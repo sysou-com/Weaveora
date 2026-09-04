@@ -1,9 +1,11 @@
 # Weaveora 织影
 
-**产品与技术设计规格书 · v1.2**  
-状态：**选型已锁定**（2026-09-02，按 MirrorTalk 代码实测 + 你的确认）  
-日期：2026-09-02  
+**产品与技术设计规格书 · v1.3**  
+状态：**选型已锁定，v1.3 裁定已确认**（2026-09-04，按 MirrorTalk 代码实测复核 + 你逐条确认的 7 项裁定）  
+日期：2026-09-04  
 文档用途：唯一产品 / 架构真源。实现模型先读完全文再写代码，不另发明架构。
+
+> **v1.3 变更要点（2026-09-04，你逐条确认）：** ① 出图通道 = 自建 ComfyUI + 后期 GPU 机（**MirrorTalk 现有出图通道不变**）；② MVP 队列 = **Redis Streams**（不再引入 RabbitMQ）；③ MVP **不上 Nacos / Gateway / Sentinel**；④ 版本 = **Java 21 + Spring Boot 3.4.5 + Spring Modulith 1.3.x**；⑤ 存储 = dev 本地目录适配器 + **生产阿里云 OSS**；⑥ 额度 = MVP 提供 `simplified` 开关；⑦ 里程碑按**单人实施**重排。详见 §15 / §23 / §28 / §30。
 
 ---
 
@@ -32,7 +34,7 @@
 20. 状态机  
 21. 存储与媒体  
 22. 安全、配额、审计  
-23. 配置中心与部署  
+23. 配置与部署  
 24. 可观测性  
 25. 仓库与目录  
 26. 编码规范  
@@ -53,16 +55,16 @@
 4. **图片流与视频流共用 Brief → PromptDraft → Confirm → Job → Asset，视频流额外插入 Script / Scene / Shot / EditPackage。**
 5. **MVP 用 Spring Modulith 模块化单体。** 接口按微服务切面设计，等流量或团队规模需要时再按第 16.4 章拆服务。禁止第一天就上 8 个可独立部署的微服务。
 6. **前端创作台以 Vue 3 Web 为唯一 MVP 交付面。** Flutter 只做二期移动审片，不要用 Flutter 做第一版故事板 / 提示词工作台。
-7. **数据库只有 PostgreSQL（业务）+ Redis（缓存 / 锁 / 限流 / 验证码）+ 对象存储（媒体）+ RabbitMQ（GPU Job）。** 不要用 Mongo 存主数据。
+7. **数据库只有 PostgreSQL（业务）+ Redis（缓存 / 锁 / 限流 / 验证码 / GPU Job 队列）+ 对象存储（媒体）。** 不要用 Mongo 存主数据，**MVP 不再引入 RabbitMQ**（v1.3 裁定，Job 队列用 Redis Streams）。
 8. **所有异步 Job 必须可重试、可取消、可幂等。** 以 `idempotency_key` 为幂等键。
-9. **密钥不进仓库、不进前端。** LLM / SD / OSS / 剪映凭据只存在 Nacos 或环境变量 / K8s Secret。
+9. **密钥不进仓库、不进前端。** LLM / SD / OSS / 剪映凭据只存在环境变量 / 未提交的 profile 配置 / K8s Secret（MVP 无 Nacos，拆分服务后才引入）。
 10. **本文第 30 章已锁定。** 若与代码冲突，停下来问产品，不要擅自改产品语义。
 11. **UI 文案默认中文，提示词默认英文，API 字段英文。**
-12. **本仓库若存在演示用前端，不得当成生产实现。** 生产后端是 Java 21 + Spring Cloud，生产前端是 `weaveora-web`（Vue 3）。
+12. **本仓库若存在演示用前端，不得当成生产实现。** 生产后端是 Java 21 + Spring Boot 3.4.5（MVP 不依赖 Spring Cloud / Nacos / Gateway），生产前端是 `weaveora-web`（Vue 3）。
 13. **禁止 `spring.jpa.hibernate.ddl-auto=update`。** 实体与 Flyway 双写，开发 / 生产均为 `validate`。不要学 MirrorTalk 的自动建表。
 14. **禁止 `ConcurrentHashMap` 存验证码 / 登录失败计数 / IP 限流。** 一律 Redis。MirrorTalk 源码自己也写了「生产环境建议用 Redis」。
 15. **禁止把 MirrorTalk 的 User 表、同库、配额字段直接拷进织影。** 只参考 JWT 无状态方案；用户 / 工作区 / 额度按本文重建。
-16. **禁止用同步 HTTP 堵住 API 线程等 GPU 出图。** LLM 导演方案可以同步等 ≤60s；GenerationJob 必须进 RabbitMQ。
+16. **禁止用同步 HTTP 堵住 API 线程等 GPU 出图。** LLM 导演方案可以同步等 ≤60s；GenerationJob 必须进 **Redis Streams 工作队列**（消费组 + 独立死信流，v1.3 裁定替代 RabbitMQ）。
 17. **ORM 锁定 Spring Data JPA。** 禁止再引入 MyBatis / MyBatis-Plus。
 
 ---
@@ -216,7 +218,7 @@ sequenceDiagram
   participant W as Vue 创作台
   participant A as weaveora-api
   participant L as LLM
-  participant Q as RabbitMQ
+  participant Q as Redis Streams
   participant P as Python Worker
   participant S as ComfyUI / SD
   participant O as OSS
@@ -475,7 +477,7 @@ sequenceDiagram
 | 多模态理解参考图 | 带视觉的 LLM | 把参考图特征写入约束 |
 
 统一抽象：`LlmClient.completeJson(JsonSchema schema, List<Message> messages)`。  
-全部走 **OpenAI Compatible** `baseUrl + apiKey + model`。模型名放 Nacos，不写死。
+全部走 **OpenAI Compatible** `baseUrl + apiKey + model`。模型名放配置中心或配置项，不写死（MVP 用 Spring profile / 环境变量）。
 
 **与 MirrorTalk 的差异：** MirrorTalk 用 `WebClient` 同步 block 等 AI 结果。织影的 **director/generate 允许同步等 ≤60s**（用户在等方案）；**禁止**用同样方式等 GPU。
 
@@ -596,7 +598,7 @@ POST /worker/v1/jobs/{id}/cancel
 鉴权：HMAC `X-Weaveora-Signature`（`timestamp + jobId + sha256(body)`）。
 
 Job payload 引用 `workflow_id` + 变量映射（prompt、seed、width、image refs）。  
-主路径是 **RabbitMQ 消费**，上述 HTTP 仅供运维探活 / 单测。
+主路径是 **Redis Streams 消费**，上述 HTTP 仅供运维探活 / 单测。
 
 ### 11.2 内置 workflow（Worker 仓库）
 
@@ -975,15 +977,15 @@ JPA 映射要点：
 
 ## 15. 技术选型（已锁定）
 
-2026-09-02 按 MirrorTalk **代码实测** 对齐，并经你确认。实现模型不得再改 ORM / 队列 / 前端选型。
+2026-09-02 按 MirrorTalk **代码实测** 对齐，并经你确认；2026-09-04 v1.3 裁定修订（队列 / 基建 / 版本 / 存储）。实现模型不得再改 ORM / 队列 / 前端选型。
 
 ### 15.0 MirrorTalk 实测摘要（决策依据）
 
 | 项 | MirrorTalk 现状 | 织影怎么做 |
 | --- | --- | --- |
-| ORM | Spring Data JPA（Hibernate），30 个实体，`ddl-auto: update`，无 MyBatis、无 Flyway | **跟 JPA**；**不跟 `ddl-auto: update`**，改 Flyway + `validate` |
-| 队列 | 无 AMQP/Kafka/Rabbit/Redis MQ 客户端。AI 调用 `WebClient` 同步 block | **新上 RabbitMQ**。LLM 导演方案可同步等 60s；**GPU Job 禁止同步 block** |
-| Redis | 无。验证码 / 登录失败 / IP 发信计数在 `ConcurrentHashMap`（作者已注明生产该用 Redis） | **第一天就上 Redis 7** |
+| ORM | Spring Data JPA（Hibernate），41 个实体（实测，文档早期写 30），`ddl-auto: update`，无 MyBatis、无 Flyway | **跟 JPA**；**不跟 `ddl-auto: update`**，改 Flyway + `validate` |
+| 队列 | 无 AMQP/Kafka/Rabbit/Redis MQ 客户端。AI 调用 `WebClient` 同步 block | **新上 Redis Streams**（工作队列，v1.3 裁定替代 RabbitMQ）。LLM 导演方案可同步等 60s；**GPU Job 禁止同步 block** |
+| Redis | 无。验证码 / 登录失败 / IP 发信计数在 `ConcurrentHashMap`（作者已注明生产该用 Redis） | **第一天就上 Redis 7**（缓存 / 锁 / 验证码 / Streams 队列 / WS pubsub） |
 | 用户中心 | 单体嵌入：`AuthService` + `JwtUtil` + `JwtAuthFilter` + `User`（email/passwordHash/nickname/三级配额…），`userId` 散落 30 张表，无独立边界 | **参考 JWT 无状态**；**新建** User / Workspace / Membership / CreditWallet。不同库、不拷贝配额字段 |
 | 定时 | `@EnableScheduling` 进程内 | 分片清理等可保留 `@Scheduled`；生成任务不走定时器 |
 | 前端 | Flutter 无 ORM，Isar 已移除，仅 shared_preferences + flutter_secure_storage | MVP 是 Vue 3 Web；Flutter 二期同样只用安全存储，不引入 Isar |
@@ -994,16 +996,16 @@ JPA 映射要点：
 | --- | --- | --- |
 | 创作台 Web | **Vue 3.5 + TypeScript + Vite + Pinia + Vue Router + Naive UI + TanStack Vue Query** | 导演台 / 分镜墙是桌面级密集 UI |
 | 移动审片 | **Flutter 3 + Riverpod + GoRouter + Dio**（二期） | 审片、推送、确认生成；**不要**用 Flutter Web 当创作台 |
-| API 中台 | **Java 21 + Spring Boot 3.3 + Spring Cloud 2023.0 / Spring Cloud Alibaba 2023** | 对齐 Java 团队习惯（Nacos、Gateway、Sentinel） |
-| MVP 形态 | **Spring Modulith 模块化单体 `weaveora-api`** | MirrorTalk 也是单体；织影同样单体，但模块边界写清 |
-| GPU Worker | **Python 3.11 + FastAPI + ComfyUI** | SD 生态在 Python |
-| 队列 | **RabbitMQ 3.13** | MirrorTalk 没有 MQ 可跟。GPU 任务要重试、死信、多 Worker，必须新上工作队列 |
-| 缓存 / 锁 / 验证码 | **Redis 7** | 进度、限流、分布式锁、WS pub/sub、验证码。不复制内存 Map |
-| 数据库 | **PostgreSQL 16** | 与 MirrorTalk 生产库一致 |
-| 对象存储 | **MinIO**（开发）/ 阿里云 OSS 或 S3（生产） | 媒体 |
+| API 中台 | **Java 21 + Spring Boot 3.4.5**（MVP 不引 Spring Cloud / Nacos / Gateway） | Java 团队习惯；**Spring Cloud 组件留到真正拆服务时再上**（v1.3 裁定） |
+| MVP 形态 | **Spring Modulith 1.3.x 模块化单体 `weaveora-api`** | MirrorTalk 也是单体；织影同样单体，但模块边界写清 |
+| GPU Worker | **Python 3.11 + FastAPI + ComfyUI**（自建，GPU 机后续搭建） | SD 生态在 Python。**MirrorTalk 现有出图通道（Replicate）保持不变** |
+| 队列 | **Redis Streams**（Redis 7 内建，消费组 + 独立死信流） | MirrorTalk 没有 MQ 可跟；Redis 第一天就上。GPU 任务要重试、可取消、多 Worker，Streams 消费组足够（v1.3 裁定替代 RabbitMQ） |
+| 缓存 / 锁 / 验证码 | **Redis 7** | 进度、限流、分布式锁、WS pub/sub、验证码、Job 队列。不复制内存 Map |
+| 数据库 | **PostgreSQL 16**（本机 18.4 实测兼容，validate 只比对结构） | 与 MirrorTalk 生产库同族 |
+| 对象存储 | **dev：本地目录适配器（LocalFileStorageAdapter）**；生产：**阿里云 OSS**（参考 MirrorTalk 既有 aliyun-sdk-oss 用法） | 媒体。v1.3 裁定：不引 MinIO，dev 期直接用本地目录，生产直接 OSS |
 | 实时进度 | **Spring WebSocket + Redis Pub/Sub** | 已确认不改 SSE |
-| 配置 / 发现 | **Nacos** | 与计划中的 Spring Cloud 配套 |
-| 网关 | **Spring Cloud Gateway** | JWT、限流、路由；MVP 可先同进程 Spring Security filter |
+| 配置 / 发现 | **MVP：Spring profile + 环境变量**（镜像 MirrorTalk 生产 systemd Environment 方式） | 单体无需 Nacos；**拆服务后才引入 Nacos**（v1.3 裁定） |
+| 网关 | **MVP 用同进程 Spring Security filter**；拆服务后才是 Spring Cloud Gateway | JWT、限流、路由（v1.3 裁定：MVP 不部署独立网关） |
 | ORM | **Spring Data JPA + Hibernate 6** | 对齐 MirrorTalk，团队零迁移成本 |
 | 迁移 | **Flyway 10** | 不跟 MirrorTalk 的 `ddl-auto: update` |
 | 鉴权 | Spring Security + JWT（access 15m + refresh 14d，旋转 refresh） | 参考 MirrorTalk `JwtUtil` / `JwtAuthFilter` 重写，不拷贝 User 实体 |
@@ -1019,7 +1021,7 @@ JPA 映射要点：
 | A | Vue 3 Web MVP，Flutter 二期 | 以 Flutter 为主 | 导演台 / 分镜 / 时间线 Web 更合适 |
 | B | Spring Modulith 单体 | 单体 | 形态相同，织影把包边界写死，方便以后拆 |
 | C | Python Worker | 无 GPU | SD 不能进 JVM |
-| D | **RabbitMQ 工作队列** | 无 MQ，AI 同步 block | 出图 / 出视频是分钟级，占 HTTP 线程会拖垮 API |
+| D | **Redis Streams 工作队列** | 无 MQ，AI 同步 block | 出图 / 出视频是分钟级，占 HTTP 线程会拖垮 API。Redis 本就必上，Streams 免新增中间件 |
 | E | Naive UI 创作台 | — | 避免中后台皮肤 |
 | F | 额度预扣 + 状态机，不上 Seata | — | 单库事务足够 |
 | G | WebSocket 进度 | — | Job 百分比 |
@@ -1038,7 +1040,7 @@ JPA 映射要点：
 | 第一天就上 Seata | 用「额度预扣 + 本地状态机 + 幂等」即可 |
 | 用 Element Plus 默认主题直接上创作台 | 会做成后台管理系统 |
 | 用 XXL-JOB 跑出图 | 它是定时调度，不是 GPU 队列 |
-| 用 Kafka 当默认队列 | 运维重，Job 语义更适合工作队列 |
+| 用 Kafka / RabbitMQ 当默认队列 | 运维重；Redis Streams 消费组 + 死信流已够 MVP |
 | 把 LLM 调用做成独立微服务 | 只有一个 HTTP client，抽 module 即可 |
 | **MyBatis-Plus** | 已锁定 JPA，禁止双 ORM |
 | **同步 HTTP 调 Worker 等到出图** | 会把 MirrorTalk 的 block 习惯带进 GPU，API 必炸 |
@@ -1057,7 +1059,7 @@ JPA 映射要点：
 
 不要再拆 user / prompt / notify / asset 四个「只有 CRUD」的服务。  
 模块包名保持 `studio.weaveora.<module>`，拆分时按包搬迁。  
-**MVP 不拆。** MirrorTalk 也是单体，织影第一天同样一个 jar。
+**MVP 不拆。** MirrorTalk 也是单体，织影第一天同样一个 jar。届时才引入 Nacos / Gateway / Sentinel 与独立网关。
 
 ### 15.5 与 MirrorTalk 的复用边界（按实测收紧）
 
@@ -1066,7 +1068,7 @@ JPA 映射要点：
 | `JwtUtil` + `JwtAuthFilter` 无状态 JWT，`userId` 注入 request | `User` 实体及 `modelLevel/storageLevel/imageLevel/hiddenMenus/traits` |
 | 邮件验证码登录流程（搬到 Redis） | `ConcurrentHashMap` 验证码 / 登录失败计数 / IP 发信计数 |
 | 密码哈希、`disabled` 冻号思路 | 同库同进程、`userId` 散落到业务表当唯一隔离 |
-| PostgreSQL + JPA 派生查询 + `@Query` JPQL 风格 | `ddl-auto: update`、H2 当开发库（织影开发用 Testcontainers PG 或 Compose PG） |
+| PostgreSQL + JPA 派生查询 + `@Query` JPQL 风格 | `ddl-auto: update`、H2 当开发库（织影开发用本机 PG / Compose PG + Testcontainers，不用 H2） |
 | `@Scheduled` 做清理类任务 | 用调度器跑生成 Job |
 | 注销级联思路（织影改为工作区匿名化） | AccountDeletion 直接改 30 张聊天表 |
 | 管理台冻号 | UserAdmin 的聊天专用字段 |
@@ -1078,16 +1080,14 @@ JPA 映射要点：
 
 ```
 Java                 21 (Temurin)
-Spring Boot          3.3.x
-Spring Cloud         2023.0.x
-Spring Cloud Alibaba 2023.0.x
-Spring Modulith      1.2.x
+Spring Boot          3.4.5
+Spring Modulith      1.3.x
 Spring Data JPA      Boot 托管（Hibernate 6）
 Flyway               10.x
-PostgreSQL           16
-Redis                7.2
-RabbitMQ             3.13
-Nacos                2.3 / 2.4
+PostgreSQL           16（本机 18.4 亦可用）
+Redis                7.2（验证码 / 限流 / 锁 / WS / **Job 队列 Streams**）
+RabbitMQ             不引入（v1.3 裁定）
+Nacos                MVP 不引入（拆服务后才用）
 Vue                  3.5
 Vite                 6
 Node                 22
@@ -1109,27 +1109,21 @@ flowchart LR
     Flutter[Flutter 审片 二期]
   end
 
-  GW[Spring Cloud Gateway]
   API[weaveora-api  Modulith]
-  NACOS[Nacos]
   PG[(PostgreSQL)]
-  REDIS[(Redis)]
-  MQ[[RabbitMQ]]
-  OSS[(MinIO / OSS)]
+  REDIS[(Redis 7)]
+  OSS[(阿里云 OSS / dev 本地目录)]
   LLM[LLM OpenAI-compatible]
   WK[Python Worker]
-  COMFY[ComfyUI]
+  COMFY[ComfyUI GPU 机]
 
-  Vue --> GW
-  Flutter --> GW
-  GW --> API
-  API --> NACOS
+  Vue --> API
+  Flutter --> API
   API --> PG
   API --> REDIS
-  API --> MQ
   API --> OSS
   API --> LLM
-  MQ --> WK
+  API -->|Redis Streams| WK
   WK --> COMFY
   WK --> OSS
   WK --> API
@@ -1144,18 +1138,18 @@ weaveora-api
     catalog/       风格模板、模型预设
     project/       项目、Brief
     director/      LLM 调用、revision、校验器
-    job/           状态机、投递 RabbitMQ、回执
-    asset/         对象存储、缩略图、签名 URL
+    job/           状态机、投递 Redis Streams、回执
+    asset/         对象存储（StoragePort：dev 本地目录 / 生产 OSS）、缩略图、签名 URL
     export/        edit_list + 剪映适配器
     billing/       额度预扣 / 结算 / 释放
     admin/         管理端
     shared/        错误码、Id 生成、时钟、审计
   infra/
-    amqp/
+    streams/       Redis Streams 生产 / 消费 / 死信
     redis/
     ws/
     llm/
-    storage/
+    storage/       StoragePort + LocalFileStorageAdapter + OssStorageAdapter
 ```
 
 Modulith 规则：
@@ -1175,7 +1169,7 @@ weaveora-worker
   app/workflows/*.json
   app/safety.py
   app/storage.py
-  app/mq_consumer.py
+  app/stream_consumer.py   # Redis Streams 消费（替代 mq_consumer）
 ```
 
 ### 16.3 模块依赖
@@ -1335,7 +1329,7 @@ POST /internal/jobs/{id}/fail
 ### 17.5 `POST /jobs` 语义
 
 - 必须已 approve。
-- 事务内：校验额度 → `credit_wallets.frozen +=` → `credit_ledger` reserve → insert job queued → 发 MQ。
+- 事务内：校验额度 → `credit_wallets.frozen +=` → `credit_ledger` reserve → insert job queued → 事务提交后 XADD 到 Redis Streams（避免消息先于事务提交 / 回滚不一致）。
 - 回执 succeed：`frozen -=`，`balance -=`，ledger settle。
 - fail / cancel：`frozen -=`，ledger release。
 - `idempotency_key` 优先客户端；否则服务端 `sha256(workspace|project|revision|shot|kind|payloadCanon)`。
@@ -1444,7 +1438,7 @@ weaveora-app/
 
 - FastAPI + uvicorn
 - 每个 GPU 进程绑一张卡（`CUDA_VISIBLE_DEVICES`）
-- 从 **RabbitMQ** 拉 Job，调 ComfyUI HTTP 或 stub
+- 从 **Redis Streams** 消费（消费组）Job，调 ComfyUI HTTP 或 stub
 - 上传 OSS，回调 Java
 - 心跳：Redis `worker:{id}` TTL 30s
 - 优雅停机：停领新任务，当前任务可完成或标 retry
@@ -1499,7 +1493,14 @@ stateDiagram-v2
 - 图片：png 下载 + webp 预览
 - 导出 zip 同桶 `…/exports/{exportId}.zip`
 
-Java 用 AWS SDK v2（MinIO 兼容）。禁止把文件落到 API 本地磁盘（临时 zip 用 `Files.createTempDirectory`，导出完成后删除）。
+### 21.1 存储抽象（v1.3 裁定）
+
+定义 `StoragePort` 接口（put / get / presign / delete）：
+
+- dev / 单测：**`LocalFileStorageAdapter`** → 配置目录（如 `./data/storage`），不进 git。
+- 生产：**`OssStorageAdapter`**（阿里云 OSS，参考 MirrorTalk 既有 `aliyun-sdk-oss` 用法，不引 MinIO / AWS SDK）。
+
+导出 zip 临时落本地 `Files.createTempDirectory`，完成后删除。生成产物始终走 StoragePort，禁止 API 把业务文件落本地磁盘当生产存储。
 
 ---
 
@@ -1513,10 +1514,10 @@ Java 用 AWS SDK v2（MinIO 兼容）。禁止把文件落到 API 本地磁盘�
 - 提示词与资产审计 180 天。
 - SSRF：Worker 拉参考图只允许 OSS 白名单 host。
 - 上传 MIME 与大小限制（图 20MB，视频 200MB）。
-- Sentinel：登录 5/s/IP，director/generate 3/min/user，jobs 10/min/user。
+- 限流（MVP 用 Redis 计数 + 自定义注解，不引 Sentinel；拆服务后才上 Sentinel）：登录 5/s/IP，director/generate 3/min/user，jobs 10/min/user。
 - 默认关闭公开分享链接。
 
-### 22.1 默认额度（可被 Nacos 覆盖）
+### 22.1 默认额度（可被 profile / 环境变量覆盖）
 
 | 套餐 | 赠送 | 图 | 视频 still | 视频 motion / 秒 |
 | --- | --- | --- | --- | --- |
@@ -1526,50 +1527,58 @@ Java 用 AWS SDK v2（MinIO 兼容）。禁止把文件落到 API 本地磁盘�
 
 LLM 每次 director/generate 扣 1 积分（free 套餐每日最多 20 次另计）。
 
+### 22.2 额度简化模式（v1.3 裁定）
+
+- 配置开关 `weaveora.billing.mode=wallet|simplified`（默认 `wallet`）。
+- `simplified`（MVP 内测 / 演示）：不做 wallet 预扣与 ledger，只做**配额常量校验**（图片张数上限、视频秒数上限、`director` 调用限频），全部免费，便于先跑通全链路。
+- `wallet`（生产）：按第 17.5 / 20 章做预扣、冻结、结算、幂等。两模式共享同一 Job 状态机与确认闸门。
+
 ---
 
-## 23. 配置中心与部署
+## 23. 配置与部署
 
-### 23.1 Nacos DataId
+### 23.1 配置（MVP：profile + 环境变量；拆服务后才用 Nacos）
 
 ```
-weaveora-api.yaml
+application-{dev|staging|prod}.yml + 环境变量
   weaveora.llm.base-url
-  weaveora.llm.api-key
+  weaveora.llm.api-key        (env: WEAVEORA_LLM_API_KEY)
   weaveora.llm.model
-  weaveora.oss.endpoint
+  weaveora.oss.access-key     (env: WEAVEORA_OSS_*)   # 生产阿里云 OSS
   weaveora.oss.bucket
-  weaveora.mq.job-queue: weaveora.jobs
-  weaveora.mq.dlq: weaveora.jobs.dlq
+  weaveora.storage.mode: local|oss     # local=LocalFileStorageAdapter, oss=OssStorageAdapter
+  weaveora.storage.local-dir: ./data/storage
+  weaveora.queue.job-stream: weaveora:jobs
+  weaveora.queue.dl-stream:  weaveora:jobs:dlq
+  weaveora.billing.mode: wallet|simplified
   weaveora.credits.image: 4
   weaveora.security.jwt.access-ttl: 15m
   spring.jpa.hibernate.ddl-auto: validate
   spring.flyway.enabled: true
 ```
 
-命名空间：`dev` / `staging` / `prod`。Group：`WEAVEORA`。
+密钥不进仓库：dev 用未提交的 `application-local.yml`（参考 MirrorTalk `application-local.example.yml` 模式）；生产用环境变量 / K8s Secret。
 
 ### 23.2 开发 Compose
 
-服务：`postgres` `redis` `rabbitmq` `minio` `nacos` `api` `web` `worker-stub`
+服务：`postgres` `redis` `api` `web` `worker-stub`（MVP 无 rabbitmq / minio / nacos；本机无 Docker 时可用本机 PG / 单独起的 Redis，配 `application-local.yml`）
 
-一键：`docker compose -f deploy/compose/dev.yml up`。  
+一键：`docker compose -f deploy/compose/dev.yml up`（若本机有 Docker）。  
 `make bootstrap`：建库、Flyway、种子风格模板、种子管理员。
 
 ### 23.3 生产
 
-- `gateway` / `api`：CPU 节点，HPA
-- `worker`：GPU 节点，按队列深度扩（有卡才能扩）
-- 独立命名空间 `weaveora`
-- 配置全部 Nacos + K8s secret
-- 备份：PG 每日 + WAL；OSS 跨区域复制
-- 网络策略：Worker 可出网拉模型，但 ComfyUI 端口不对公网
+- MVP 部署形态：单机 systemd（镜像 MirrorTalk 生产方式）：`weaveora-api`（CPU）+ `worker-stub`（先跑通）→ GPU 机到位后换 `weaveora-worker`（ComfyUI）。
+- 扩展形态（拆服务后才编排）：`gateway` / `api` CPU 节点 HPA；`worker` GPU 节点按队列深度扩；独立命名空间 `weaveora`。
+- 配置：环境变量 + 进程 manager（systemd Environment / K8s Secret），不用 Nacos（拆服务后才引入）。
+- 备份：PG 每日 + WAL；OSS 跨区域复制。
+- 网络策略：Worker 可出网拉模型，但 ComfyUI 端口不对公网。
 
 ---
 
 ## 24. 可观测性
 
-- TraceId 从 Gateway 注入（`X-Trace-Id`），贯穿 LLM 与 Worker。
+- TraceId 从入口 filter 注入（`X-Trace-Id`；拆服务后才由 Gateway 注入），贯穿 LLM 与 Worker。
 - 日志 JSON：`timestamp, level, traceId, workspaceId, jobId, message`。
 - 指标：`weaveora_job_wait_seconds`、`weaveora_job_runtime_seconds`、`weaveora_llm_latency_seconds`、`weaveora_job_success_ratio`、`weaveora_nsfw_hits_total`、`weaveora_credits_reserved`。
 - 告警：队列堆积 > 50、worker 心跳消失、失败率 > 10%、磁盘 > 80%、LLM 5xx。
@@ -1620,7 +1629,7 @@ Maven：`weaveora-parent` BOM。包名 `studio.weaveora.<module>`。
 
 ## 27. 测试
 
-- API：Testcontainers（PG / Redis / RabbitMQ）测额度预扣与状态机。
+- API：Testcontainers（PG / Redis）测额度预扣与状态机；本机无 Docker 时用本机 PG / 单独 Redis，配 local profile。
 - Director 校验器：纯单测（时长求和、JSON schema、负面词合并）。
 - Worker：用假 ComfyUI / stub。
 - Web：导演台确认按钮在未 approve 时禁用；分镜拖拽测时间码。
@@ -1633,20 +1642,20 @@ Maven：`weaveora-parent` BOM。包名 `studio.weaveora.<module>`。
 
 ---
 
-## 28. 实施里程碑（交给实现模型按此拆 PR）
+## 28. 实施里程碑（v1.3 按单人实施重排，仍按周交付）
 
 | 周 | 交付 | 完成定义 |
 | --- | --- | --- |
-| W1 | 仓库、Compose、Flyway、JPA 实体、用户 / 工作区 / 项目 CRUD、Vue 壳、暗色 token、登录（验证码 Redis） | 能登录并建空项目 |
+| W1 | 仓库、Flyway V1、JPA 实体、用户 / 工作区 / 项目 CRUD、JWT 登录（验证码 Redis）、Vue 壳、暗色 token | 能登录并建空项目 |
 | W2 | Director：LLM JSON、revision 版本、校验器、导演台 UI | 输入一句话得到可编辑提示词 / 剧本 |
-| W3 | Job 状态机、额度、RabbitMQ、stub worker、进度 WS | 点确认后有假图回来 |
-| W4 | 真 ComfyUI txt2img、资产库、画廊 | 真出图 |
+| W3 | Job 状态机、额度（simplified / wallet）、Redis Streams、stub worker、进度 WS | 点确认后有假图回来 |
+| W4 | 真 ComfyUI txt2img（GPU 机到位前保持 stub）、资产库、画廊 | 真出图或 GPU 机就绪后立即真出图 |
 | W5 | 分镜墙、逐镜确认、still pass | 视频项目可按镜出关键帧 |
 | W6 | 时间线粗预览、edit_list 导出、README | 能把媒体送进剪映手工对齐 |
 | W7 | 剪映适配器、img2vid 可选、安全扫描 | 草稿包可导入或明确降级 |
 | W8 | 管理后台、额度、观测、打磨 | 可给内测用户 |
 
-实现模型若在无 GPU 环境，W4 用 stub，但接口保持。  
+GPU 机未到位时，W4 用 stub 保持接口；GPU 机到位后切 `WEAVEORA_WORKER_MODE=comfy`，MirrorTalk 的 Replicate 通道不受影响。  
 **不要从 Flutter 或管理后台开干。**
 
 ### 28.1 实现模型开工顺序（第一周文件级）
@@ -1655,7 +1664,7 @@ Maven：`weaveora-parent` BOM。包名 `studio.weaveora.<module>`。
 2. identity：注册登录 JWT，验证码 Redis  
 3. project CRUD（全部带 `workspace_id`）  
 4. `web` 登录 + 项目列表 + 新建  
-5. Compose 可一键起（postgres/redis/rabbitmq/minio）  
+5. dev 可起（本机 PG / Redis，或 Docker Compose postgres+redis+api+web+worker-stub）  
 6. 再进入 director  
 
 禁止第一周做：微服务拆分、Flutter、Seata、真实 ComfyUI、剪映私有格式逆向、H2、`ddl-auto=update`、内存验证码。
@@ -1673,36 +1682,46 @@ Maven：`weaveora-parent` BOM。包名 `studio.weaveora.<module>`。
 | NSFW 与版权 | 双层过滤 + 用户协议 |
 | 微服务过度拆分 | MVP 单体（与 MirrorTalk 一致） |
 | Java 团队不会 ComfyUI | Worker 独立仓，用 HTTP 契约隔离 |
-| 把 MirrorTalk 同步 AI 习惯带进 GPU | 硬性指令 16：Job 必须进 RabbitMQ |
+| 把 MirrorTalk 同步 AI 习惯带进 GPU | 硬性指令 16：Job 必须进 Redis Streams |
+| GPU 机未到位 | W4 保持 stub；Worker 契约不变，`WEAVEORA_WORKER_MODE` 切换 |
+| 本机无 Docker | 用本机 PG 18 + 单独 Redis 跑 local profile；Compose 可选 |
 | Hibernate 改表毁掉状态机 | Flyway + `ddl-auto=validate` |
 
 ---
 
 ## 30. 已锁定决策
 
-2026-09-02 你确认：第 1–3、6–11 条同意；第 4、5 条按 MirrorTalk 实测裁定。实现模型按本表开工，不得再问。
+2026-09-02 你确认：第 1–3、6–11 条同意；第 4、5 条按 MirrorTalk 实测裁定。2026-09-04 v1.3 裁定修订 #3 #4 并新增 #13–#19。实现模型按本表开工，不得再问。
 
 | # | 决策 | 锁定值 | 来源 |
 | --- | --- | --- | --- |
 | 1 | 名称 | **Weaveora / 织影** | 同意 |
 | 2 | 前端 | **Vue 3 + Naive/Arco 做 MVP**；Flutter 只做二期审片 | 同意 |
-| 3 | 后端 | **Java 21 + Spring Boot 3.3 + Spring Cloud Alibaba**，MVP **Spring Modulith 单体**，Worker **Python FastAPI + ComfyUI** | 同意 |
-| 4 | 队列 | **RabbitMQ 3.13**（新上，不是从 MirrorTalk 继承） | MirrorTalk **没有 MQ**。GPU Job 不能同步 block，必须新上工作队列 |
+| 3 | 后端 | **Java 21 + Spring Boot 3.4.5 + Spring Modulith 1.3.x 单体**；MVP **不引 Spring Cloud / Nacos / Gateway / Sentinel**（拆服务后才引入）；Worker **Python FastAPI + ComfyUI**（自建，GPU 机后续） | v1.3 裁定 |
+| 4 | 队列 | **Redis Streams**（消费组 + 独立死信流），Redis 7 内建 | v1.3 裁定替代 RabbitMQ（MirrorTalk 仍无 MQ，GPU Job 不能同步 block） |
 | 5 | ORM | **Spring Data JPA + Hibernate 6** | MirrorTalk 实测即此。**不跟** `ddl-auto: update`，配 **Flyway + validate** |
-| 6 | 生成引擎 | 自建 ComfyUI 为主，可灵 / 即梦为 v1 适配器 | 同意 |
+| 6 | 生成引擎 | 自建 ComfyUI 为主（可灵 / 即梦为 v1 适配器）；**MirrorTalk 现有 Replicate 出图通道保持不变** | v1.3 裁定补充 |
 | 7 | 剪映 | 导出草稿包，不做未授权客户端注入 | 同意 |
 | 8 | 视频 | **强制两段式**：先关键帧，确认后再运动 | 同意 |
 | 9 | 登录 | MVP 邮箱 + 密码；手机号可同期；微信后期 | 同意 |
 | 10 | 风格 | 默认关闭「真人模特」类 | 同意 |
 | 11 | 进度 | **WebSocket**（不改 SSE） | 同意 |
 | 12 | 用户中心 | **不可直接复用**。重写 Auth + JWT，验证码/限流 Redis，用户模型按第 14 章 | MirrorTalk 实测 |
+| 13 | 存储 | **dev：本地目录适配器**；生产：**阿里云 OSS**。不引 MinIO / AWS SDK v2 | v1.3 裁定 |
+| 14 | 额度 | **wallet 为默认**，MVP 内测可切 `billing.mode=simplified`（配额常量、免费、无 ledger） | v1.3 裁定 |
+| 15 | 配置 | **Spring profile + 环境变量**（镜像 MirrorTalk 生产方式）；拆服务后才用 Nacos | v1.3 裁定 |
+| 16 | 网关 | **MVP 同进程 Security filter**；拆服务后才是 Spring Cloud Gateway | v1.3 裁定 |
+| 17 | 限流 | MVP：Redis 计数 + 自定义注解（登录 5/s/IP 等）；Sentinel 拆服务后再上 | v1.3 裁定 |
+| 18 | 版本 | **Java 21 + Boot 3.4.5 + Modulith 1.3.x + Flyway 10.x**（Boot 不再 3.3，对齐 MirrorTalk 3.4.x 实测） | v1.3 裁定 |
+| 19 | 里程碑 | 按 **§28 v1.3 单人版** W1-W8 执行；GPU 机未到位时 W4 用 stub | v1.3 裁定 |
 
-补充裁定（随 4、5 条一起锁死）：
+补充裁定（随 4、5 条一起锁死；v1.3 更新）：
 
-- **Redis 7 第一天就上**（验证码、限流、锁、WS）。
+- **Redis 7 第一天就上**（验证码、限流、锁、WS、Job 队列 Streams）。
 - **开发 / CI 用 PostgreSQL，不用 H2。**
 - **不引入 MyBatis-Plus。**
 - **不把 GenerationJob 做成 `@Scheduled` 或同步 WebClient。**
+- **不引入 RabbitMQ / Kafka / Nacos / Gateway / Sentinel / MinIO（拆服务或规模需要时再评估）。**
 
 ---
 
@@ -1716,7 +1735,7 @@ Maven：`weaveora-parent` BOM。包名 `studio.weaveora.<module>`。
 6. 用户 A 不能读用户 B 工作区的项目。
 7. LLM 返回非 JSON，前端看到可读错误，不崩页。
 8. 重启 API 后，未过期验证码仍有效（证明走 Redis 不是内存 Map）。
-9. 停掉 Worker，创建 job 后状态保持 queued，Worker 恢复后继续，不丢任务（证明走 RabbitMQ）。
+9. 停掉 Worker，创建 job 后状态保持 queued，Worker 恢复后继续，不丢任务（证明走 Redis Streams 消费组，不是内存）。
 
 ---
 
@@ -1749,4 +1768,4 @@ deformed, extra limbs, badly drawn, jpeg artifacts, ugly, nsfw
 
 ---
 
-*结束。实现时以本文 v1.2 为唯一产品 / 架构真源。第 30 章已锁定，可以开工。*
+*结束。实现时以本文 v1.3 为唯一产品 / 架构真源。第 30 章已锁定（含 v1.3 裁定 #3 #4 #13–#19），可以开工。*
