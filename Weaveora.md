@@ -1,7 +1,7 @@
 # Weaveora 织影
 
-**产品与技术设计规格书 · v1.5**  
-状态：**选型已锁定，v1.5 裁定已确认**（2026-09-04：v1.3 七项 + v1.4 中间件集中部署 + v1.5 开发库本机过渡）  
+**产品与技术设计规格书 · v1.6**  
+状态：**选型已锁定，v1.6 裁定已确认**（2026-09-04：v1.3–v1.5 各项 + 双轨执行模型）  
 日期：2026-09-04  
 文档用途：唯一产品 / 架构真源。实现模型先读完全文再写代码，不另发明架构。
 
@@ -10,6 +10,8 @@
 > **v1.4 变更要点（2026-09-04，你确认 Q1-A Q2-A Q3-B Q4-A，Q5/Q6 补充）：** ⑧ **中间件（PG / Redis）统一部署在 MirrorTalk 现有 VPS 上，生产与测试共用**：PG 同一实例分库 `weaveora`（生产）/ `weaveora_test`（测试）；Redis 同一实例 **db 隔离**（db0 生产 / db1 测试）；VPS 规格 2C / 8G / 200G。详见 §23 / §30 #20。
 
 > **v1.5 变更要点（2026-09-04，你确认：本机已装 PG 18.4，上生产前可先用本地 PG 开发）：** ⑨ **开发库 = 本机 PG `weaveora_dev`**（镜像本机既有 `mirrortalk_dev` 惯例；上生产前过渡）。VPS `weaveora` / `weaveora_test` 布局不变（#20）；本机开发不再强依赖 VPS 测试库，VPS 建好并要验证生产一致性时再切 `weaveora_test`。详见 §23 / §30 #21。
+
+> **v1.6 变更要点（2026-09-04，你确认 Q1-是 Q2-A Q3-B Q4-A Q5-是 Q6）：** ⑩ **双轨执行模型（§30 #22）**：轨 1 = 云 GPU（租我/指定供应商的 GPU，租整机自跑 worker，MVP 先行）；轨 2 = 用户自带本地 GPU（Windows + RTX 3090/4070/4080/4090，困难时陪装）。**Worker 协议双轨同构：一律出站 HTTPS 连 API 拉 Job + OSS 直传，不反向连 Redis**。客群按轨拆分（§3）。详见 §5 / §11.1 / §19 / §23.3 / §30 #22。
 
 ---
 
@@ -139,14 +141,14 @@ Weaveora 不做「又一个模型广场」，做 **导演层 + 确认闸门 + �
 
 ---
 
-## 3. 目标用户
+## 3. 目标用户（v1.6 按双轨拆分）
 
-| 角色 | 诉求 | 成功标准 |
-| --- | --- | --- |
-| 短视频创作者 / 中小 MCN | 用口语需求快速出可用素材 | 30 分钟内从一句话到可进剪映的草稿时间线 |
-| 电商视觉 / 独立设计师 | 固定风格反复出图 | 风格模板可复用，种子 / LoRA / 参数可锁定 |
-| 广告 / 品牌小团队 | 先分镜再拍或先分镜再生成 | 分镜表可评审、可导出 |
-| 个人创作者 | 低门槛出一张海报或 15s 短片 | 不需要会写 SD 语法 |
+| 角色 | 轨 | 诉求 | 成功标准 |
+| --- | --- | --- | --- |
+| 已自建 ComfyUI 的创作者 / 工作室 | **轨 2（本地 GPU）** | 导演层 / 工作流管理 / 风格资产库叠在自有 GPU 上 | 本地机接自己的 Job，不额外付算力费 |
+| 电商视觉 / 独立设计师（无 GPU） | **轨 1（云 GPU）** | 固定风格反复出图，不想管硬件 | 风格模板可复用，种子 / LoRA / 参数可锁定 |
+| 广告 / 品牌小团队 | 轨 1 / 轨 2 | 先分镜再拍或先分镜再生成 | 分镜表可评审、可导出 |
+| 短视频创作者 / 中小 MCN | 轨 1 | 用口语需求快速出可用素材 | 30 分钟内从一句话到可进剪映的草稿时间线 |
 
 **非目标（MVP 不做）**
 
@@ -173,6 +175,8 @@ Weaveora 不做「又一个模型广场」，做 **导演层 + 确认闸门 + �
 
 ### 5.1 MVP（v0.9，6–8 周，可演示全链路）
 
+**执行模型（v1.6 裁定 #22）：双轨。轨 1 = 云 GPU（用户用系统 + 租用我或指定供应商的 GPU）；轨 2 = 用户自带本地 GPU（RTX 3090/4070/4080/4090，连自己工作区）。MVP 以轨 1 先行（Q3-B），轨 2 协议同构（Q2-A：worker 一律出站连 API，不直连 Redis）。**
+
 - 邮箱登录（手机号验证码可选），项目、草稿
 - 图片链路：口语 Brief → LLM 提示词 → 人工确认 → SD 出图 → 选图 / 再生成
 - 视频链路：口语 Brief → LLM 剧本 + 分镜 + 逐镜提示词 → 人工确认 → 逐镜出关键帧 → 时间线拼装 → 导出剪映草稿包
@@ -180,6 +184,7 @@ Weaveora 不做「又一个模型广场」，做 **导演层 + 确认闸门 + �
 - 额度、任务队列、失败重试
 - Web 创作台（Vue 3）
 - 管理端最小集：模型开关、队列、用户冻结
+- **轨 2 最小集（v1.6）**：node 注册/心跳/能力上报（本地机），出站 HTTPS 拉 Job + OSS 直传（Q2-A）；参考环境 Windows + RTX 3090/4070/4080/4090（Q6），必要时陪用户装 ComfyUI/驱动
 
 ### 5.2 v1.0
 
@@ -589,20 +594,27 @@ prompts/brief_classify.md
 
 ## 11. Stable Diffusion 与视频生成
 
-### 11.1 原则：ComfyUI 为执行引擎
+### 11.1 原则：ComfyUI 为执行引擎 + 双轨执行模型（v1.6 裁定 #22）
 
-Java 不直接调 diffusers。Worker 暴露：
+Java 不直接调 diffusers。**执行分为两轨，worker 协议完全同构**（Q2-A：worker 一律出站主动连 API，不反向直连 Redis）：
+
+- **轨 1 · 云 GPU**：用户用系统 + 算力跑在 **我租的 GPU 服务器 或 指定 GPU 供应商的服务器**上（Q3-B：MVP 先行）。worker 由我部署在这些服务器上，归属于我方节点池；按用量计费。
+- **轨 2 · 本地 GPU（BYO）**：用户自带 GPU 主机（Windows + RTX 3090/4070/4080/4090，Q6），把 Weaveora worker 装在自己机器上，注册到自己的工作区；只接本工作区 Job，不接他人 Job。
+
+**统一 worker 通道（轨 1 / 轨 2 相同）：**
 
 ```
-POST /worker/v1/jobs
-GET  /worker/v1/jobs/{id}
-POST /worker/v1/jobs/{id}/cancel
+worker 启动 → 向 API 注册（node_id, workspace 归属, 能力上报: GPU型号/显存/已装workflow/ComfyUI版本）
+       → 出站 HTTPS 长轮询/WebSocket 拉 Job（POST /internal/nodes/{id}/claim）
+       → 执行 ComfyUI → 上传 OSS（直传）→ 回调 API 终态
+心跳：worker 每 30s 向 API 报在线（Redis 记 worker:{id} TTL，仅作内部状态）
 ```
 
-鉴权：HMAC `X-Weaveora-Signature`（`timestamp + jobId + sha256(body)`）。
+Job 派发：API 按 **Job.workspace_id → 该工作区可用节点** 派发；我方云节点池可服务多个工作区，轨 2 节点只服务自己工作区。Job 状态含 `waiting_node`（无节点在线时）。
 
-Job payload 引用 `workflow_id` + 变量映射（prompt、seed、width、image refs）。  
-主路径是 **Redis Streams 消费**，上述 HTTP 仅供运维探活 / 单测。
+能力协商（必做）：worker 上报已装 workflow 与模型清单；导演层 / 下单时校验 `workflow_id` 是否该节点可用（如用户未装 Flux 则降 SDXL 或提示安装），模型 `model_hash` 运行前校验，结果与声明不符则报错不结算。
+
+（内部参考：早期 v1.3 的 “Worker 暴露 POST /worker/v1/jobs + Redis Streams 消费” 仅作为我方节点池 / 运维内部通道，不作为对用户节点的外部协议；对用户节点统一走上述出站通道。）
 
 ### 11.2 内置 workflow（Worker 仓库）
 
@@ -1002,8 +1014,8 @@ JPA 映射要点：
 | 移动审片 | **Flutter 3 + Riverpod + GoRouter + Dio**（二期） | 审片、推送、确认生成；**不要**用 Flutter Web 当创作台 |
 | API 中台 | **Java 21 + Spring Boot 3.4.5**（MVP 不引 Spring Cloud / Nacos / Gateway） | Java 团队习惯；**Spring Cloud 组件留到真正拆服务时再上**（v1.3 裁定） |
 | MVP 形态 | **Spring Modulith 1.3.x 模块化单体 `weaveora-api`** | MirrorTalk 也是单体；织影同样单体，但模块边界写清 |
-| GPU Worker | **Python 3.11 + FastAPI + ComfyUI**（自建，GPU 机后续搭建） | SD 生态在 Python。**MirrorTalk 现有出图通道（Replicate）保持不变** |
-| 队列 | **Redis Streams**（Redis 7 内建，消费组 + 独立死信流） | MirrorTalk 没有 MQ 可跟；Redis 第一天就上。GPU 任务要重试、可取消、多 Worker，Streams 消费组足够（v1.3 裁定替代 RabbitMQ） |
+| GPU Worker | **Python 3.11 + FastAPI + ComfyUI（自建）**；双轨：轨 1 租用 GPU 服务器（MVP 先行，Q3-B/Q4-A）/ 轨 2 用户本地 GPU（BYO，Q6） | SD 生态在 Python。**MirrorTalk 现有出图通道（Replicate）保持不变** |
+| 队列 | **Redis Streams**（Redis 7 内建，消费组 + 独立死信流） | MirrorTalk 没有 MQ 可跟；Redis 第一天就上。GPU 任务要重试、可取消、多 Worker，Streams 消费组足够（v1.3 裁定替代 RabbitMQ）。**对用户节点走 API 出站通道，Streams 仅限我方节点池/运维内部（v1.6）** |
 | 缓存 / 锁 / 验证码 | **Redis 7** | 进度、限流、分布式锁、WS pub/sub、验证码、Job 队列。不复制内存 Map |
 | 数据库 | **PostgreSQL 16**（本机 18.4 实测兼容，validate 只比对结构） | 与 MirrorTalk 生产库同族 |
 | 对象存储 | **dev：本地目录适配器（LocalFileStorageAdapter）**；生产：**阿里云 OSS**（参考 MirrorTalk 既有 aliyun-sdk-oss 用法） | 媒体。v1.3 裁定：不引 MinIO，dev 期直接用本地目录，生产直接 OSS |
@@ -1438,18 +1450,23 @@ weaveora-app/
 
 ---
 
-## 19. GPU Worker
+## 19. GPU Worker（v1.6：双轨同构，出站连 API）
 
-- FastAPI + uvicorn
-- 每个 GPU 进程绑一张卡（`CUDA_VISIBLE_DEVICES`）
-- 从 **Redis Streams** 消费（消费组）Job，调 ComfyUI HTTP 或 stub
-- 上传 OSS，回调 Java
-- 心跳：Redis `worker:{id}` TTL 30s
-- 优雅停机：停领新任务，当前任务可完成或标 retry
+- Python 3.11 + FastAPI + uvicorn，每个 GPU 进程绑一张卡（`CUDA_VISIBLE_DEVICES`）
+- **一份代码，两种部署**（Q2-A / Q3-B）：
+  - **轨 1 云节点**：部署在我租的 / 指定供应商的 GPU 服务器上，注册到**我方节点池**，可服务多个工作区；运营方管理。
+  - **轨 2 本地节点（BYO）**：用户在自己 Windows 机器（RTX 3090/4070/4080/4090）上运行同一 worker，注册时绑定自己的 workspace_id；**只接自己工作区的 Job**。
+- **统一协议（出站）**：启动注册（node_id / workspace / 能力上报）→ HTTPS 长轮询拉 Job（claim）→ 调 ComfyUI HTTP 或 stub → 上传 OSS（直传）→ 回调终态；心跳每 30s 报在线。
+- 能力上报：GPU 型号 / 显存 / 已装 workflow 与模型 / ComfyUI 版本；导演层与下单校验能力匹配。
+- 开发期 **必须** 有 CPU stub worker：根据 prompt hash 返回占位 PNG（Pillow 渲染标题 + 镜号）。环境变量 `WEAVEORA_WORKER_MODE=stub|comfy`。
+- 取消：API 下发 `JobCancel`（经出站通道带回收）→ Worker 调 ComfyUI interrupt；若已 uploading，则尽力取消上传但仍可能 complete——API 以 **先到的终态为准**，迟到的 complete 若 state=cancelled 则忽略并删除对象。
+- 优雅停机：停领新任务，当前任务可完成或标 retry。
 
-开发期 **必须** 有 CPU stub worker：根据 prompt hash 返回占位 PNG（Pillow 渲染标题 + 镜号）。环境变量 `WEAVEORA_WORKER_MODE=stub|comfy`。
+### 19.1 轨 2 安装包（Q6：陪装策略）
 
-取消：Java 发 `JobCancel` → Worker 调 ComfyUI interrupt；若已 uploading，则尽力取消上传但仍可能 complete——API 以 **先到的终态为准**，迟到的 complete 若 state=cancelled 则忽略并删除对象。
+- 提供 `weaveora-node` 一键安装/启动器（Windows，参考环境 RTX 3090/4070/4080/4090），内含 ComfyUI 依赖与内置 workflow 清单。
+- 支持边界：**MVP 只支持上述 4 款 N 卡 + Windows**；若用户环境有差异且实现有难度，允许**人工陪装 ComfyUI 与驱动**（Q6），不承诺全自动。
+- 节点安装即注册：首次启动弹 token 绑定工作区。
 
 ---
 
@@ -1606,14 +1623,15 @@ worker-stub  python worker（可选，仅需本机 stub 出图时）
 不需要 Docker Compose 起 PG/Redis；`docker compose` 仅保留为可选（给无 VPS / 无本机 PG 的隔离环境）。  
 `make bootstrap`：建 `weaveora_dev`（本机）或 `weaveora` / `weaveora_test`（VPS）、Flyway、种子风格模板、种子管理员。
 
-### 23.3 生产（VPS，同 MirrorTalk 单机 systemd 模式）
+### 23.3 生产（VPS，同 MirrorTalk 单机 systemd 模式；v1.6 双轨）
 
 - 部署对象：`weaveora-api`（连 VPS 本地 PG `weaveora` + Redis db0）+ 静态 `web` 产物（nginx 托管，如 `/opt/weaveora/web`）。
-- Worker：GPU 机到位前用 `worker-stub`（可本机或 VPS 低配进程）；到位后 `weaveora-worker`（ComfyUI）独立部署在 GPU 机，只出网连 VPS 中间件与 OSS。
+- **轨 1 云节点**（Q3-B：MVP 先行）：`weaveora-worker` 部署在我租的 / 指定供应商的 GPU 服务器上（自建 ComfyUI，Q4-A），只出站连 API 拉 Job + OSS 直传；我部署的 GPU 机同时供个人测试与轨 1 首发。
+- **轨 2 本地节点**（Q6）：用户自带 RTX 3090/4070/4080/4090 + Windows 跑同一 worker，注册到自己工作区，不接他人 Job；安装有难度时陪装。
 - 内存预算（VPS 8G，与 MirrorTalk 同机）：MirrorTalk JAR + `weaveora-api`（`-Xmx1g`）+ PG + Redis 需共存，控制 JVM 堆并监控；必要时测试实例只在本机开发时占用 db1，不常驻 VPS 服务。
 - 配置：环境变量 + systemd Environment（镜像 MirrorTalk），不用 Nacos（拆服务后才引入）。
 - 备份：PG 每日 + WAL（含 `weaveora` 与 `mirrortalk` 同实例统一备份）；OSS 跨区域复制。
-- 网络策略：Redis 仅本机回环 + 防火墙白名单（生产与测试机）；PG 仅本机 + 白名单；ComfyUI 端口不对公网。
+- 网络策略：Redis 仅本机回环 + 防火墙白名单；PG 仅本机 + 白名单；API 公网（HTTPS）；**用户节点出站访问 API 与 OSS**（无需开放入站端口）；ComfyUI 端口不对公网。
 
 ---
 
@@ -1690,13 +1708,13 @@ Maven：`weaveora-parent` BOM。包名 `studio.weaveora.<module>`。
 | W1 | 仓库、Flyway V1、JPA 实体、用户 / 工作区 / 项目 CRUD、JWT 登录（验证码 Redis）、Vue 壳、暗色 token | 能登录并建空项目 |
 | W2 | Director：LLM JSON、revision 版本、校验器、导演台 UI | 输入一句话得到可编辑提示词 / 剧本 |
 | W3 | Job 状态机、额度（simplified / wallet）、Redis Streams、stub worker、进度 WS | 点确认后有假图回来 |
-| W4 | 真 ComfyUI txt2img（GPU 机到位前保持 stub）、资产库、画廊 | 真出图或 GPU 机就绪后立即真出图 |
+| W4 | 真 ComfyUI txt2img（轨 1 云 GPU 先行，Q3-B）、资产库、画廊 | 真出图（租用 GPU 服务器或 stub 先行，接口不变） |
 | W5 | 分镜墙、逐镜确认、still pass | 视频项目可按镜出关键帧 |
 | W6 | 时间线粗预览、edit_list 导出、README | 能把媒体送进剪映手工对齐 |
 | W7 | 剪映适配器、img2vid 可选、安全扫描 | 草稿包可导入或明确降级 |
 | W8 | 管理后台、额度、观测、打磨 | 可给内测用户 |
 
-GPU 机未到位时，W4 用 stub 保持接口；GPU 机到位后切 `WEAVEORA_WORKER_MODE=comfy`，MirrorTalk 的 Replicate 通道不受影响。  
+GPU 机未到位时，W4 用 stub 保持接口；轨 1 的 GPU 服务器到位后切 `WEAVEORA_WORKER_MODE=comfy`（Q3-B：轨 1 先行）；轨 2 用户本地节点同款 worker（Q6）。MirrorTalk 的 Replicate 通道不受影响。  
 **不要从 Flutter 或管理后台开干。**
 
 ### 28.1 实现模型开工顺序（第一周文件级）
@@ -1739,7 +1757,7 @@ GPU 机未到位时，W4 用 stub 保持接口；GPU 机到位后切 `WEAVEORA_W
 | --- | --- | --- | --- |
 | 1 | 名称 | **Weaveora / 织影** | 同意 |
 | 2 | 前端 | **Vue 3 + Naive/Arco 做 MVP**；Flutter 只做二期审片 | 同意 |
-| 3 | 后端 | **Java 21 + Spring Boot 3.4.5 + Spring Modulith 1.3.x 单体**；MVP **不引 Spring Cloud / Nacos / Gateway / Sentinel**（拆服务后才引入）；Worker **Python FastAPI + ComfyUI**（自建，GPU 机后续） | v1.3 裁定 |
+| 3 | 后端 | **Java 21 + Spring Boot 3.4.5 + Spring Modulith 1.3.x 单体**；MVP **不引 Spring Cloud / Nacos / Gateway / Sentinel**（拆服务后才引入）；Worker **Python FastAPI + ComfyUI（自建）**，双轨执行见 #22 | v1.3 裁定 + v1.6 #22 |
 | 4 | 队列 | **Redis Streams**（消费组 + 独立死信流），Redis 7 内建 | v1.3 裁定替代 RabbitMQ（MirrorTalk 仍无 MQ，GPU Job 不能同步 block） |
 | 5 | ORM | **Spring Data JPA + Hibernate 6** | MirrorTalk 实测即此。**不跟** `ddl-auto: update`，配 **Flyway + validate** |
 | 6 | 生成引擎 | 自建 ComfyUI 为主（可灵 / 即梦为 v1 适配器）；**MirrorTalk 现有 Replicate 出图通道保持不变** | v1.3 裁定补充 |
@@ -1758,14 +1776,16 @@ GPU 机未到位时，W4 用 stub 保持接口；GPU 机到位后切 `WEAVEORA_W
 | 19 | 里程碑 | 按 **§28 v1.3 单人版** W1-W8 执行；GPU 机未到位时 W4 用 stub | v1.3 裁定 |
 | 20 | 中间件部署 | **PG / Redis 统一部署在 MirrorTalk VPS，生产与测试共用**：PG 同实例分库 `weaveora` / `weaveora_test`（不新建实例、不动 mirrortalk 库）；Redis 同实例 **db0 生产 / db1 测试** + key 前缀 `weaveora:prod:*` / `weaveora:test:*`；VPS 2C/8G/200G | v1.4 裁定（Q1-A Q2-A Q3-B Q4-A） |
 | 21 | 开发库 | **开发日常用本机 PG `weaveora_dev`**（上生产前过渡；本机 PG 18.4 已装，镜像 `mirrortalk_dev` 惯例）；VPS 就绪并需验证生产结构一致性时 dev 切 `weaveora_test`。Redis 开发连 db1 | v1.5 裁定（本机已装 PG） |
+| 22 | 双轨执行 | **轨 1 云 GPU + 轨 2 本地 GPU（BYO）并存**：轨 1 = 用户用系统 + 租我/指定供应商的 GPU（Q4-A 租整机自跑 worker，自建 ComfyUI），MVP 轨 1 先行（Q3-B）；轨 2 = 用户自带本地 GPU 连自己工作区，MVP 支持 Windows + RTX 3090/4070/4080/4090，安装困难时陪装（Q6）。**Worker 协议双轨同构：一律出站 HTTPS 连 API 拉 Job + OSS 直传，不反向直连 Redis**（Q2-A）。轨 2 客群 = 已自建 ComfyUI 的创作者/工作室 | v1.6 裁定（1-6 确认） |
 
-补充裁定（随 4、5 条一起锁死；v1.4 更新）：
+补充裁定（随 4、5 条一起锁死；v1.6 更新）：
 
-- **Redis 7 第一天就上**（验证码、限流、锁、WS、Job 队列 Streams）。
+- **Redis 7 第一天就上**（验证码、限流、锁、WS、Job 队列 Streams 仅作我方内部）。
 - **开发 / CI 用 PostgreSQL，不用 H2。**
 - **不引入 MyBatis-Plus。**
 - **不把 GenerationJob 做成 `@Scheduled` 或同步 WebClient。**
 - **不引入 RabbitMQ / Kafka / Nacos / Gateway / Sentinel / MinIO（拆服务或规模需要时再评估）。**
+- **对用户节点，Job 派发一律走出站通道（长轮询/WS），不要求用户开放入站端口；Redis Streams 仅限我方节点池/运维内部。**
 
 ---
 
@@ -1812,4 +1832,4 @@ deformed, extra limbs, badly drawn, jpeg artifacts, ugly, nsfw
 
 ---
 
-*结束。实现时以本文 v1.5 为唯一产品 / 架构真源。第 30 章已锁定（含 v1.3 #3 #4 #13–#19、v1.4 #20、v1.5 #21），可以开工。*
+*结束。实现时以本文 v1.6 为唯一产品 / 架构真源。第 30 章已锁定（含 v1.3 #3 #4 #13–#19、v1.4 #20、v1.5 #21、v1.6 #22），可以开工。*
