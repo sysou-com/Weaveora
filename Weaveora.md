@@ -1,11 +1,13 @@
 # Weaveora 织影
 
-**产品与技术设计规格书 · v1.3**  
-状态：**选型已锁定，v1.3 裁定已确认**（2026-09-04，按 MirrorTalk 代码实测复核 + 你逐条确认的 7 项裁定）  
+**产品与技术设计规格书 · v1.4**  
+状态：**选型已锁定，v1.4 裁定已确认**（2026-09-04：v1.3 的 7 项裁定 + 中间件集中部署裁定）  
 日期：2026-09-04  
 文档用途：唯一产品 / 架构真源。实现模型先读完全文再写代码，不另发明架构。
 
 > **v1.3 变更要点（2026-09-04，你逐条确认）：** ① 出图通道 = 自建 ComfyUI + 后期 GPU 机（**MirrorTalk 现有出图通道不变**）；② MVP 队列 = **Redis Streams**（不再引入 RabbitMQ）；③ MVP **不上 Nacos / Gateway / Sentinel**；④ 版本 = **Java 21 + Spring Boot 3.4.5 + Spring Modulith 1.3.x**；⑤ 存储 = dev 本地目录适配器 + **生产阿里云 OSS**；⑥ 额度 = MVP 提供 `simplified` 开关；⑦ 里程碑按**单人实施**重排。详见 §15 / §23 / §28 / §30。
+
+> **v1.4 变更要点（2026-09-04，你确认 Q1-A Q2-A Q3-B Q4-A，Q5/Q6 补充）：** ⑧ **中间件（PG / Redis）统一部署在 MirrorTalk 现有 VPS 上，生产与测试共用**：PG 同一实例分库 `weaveora`（生产）/ `weaveora_test`（测试）；Redis 同一实例 **db 隔离**（db0 生产 / db1 测试）；**测试环境 = 本地开发机直连 VPS 的测试实例中间件**（本机不再装 PG/Redis，也不常驻测试服务）；VPS 规格 2C / 8G / 200G。详见 §23 / §30。#20。
 
 ---
 
@@ -750,7 +752,7 @@ classDiagram
 - 迁移工具 **Flyway**，脚本 `V1__init.sql`、`V2__credits.sql`…。JPA 实体与脚本字段必须一致。
 - `spring.jpa.hibernate.ddl-auto=validate`（开发与生产相同）。**禁止 `update`。**
 - ORM：**Spring Data JPA + Hibernate 6**（对齐 MirrorTalk）。查询以派生方法 + `@Query` JPQL 为主。实体放各模块 `domain` 包，禁止跨模块引用对方实体。
-- 开发库用 Compose PostgreSQL 或 Testcontainers，**不要用 H2**（JSONB / citext / 部分索引与 H2 行为不同）。
+- 开发库：v1.4 起**不装本机中间件**——dev profile 连 VPS 的 PG `weaveora_test` 库；单测用 Testcontainers PG 或本机 PG 临时库。**不要用 H2**（JSONB / citext / 部分索引与 H2 行为不同）。
 
 ```sql
 CREATE EXTENSION IF NOT EXISTS "pgcrypto";
@@ -1012,7 +1014,7 @@ JPA 映射要点：
 | 参数校验 | Jakarta Validation | |
 | JSON | Jackson + 共享 JSON Schema | |
 | 观测 | Micrometer + Prometheus + Grafana + Loki + OpenTelemetry | Worker 同样暴露 `/metrics` |
-| 部署 | Docker Compose（开发） / K8s（生产） | GPU 节点独立 taint |
+| 部署 | 本机跑进程连 VPS 测试中间件（dev，v1.4）/ 同机 systemd 单实例（生产，镜像 MirrorTalk） | 8G VPS 内存预算：MirrorTalk JAR + weaveora-api(Xmx1g) + PG + Redis 共存 |
 
 ### 15.2 相对 MirrorTalk 的差异（有意为之，不是疏忽）
 
@@ -1068,7 +1070,7 @@ JPA 映射要点：
 | `JwtUtil` + `JwtAuthFilter` 无状态 JWT，`userId` 注入 request | `User` 实体及 `modelLevel/storageLevel/imageLevel/hiddenMenus/traits` |
 | 邮件验证码登录流程（搬到 Redis） | `ConcurrentHashMap` 验证码 / 登录失败计数 / IP 发信计数 |
 | 密码哈希、`disabled` 冻号思路 | 同库同进程、`userId` 散落到业务表当唯一隔离 |
-| PostgreSQL + JPA 派生查询 + `@Query` JPQL 风格 | `ddl-auto: update`、H2 当开发库（织影开发用本机 PG / Compose PG + Testcontainers，不用 H2） |
+| PostgreSQL + JPA 派生查询 + `@Query` JPQL 风格 | `ddl-auto: update`、H2 当开发库（织影 dev 连 VPS PG `weaveora_test`，不用 H2） |
 | `@Scheduled` 做清理类任务 | 用调度器跑生成 Job |
 | 注销级联思路（织影改为工作区匿名化） | AccountDeletion 直接改 30 张聊天表 |
 | 管理台冻号 | UserAdmin 的聊天专用字段 |
@@ -1535,12 +1537,36 @@ LLM 每次 director/generate 扣 1 积分（free 套餐每日最多 20 次另计
 
 ---
 
-## 23. 配置与部署
+## 23. 配置与部署（v1.4：中间件集中到 MirrorTalk VPS）
+
+### 23.0 中间件拓扑（v1.4 裁定，实现必须遵守）
+
+**原则：所有中间件（PostgreSQL / Redis）只部署在 MirrorTalk 现有 VPS 上，生产与测试共用；本机不装任何中间件。**
+
+| 中间件 | 部署位置 | 生产 | 测试（= 本地开发机使用） |
+| --- | --- | --- | --- |
+| PostgreSQL | MirrorTalk VPS（与 `mirrortalk` 库同一实例，**不新建实例**） | database `weaveora` | database `weaveora_test` |
+| Redis 7 | MirrorTalk VPS（新装，与 MirrorTalk 应用互不影响） | **db0**（key 前缀 `weaveora:prod:*`） | **db1**（key 前缀 `weaveora:test:*`） |
+| 对象存储 | 生产 = 阿里云 OSS（不占 VPS）；dev = 本地目录适配器 | OSS bucket | 本地目录（`./data/storage`） |
+| LLM | OpenAI-compatible 外呼 | 生产 key | dev key |
+
+- **VPS 规格：2 CPU / 8G 内存 / 200G 硬盘**（2026-09-04 你确认）。
+- 测试环境的含义（Q5）：**没有独立的测试服务器**；本地开发机跑 `weaveora-api` / `weaveora-web` / `worker-stub` 进程，连 VPS 上 PG `weaveora_test` + Redis db1。
+- 环境标识：连接串带明确后缀——DB 名（`weaveora` vs `weaveora_test`）+ Redis db（0 vs 1）+ key 前缀（`prod` vs `test`），防止生产 / 测试互相污染。
+- MirrorTalk 现状不受影响：PG 同一实例加库、Redis 为新增进程；MirrorTalk 应用不消费 Redis。
 
 ### 23.1 配置（MVP：profile + 环境变量；拆服务后才用 Nacos）
 
 ```
-application-{dev|staging|prod}.yml + 环境变量
+application-{dev|prod}.yml + 环境变量
+  # —— 中间件（VPS 集中部署，v1.4）——
+  spring.datasource.url:      jdbc:postgresql://<VPS_HOST>:5432/weaveora          # prod
+  spring.datasource.url:      jdbc:postgresql://<VPS_HOST>:5432/weaveora_test     # dev
+  spring.data.redis.host:     <VPS_HOST>
+  spring.data.redis.port:     6379
+  spring.data.redis.database: 0     # prod；dev 用 1
+  weaveora.env: prod|test           # key 前缀：weaveora:{env}:*
+  # —— 业务 ——
   weaveora.llm.base-url
   weaveora.llm.api-key        (env: WEAVEORA_LLM_API_KEY)
   weaveora.llm.model
@@ -1548,8 +1574,8 @@ application-{dev|staging|prod}.yml + 环境变量
   weaveora.oss.bucket
   weaveora.storage.mode: local|oss     # local=LocalFileStorageAdapter, oss=OssStorageAdapter
   weaveora.storage.local-dir: ./data/storage
-  weaveora.queue.job-stream: weaveora:jobs
-  weaveora.queue.dl-stream:  weaveora:jobs:dlq
+  weaveora.queue.job-stream:  weaveora:{env}:jobs
+  weaveora.queue.dl-stream:   weaveora:{env}:jobs:dlq
   weaveora.billing.mode: wallet|simplified
   weaveora.credits.image: 4
   weaveora.security.jwt.access-ttl: 15m
@@ -1557,22 +1583,29 @@ application-{dev|staging|prod}.yml + 环境变量
   spring.flyway.enabled: true
 ```
 
-密钥不进仓库：dev 用未提交的 `application-local.yml`（参考 MirrorTalk `application-local.example.yml` 模式）；生产用环境变量 / K8s Secret。
+密钥不进仓库：dev 用未提交的 `application-local.yml` + 环境变量（参考 MirrorTalk `application-local.example.yml` 模式）；生产用 systemd Environment / K8s Secret。
 
-### 23.2 开发 Compose
+### 23.2 本机开发（v1.4：不装中间件，连 VPS 测试实例）
 
-服务：`postgres` `redis` `api` `web` `worker-stub`（MVP 无 rabbitmq / minio / nacos；本机无 Docker 时可用本机 PG / 单独起的 Redis，配 `application-local.yml`）
+本机只跑三个进程，中间件全部指向 VPS 测试实例（PG `weaveora_test` + Redis db1 + `weaveora.env=test`）：
 
-一键：`docker compose -f deploy/compose/dev.yml up`（若本机有 Docker）。  
-`make bootstrap`：建库、Flyway、种子风格模板、种子管理员。
+```
+api          mvn spring-boot:run -Dspring-boot.run.profiles=dev     # 连 VPS test 中间件
+web          pnpm dev（Vite）
+worker-stub  python worker 或 docker run（可选，仅需本机 stub 出图时）
+```
 
-### 23.3 生产
+不需要 Docker Compose 起 PG/Redis；`docker compose` 仅保留为可选（给无 VPS 访问的隔离环境）。  
+`make bootstrap`：在 VPS 上建库 `weaveora` / `weaveora_test`、Flyway、种子风格模板、种子管理员。
 
-- MVP 部署形态：单机 systemd（镜像 MirrorTalk 生产方式）：`weaveora-api`（CPU）+ `worker-stub`（先跑通）→ GPU 机到位后换 `weaveora-worker`（ComfyUI）。
-- 扩展形态（拆服务后才编排）：`gateway` / `api` CPU 节点 HPA；`worker` GPU 节点按队列深度扩；独立命名空间 `weaveora`。
-- 配置：环境变量 + 进程 manager（systemd Environment / K8s Secret），不用 Nacos（拆服务后才引入）。
-- 备份：PG 每日 + WAL；OSS 跨区域复制。
-- 网络策略：Worker 可出网拉模型，但 ComfyUI 端口不对公网。
+### 23.3 生产（VPS，同 MirrorTalk 单机 systemd 模式）
+
+- 部署对象：`weaveora-api`（连 VPS 本地 PG `weaveora` + Redis db0）+ 静态 `web` 产物（nginx 托管，如 `/opt/weaveora/web`）。
+- Worker：GPU 机到位前用 `worker-stub`（可本机或 VPS 低配进程）；到位后 `weaveora-worker`（ComfyUI）独立部署在 GPU 机，只出网连 VPS 中间件与 OSS。
+- 内存预算（VPS 8G，与 MirrorTalk 同机）：MirrorTalk JAR + `weaveora-api`（`-Xmx1g`）+ PG + Redis 需共存，控制 JVM 堆并监控；必要时测试实例只在本机开发时占用 db1，不常驻 VPS 服务。
+- 配置：环境变量 + systemd Environment（镜像 MirrorTalk），不用 Nacos（拆服务后才引入）。
+- 备份：PG 每日 + WAL（含 `weaveora` 与 `mirrortalk` 同实例统一备份）；OSS 跨区域复制。
+- 网络策略：Redis 仅本机回环 + 防火墙白名单（生产与测试机）；PG 仅本机 + 白名单；ComfyUI 端口不对公网。
 
 ---
 
@@ -1664,7 +1697,7 @@ GPU 机未到位时，W4 用 stub 保持接口；GPU 机到位后切 `WEAVEORA_W
 2. identity：注册登录 JWT，验证码 Redis  
 3. project CRUD（全部带 `workspace_id`）  
 4. `web` 登录 + 项目列表 + 新建  
-5. dev 可起（本机 PG / Redis，或 Docker Compose postgres+redis+api+web+worker-stub）  
+5. dev 可连 VPS 测试中间件（PG `weaveora_test` + Redis db1；本机不装 PG/Redis）  
 6. 再进入 director  
 
 禁止第一周做：微服务拆分、Flutter、Seata、真实 ComfyUI、剪映私有格式逆向、H2、`ddl-auto=update`、内存验证码。
@@ -1684,14 +1717,15 @@ GPU 机未到位时，W4 用 stub 保持接口；GPU 机到位后切 `WEAVEORA_W
 | Java 团队不会 ComfyUI | Worker 独立仓，用 HTTP 契约隔离 |
 | 把 MirrorTalk 同步 AI 习惯带进 GPU | 硬性指令 16：Job 必须进 Redis Streams |
 | GPU 机未到位 | W4 保持 stub；Worker 契约不变，`WEAVEORA_WORKER_MODE` 切换 |
-| 本机无 Docker | 用本机 PG 18 + 单独 Redis 跑 local profile；Compose 可选 |
+| 本机无 Docker / 无 PG / 无 Redis | v1.4：中间件全部在 VPS（PG `weaveora_test` + Redis db1），本机只跑进程，无需本机中间件 |
+| 单测需要 DB | Testcontainers PG（有 Docker 时）；无 Docker 则连 VPS `weaveora_test` 的独立临时库（慎用，避免污染） |
 | Hibernate 改表毁掉状态机 | Flyway + `ddl-auto=validate` |
 
 ---
 
 ## 30. 已锁定决策
 
-2026-09-02 你确认：第 1–3、6–11 条同意；第 4、5 条按 MirrorTalk 实测裁定。2026-09-04 v1.3 裁定修订 #3 #4 并新增 #13–#19。实现模型按本表开工，不得再问。
+2026-09-02 你确认：第 1–3、6–11 条同意；第 4、5 条按 MirrorTalk 实测裁定。2026-09-04 v1.3 裁定修订 #3 #4 并新增 #13–#19；同日 v1.4 裁定新增 #20（中间件集中部署）。实现模型按本表开工，不得再问。
 
 | # | 决策 | 锁定值 | 来源 |
 | --- | --- | --- | --- |
@@ -1714,8 +1748,9 @@ GPU 机未到位时，W4 用 stub 保持接口；GPU 机到位后切 `WEAVEORA_W
 | 17 | 限流 | MVP：Redis 计数 + 自定义注解（登录 5/s/IP 等）；Sentinel 拆服务后再上 | v1.3 裁定 |
 | 18 | 版本 | **Java 21 + Boot 3.4.5 + Modulith 1.3.x + Flyway 10.x**（Boot 不再 3.3，对齐 MirrorTalk 3.4.x 实测） | v1.3 裁定 |
 | 19 | 里程碑 | 按 **§28 v1.3 单人版** W1-W8 执行；GPU 机未到位时 W4 用 stub | v1.3 裁定 |
+| 20 | 中间件部署 | **PG / Redis 统一部署在 MirrorTalk VPS，生产与测试共用**：PG 同实例分库 `weaveora` / `weaveora_test`（不新建实例、不动 mirrortalk 库）；Redis 同实例 **db0 生产 / db1 测试** + key 前缀 `weaveora:prod:*` / `weaveora:test:*`；测试环境 = 本机开发连 VPS 测试中间件；VPS 2C/8G/200G | v1.4 裁定（Q1-A Q2-A Q3-B Q4-A） |
 
-补充裁定（随 4、5 条一起锁死；v1.3 更新）：
+补充裁定（随 4、5 条一起锁死；v1.4 更新）：
 
 - **Redis 7 第一天就上**（验证码、限流、锁、WS、Job 队列 Streams）。
 - **开发 / CI 用 PostgreSQL，不用 H2。**
@@ -1768,4 +1803,4 @@ deformed, extra limbs, badly drawn, jpeg artifacts, ugly, nsfw
 
 ---
 
-*结束。实现时以本文 v1.3 为唯一产品 / 架构真源。第 30 章已锁定（含 v1.3 裁定 #3 #4 #13–#19），可以开工。*
+*结束。实现时以本文 v1.4 为唯一产品 / 架构真源。第 30 章已锁定（含 v1.3 裁定 #3 #4 #13–#19 与 v1.4 裁定 #20），可以开工。*
