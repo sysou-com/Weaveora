@@ -1557,6 +1557,7 @@ LLM 每次 director/generate 扣 1 积分（free 套餐每日最多 20 次另计
 - 测试环境的含义（v1.4 Q5 + v1.5 修订）：**没有独立的测试服务器**；本地开发机跑 `weaveora-api` / `weaveora-web` / `worker-stub` 进程。日常开发连**本机 PG `weaveora_dev`**；Redis 连 VPS db1（或本机临时 Redis 实例亦可，见 23.2）。VPS 就绪并需验证生产结构一致性时，dev profile 切 VPS PG `weaveora_test`。
 - 环境标识：连接串带明确后缀——DB 名（`weaveora` / `weaveora_test` / `weaveora_dev`）+ Redis db（0 vs 1）+ key 前缀（`prod` vs `test`），防止环境互相污染。
 - MirrorTalk 现状不受影响：PG 同一实例加库、Redis 为新增进程；MirrorTalk 应用不消费 Redis。
+- **VPS Redis 已部署（2026-09-04）**：Redis 7.2.8 源码编译装于 CentOS 8 VPS，systemd `redis.service`（enabled + running），`bind 127.0.0.1 ::1` + `requirepass`（凭据存本机 `~/.weaveora/vps-mw.env`，不入仓库），`appendonly yes`（AOF+RDB），`maxmemory 1gb`，重启持久化已验证，db0/db1 隔离已验证。本机访问走 SSH 隧道：`ssh -N -L 6379:127.0.0.1:6379 root@sysou.com`。
 
 ### 23.1 配置（MVP：profile + 环境变量；拆服务后才用 Nacos）
 
