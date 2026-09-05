@@ -1,0 +1,45 @@
+# ===== 生产（VPS，镜像 MirrorTalk 单机 systemd 模式；v1.4/§23）=====
+# 目标：PG weaveora 库（与 mirrortalk 同实例）+ Redis db0（key 前缀 weaveora:prod:*）。
+# 本文件不含任何密钥：全部经 systemd EnvironmentFile 注入（/etc/weaveora/weaveora-api.env，0600）。
+
+spring:
+  datasource:
+    url: jdbc:postgresql://localhost:5432/weaveora
+    username: ${WEAVEORA_DB_USER}
+    password: ${WEAVEORA_DB_PASSWORD}
+    driver-class-name: org.postgresql.Driver
+    hikari:
+      maximum-pool-size: 10
+  data:
+    redis:
+      host: 127.0.0.1
+      port: 6379
+      password: ${WEAVEORA_REDIS_PASSWORD}
+      database: 0                      # db0 = 生产（v1.4 #20）；db1 = 测试
+      timeout: 3s
+
+weaveora:
+  env: prod                             # key 前缀 weaveora:prod:*
+  security:
+    jwt:
+      secret: ${WEAVEORA_JWT_SECRET}    # 必填：由 env 文件注入（openssl rand -hex 32）
+      access-ttl: 15m
+      refresh-ttl: 14d
+  billing:
+    mode: ${WEAVEORA_BILLING_MODE:simplified}
+  llm:
+    base-url: ${WEAVEORA_LLM_BASE_URL:}   # 暂沿用 MirrorTalk 的 LLM key/base/model（环境变量）
+    api-key: ${WEAVEORA_LLM_API_KEY:}
+    model: ${WEAVEORA_LLM_MODEL:}
+  storage:
+    mode: local
+    local-dir: /opt/weaveora/data/storage
+
+server:
+  address: 127.0.0.1                     # 仅本机 nginx 反代访问，不对公网暴露
+  port: 8080
+
+logging:
+  level:
+    root: INFO
+    studio.weaveora: INFO

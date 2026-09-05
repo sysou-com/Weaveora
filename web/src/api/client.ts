@@ -3,13 +3,20 @@ import { clearTokens, loadTokens, saveTokens } from './session'
 
 /**
  * 轻量 fetch 客户端：
- * - base = VITE_API_BASE_URL（默认 '' 同源，dev 走 Vite 反代 /api → :8080）
- * - 自动携带 Authorization: Bearer <access>
- * - 401 时用 refresh token 单次续期后重试原请求；续期失败则清会话（跳登录）
- * - 统一把错误归一为 ApiError（含后端 code/message）
+ * - base 规则：VITE_API_BASE_URL 优先；否则取 Vite BASE_URL（生产以 --base=/weaveora/ 构建时自动得 '/weaveora'）
+ * - dev（BASE_URL='/'）→ '' 同源，走 Vite 反代 /api → :8080
+ * - 请求路径形如 '/api/v1/...'，与 base 拼接后为 '/weaveora/api/v1/...'（nginx 剥前缀反代后端）
+ * - 自动携带 Authorization: Bearer <access>；401 时单次续期重试；失败清会话
  */
 
-export const API_BASE: string = (import.meta.env.VITE_API_BASE_URL ?? '').replace(/\/$/, '')
+export const API_BASE: string = resolveApiBase()
+
+function resolveApiBase(): string {
+  const explicit = import.meta.env.VITE_API_BASE_URL
+  if (explicit !== undefined && explicit !== '') return explicit.replace(/\/$/, '')
+  const base = (import.meta.env.BASE_URL ?? '/').replace(/\/$/, '')
+  return base === '' ? '' : base
+}
 
 export class ApiError extends Error {
   readonly code: string
