@@ -34,3 +34,12 @@ python worker/qa_acceptance.py --base https://sysou.com/weaveora --engine cloud
 - 云（Replicate SDXL）：图片仍走云；clip(motion) 未接线（`CLOUD_MOTION_UNSUPPORTED`）
 - motion 成片需本地 Wan（GPU）或云视频 API（高阶档，后置）；edit_list 导出以关键帧兜底
 - 一致性验收（QA-3）待 GPU/带参考能力的云档
+
+## 运维备忘：长视频（分段导演）经 nginx 的同步等待超时
+- 症状：>30s 视频（触发分段导演）点「导演」约 60s 后返回 **404**（nginx 页，空 JSON）。
+- 根因：`nginx proxy_read_timeout` 默认 60s；分段导演在 Spring 内串行多次 LLM 调用（每段最长 ~60s），
+  整体可达数分钟，超过代理读超时即中断；`/usr/share/nginx/html/50x.html` 缺失时显示为 404。
+- 修复：`location ^~ /weaveora/api/`（及 `/weaveora/internal/`）设
+  `proxy_read_timeout 1800s; proxy_send_timeout 1800s;`（5 分钟上限 × 多段 × 重试余量）。
+- 验证：31s→200（~95s）、60s→200（~156s）走公共 https 通过。
+- 演进：若走向 5 分钟长片批量并发，应把 director/generate 改异步任务 + 进度（现状同步等待）。
