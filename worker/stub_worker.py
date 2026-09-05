@@ -146,6 +146,11 @@ def execute_job(job):
     _req("POST", "/internal/jobs/%s/progress" % jid, {"progress": 15, "stage": "loading_model"})
 
     if MODE == "cloud":
+        if kind == "clip":
+            _req("POST", "/internal/jobs/%s/fail" % jid,
+                 {"code": "CLOUD_MOTION_UNSUPPORTED",
+                  "message": "运动(clip)暂需本地 Wan 引擎或云视频适配器（尚未接线）"})
+            return False
         import cloud_client as cloud
         try:
             outs = cloud.generate_still(payload, progress_fn=lambda p, st: _req(

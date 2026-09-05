@@ -152,4 +152,19 @@ class DirectorPlanValidatorTest {
         assertEquals(new AspectPixels.Dim(768, 1344), AspectPixels.forImage("9:16"));
         assertEquals(new AspectPixels.Dim(1344, 768), AspectPixels.forImage("unknown")); // fallback
     }
+
+    @Test
+    void shotOver10sRejected() {
+        ObjectNode p = videoPlan(24);
+        addShots(p, new ObjectNode[]{
+                shot(1, 3, "wide street in rain with passing umbrellas, cinematic texture, moody"),
+                shot(2, 11, "long take under bridge with heavy rain, cinematic anamorphic feel"), // >10
+                shot(3, 4, "the boat drifting into darkness, final frame, cinematic grade"),
+                shot(4, 3, "medium shot of ripples on water surface, slow motion, cinematic"),
+                shot(5, 3, "extreme close up of wet paper edge, texture detail, cinematic"),
+        });
+        List<String> problems = DirectorPlanValidator.validate(p, "video", new BigDecimal("24"));
+        assertTrue(problems.stream().anyMatch(x -> x.contains("10s")));
+    }
+
 }

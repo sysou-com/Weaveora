@@ -117,6 +117,9 @@ public final class DirectorPlanValidator {
                 problems.add("shots[" + i + "] 缺少 duration_sec");
             } else {
                 sum = sum.add(d);
+                if (d.compareTo(new BigDecimal("10")) > 0) {
+                    problems.add("shots[" + i + "] 单镜 " + d + "s 超过 10s（§30 #25 单镜上限）");
+                }
             }
             String pos = text(shot, "positive_prompt");
             if (isBlank(pos)) {

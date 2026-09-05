@@ -59,14 +59,17 @@ public class DirectorService {
     private final ShotDraftRepository shots;
     private final DirectorLlm llm;
     private final ObjectMapper mapper;
+    private final SafetyGuard safety;
 
     public DirectorService(ProjectContextPort context, PromptRevisionRepository revisions,
-                           ShotDraftRepository shots, DirectorLlm llm, ObjectMapper mapper) {
+                           ShotDraftRepository shots, DirectorLlm llm, ObjectMapper mapper,
+                           SafetyGuard safety) {
         this.context = context;
         this.revisions = revisions;
         this.shots = shots;
         this.llm = llm;
         this.mapper = mapper;
+        this.safety = safety;
     }
 
     @Transactional
@@ -76,6 +79,12 @@ public class DirectorService {
         String mode = resolveMode(req.mode(), brief.mode(), project.mode());
         if ("video".equals(mode) && project.durationSec() == null) {
             throw new BizException(ErrorCode.VALIDATION, "视频项目缺少目标时长 durationSec（创建项目时指定）");
+        }
+        String hit = safety.matchRealPerson(brief.rawText()).orElse(null);
+        if (hit != null) {
+            throw new BizException(ErrorCode.BRIEF_BLOCKED,
+                    "主体分档拦截：命中真人分档词「" + hit + "」——可识别真人需 v1.0 解锁"
+                            + "（肖像授权 / AI 标识 / 深度合成合规，§11.4）。请改为产品/物体/场景或虚构人物描述。");
         }
 
         String system = loadSystemPrompt(mode);
