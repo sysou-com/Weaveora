@@ -36,6 +36,9 @@ weaveora:
       refresh-ttl: 14d
   billing:
     mode: ${WEAVEORA_BILLING_MODE:simplified}  # wallet|simplified（v1.3 #14）
+  video:
+    # W8 长片编排底座：单项目目标时长上限（3–5 分钟=180–300s；默认 300s，可按引擎能力调整）
+    max-duration-sec: ${WEAVEORA_VIDEO_MAX_DURATION_SEC:300}
   llm:
     base-url: ${WEAVEORA_LLM_BASE_URL:}
     api-key: ${WEAVEORA_LLM_API_KEY:}

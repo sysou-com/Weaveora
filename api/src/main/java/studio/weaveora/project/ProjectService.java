@@ -32,11 +32,15 @@ public class ProjectService implements ProjectContextPort {
     private final ProjectRepository projects;
     private final BriefRepository briefs;
     private final WorkspaceGuard guard;
+    private final int maxVideoSec; // W8 视频目标时长上限(默认300s)
 
-    public ProjectService(ProjectRepository projects, BriefRepository briefs, WorkspaceGuard guard) {
+    public ProjectService(ProjectRepository projects, BriefRepository briefs, WorkspaceGuard guard,
+                          @org.springframework.beans.factory.annotation.Value(
+                                  "${weaveora.video.max-duration-sec:300}") int maxVideoSec) {
         this.projects = projects;
         this.briefs = briefs;
         this.guard = guard;
+        this.maxVideoSec = maxVideoSec;
     }
 
     @Transactional
@@ -49,6 +53,11 @@ public class ProjectService implements ProjectContextPort {
         }
         if (!ALLOWED_RATIOS.contains(ratio)) {
             throw new BizException(ErrorCode.VALIDATION, "aspectRatio 不合法");
+        }
+        if ("video".equals(mode) && req.durationSec() != null
+                && req.durationSec().intValue() > maxVideoSec) {
+            throw new BizException(ErrorCode.VALIDATION,
+                    "视频目标时长不能超过 " + maxVideoSec + " 秒（W8 长片编排上限）");
         }
         Project p = Project.create(workspaceId, userId, req.title().trim(), mode, ratio, req.durationSec());
         return ProjectMapper.toResponse(projects.save(p));
