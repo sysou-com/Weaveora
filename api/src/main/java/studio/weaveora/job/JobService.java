@@ -7,6 +7,8 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import studio.weaveora.asset.AssetService;
+import studio.weaveora.billing.QuotaService;
+import studio.weaveora.infra.obs.Metrics;
 import studio.weaveora.asset.api.AssetResponse;
 import studio.weaveora.identity.api.WorkspaceGuard;
 import studio.weaveora.infra.storage.StoragePort;
@@ -56,11 +58,14 @@ public class JobService {
     private final JobWsHandler ws;
     private final studio.weaveora.director.PlanReader planReader;
     private final studio.weaveora.asset.domain.AssetRepository assetRepo;
+    private final QuotaService quota;
+    private final Metrics metrics;
 
     public JobService(GenerationJobRepository jobs, WorkerNodeRepository nodes, AssetService assets,
                       StoragePort storage, ProjectContextPort projects, WorkspaceGuard guard, JobWsHandler ws,
                       studio.weaveora.director.PlanReader planReader,
-                      studio.weaveora.asset.domain.AssetRepository assetRepo) {
+                      studio.weaveora.asset.domain.AssetRepository assetRepo,
+                      QuotaService quota, Metrics metrics) {
         this.jobs = jobs;
         this.nodes = nodes;
         this.assets = assets;
@@ -70,6 +75,8 @@ public class JobService {
         this.ws = ws;
         this.planReader = planReader;
         this.assetRepo = assetRepo;
+        this.quota = quota;
+        this.metrics = metrics;
     }
 
     // ---------- 对外：创建 / 查询 / 取消 ----------
@@ -96,6 +103,16 @@ public class JobService {
             List<UUID> shotIds = resolveVideoShots(userId, workspaceId, projectId, req.revisionId(), req.shotId(), req.kind());
             if (shotIds.isEmpty()) {
                 throw new BizException(ErrorCode.SHOT_NOT_APPROVED, "没有已确认的镜头可生成");
+            }
+            if ("clip".equals(req.kind())) {
+                int secs = 0;
+                for (UUID sid : shotIds) {
+                    JsonNode sh = shotOf(plan, sid);
+                    secs += (int) Math.ceil(sh == null ? 3 : sh.path("duration_sec").asDouble(3));
+                }
+                quota.checkClipSeconds(userId, secs);
+            } else {
+                quota.checkStills(userId, shotIds.size());
             }
             for (UUID shotId : shotIds) {
                 JsonNode shot = shotOf(plan, shotId);
@@ -133,6 +150,7 @@ public class JobService {
             if (count != 1 && count != 2 && count != 4) {
                 throw new BizException(ErrorCode.VALIDATION, "图片张数须为 1/2/4（§7.5）");
             }
+            quota.checkStills(userId, count);
             for (int i = 0; i < count; i++) {
                 ObjectNode payload = mapper().createObjectNode();
                 payload.put("kind", "still");
@@ -185,6 +203,7 @@ public class JobService {
         }
         job.cancel();
         emit(job, Map.of("type", "job.cancelled"));
+        metrics.jobCancelled();
         return toView(jobs.save(job));
     }
 
@@ -252,10 +271,12 @@ public class JobService {
         if (job.cancelRequested()) {
             job.cancel();
             emit(jobs.save(job), Map.of("type", "job.cancelled"));
+            metrics.jobCancelled();
             throw new BizException(ErrorCode.JOB_NOT_CANCELLABLE, "任务已请求取消");
         }
         job.succeed();
         jobs.save(job);
+        metrics.jobSucceeded();
         String kind = "clip".equals(job.kind()) ? "clip" : "still";
         for (CompleteAsset a : items) {
             AssetResponse resp = toAssetResponse(assets.createOutput(
@@ -273,10 +294,12 @@ public class JobService {
         if (job.cancelRequested()) {
             job.cancel();
             emit(jobs.save(job), Map.of("type", "job.cancelled"));
+            metrics.jobCancelled();
             return;
         }
         job.fail(code == null ? "WORKER_ERROR" : code, message);
         emit(jobs.save(job), Map.of("type", "job.failed", "code", job.errorCode()));
+        metrics.jobFailed();
     }
 
     @Transactional
@@ -342,6 +365,7 @@ public class JobService {
                 kind, idem, payload, userId);
         GenerationJob saved = jobs.save(job);
         emit(saved, Map.of("type", "job.queued", "state", "queued"));
+        metrics.jobQueued();
         return saved;
     }
 

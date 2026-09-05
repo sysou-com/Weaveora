@@ -36,6 +36,11 @@ weaveora:
       refresh-ttl: 14d
   billing:
     mode: ${WEAVEORA_BILLING_MODE:simplified}  # wallet|simplified（v1.3 #14）
+    simplified:
+      # §22.2 简化额度：全免费，仅配额/限频（Redis 每日计数，日切零点）
+      max-director-day: ${WEAVEORA_QUOTA_DIRECTOR_DAY:20}
+      max-stills-day: ${WEAVEORA_QUOTA_STILLS_DAY:200}
+      max-clip-seconds-day: ${WEAVEORA_QUOTA_CLIP_SECONDS_DAY:600}
   video:
     # W8 长片编排底座：单项目目标时长上限（3–5 分钟=180–300s；默认 300s，可按引擎能力调整）
     max-duration-sec: ${WEAVEORA_VIDEO_MAX_DURATION_SEC:300}
@@ -57,3 +62,9 @@ server:
 springdoc:
   swagger-ui:
     path: /swagger-ui.html
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus

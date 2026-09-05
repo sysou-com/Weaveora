@@ -22,6 +22,8 @@ import studio.weaveora.director.domain.PromptRevisionRepository;
 import studio.weaveora.director.domain.ShotDraft;
 import studio.weaveora.director.domain.ShotDraftRepository;
 import studio.weaveora.director.plan.AspectPixels;
+import studio.weaveora.billing.QuotaService;
+import studio.weaveora.infra.obs.Metrics;
 import studio.weaveora.director.plan.DirectorPlanValidator;
 import studio.weaveora.infra.llm.DirectorLlm;
 import studio.weaveora.infra.llm.LlmRequest;
@@ -60,16 +62,20 @@ public class DirectorService {
     private final DirectorLlm llm;
     private final ObjectMapper mapper;
     private final SafetyGuard safety;
+    private final QuotaService quota;
+    private final Metrics metrics;
 
     public DirectorService(ProjectContextPort context, PromptRevisionRepository revisions,
                            ShotDraftRepository shots, DirectorLlm llm, ObjectMapper mapper,
-                           SafetyGuard safety) {
+                           SafetyGuard safety, QuotaService quota, Metrics metrics) {
         this.context = context;
         this.revisions = revisions;
         this.shots = shots;
         this.llm = llm;
         this.mapper = mapper;
         this.safety = safety;
+        this.quota = quota;
+        this.metrics = metrics;
     }
 
     @Transactional
@@ -82,17 +88,26 @@ public class DirectorService {
         }
         String hit = safety.matchRealPerson(brief.rawText()).orElse(null);
         if (hit != null) {
+            metrics.nsfwHit();
             throw new BizException(ErrorCode.BRIEF_BLOCKED,
                     "主体分档拦截：命中真人分档词「" + hit + "」——可识别真人需 v1.0 解锁"
                             + "（肖像授权 / AI 标识 / 深度合成合规，§11.4）。请改为产品/物体/场景或虚构人物描述。");
         }
+        quota.checkDirector(userId);
 
         String system = loadSystemPrompt(mode);
         String user = buildUserPrompt(brief, project, mode);
-        JsonNode plan = callAndParse(system, user, brief, project, mode);
-
-        enrich(plan, mode, project.aspectRatio());
-        validateOrThrow(plan, mode, project.durationSec());
+        long t0 = System.nanoTime();
+        JsonNode plan;
+        try {
+            plan = callAndParse(system, user, brief, project, mode);
+            enrich(plan, mode, project.aspectRatio());
+            validateOrThrow(plan, mode, project.durationSec());
+            metrics.director(System.nanoTime() - t0, true);
+        } catch (RuntimeException e) {
+            metrics.director(System.nanoTime() - t0, false);
+            throw e;
+        }
         if (plan instanceof ObjectNode obj && !obj.has("mode")) {
             obj.put("mode", mode);
         }
