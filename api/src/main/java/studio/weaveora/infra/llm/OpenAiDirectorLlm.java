@@ -71,6 +71,7 @@ public class OpenAiDirectorLlm implements DirectorLlm {
                     h.setContentType(MediaType.APPLICATION_JSON);
                     h.setBearerAuth(apiKey);
                 })
+                .body(body)
                 .retrieve()
                 .body(JsonNode.class);
 
