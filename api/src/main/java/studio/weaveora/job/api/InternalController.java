@@ -3,6 +3,7 @@ package studio.weaveora.job.api;
 import com.fasterxml.jackson.databind.JsonNode;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -96,6 +97,17 @@ public class InternalController {
         String suffix = suffixOf(mime, file.getOriginalFilename());
         String key = jobService.storeWorkerFile(jobId, file.getBytes(), mime, suffix);
         return ResponseEntity.ok(Map.of("key", key));
+    }
+
+    /** 参考图字节读取（W4 一致性锚定）：?key=base64url(存储 key)。 */
+    @GetMapping("/assets")
+    public ResponseEntity<byte[]> asset(@RequestParam("key") String keyB64) throws IOException {
+        String storageKey = new String(java.util.Base64.getUrlDecoder().decode(keyB64),
+                java.nio.charset.StandardCharsets.UTF_8);
+        var obj = jobService.readAssetByKey(storageKey);
+        return ResponseEntity.ok()
+                .contentType(MediaType.parseMediaType(obj.contentType()))
+                .body(obj.stream().readAllBytes());
     }
 
     private static String suffixOf(String mime, String filename) {

@@ -55,10 +55,12 @@ public class JobService {
     private final WorkspaceGuard guard;
     private final JobWsHandler ws;
     private final studio.weaveora.director.PlanReader planReader;
+    private final studio.weaveora.asset.domain.AssetRepository assetRepo;
 
     public JobService(GenerationJobRepository jobs, WorkerNodeRepository nodes, AssetService assets,
                       StoragePort storage, ProjectContextPort projects, WorkspaceGuard guard, JobWsHandler ws,
-                      studio.weaveora.director.PlanReader planReader) {
+                      studio.weaveora.director.PlanReader planReader,
+                      studio.weaveora.asset.domain.AssetRepository assetRepo) {
         this.jobs = jobs;
         this.nodes = nodes;
         this.assets = assets;
@@ -67,6 +69,7 @@ public class JobService {
         this.guard = guard;
         this.ws = ws;
         this.planReader = planReader;
+        this.assetRepo = assetRepo;
     }
 
     // ---------- 对外：创建 / 查询 / 取消 ----------
@@ -85,6 +88,8 @@ public class JobService {
         // 读取 revision plan（导演层产物）构造 payload
         JsonNode plan = planReader.revisionPlan(req.revisionId());
         String planMode = plan.path("mode").asText("image");
+        // W4 一致性锚定：把项目 approved 方案的参考图(storage key)带给引擎
+        RefCtx refs = loadRefs(userId, workspaceId, projectId, req.revisionId());
 
         List<GenerationJob> created = new ArrayList<>();
         if ("video".equals(planMode)) {
@@ -104,6 +109,7 @@ public class JobService {
                 payload.put("negative_prompt", shot.path("negative_prompt").asText(""));
                 payload.put("duration_sec", shot.path("duration_sec").asDouble(3));
                 payload.put("seed", shot.path("seed").asLong(0) == 0 ? randomSeed() : shot.path("seed").asLong(0));
+                attachRefs(payload, refs);
                 GenerationJob job = createOne(workspaceId, projectId, req.revisionId(), shotId,
                         "clip".equals(req.kind()) ? PRESET_CLIP : PRESET_STILL, req.kind(), payload, userId);
                 created.add(job);
@@ -127,6 +133,7 @@ public class JobService {
                 payload.set("params", params.deepCopy());
                 payload.put("seed", randomSeed());
                 payload.put("title", plan.path("title").asText(""));
+                attachRefs(payload, refs);
                 GenerationJob job = createOne(workspaceId, projectId, req.revisionId(), null,
                         PRESET_STILL, "still", payload, userId);
                 created.add(job);
@@ -262,6 +269,50 @@ public class JobService {
                 + UUID.randomUUID() + "." + suffix;
         storage.put(key, new java.io.ByteArrayInputStream(data), data.length, mime);
         return key;
+    }
+
+    // ---------- W4 一致性锚定 ----------
+
+    record RefCtx(List<String> ids, List<String> keys) {
+        static RefCtx empty() { return new RefCtx(List.of(), List.of()); }
+    }
+
+    private RefCtx loadRefs(UUID userId, UUID workspaceId, UUID projectId, UUID revisionId) {
+        try {
+            UUID briefId = planReader.revisionBriefId(revisionId);
+            BriefSnapshot brief = projects.requireBrief(userId, workspaceId, projectId, briefId);
+            if (brief.constraints() == null || !brief.constraints().has("referenceAssetIds")) {
+                return RefCtx.empty();
+            }
+            List<UUID> ids = new ArrayList<>();
+            for (JsonNode n : brief.constraints().get("referenceAssetIds")) {
+                try { ids.add(UUID.fromString(n.asText())); } catch (IllegalArgumentException ignored) { }
+            }
+            if (ids.isEmpty()) return RefCtx.empty();
+            List<String> keys = assetRepo.findByIdInAndWorkspaceId(ids, workspaceId).stream()
+                    .map(studio.weaveora.asset.domain.Asset::storageKey)
+                    .toList();
+            return new RefCtx(ids.stream().map(UUID::toString).toList(), keys);
+        } catch (BizException e) {
+            return RefCtx.empty(); // 引用缺失不阻塞出图（仅丢锚定）
+        }
+    }
+
+    private void attachRefs(ObjectNode payload, RefCtx refs) {
+        com.fasterxml.jackson.databind.node.ArrayNode ids = payload.putArray("referenceAssetIds");
+        refs.ids().forEach(ids::add);
+        com.fasterxml.jackson.databind.node.ArrayNode keys = payload.putArray("referenceKeys");
+        refs.keys().forEach(keys::add);
+    }
+
+    /** 内部：按存储 key 读取参考图字节（worker 经 token 拉取，供 ComfyUI 上传/IP-Adapter）。 */
+    @Transactional(readOnly = true)
+    public studio.weaveora.infra.storage.StoragePort.StoredObject readAssetByKey(String storageKey) {
+        var obj = storage.get(storageKey);
+        if (obj == null) {
+            throw new BizException(ErrorCode.NOT_FOUND, "资产文件不存在");
+        }
+        return obj;
     }
 
     // ---------- 内部工具 ----------

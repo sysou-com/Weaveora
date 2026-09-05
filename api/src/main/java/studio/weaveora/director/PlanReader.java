@@ -51,4 +51,11 @@ public class PlanReader {
                 .map(ShotDraft::shotNo)
                 .orElse(0);
     }
+
+    @Transactional(readOnly = true)
+    public UUID revisionBriefId(UUID revisionId) {
+        return revisions.findById(revisionId)
+                .map(PromptRevision::briefId)
+                .orElseThrow(() -> new BizException(ErrorCode.NOT_FOUND, "方案不存在"));
+    }
 }

@@ -11,4 +11,6 @@ public interface AssetRepository extends JpaRepository<Asset, UUID> {
     List<Asset> findByProjectIdAndWorkspaceIdOrderByCreatedAtDesc(UUID projectId, UUID workspaceId);
 
     Optional<Asset> findByIdAndWorkspaceId(UUID id, UUID workspaceId);
+
+    List<Asset> findByIdInAndWorkspaceId(List<UUID> ids, UUID workspaceId);
 }

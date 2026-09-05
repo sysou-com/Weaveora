@@ -209,6 +209,29 @@ async function refreshThumbs(): Promise<void> {
 }
 watch(() => refAssets.value.map((a) => a.id).join(','), () => { void refreshThumbs() }, { immediate: true })
 
+// ---------- W4 资产库 ----------
+const outputAssets = computed(() => (assets.data.value ?? []).filter((a) => a.kind === 'still' || a.kind === 'clip'))
+const galUrls = ref<Record<string, string>>({})
+async function refreshGallery(): Promise<void> {
+  await Promise.all(outputAssets.value.map(async (a) => {
+    if (!galUrls.value[a.id]) {
+      const blob = await fetchAssetBlob(workspaceId.value, a.id)
+      if (blob) galUrls.value[a.id] = URL.createObjectURL(blob)
+    }
+  }))
+}
+watch(() => outputAssets.value.map((a) => a.id).join(','), () => { void refreshGallery() }, { immediate: true })
+
+function setRefFromAsset(id: string): void {
+  if (refSelected.value.includes(id)) return
+  if (refSelected.value.length >= 4) {
+    message.warning('参考图最多 4 张（§7.2）')
+    return
+  }
+  refSelected.value.push(id)
+  message.success('已加入参考图（下次导演/生成生效）')
+}
+
 function onPickFile(e: Event): void {
   const input = e.target as HTMLInputElement
   const file = input.files?.[0]
@@ -619,6 +642,35 @@ const shotTotal = computed(() => {
         </p>
       </div>
 
+      <!-- 资产库（W4） -->
+      <div v-if="outputAssets.length" class="gallery-panel" data-testid="gallery-panel">
+        <div class="jobs-head">
+          <span class="font-mono eyebrow">资产库</span>
+          <span class="state-hint font-mono">{{ outputAssets.length }} 个产物</span>
+        </div>
+        <div class="gallery-grid">
+          <div v-for="a in outputAssets" :key="a.id" class="g-item">
+            <img v-if="galUrls[a.id]" :src="galUrls[a.id]" :alt="a.kind" loading="lazy" />
+            <div v-else class="g-loading">…</div>
+            <div class="g-meta">
+              <span class="g-kind font-mono">{{ a.kind }}<template v-if="a.width"> · {{ a.width }}×{{ a.height }}</template></span>
+              <span class="g-actions">
+                <a v-if="galUrls[a.id]" :href="galUrls[a.id]" :download="'weaveora-' + a.id.slice(0, 8) + '.png'" title="下载">↓</a>
+                <button
+                  type="button"
+                  class="g-ref"
+                  :disabled="refSelected.includes(a.id)"
+                  :title="refSelected.includes(a.id) ? '已选为参考' : '设为参考图（IP-Adapter 一致性）'"
+                  @click="setRefFromAsset(a.id)"
+                >
+                  {{ refSelected.includes(a.id) ? '已选' : '参考' }}
+                </button>
+              </span>
+            </div>
+          </div>
+        </div>
+      </div>
+
       <!-- 底：版本条 + 确认闸门（§9.1/§9.5） -->
       <div class="studio-rail">
         <RevisionRail
@@ -966,5 +1018,42 @@ const shotTotal = computed(() => {
 .job-pct { font-size: 10px; color: var(--wv-text-4); width: 34px; text-align: right; flex: none; }
 .job-err { color: var(--wv-danger); cursor: help; }
 .job-empty { margin: 0; font-size: 12.5px; }
+
+/* ---------- W4 资产库 ---------- */
+.gallery-panel {
+  background: var(--wv-surface);
+  border: 1px solid var(--wv-line);
+  border-radius: var(--wv-radius-m);
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.gallery-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 10px;
+}
+.g-item {
+  border: 1px solid var(--wv-line);
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--wv-surface-sunken);
+}
+.g-item img { width: 100%; aspect-ratio: 1; object-fit: cover; display: block; }
+.g-loading { width: 100%; aspect-ratio: 1; display: flex; align-items: center; justify-content: center; color: var(--wv-text-4); }
+.g-meta {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 6px; padding: 6px 8px;
+}
+.g-kind { font-size: 10px; color: var(--wv-text-4); }
+.g-actions { display: inline-flex; align-items: center; gap: 8px; }
+.g-actions a { color: var(--wv-accent-text); text-decoration: none; font-size: 14px; line-height: 1; }
+.g-ref {
+  appearance: none; border: none; background: var(--wv-accent-soft);
+  color: var(--wv-accent-text); font-size: 11px; border-radius: 6px;
+  padding: 2px 8px; cursor: pointer;
+}
+.g-ref:disabled { opacity: .5; cursor: default; }
 
 </style>

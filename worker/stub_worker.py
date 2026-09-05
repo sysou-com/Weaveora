@@ -28,6 +28,7 @@ API = os.environ.get("WEAVEORA_API_BASE", "http://localhost:8080").rstrip("/")
 TOKEN = os.environ.get("WEAVEORA_WORKER_TOKEN", "dev-worker-token")
 NAME = os.environ.get("WEAVEORA_WORKER_NAME", "stub-worker")
 WORKSPACE = os.environ.get("WEAVEORA_WORKER_WORKSPACE")  # None = 节点池
+MODE = os.environ.get("WEAVEORA_WORKER_MODE", "stub")  # stub|comfy
 
 
 def _req(method, path, payload=None, files=None, timeout=30):
@@ -84,6 +85,28 @@ def make_png(width, height, seed):
     return sig + chunk(b"IHDR", ihdr) + chunk(b"IDAT", comp) + chunk(b"IEND", b"")
 
 
+def _upload_and_complete(jid, payload, images):
+    """images: list[(bytes png, width, height)]；上传并 complete。"""
+    if not images:
+        _req("POST", "/internal/jobs/%s/fail" % jid,
+             {"code": "EMPTY_OUTPUT", "message": "引擎没有输出图片"})
+        return False
+    seed = int(payload.get("seed") or random.randint(1, 2 ** 31))
+    st, up = _req("POST", "/internal/jobs/%s/assets" % jid, files={
+        "file": ("out_%s.png" % jid[:8], images[0][0], "image/png")})
+    if st != 200:
+        _req("POST", "/internal/jobs/%s/fail" % jid, {"code": "UPLOAD_FAIL", "message": str(up)[:200]})
+        return False
+    st, done = _req("POST", "/internal/jobs/%s/complete" % jid, {
+        "assets": [{"key": up["key"], "mime": "image/png",
+                    "width": images[0][1], "height": images[0][2], "seed": seed}]})
+    if st != 200:
+        _req("POST", "/internal/jobs/%s/fail" % jid, {"code": "COMPLETE_FAIL", "message": str(done)[:200]})
+        return False
+    print("[%s] job %s ok key=%s" % (MODE, jid[:8], up["key"]), flush=True)
+    return True
+
+
 def execute_job(job):
     jid = job["jobId"]
     payload = job.get("payload") or {}
@@ -91,23 +114,27 @@ def execute_job(job):
     params = payload.get("params") or {}
     width = int(params.get("width") or 1024)
     height = int(params.get("height") or 1024)
-    # 模拟阶段进度
+    _req("POST", "/internal/jobs/%s/progress" % jid, {"progress": 20, "stage": "loading_model"})
+
+    if MODE == "comfy":
+        import comfy_client as engine
+        try:
+            outs = engine.generate("weaveora-stub-worker", payload,
+                                   progress_fn=lambda p, s: _req(
+                                       "POST", "/internal/jobs/%s/progress" % jid,
+                                       {"progress": p, "stage": s}))
+            images = [(o["bytes"], width, height) for o in outs]
+            return _upload_and_complete(jid, payload, images)
+        except Exception as e:
+            _req("POST", "/internal/jobs/%s/fail" % jid,
+                 {"code": "COMFY_ERROR", "message": str(e)[:500]})
+            return False
+
+    # stub：占位 PNG
     _req("POST", "/internal/jobs/%s/progress" % jid, {"progress": 40, "stage": "sampling"})
     png = make_png(width, height, seed)
-    time.sleep(0.2)  # 模拟算力耗时
-    st, up = _req("POST", "/internal/jobs/%s/assets" % jid, files={
-        "file": ("stub_%s.png" % jid[:8], png, "image/png")})
-    if st != 200:
-        _req("POST", "/internal/jobs/%s/fail" % jid, {"code": "UPLOAD_FAIL", "message": str(up)[:200]})
-        return False
-    key = up["key"]
-    st, done = _req("POST", "/internal/jobs/%s/complete" % jid, {
-        "assets": [{"key": key, "mime": "image/png", "width": width, "height": height, "seed": seed}]})
-    if st != 200:
-        _req("POST", "/internal/jobs/%s/fail" % jid, {"code": "COMPLETE_FAIL", "message": str(done)[:200]})
-        return False
-    print("[stub] job %s ok key=%s" % (jid[:8], key), flush=True)
-    return True
+    time.sleep(0.2)
+    return _upload_and_complete(jid, payload, [(png, width, height)])
 
 
 def register():
@@ -159,7 +186,7 @@ def main():
         pass
     finally:
         stop.set()
-    print("[stub] done jobs=%d" % worked, flush=True)
+    print("[%s] done jobs=%d" % (MODE, worked), flush=True)
 
 
 if __name__ == "__main__":
