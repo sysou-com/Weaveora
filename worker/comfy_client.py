@@ -8,6 +8,7 @@ WEAVEORA_COMFY_URL 指向 ComfyUI（默认 http://127.0.0.1:8188）。
 import base64
 import json
 import os
+import sys
 import time
 import urllib.error
 import urllib.parse
@@ -126,21 +127,22 @@ def _prompt(client_id, positive, negative, params, seed, width=None, height=None
 
     if reference_image_name:
         # IP-Adapter（参考图 → 主体一致性，产品/物体/虚构人物；§30 #23）
+        # ComfyUI_IPAdapter_plus 真实拓扑：UnifiedLoader 预载 clip_vision+adapter，
+        # apply 节点(IPAdapter=IPAdapterSimple) 仅改 model（单 MODEL 输出），提示词仍走原 pos/neg。
         nodes["load_ref"] = {"class_type": "LoadImage",
                              "inputs": {"image": reference_image_name}}
-        nodes["clip_vision"] = {"class_type": "CLIPVisionLoader",
-                                "inputs": {"clip_name": params.get("clip_vision", "CLIP-ViT-H-14-laion2B-s32B-b79K.safetensors")}}
         nodes["ip_unified"] = {"class_type": "IPAdapterUnifiedLoader",
-                               "inputs": {"preset": "PLUS V1 HIGH", "model": ["ckpt", 0]}}
+                               "inputs": {"preset": params.get("ipadapter_preset",
+                                                                   "STANDARD (medium strength)"),
+                                           "model": ["ckpt", 0]}}
         nodes["ip_apply"] = {"class_type": "IPAdapter",
                              "inputs": {"model": ["ip_unified", 0],
                                         "ipadapter": ["ip_unified", 1],
                                         "image": ["load_ref", 0],
                                         "weight": float(params.get("ipadapter_weight", 0.85)),
                                         "start_at": 0.0, "end_at": 1.0,
-                                        "positive": ["pos", 0], "negative": ["neg", 0]}}
-        nodes["ksampler"]["inputs"]["positive"] = ["ip_apply", 1]
-        nodes["ksampler"]["inputs"]["negative"] = ["ip_apply", 2]
+                                        "weight_type": params.get("ipadapter_weight_type", "standard")}}
+        nodes["ksampler"]["inputs"]["model"] = ["ip_apply", 0]
 
     # ComfyUI 需要节点 id 为字符串键 + client_id
     return {"prompt": nodes, "client_id": client_id}
@@ -208,10 +210,7 @@ def generate(client_id, payload, progress_fn=None):
     try:
         prompt = _prompt(client_id, positive, negative, params, seed, width, height,
                          reference_image_name=ref_name, prefix=prefix)
-        st, body = _comfy("POST", "/prompt", payload=prompt)
-        pid = json.loads(body.decode()).get("prompt_id")
-        if not pid:
-            raise ComfyError("comfy /prompt 无 prompt_id")
+        pid = _post_prompt(prompt, client_id)
         rec = _poll_history(client_id, pid)
         return _download_outputs(rec, prefix)
     except ComfyError as e:
@@ -220,11 +219,27 @@ def generate(client_id, payload, progress_fn=None):
         if ref_name is not None and FALLBACK:
             prompt = _prompt(client_id, positive, negative, params, seed, width, height,
                              reference_image_name=None, prefix=prefix)
-            st, body = _comfy("POST", "/prompt", payload=prompt)
-            pid = json.loads(body.decode()).get("prompt_id")
+            pid = _post_prompt(prompt, client_id)
             rec = _poll_history(client_id, pid)
             return _download_outputs(rec, prefix)
         raise
+
+
+def _post_prompt(prompt, client_id):
+    """POST /prompt；对偶发的 prompt 校验失败重试 1 次（同图重投，服务端状态问题）。"""
+    for attempt in (1, 2):
+        try:
+            st, body = _comfy("POST", "/prompt", payload=prompt)
+            pid = json.loads(body.decode()).get("prompt_id")
+            if not pid:
+                raise ComfyError("comfy /prompt 无 prompt_id")
+            return pid
+        except ComfyError as e:
+            if attempt == 1 and "failed_validation" in str(e):
+                sys.stderr.write("[comfy] prompt validation 偶发失败，重试: %s\n" % str(e)[:600])
+                time.sleep(1.5)
+                continue
+            raise
 
 
 
