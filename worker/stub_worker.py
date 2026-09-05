@@ -145,6 +145,19 @@ def execute_job(job):
     height = int(params.get("height") or 1024)
     _req("POST", "/internal/jobs/%s/progress" % jid, {"progress": 15, "stage": "loading_model"})
 
+    if MODE == "cloud":
+        import cloud_client as cloud
+        try:
+            outs = cloud.generate_still(payload, progress_fn=lambda p, st: _req(
+                "POST", "/internal/jobs/%s/progress" % jid,
+                {"progress": p, "stage": st}))
+            media = [(o[0], o[1], o[2], o[3], o[4]) for o in outs]
+            return _complete(jid, payload, media)
+        except Exception as e:
+            _req("POST", "/internal/jobs/%s/fail" % jid,
+                 {"code": "CLOUD_ERROR", "message": str(e)[:500]})
+            return False
+
     if MODE == "comfy":
         import comfy_client as engine
         try:

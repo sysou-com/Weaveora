@@ -31,3 +31,7 @@ python e2e_local.py              # 全链路（注册→项目→导演→确认
 - comfy：`comfy_client.generate_motion` 走 Wan i2v 图（WanVideoModelLoader/WanImageToVideo/VHS_VideoCombine）；
   真实节点名随安装的 Wan 节点包而定，GPU 接入时按实调（可 `WEAVEORA_COMFY_WORKFLOW_WAN` 指向自定义 JSON）
 - stub：PIL 生成动画 WebP 占位（无 ffmpeg/GPU 也能演示运动）；真引擎会回 video/mp4 由资产库以 <video> 播放
+
+## 云引擎（早期测试，无需 GPU）
+- WEAVEORA_WORKER_MODE=cloud + WEAVEORA_REPLICATE_TOKEN（+ WEAVEORA_REPLICATE_MODEL 可选）
+- 当前 txt2img 走 Replicate(stability-ai/sdxl)；IP-Adapter 一致性正式验收仍走本地 Comfy（GPU 稳定后）
