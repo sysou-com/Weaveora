@@ -43,6 +43,7 @@ public class SecurityConfig {
                 .authorizeHttpRequests(auth -> auth
                         .requestMatchers(HttpMethod.POST, "/api/v1/auth/**").permitAll()
                         .requestMatchers("/api/v1/me", "/api/v1/projects/**").authenticated()
+                        .requestMatchers("/api/v1/assets/**", "/api/v1/exports/**").authenticated()
                         .requestMatchers("/swagger-ui/**", "/swagger-ui.html", "/v3/api-docs/**").permitAll()
                         .requestMatchers("/internal/**", "/api/v1/ws/**").permitAll() // WS 握手内自行鉴权
                         .anyRequest().permitAll())

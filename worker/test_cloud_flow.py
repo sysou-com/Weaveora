@@ -2,6 +2,8 @@
 """云适配器逻辑测试（假 Replicate）：验证提交/轮询/下载/输出结构。"""
 import json, os, sys, threading, urllib.request
 from http.server import BaseHTTPRequestHandler, HTTPServer
+os.environ.setdefault('WEAVEORA_CLOUD_DELAY_MS','0')
+os.environ.setdefault('WEAVEORA_CLOUD_RETRIES','1')
 sys.path.insert(0, os.path.dirname(__file__))
 import cloud_client
 

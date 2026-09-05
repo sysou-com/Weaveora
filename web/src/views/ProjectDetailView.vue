@@ -23,6 +23,7 @@ import {
 import { createBrief, listBriefs } from '@/api/briefs'
 import { createJobs, listJobs, cancelJob, JOB_STATE_LABEL } from '@/api/jobs'
 import { listAssets, uploadReference, fetchAssetBlob } from '@/api/assets'
+import { createExport, fetchExportBlob, timecode } from '@/api/export'
 import { getProject } from '@/api/projects'
 import type { DirectorPlan } from '@/api/types'
 import BriefComposer from '@/components/director/BriefComposer.vue'
@@ -337,11 +338,53 @@ async function startMotion(): Promise<void> {
     genBusy.value = false
   }
 }
+
 const motionReady = computed(() =>
   detApproved.value &&
   !!isVideoNow.value &&
   (jobs.data.value ?? []).some((j) => j.kind === 'still' && j.state === 'succeeded'),
 )
+
+// ---------- W6 成片 / 时间线导出 ----------
+const exportBusy = ref(false)
+const exportRows = computed(() => {
+  const recs = detail.data.value?.shots ?? []
+  const as = assets.data.value ?? []
+  let cursor = 0
+  const planShots = (draft.value && isVideoPlan(draft.value)) ? draft.value.shots : []
+  return recs.map((rec, i) => {
+    const dur = Number(planShots[i]?.duration_sec ?? 3)
+    const row = { rec, start: cursor, dur, hasMedia: as.some((a) => a.shotId === rec.id) }
+    cursor += dur
+    return row
+  })
+})
+const exportTotalSec = computed(() => {
+  const last = exportRows.value[exportRows.value.length - 1]
+  return last ? last.start + last.dur : 0
+})
+const exportTotal = computed(() => timecode(exportTotalSec.value))
+async function doExport(): Promise<void> {
+  if (!selectedRevId.value) return
+  exportBusy.value = true
+  try {
+    const info = await createExport(workspaceId.value, projectId.value, selectedRevId.value)
+    const blob = await fetchExportBlob(workspaceId.value, info.id)
+    if (!blob) throw new Error('下载失败')
+    const a = document.createElement('a')
+    a.href = URL.createObjectURL(blob)
+    a.download = `weaveora-export-${info.id.slice(0, 8)}.zip`
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    URL.revokeObjectURL(a.href)
+    message.success('已生成成片包（edit_list.json + 素材）')
+  } catch (e) {
+    message.error(e instanceof Error ? e.message : '导出失败')
+  } finally {
+    exportBusy.value = false
+  }
+}
 
 /** 首次：写 Brief 并立即导演 */
 async function handleFirstBrief(payload: { rawText: string; dirMode: 'image' | 'video' }): Promise<void> {
@@ -702,6 +745,29 @@ const shotTotal = computed(() => {
             </div>
           </div>
         </div>
+      </div>
+
+      <!-- 成片 / 时间线（W6） -->
+      <div v-if="isVideoNow && detApproved && exportRows.length" class="export-panel" data-testid="export-panel">
+        <div class="jobs-head">
+          <span class="font-mono eyebrow">成片 / 时间线</span>
+          <div class="jobs-actions">
+            <span class="state-hint font-mono">共 {{ exportTotal }}</span>
+            <NButton size="small" type="primary" :loading="exportBusy" data-testid="btn-export"
+                     @click="doExport">
+              导出成片包(edit_list)
+            </NButton>
+          </div>
+        </div>
+        <div class="tl-rows">
+          <div v-for="r in exportRows" :key="r.rec.id" class="tl-row">
+            <span class="tl-no font-mono">SHOT {{ r.rec.shotNo }}</span>
+            <span class="tl-tc font-mono">{{ timecode(r.start) }}–{{ timecode(r.start + r.dur) }}</span>
+            <div class="tl-bar"><span class="tl-fill" :style="{ width: (r.dur / Math.max(exportTotalSec, 1)) * 100 + '%' }" /></div>
+            <span :class="['tl-state', r.hasMedia ? 'ok' : 'empty']">{{ r.hasMedia ? '素材已就绪' : '待生成' }}</span>
+          </div>
+        </div>
+        <p class="export-hint text-secondary">按方案分镜顺序生成 edit_list.json + 素材（clip 优先，无 motion 时用关键帧兜底）；剪映导入为兼容可选项。</p>
       </div>
 
       <!-- 底：版本条 + 确认闸门（§9.1/§9.5） -->
@@ -1096,5 +1162,30 @@ const shotTotal = computed(() => {
   display: block;
   background: #000;
 }
+
+
+/* ---------- W6 成片时间线 ---------- */
+.export-panel {
+  background: var(--wv-surface);
+  border: 1px solid var(--wv-line);
+  border-radius: var(--wv-radius-m);
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.tl-rows { display: flex; flex-direction: column; gap: 6px; }
+.tl-row {
+  display: flex; align-items: center; gap: 12px;
+  padding: 6px 8px; background: var(--wv-surface-sunken); border-radius: 8px;
+}
+.tl-no { font-size: 10px; color: var(--wv-text-4); width: 64px; flex: none; }
+.tl-tc { font-size: 11px; color: var(--wv-text-3); width: 108px; flex: none; font-variant-numeric: tabular-nums; }
+.tl-bar { flex: 1; height: 8px; background: var(--wv-line); border-radius: 999px; overflow: hidden; }
+.tl-fill { display: block; height: 100%; background: var(--wv-accent); }
+.tl-state { font-size: 11px; color: var(--wv-text-3); flex: none; }
+.tl-state.ok { color: var(--wv-success); }
+.tl-state.empty { color: var(--wv-text-4); }
+.export-hint { margin: 0; font-size: 12px; line-height: 1.7; }
 
 </style>

@@ -98,7 +98,7 @@ public class AssetService {
     }
 
     private AssetResponse toResponse(Asset a) {
-        return new AssetResponse(a.id(), a.projectId(), a.kind(), a.mime(),
+        return new AssetResponse(a.id(), a.projectId(), a.jobId(), a.shotId(), a.kind(), a.mime(),
                 a.width(), a.height(), a.createdAt());
     }
 

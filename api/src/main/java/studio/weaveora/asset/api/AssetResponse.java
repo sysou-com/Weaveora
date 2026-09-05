@@ -6,6 +6,8 @@ import java.util.UUID;
 public record AssetResponse(
         UUID id,
         UUID projectId,
+        UUID jobId,
+        UUID shotId,
         String kind,
         String mime,
         Integer width,

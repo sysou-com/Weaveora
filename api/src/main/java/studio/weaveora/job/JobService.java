@@ -409,7 +409,8 @@ public class JobService {
     }
 
     private AssetResponse toAssetResponse(studio.weaveora.asset.domain.Asset a) {
-        return new AssetResponse(a.id(), a.projectId(), a.kind(), a.mime(), a.width(), a.height(), a.createdAt());
+        return new AssetResponse(a.id(), a.projectId(), a.jobId(), a.shotId(), a.kind(), a.mime(),
+                a.width(), a.height(), a.createdAt());
     }
 
     private static long randomSeed() {

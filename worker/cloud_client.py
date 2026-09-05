@@ -5,10 +5,9 @@
   WEAVEORA_CLOUD_PROVIDER  replicate（默认）
   WEAVEORA_REPLICATE_TOKEN  Replicate API token
   WEAVEORA_REPLICATE_MODEL  模型 owner/name:version（默认 stability-ai/sdxl 固定版本）
-
-说明：早期测试用 txt2img 云 API；IP-Adapter 一致性在部分云上不可用，
-一致性正式验收仍走本地 Comfy 引擎（GPU 稳定后再接）。视频云 API（Runway/Kling/Veo 等）
-属高阶档，后续按 Model Preset 再加适配器。
+  WEAVEORA_CLOUD_DELAY_MS   相邻云调用间隔（默认 1500ms，避免短时多次调用被限流，
+                            复现过镜像短时间多调失败的问题）
+  WEAVEORA_CLOUD_RETRIES    创建重试次数（默认 4，429/5xx 指数退避）
 """
 import json
 import os
@@ -21,10 +20,16 @@ MODEL = os.environ.get(
     "WEAVEORA_REPLICATE_MODEL",
     "stability-ai/sdxl:39ed52f2a78e934b3ba6e2a89f5b1c712de7dfea535525255b1aa35c5565e08b")
 API = "https://api.replicate.com/v1"
+DELAY_MS = int(os.environ.get("WEAVEORA_CLOUD_DELAY_MS", "1500"))
+RETRIES = int(os.environ.get("WEAVEORA_CLOUD_RETRIES", "4"))
+
+TRANSIENT = {429, 500, 502, 503, 504}
 
 
 class CloudError(Exception):
-    pass
+    def __init__(self, message, status=None):
+        super().__init__(message)
+        self.status = status
 
 
 def _headers():
@@ -41,7 +46,8 @@ def _post(path, payload, timeout=300):
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return json.loads(r.read())
     except urllib.error.HTTPError as e:
-        raise CloudError("replicate %s -> %s %s" % (path, e.code, e.read()[:300]))
+        body = e.read()[:300].decode(errors="replace")
+        raise CloudError("replicate %s -> %s %s" % (path, e.code, body), status=e.code)
 
 
 def _get(path, timeout=60):
@@ -51,7 +57,23 @@ def _get(path, timeout=60):
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return json.loads(r.read())
     except urllib.error.HTTPError as e:
-        raise CloudError("replicate %s -> %s %s" % (path, e.code, e.read()[:300]))
+        raise CloudError("replicate %s -> %s %s" % (path, e.code, e.read()[:300]),
+                         status=e.code)
+
+
+def _create_with_retry(body):
+    """创建预测：429/5xx 指数退避重试（限流友好）。"""
+    for attempt in range(1, RETRIES + 1):
+        try:
+            return _post("/predictions", body)
+        except CloudError as e:
+            if e.status not in TRANSIENT or attempt == RETRIES:
+                raise
+            wait = min(5 * (2 ** (attempt - 1)) + 2, 40)
+            print("[cloud] create retry %d/%d after %ss (%s)" % (attempt, RETRIES, wait, e.status),
+                  flush=True)
+            time.sleep(wait)
+    raise CloudError("replicate 创建预测失败（重试耗尽）")
 
 
 def _download(url):
@@ -61,12 +83,15 @@ def _download(url):
 
 
 def generate_still(payload, progress_fn=None):
-    """云 txt2img；返回 [(bytes, mime, w, h, None)]。"""
+    """云 txt2img；返回 [(bytes, mime, w, h, None)]。调用前按间隔限速。"""
+    if DELAY_MS > 0:
+        time.sleep(DELAY_MS / 1000.0)
     if progress_fn:
         progress_fn(10, "cloud_submit")
     params = payload.get("params") or {}
+    version = MODEL.split(":", 1)[1] if ":" in MODEL else MODEL
     body = {
-        "version": MODEL.split(":", 1)[1] if ":" in MODEL else MODEL,
+        "version": version,
         "input": {
             "prompt": payload.get("positive_prompt", ""),
             "negative_prompt": payload.get("negative_prompt", ""),
@@ -81,25 +106,35 @@ def generate_still(payload, progress_fn=None):
     }
     if progress_fn:
         progress_fn(25, "cloud_wait")
-    pred = _post("/predictions", body)
+    pred = _create_with_retry(body)
     url = pred.get("urls", {}).get("get")
     if not url:
         raise CloudError("replicate 无预测查询 URL")
-    deadline = time.time() + 300
+    deadline = time.time() + 420
+    state = None
     while time.time() < deadline:
         st = _get(url)
         state = st.get("status")
         if state == "succeeded":
             break
         if state in ("failed", "canceled"):
-            raise CloudError("replicate 预测失败: %s" % str(st.get("error"))[:300])
-        time.sleep(3)
+            err = str(st.get("error"))[:300]
+            # 任务端瞬时失败（模型超时/排队被拒）也可整体重试一次
+            if err and ("timeout" in err.lower() or "rate" in err.lower()) and RETRIES > 1:
+                time.sleep(6)
+                pred = _create_with_retry(body)
+                url = pred.get("urls", {}).get("get")
+                deadline = time.time() + 420
+                continue
+            raise CloudError("replicate 预测失败: %s" % err, status=500)
+        time.sleep(4)
     else:
-        raise CloudError("replicate 预测超时")
+        raise CloudError("replicate 预测超时", status=504)
     outputs = st.get("output") or []
     if not outputs:
-        raise CloudError("replicate 无输出")
-    data = _download(outputs[0] if isinstance(outputs[0], str) else outputs[0]["url"])
+        raise CloudError("replicate 无输出", status=500)
+    out0 = outputs[0] if isinstance(outputs[0], str) else outputs[0]["url"]
+    data = _download(out0)
     w = int(params.get("width") or 1024)
     h = int(params.get("height") or 1024)
     return [(data, "image/png", w, h, None)]

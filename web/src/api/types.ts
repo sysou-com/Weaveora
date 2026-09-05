@@ -137,6 +137,8 @@ export interface RevisionDetail {
 export interface AssetRef {
   id: string
   projectId: string
+  jobId: string | null
+  shotId: string | null
   kind: string
   mime: string
   width: number | null
