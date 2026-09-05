@@ -85,16 +85,22 @@ def make_png(width, height, seed):
     return sig + chunk(b"IHDR", ihdr) + chunk(b"IDAT", comp) + chunk(b"IEND", b"")
 
 
+FALLBACK_WEBP = "UklGRtIAAABXRUJQVlA4WAoAAAACAAAALwAALwAAQU5JTQYAAAAAAAAAAABBTk1GVAAAAAAAAAAAAC8AAC8AAMgAAAJWUDggPAAAAHADAJ0BKjAAMAA+bTaYSSQjIqEjiACADYlpAAIDiGGv401UAAD+9PQ/90n6n+i/6qp6/G7/eG4v7wwAAEFOTUZKAAAAAAAAAAAALwAALwAAyAAAAFZQOCAyAAAA9AIAnQEqMAAwAD5tMJFIgjgAANiWkAAgOKK/T4J4hgAA/vKpfzse4OezX/ELc/xCQAA="
+
+
 def make_animated_webp(width, height, seed, frames=14, duration_ms=110):
-    """stub motion 占位：PIL 生成动画 WebP（无 ffmpeg/GPU 也能演示运动）。"""
-    from PIL import Image, ImageDraw
+    """stub motion 占位：优先 PIL 生成动画 WebP；无 PIL（精简环境）用内置动图回退。"""
+    try:
+        from PIL import Image, ImageDraw
+    except Exception:
+        import base64 as _b64
+        return _b64.b64decode(FALLBACK_WEBP)
     import io as _io
     w, h = max(8, width or 320), max(8, height or 320)
     imgs = []
     for i in range(frames):
         img = Image.new("RGB", (w, h), ((seed * 3 + i * 7) % 256, (seed // 7 + i * 5) % 256, (seed // 13) % 256))
         d = ImageDraw.Draw(img)
-        # 移动亮条模拟运动
         step = (w * 2) // max(1, frames)
         x0 = (i * step) % (w + 40) - 20
         d.rectangle([x0, h // 3, x0 + max(10, w // 6), h - h // 3], fill=(255, 240, 200))
@@ -103,7 +109,6 @@ def make_animated_webp(width, height, seed, frames=14, duration_ms=110):
     imgs[0].save(buf, format="WEBP", save_all=True, append_images=imgs[1:],
                  duration=duration_ms, loop=0)
     return buf.getvalue()
-
 
 def _complete(jid, payload, media):
     """media: list[(bytes, mime, w, h, dur_ms)]；上传第一个产物并 complete。"""
