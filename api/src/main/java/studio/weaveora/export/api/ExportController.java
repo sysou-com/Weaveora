@@ -52,7 +52,7 @@ public class ExportController {
             @PathVariable UUID projectId,
             @Valid @RequestBody RenderRequest req) {
         return ResponseEntity.ok(concatService.renderMaster(
-                uid(request), ws(workspaceId), projectId, req.revisionId()));
+                uid(request), ws(workspaceId), projectId, req.revisionId(), req.transition()));
     }
 
     @GetMapping("/projects/{projectId}/exports/{exportId}")

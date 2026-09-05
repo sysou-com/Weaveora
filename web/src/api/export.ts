@@ -1,6 +1,7 @@
 import { API_BASE, request } from './client'
 import { loadTokens } from './session'
 import { WORKSPACE_HEADER } from './projects'
+import type { AssetRef as AssetLike } from './types'
 
 export interface ExportInfo {
   id: string
@@ -33,6 +34,21 @@ export async function fetchExportBlob(workspaceId: string, exportId: string): Pr
 }
 
 /** 秒 → mm:ss 时间码 */
+
+/** POST /projects/{id}/render —— ffmpeg 合成 master mp4（kind=master 资产）；transition: cut|fade */
+export async function renderMaster(
+  workspaceId: string,
+  projectId: string,
+  revisionId: string,
+  transition: 'cut' | 'fade' = 'fade',
+): Promise<AssetLike> {
+  return request<AssetLike>(`/api/v1/projects/${projectId}/render`, {
+    method: 'POST',
+    headers: { [WORKSPACE_HEADER]: workspaceId },
+    body: { revisionId, transition },
+  })
+}
+
 export function timecode(sec: number): string {
   const s = Math.max(0, Math.round(sec))
   const m = Math.floor(s / 60)

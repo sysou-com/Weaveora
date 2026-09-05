@@ -23,7 +23,7 @@ import {
 import { createBrief, listBriefs } from '@/api/briefs'
 import { createJobs, listJobs, cancelJob, JOB_STATE_LABEL } from '@/api/jobs'
 import { listAssets, uploadReference, fetchAssetBlob } from '@/api/assets'
-import { createExport, fetchExportBlob, timecode } from '@/api/export'
+import { createExport, fetchExportBlob, renderMaster, timecode } from '@/api/export'
 import { getProject } from '@/api/projects'
 import type { DirectorPlan } from '@/api/types'
 import BriefComposer from '@/components/director/BriefComposer.vue'
@@ -211,7 +211,7 @@ async function refreshThumbs(): Promise<void> {
 watch(() => refAssets.value.map((a) => a.id).join(','), () => { void refreshThumbs() }, { immediate: true })
 
 // ---------- W4 资产库 ----------
-const outputAssets = computed(() => (assets.data.value ?? []).filter((a) => a.kind === 'still' || a.kind === 'clip'))
+const outputAssets = computed(() => (assets.data.value ?? []).filter((a) => ['still','clip','master'].includes(a.kind)))
 const galUrls = ref<Record<string, string>>({})
 async function refreshGallery(): Promise<void> {
   await Promise.all(outputAssets.value.map(async (a) => {
@@ -383,6 +383,21 @@ async function doExport(): Promise<void> {
     message.error(e instanceof Error ? e.message : '导出失败')
   } finally {
     exportBusy.value = false
+  }
+}
+const renderBusy = ref(false)
+async function doRender(): Promise<void> {
+  if (!selectedRevId.value) return
+  renderBusy.value = true
+  try {
+    const a = await renderMaster(workspaceId.value, projectId.value, selectedRevId.value, 'fade')
+    await queryClient.invalidateQueries({ queryKey: ['assets'] })
+    message.success('已渲染成片（master mp4，带淡入淡出与音轨），可在资产库播放/下载')
+    void a
+  } catch (e) {
+    message.error(e instanceof Error ? e.message : '渲染失败')
+  } finally {
+    renderBusy.value = false
   }
 }
 
@@ -719,7 +734,7 @@ const shotTotal = computed(() => {
         <div class="gallery-grid">
           <div v-for="a in outputAssets" :key="a.id" class="g-item">
             <video
-              v-if="a.kind === 'clip' && (a.mime ?? '').startsWith('video/') && galUrls[a.id]"
+              v-if="(a.kind === 'clip' || a.kind === 'master') && (a.mime ?? '').startsWith('video/') && galUrls[a.id]"
               :src="galUrls[a.id]"
               class="g-video"
               controls
@@ -753,6 +768,10 @@ const shotTotal = computed(() => {
           <span class="font-mono eyebrow">成片 / 时间线</span>
           <div class="jobs-actions">
             <span class="state-hint font-mono">共 {{ exportTotal }}</span>
+            <NButton size="small" secondary :loading="renderBusy" data-testid="btn-render"
+                     @click="doRender">
+              渲染成片(mp4)
+            </NButton>
             <NButton size="small" type="primary" :loading="exportBusy" data-testid="btn-export"
                      @click="doExport">
               导出成片包(edit_list)
