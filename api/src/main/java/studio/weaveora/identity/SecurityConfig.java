@@ -20,10 +20,13 @@ public class SecurityConfig {
 
     private final JwtAuthFilter jwtAuthFilter;
     private final Argon2PasswordEncoder argon2PasswordEncoder;
+    private final studio.weaveora.infra.ws.InternalAuthFilter internalAuthFilter;
 
-    public SecurityConfig(JwtAuthFilter jwtAuthFilter, Argon2PasswordEncoder argon2PasswordEncoder) {
+    public SecurityConfig(JwtAuthFilter jwtAuthFilter, Argon2PasswordEncoder argon2PasswordEncoder,
+                          studio.weaveora.infra.ws.InternalAuthFilter internalAuthFilter) {
         this.jwtAuthFilter = jwtAuthFilter;
         this.argon2PasswordEncoder = argon2PasswordEncoder;
+        this.internalAuthFilter = internalAuthFilter;
     }
 
     @Bean
@@ -43,7 +46,8 @@ public class SecurityConfig {
                         .requestMatchers("/swagger-ui/**", "/swagger-ui.html", "/v3/api-docs/**").permitAll()
                         .requestMatchers("/internal/**", "/api/v1/ws/**").permitAll() // WS 握手内自行鉴权
                         .anyRequest().permitAll())
-                .addFilterBefore(jwtAuthFilter, UsernamePasswordAuthenticationFilter.class);
+                .addFilterBefore(jwtAuthFilter, UsernamePasswordAuthenticationFilter.class)
+                .addFilterBefore(internalAuthFilter, JwtAuthFilter.class);
         return http.build();
     }
 

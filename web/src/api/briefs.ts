@@ -9,11 +9,16 @@ export async function listBriefs(workspaceId: string, projectId: string): Promis
   })
 }
 
-/** POST /api/v1/projects/{id}/briefs —— raw_text 10–2000 字；mode 缺省沿用项目 */
+/** POST /api/v1/projects/{id}/briefs —— raw_text 10–2000 字；mode 缺省沿用项目；referenceAssetIds ≤4 */
 export async function createBrief(
   workspaceId: string,
   projectId: string,
-  input: { rawText: string; mode?: string; constraints?: Record<string, unknown> },
+  input: {
+    rawText: string
+    mode?: string
+    constraints?: Record<string, unknown>
+    referenceAssetIds?: string[]
+  },
 ): Promise<Brief> {
   return request<Brief>(`/api/v1/projects/${projectId}/briefs`, {
     method: 'POST',

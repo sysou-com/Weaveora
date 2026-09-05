@@ -133,6 +133,33 @@ export interface RevisionDetail {
   createdAt: string
 }
 
+/** 资产（AssetResponse） */
+export interface AssetRef {
+  id: string
+  projectId: string
+  kind: string
+  mime: string
+  width: number | null
+  height: number | null
+  createdAt: string
+}
+
+/** 任务（JobView） */
+export interface JobRecord {
+  id: string
+  projectId: string
+  revisionId: string | null
+  shotId: string | null
+  kind: 'still' | 'clip'
+  state: string
+  progress: number
+  stage: string | null
+  cancelRequested: boolean
+  errorCode: string | null
+  errorMessage: string | null
+  createdAt: string
+}
+
 /** POST /projects 请求体 */
 export interface CreateProjectInput {
   title: string

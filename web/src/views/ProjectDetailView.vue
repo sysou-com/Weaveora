@@ -21,6 +21,8 @@ import {
   patchRevision,
 } from '@/api/director'
 import { createBrief, listBriefs } from '@/api/briefs'
+import { createJobs, listJobs, cancelJob, JOB_STATE_LABEL } from '@/api/jobs'
+import { listAssets, uploadReference, fetchAssetBlob } from '@/api/assets'
 import { getProject } from '@/api/projects'
 import type { DirectorPlan } from '@/api/types'
 import BriefComposer from '@/components/director/BriefComposer.vue'
@@ -181,6 +183,122 @@ async function doGenerate(briefId: string, dirMode?: 'image' | 'video'): Promise
   }
 }
 
+// ---------- W2C 参考图 ----------
+const assets = useQuery({
+  queryKey: computed(() => ['assets', workspaceId.value, projectId.value]),
+  queryFn: () => listAssets(workspaceId.value, projectId.value),
+  enabled: computed(() => workspaceId.value !== '' && projectId.value !== ''),
+})
+const refAssets = computed(() => (assets.data.value ?? []).filter((a) => a.kind === 'reference'))
+const refSelected = ref<string[]>([])
+const uploadingRef = ref(false)
+const thumbUrls = ref<Record<string, string>>({})
+
+async function refreshThumbs(): Promise<void> {
+  const picks = refAssets.value
+  const next: Record<string, string> = {}
+  await Promise.all(
+    picks.slice(0, 8).map(async (a) => {
+      if (!thumbUrls.value[a.id]) {
+        const blob = await fetchAssetBlob(workspaceId.value, a.id)
+        if (blob) thumbUrls.value[a.id] = URL.createObjectURL(blob)
+      }
+      next[a.id] = thumbUrls.value[a.id]
+    }),
+  )
+}
+watch(() => refAssets.value.map((a) => a.id).join(','), () => { void refreshThumbs() }, { immediate: true })
+
+function onPickFile(e: Event): void {
+  const input = e.target as HTMLInputElement
+  const file = input.files?.[0]
+  if (!file) return
+  void (async () => {
+    uploadingRef.value = true
+    try {
+      const a = await uploadReference(workspaceId.value, projectId.value, file)
+      await queryClient.invalidateQueries({ queryKey: ['assets'] })
+      if (refSelected.value.length >= 4) message.warning('参考图最多 4 张')
+      else refSelected.value.push(a.id)
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : '上传失败')
+    } finally {
+      uploadingRef.value = false
+      input.value = ''
+    }
+  })()
+}
+function toggleRef(id: string, on: boolean): void {
+  if (on) {
+    if (refSelected.value.length >= 4) {
+      message.warning('参考图最多 4 张（§7.2）')
+      return
+    }
+    if (!refSelected.value.includes(id)) refSelected.value.push(id)
+  } else {
+    refSelected.value = refSelected.value.filter((x) => x !== id)
+  }
+}
+
+// ---------- W3 任务 ----------
+const jobs = useQuery({
+  queryKey: computed(() => ['jobs', workspaceId.value, projectId.value]),
+  queryFn: () => listJobs(workspaceId.value, projectId.value),
+  enabled: computed(() => workspaceId.value !== '' && projectId.value !== ''),
+})
+const activeJobCount = computed(() => (jobs.data.value ?? []).filter((j) =>
+  ['queued', 'running'].includes(j.state)).length)
+
+// 有进行中任务时 3s 轮询（避免查询配置自引用）
+let jobsTimer: ReturnType<typeof setInterval> | undefined
+watch(
+  activeJobCount,
+  (n) => {
+    if (n > 0 && !jobsTimer) {
+      jobsTimer = setInterval(() => {
+        void jobs.refetch()
+      }, 3000)
+    } else if (n === 0 && jobsTimer) {
+      clearInterval(jobsTimer)
+      jobsTimer = undefined
+    }
+  },
+  { immediate: true },
+)
+const imgCount = ref(1)
+const genBusy = ref(false)
+const cancelBusy = ref<string | null>(null)
+
+async function startGeneration(): Promise<void> {
+  if (!selectedRevId.value) return
+  genBusy.value = true
+  try {
+    const isVideo = draft.value?.mode === 'video'
+    const created = await createJobs(workspaceId.value, projectId.value, {
+      revisionId: selectedRevId.value,
+      kind: 'still',
+      count: isVideo ? undefined : imgCount.value,
+    })
+    await queryClient.invalidateQueries({ queryKey: ['jobs'] })
+    message.success(`已创建 ${created.length} 个任务（关键帧）`)
+  } catch (e) {
+    message.error(e instanceof Error ? e.message : '创建任务失败')
+  } finally {
+    genBusy.value = false
+  }
+}
+async function cancelOne(jobId: string): Promise<void> {
+  cancelBusy.value = jobId
+  try {
+    await cancelJob(workspaceId.value, jobId)
+    await queryClient.invalidateQueries({ queryKey: ['jobs'] })
+  } catch (e) {
+    message.error(e instanceof Error ? e.message : '取消失败')
+  } finally {
+    cancelBusy.value = null
+  }
+}
+
 /** 首次：写 Brief 并立即导演 */
 async function handleFirstBrief(payload: { rawText: string; dirMode: 'image' | 'video' }): Promise<void> {
   creating.value = true
@@ -188,6 +306,7 @@ async function handleFirstBrief(payload: { rawText: string; dirMode: 'image' | '
     const b = await createBrief(workspaceId.value, projectId.value, {
       rawText: payload.rawText,
       mode: payload.dirMode,
+      ...(refSelected.value.length ? { referenceAssetIds: [...refSelected.value] } : {}),
     })
     await doGenerate(b.id, payload.dirMode)
   } catch (e) {
@@ -358,6 +477,34 @@ const shotTotal = computed(() => {
           <div v-if="generating || creating" class="brief-spinner">
             <NButton size="small" loading :bordered="false" quaternary>导演层思考中…</NButton>
           </div>
+
+          <div class="refs-panel" data-testid="refs-panel">
+            <div class="brief-head">
+              <span class="font-mono eyebrow">参考图</span>
+              <label class="upload-link" :class="{ busy: uploadingRef }">
+                <input type="file" accept="image/png,image/jpeg,image/webp" :disabled="uploadingRef" @change="onPickFile" />
+                <span v-if="uploadingRef">上传中…</span>
+                <span v-else>+ 上传</span>
+              </label>
+            </div>
+            <div v-if="refAssets.length" class="refs-grid">
+              <div
+                v-for="a in refAssets.slice(0, 8)"
+                :key="a.id"
+                :class="['ref-thumb', { sel: refSelected.includes(a.id) }]"
+                :title="refSelected.includes(a.id) ? '点击取消' : '点击用作参考'"
+                @click="toggleRef(a.id, !refSelected.includes(a.id))"
+              >
+                <img v-if="thumbUrls[a.id]" :src="thumbUrls[a.id]" alt="参考图" loading="lazy" />
+                <span v-else class="ref-empty">…</span>
+                <i v-if="refSelected.includes(a.id)" class="ref-badge font-mono">REF</i>
+              </div>
+            </div>
+            <p v-else class="ref-hint text-secondary">
+              上传参考图（png/jpg/webp ≤4 张）做一致性锚定；选中的图会随下次 Brief 一并交给导演层。
+            </p>
+            <p v-if="refSelected.length" class="ref-count font-mono">{{ refSelected.length }}/4 已选</p>
+          </div>
         </aside>
 
         <!-- 中：方案编辑区 -->
@@ -422,6 +569,54 @@ const shotTotal = computed(() => {
             </NAlert>
           </template>
         </main>
+      </div>
+
+      <!-- 任务区（W3）：确认后发起生成，展示状态/进度 -->
+      <div v-if="detApproved || (jobs.data.value ?? []).length" class="jobs-panel" data-testid="jobs-panel">
+        <div class="jobs-head">
+          <span class="font-mono eyebrow">任务 / 生成</span>
+          <div class="jobs-actions">
+            <template v-if="!activeJobCount">
+              <span v-if="!isVideoNow" class="count-inline">
+                张数
+                <select v-model="imgCount" class="mini-select">
+                  <option :value="1">1</option>
+                  <option :value="2">2</option>
+                  <option :value="4">4</option>
+                </select>
+              </span>
+              <NButton size="small" type="primary" :loading="genBusy" data-testid="btn-gen-jobs" @click="startGeneration">
+                {{ isVideoNow ? '生成关键帧(still)' : '开始生成' }}
+              </NButton>
+            </template>
+            <span v-else class="state-hint font-mono">{{ activeJobCount }} 个进行中，实时刷新…</span>
+          </div>
+        </div>
+
+        <div v-if="(jobs.data.value ?? []).length" class="job-list">
+          <div v-for="j in jobs.data.value ?? []" :key="j.id" class="job-row" :data-testid="'job-' + j.id.slice(0, 8)">
+            <span class="job-kind font-mono">[{{ j.kind }}]</span>
+            <span :class="['job-state', j.state]">
+              {{ JOB_STATE_LABEL[j.state] ?? j.state }}{{ j.state === 'running' && j.stage ? ' · ' + j.stage : '' }}
+            </span>
+            <div class="job-bar"><span class="job-fill" :style="{ width: j.progress + '%' }" /></div>
+            <span class="job-pct font-mono">{{ j.progress }}%</span>
+            <NButton
+              v-if="(j.state === 'queued' || j.state === 'running') && !j.cancelRequested"
+              size="tiny"
+              quaternary
+              :loading="cancelBusy === j.id"
+              data-testid="btn-cancel-job"
+              @click="cancelOne(j.id)"
+            >
+              取消
+            </NButton>
+            <span v-else-if="j.errorMessage" class="job-err" :title="j.errorMessage">!</span>
+          </div>
+        </div>
+        <p v-else-if="detApproved" class="job-empty text-secondary">
+          方案已确认 —— 点「{{ isVideoNow ? '生成关键帧(still)' : '开始生成' }}」发起（先出静帧关键帧，确认后再运动）。
+        </p>
       </div>
 
       <!-- 底：版本条 + 确认闸门（§9.1/§9.5） -->
@@ -665,4 +860,111 @@ const shotTotal = computed(() => {
   bottom: 12px;
   z-index: 5;
 }
+
+/* ---------- W2C 参考图 ---------- */
+.refs-panel {
+  padding: 14px 14px 12px;
+  background: var(--wv-surface);
+  border: 1px dashed var(--wv-line-strong);
+  border-radius: var(--wv-radius-m);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.upload-link {
+  appearance: none;
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--wv-accent-text);
+  background: var(--wv-accent-soft);
+  border: 1px solid transparent;
+  border-radius: 6px;
+  padding: 3px 10px;
+}
+.upload-link.busy { opacity: 0.6; pointer-events: none; }
+.upload-link input { display: none; }
+.refs-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 6px;
+}
+.ref-thumb {
+  position: relative;
+  aspect-ratio: 1;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid var(--wv-line);
+  background: var(--wv-surface-sunken);
+  cursor: pointer;
+}
+.ref-thumb img {
+  width: 100%; height: 100%; object-fit: cover; display: block;
+}
+.ref-thumb.sel { border-color: var(--wv-accent); }
+.ref-badge {
+  position: absolute;
+  left: 4px; bottom: 4px;
+  background: rgba(11,11,10,.72);
+  color: var(--wv-accent-text);
+  font-size: 8px;
+  letter-spacing: .08em;
+  padding: 1px 4px;
+  border-radius: 4px;
+}
+.ref-empty { color: var(--wv-text-4); display:flex; align-items:center; justify-content:center; height:100%; font-size: 12px; }
+.ref-hint { margin: 0; font-size: 11.5px; line-height: 1.7; }
+.ref-count { margin: 0; font-size: 10px; color: var(--wv-accent-text); letter-spacing: .12em; }
+
+/* ---------- W3 任务区 ---------- */
+.jobs-panel {
+  background: var(--wv-surface);
+  border: 1px solid var(--wv-line);
+  border-radius: var(--wv-radius-m);
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.jobs-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.jobs-actions { display: flex; align-items: center; gap: 8px; }
+.count-inline { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--wv-text-3); }
+.mini-select {
+  background: var(--wv-surface-sunken);
+  border: 1px solid var(--wv-line);
+  color: var(--wv-text-2);
+  border-radius: 6px;
+  font-size: 12px;
+  padding: 2px 6px;
+}
+.state-hint { font-size: 11px; color: var(--wv-accent-text); letter-spacing: .06em; }
+.job-list { display: flex; flex-direction: column; gap: 6px; }
+.job-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 8px;
+  background: var(--wv-surface-sunken);
+  border-radius: 8px;
+}
+.job-kind { font-size: 10px; color: var(--wv-text-4); flex: none; width: 46px; }
+.job-state { font-size: 12px; color: var(--wv-text-2); flex: none; min-width: 84px; }
+.job-state.running { color: var(--wv-accent-text); }
+.job-state.failed { color: var(--wv-danger); }
+.job-state.cancelled { color: var(--wv-text-4); }
+.job-state.succeeded { color: var(--wv-success); }
+.job-bar {
+  flex: 1; height: 5px; border-radius: 999px;
+  background: var(--wv-line);
+  overflow: hidden;
+}
+.job-fill { display: block; height: 100%; background: var(--wv-accent); transition: width 300ms ease; }
+.job-pct { font-size: 10px; color: var(--wv-text-4); width: 34px; text-align: right; flex: none; }
+.job-err { color: var(--wv-danger); cursor: help; }
+.job-empty { margin: 0; font-size: 12.5px; }
+
 </style>

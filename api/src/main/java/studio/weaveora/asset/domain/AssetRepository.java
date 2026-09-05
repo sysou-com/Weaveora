@@ -1,0 +1,14 @@
+package studio.weaveora.asset.domain;
+
+import org.springframework.data.jpa.repository.JpaRepository;
+
+import java.util.List;
+import java.util.Optional;
+import java.util.UUID;
+
+public interface AssetRepository extends JpaRepository<Asset, UUID> {
+
+    List<Asset> findByProjectIdAndWorkspaceIdOrderByCreatedAtDesc(UUID projectId, UUID workspaceId);
+
+    Optional<Asset> findByIdAndWorkspaceId(UUID id, UUID workspaceId);
+}

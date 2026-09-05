@@ -1,0 +1,50 @@
+import { request, API_BASE } from './client'
+import { loadTokens } from './session'
+import { WORKSPACE_HEADER } from './projects'
+import type { AssetRef } from './types'
+
+/** 上传参考图（W2C，multipart） */
+export async function uploadReference(workspaceId: string, projectId: string, file: File): Promise<AssetRef> {
+  const { accessToken } = loadTokens()
+  const fd = new FormData()
+  fd.append('file', file)
+  const resp = await fetch(`${API_BASE}/api/v1/projects/${projectId}/assets`, {
+    method: 'POST',
+    headers: {
+      [WORKSPACE_HEADER]: workspaceId,
+      ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+    },
+    body: fd,
+  })
+  if (!resp.ok) {
+    let msg = `上传失败（HTTP ${resp.status}）`
+    try {
+      const e = (await resp.json()) as { message?: string }
+      if (e.message) msg = e.message
+    } catch {
+      // ignore
+    }
+    throw new Error(msg)
+  }
+  return (await resp.json()) as AssetRef
+}
+
+/** 项目资产列表（含参考图与 Job 产物） */
+export async function listAssets(workspaceId: string, projectId: string): Promise<AssetRef[]> {
+  return request<AssetRef[]>(`/api/v1/projects/${projectId}/assets`, {
+    headers: { [WORKSPACE_HEADER]: workspaceId },
+  })
+}
+
+/** 下载为 Blob（用于 <img> 预览，带鉴权头） */
+export async function fetchAssetBlob(workspaceId: string, assetId: string): Promise<Blob | null> {
+  const { accessToken } = loadTokens()
+  const resp = await fetch(`${API_BASE}/api/v1/assets/${assetId}/download`, {
+    headers: {
+      [WORKSPACE_HEADER]: workspaceId,
+      ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+    },
+  })
+  if (!resp.ok) return null
+  return resp.blob()
+}

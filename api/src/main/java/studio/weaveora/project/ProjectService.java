@@ -88,8 +88,26 @@ public class ProjectService implements ProjectContextPort {
         if (!BRIEF_MODES.contains(mode)) {
             throw new BizException(ErrorCode.VALIDATION, "brief.mode 必须为 image|video|auto");
         }
-        Brief b = Brief.create(workspaceId, projectId, raw, mode, req.constraints());
+        com.fasterxml.jackson.databind.JsonNode constraints = mergeConstraints(req.constraints(), req.referenceAssetIds());
+        Brief b = Brief.create(workspaceId, projectId, raw, mode, constraints);
         return toBriefResponse(briefs.save(b));
+    }
+
+    /** constraints（用户 JSON）+ referenceAssetIds（≤4，去重）合并进 "referenceAssetIds"。 */
+    private static com.fasterxml.jackson.databind.JsonNode mergeConstraints(
+            com.fasterxml.jackson.databind.JsonNode user, java.util.List<UUID> refIds) {
+        com.fasterxml.jackson.databind.node.ObjectNode out = user != null && user.isObject()
+                ? (com.fasterxml.jackson.databind.node.ObjectNode) user.deepCopy()
+                : com.fasterxml.jackson.databind.node.JsonNodeFactory.instance.objectNode();
+        if (refIds != null && !refIds.isEmpty()) {
+            java.util.List<UUID> distinct = refIds.stream().distinct().toList();
+            if (distinct.size() > 4) {
+                throw new BizException(ErrorCode.VALIDATION, "参考图最多 4 张（§7.2）");
+            }
+            var arr = out.putArray("referenceAssetIds");
+            distinct.forEach(u -> arr.add(u.toString()));
+        }
+        return out;
     }
 
     @Transactional(readOnly = true)
