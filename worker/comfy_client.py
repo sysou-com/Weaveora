@@ -76,12 +76,33 @@ def fetch_reference_bytes(storage_key):
         raise ComfyError("fetch ref asset %s -> %s" % (storage_key, e.code))
 
 
+
+_KS_INFO = None
+
+
+def _sampler_options(kind, fallback):
+    """从 Comfy object_info 读 KSampler 允许列表并缓存；返回 (list, chosen)。"""
+    global _KS_INFO
+    try:
+        if _KS_INFO is None:
+            import urllib.request as _ur
+            _KS_INFO = json.loads(_ur.urlopen(COMFY + "/object_info/KSampler", timeout=15).read())
+        opts = _KS_INFO["KSampler"]["input"]["required"][kind][0]
+        if isinstance(opts, list) and opts:
+            return opts, (fallback if fallback in opts else opts[0])
+    except Exception:
+        pass
+    return [fallback], fallback
+
+
 def _prompt(client_id, positive, negative, params, seed, width=None, height=None,
             reference_image_name=None, prefix="weaveora"):
     """构造 ComfyUI prompt（txt2img；带参考图则加 IP-Adapter 分支）。"""
     cfg = float(params.get("cfg", 5.5))
     steps = int(params.get("steps", 30))
-    sampler = params.get("sampler", "dpmpp_2m_karras")
+    requested = params.get("sampler", "dpmpp_2m")
+    _, sampler = _sampler_options("sampler_name", requested)
+    _, scheduler = _sampler_options("scheduler", params.get("scheduler", "normal"))
     width = int(width or params.get("width") or 1024)
     height = int(height or params.get("height") or 1024)
 
@@ -96,7 +117,7 @@ def _prompt(client_id, positive, negative, params, seed, width=None, height=None
                      "inputs": {"model": ["ckpt", 0], "positive": ["pos", 0], "negative": ["neg", 0],
                                 "latent_image": ["empty", 0],
                                 "seed": int(seed or 1), "steps": steps, "cfg": cfg,
-                                "sampler_name": sampler, "scheduler": "normal",
+                                "sampler_name": sampler, "scheduler": scheduler,
                                 "denoise": 1.0}},
         "vae": {"class_type": "VAEDecode", "inputs": {"samples": ["ksampler", 0], "vae": ["ckpt", 2]}},
         "save": {"class_type": "SaveImage",
