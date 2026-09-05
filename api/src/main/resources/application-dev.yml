@@ -1,0 +1,26 @@
+# ===== dev profile：本机 PG weaveora_dev + Redis（v1.5/v1.4）=====
+# PG：本机 localhost（weaveora_dev）
+# Redis：连 VPS db1 需先开隧道 ssh -N -L 6379:127.0.0.1:6379 root@sysou.com；
+#        或本机临时 Redis 实例（db1）。key 前缀 weaveora:test:*。
+# 本文件不含任何密钥；本地密钥放 application-local.yml（已 gitignore）。
+
+spring:
+  datasource:
+    url: jdbc:postgresql://localhost:5432/weaveora_dev
+    username: ${WEAVEORA_DB_USER:postgres}
+    password: ${WEAVEORA_DB_PASSWORD:postgres}
+    driver-class-name: org.postgresql.Driver
+    hikari:
+      maximum-pool-size: 5
+  data:
+    redis:
+      host: ${WEAVEORA_REDIS_HOST:127.0.0.1}
+      port: ${WEAVEORA_REDIS_PORT:6379}
+      password: ${WEAVEORA_REDIS_PASSWORD:}
+      database: 1                      # db1 = 测试（v1.4 #20）；db0 = 生产
+      timeout: 3s
+
+logging:
+  level:
+    studio.weaveora: DEBUG
+    org.hibernate.SQL: INFO

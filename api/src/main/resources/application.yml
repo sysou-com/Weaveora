@@ -1,0 +1,56 @@
+# ===== Weaveora API 配置（v1.5/v1.6/v2.0 裁定）=====
+# dev profile 连本机 PG weaveora_dev + Redis db1；生产连 VPS PG weaveora + Redis db0。
+# 密钥一律走环境变量 / 未提交的 application-local.yml，禁止入仓库。
+
+spring:
+  application:
+    name: weaveora-api
+  profiles:
+    active: ${SPRING_PROFILES_ACTIVE:dev}
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate          # 实体与 Flyway 双写，禁止 update（硬性指令 13）
+    properties:
+      hibernate:
+        jdbc:
+          time_zone: UTC
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    baseline-on-migrate: false
+  jackson:
+    default-property-inclusion: non_null
+    time-zone: UTC
+  servlet:
+    multipart:
+      max-file-size: 20MB
+      max-request-size: 25MB
+
+weaveora:
+  env: ${WEAVEORA_ENV:test}        # prod|test；key 前缀 weaveora:{env}:*
+  security:
+    jwt:
+      secret: ${WEAVEORA_JWT_SECRET:}          # 必填：生产/开发由环境变量注入
+      access-ttl: 15m
+      refresh-ttl: 14d
+  billing:
+    mode: ${WEAVEORA_BILLING_MODE:simplified}  # wallet|simplified（v1.3 #14）
+  llm:
+    base-url: ${WEAVEORA_LLM_BASE_URL:}
+    api-key: ${WEAVEORA_LLM_API_KEY:}
+    model: ${WEAVEORA_LLM_MODEL:}
+  storage:
+    mode: ${WEAVEORA_STORAGE_MODE:local}       # local|oss（v1.3 #13）
+    local-dir: ${WEAVEORA_STORAGE_LOCAL_DIR:./data/storage}
+  queue:
+    job-stream: weaveora:${weaveora.env}:jobs
+    dl-stream: weaveora:${weaveora.env}:jobs:dlq
+
+server:
+  port: 8080
+  shutdown: graceful
+
+springdoc:
+  swagger-ui:
+    path: /swagger-ui.html

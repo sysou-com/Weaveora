@@ -1,0 +1,29 @@
+# ---- Java / Maven ----
+api/target/
+*.class
+.mvn/timing.properties
+
+# ---- Node / Vue ----
+web/node_modules/
+web/dist/
+web/.vite/
+
+# ---- Python / worker ----
+worker/__pycache__/
+worker/.venv/
+worker/**/*.pyc
+
+# ---- 本地数据与密钥（禁止入仓库）----
+data/
+*.log
+application-local.yml
+.env
+.env.local
+
+# ---- IDE ----
+.idea/
+.vscode/
+*.iml
+
+# ---- pi / 会话 ----
+.pi/
