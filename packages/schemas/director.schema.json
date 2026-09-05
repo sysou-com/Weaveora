@@ -1,0 +1,93 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://weaveora.studio/schemas/director.schema.json",
+  "title": "Weaveora DirectorPlan",
+  "description": "导演层输出方案（§10.2）。前后端共享契约：studio.weaveora.director 落库 prompt_revisions.schema_json 的完整结构。字段稳定，新增字段向后兼容。",
+  "type": "object",
+  "required": ["mode", "title", "logline"],
+  "properties": {
+    "mode": { "enum": ["image", "video"] },
+    "title": { "type": "string", "maxLength": 120 },
+    "logline": { "type": "string", "maxLength": 300 },
+    "prompt_zh": { "type": "string", "description": "中文解释（图片）" },
+    "positive_prompt": { "type": "string", "description": "图片正向提示词（20–1200）" },
+    "negative_prompt": { "type": "string", "description": "图片负向提示词" },
+    "camera": {
+      "type": "object",
+      "properties": {
+        "focal_mm": { "type": "number" },
+        "shot_size": { "type": "string", "enum": ["extreme-wide", "wide", "medium", "close-up", "extreme-close-up"] },
+        "angle": { "type": "string" }
+      }
+    },
+    "lighting": { "type": "string" },
+    "palette": { "type": "array", "items": { "type": "string" }, "minItems": 3, "maxItems": 5 },
+    "params": {
+      "type": "object",
+      "properties": {
+        "width": { "type": "integer", "multipleOf": 8 },
+        "height": { "type": "integer", "multipleOf": 8 },
+        "steps": { "type": "integer" },
+        "cfg": { "type": "number" },
+        "sampler": { "type": "string" },
+        "seed": { "type": ["integer", "null"] }
+      }
+    },
+    "variations": { "type": "array", "items": { "type": "object" } },
+    "duration_sec": { "type": "number", "description": "视频目标时长（视频必填）" },
+    "aspect_ratio": { "type": "string", "enum": ["1:1", "3:2", "2:3", "16:9", "9:16"] },
+    "script": {
+      "type": "object",
+      "properties": {
+        "theme": { "type": "string" },
+        "acts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": { "type": "string" },
+              "start_sec": { "type": "number" },
+              "end_sec": { "type": "number" },
+              "purpose": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    "shots": {
+      "type": "array",
+      "description": "视频镜头表：时长总和 == duration_sec ±0.5；数量 ≤ ceil(duration_sec/1.5)；单镜 positive_prompt 20–1200",
+      "items": {
+        "type": "object",
+        "required": ["shot_no", "duration_sec", "positive_prompt", "negative_prompt"],
+        "properties": {
+          "shot_no": { "type": "integer" },
+          "duration_sec": { "type": "number", "minimum": 1 },
+          "shot_size": { "type": "string" },
+          "camera_move": { "type": "string" },
+          "action": { "type": "string" },
+          "positive_prompt": { "type": "string", "minLength": 20, "maxLength": 1200 },
+          "negative_prompt": { "type": "string" },
+          "seed_lock": { "type": "boolean", "default": true },
+          "ref_shot_no": { "type": ["integer", "null"] }
+        }
+      }
+    },
+    "audio": {
+      "type": "object",
+      "properties": {
+        "music_mood": { "type": "string" },
+        "sfx": { "type": "array", "items": { "type": "string" } },
+        "vo": { "type": "string" }
+      }
+    },
+    "edit_plan": {
+      "type": "object",
+      "properties": {
+        "fps": { "type": "integer" },
+        "transition_default": { "type": "string" },
+        "subtitle": { "type": "boolean" }
+      }
+    }
+  }
+}

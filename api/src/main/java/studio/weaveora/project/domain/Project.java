@@ -80,6 +80,25 @@ public class Project {
         this.updatedAt = OffsetDateTime.now();
     }
 
+    /** §20.1：产生新 revision → directing（draft/approved/reviewing 可进），并解除旧确认。 */
+    public void startDirecting() {
+        this.status = "directing";
+        this.approvedRevisionId = null;
+        this.updatedAt = OffsetDateTime.now();
+    }
+
+    /** §20.1：确认某版 → approved，钉住 approved_revision_id。 */
+    public void approve(UUID revisionId) {
+        this.status = "approved";
+        this.approvedRevisionId = revisionId;
+        this.updatedAt = OffsetDateTime.now();
+    }
+
+    /** 已确认版本是否可编辑判定：directing/draft 且未钉版本。 */
+    public boolean editable() {
+        return this.approvedRevisionId == null;
+    }
+
     public UUID id() { return id; }
     public UUID workspaceId() { return workspaceId; }
     public UUID createdBy() { return createdBy; }
@@ -89,6 +108,7 @@ public class Project {
     public BigDecimal durationSec() { return durationSec; }
     public UUID styleTemplateId() { return styleTemplateId; }
     public String status() { return status; }
+    public UUID approvedRevisionId() { return approvedRevisionId; }
     public OffsetDateTime createdAt() { return createdAt; }
     public OffsetDateTime updatedAt() { return updatedAt; }
 }
