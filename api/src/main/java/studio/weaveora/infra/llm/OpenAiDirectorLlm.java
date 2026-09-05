@@ -59,7 +59,8 @@ public class OpenAiDirectorLlm implements DirectorLlm {
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("model", model);
         body.put("temperature", 0.7);
-        body.put("max_tokens", 6000);
+        // W8 分段导演：段方案内容较长，6000 偶发被截断（finish_reason=length）→ 提到 DeepSeek 上限附近
+        body.put("max_tokens", 8000);
         body.put("response_format", Map.of("type", "json_object"));
         body.put("messages", List.of(
                 Map.of("role", "system", "content", request.systemPrompt()),
@@ -78,6 +79,11 @@ public class OpenAiDirectorLlm implements DirectorLlm {
         JsonNode content = resp.path("choices").path(0).path("message").path("content");
         if (content.isMissingNode() || content.isNull()) {
             throw new IllegalStateException("LLM 响应缺少 choices[0].message.content");
+        }
+        String finish = resp.path("choices").path(0).path("finish_reason").asText("");
+        if ("length".equals(finish)) {
+            // 输出被 max_tokens 截断 → 属于可修复错误，立即重试（上层会压缩指令重出）
+            throw new IllegalStateException("LLM 输出达到 max_tokens 被截断（finish_reason=length）");
         }
         return content.asText();
     }

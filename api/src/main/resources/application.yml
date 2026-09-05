@@ -45,7 +45,7 @@ weaveora:
     # W8 长片编排底座：单项目目标时长上限（3–5 分钟=180–300s；默认 300s，可按引擎能力调整）
     max-duration-sec: ${WEAVEORA_VIDEO_MAX_DURATION_SEC:300}
     # W8 分段导演：单次导演计划时长上限（超过则自动按 ≤此值分 K 段，逐段生成后合并）
-    plan-max-sec: ${WEAVEORA_VIDEO_PLAN_MAX_SEC:60}
+    plan-max-sec: ${WEAVEORA_VIDEO_PLAN_MAX_SEC:30}
   llm:
     base-url: ${WEAVEORA_LLM_BASE_URL:}
     api-key: ${WEAVEORA_LLM_API_KEY:}

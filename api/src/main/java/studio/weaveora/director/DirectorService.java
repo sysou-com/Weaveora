@@ -175,8 +175,9 @@ public class DirectorService {
             StringBuilder scope = new StringBuilder()
                     .append("整片目标 ").append(total).append(" 秒，当前导演第 ").append(i)
                     .append("/").append(k).append(" 段，本段时长恰好 ").append(chunk)
-                    .append(" 秒（镜头时长总和必须 == ").append(chunk).append("，单镜 <=10s）。用户 Brief：")
-                    .append(brief.rawText());
+                    .append(" 秒（镜头时长总和必须 == ").append(chunk).append("，单镜 <=10s）。")
+                    .append("输出要精炼：每镜 positive_prompt <=60 个英文词（信息完整但勿啰嗦），镜头数尽量少而完整覆盖本段内容。")
+                    .append("用户 Brief：").append(brief.rawText());
             if (brief.constraints() != null && !brief.constraints().isEmpty()) {
                 scope.append(" 约束：").append(brief.constraints().toPrettyString());
             }
@@ -204,13 +205,28 @@ public class DirectorService {
     }
 
     private JsonNode callSegment(String system, String segUser, int chunk, int index, String briefText) {
-        LlmRequest req = new LlmRequest(system, segUser, clip(briefText, 40), briefText, "video", "16:9",
-                new BigDecimal(chunk), null);
         Exception last = null;
-        for (int attempt = 1; attempt <= 2; attempt++) {
+        for (int attempt = 1; attempt <= 3; attempt++) {
+            // 段输出过长/非 JSON 时逐级压缩重出，避免同一超长内容反复失败
+            String hint = switch (attempt) {
+                case 2 -> "；上次输出无效。压缩重出：本段镜头 <=4 个，每镜 positive_prompt <=35 个英文词，字段齐全，只输出本段 JSON 对象";
+                case 3 -> "；再压缩：本段镜头 <=3 个，每镜 positive_prompt <=25 个英文词，动作与内容要义完整，只输出 JSON 对象（不要任何解释）";
+                default -> "";
+            };
+            LlmRequest req = new LlmRequest(system, segUser + hint, clip(briefText, 40), briefText, "video",
+                    "16:9", new BigDecimal(chunk), null);
             try {
                 String raw = llm.generateJson(req);
-                JsonNode seg = mapper.readTree(raw);
+                JsonNode seg = normalizeSegment(mapper.readTree(raw), chunk);
+                if (seg == null || !seg.isObject()) {
+                    String head = raw == null ? "" : raw.replaceAll("\\s+", " ");
+                    if (head.length() > 160) head = head.substring(0, 160);
+                    String shown = head.isBlank() ? "（空/空白返回）" : head;
+                    log.warn("第 {} 段第 {} 次返回非对象 JSON（长度 {}），开头: {}", index, attempt,
+                            raw == null ? 0 : raw.length(), shown);
+                    last = new IllegalArgumentException("plan 必须是 JSON 对象");
+                    continue;
+                }
                 List<String> problems = DirectorPlanValidator.validate(seg, "video", new BigDecimal(chunk));
                 if (problems.isEmpty()) {
                     return seg;
@@ -227,7 +243,56 @@ public class DirectorService {
                 "第 " + index + " 段导演失败（" + (last == null ? "" : last.getMessage()) + "）");
     }
 
-    private static String clip(String s, int max) {
+    /** 容错：模型偶发返回 shots 数组或字符串 → 包装/重解析为段方案对象。 */
+    private static JsonNode normalizeSegment(JsonNode raw, int chunk) {
+        com.fasterxml.jackson.databind.ObjectMapper om = new com.fasterxml.jackson.databind.ObjectMapper();
+        JsonNode node = raw;
+        if (node != null && node.isTextual()) {
+            String text = node.asText();
+            node = tryParse(om, text);
+            if (node == null) {
+                // 尝试提取首个 {…} 或 […] 区间（模型可能带前后缀/围栏）
+                int ob = text.indexOf('{');
+                int ab = text.indexOf('[');
+                int start = ob >= 0 && (ab < 0 || ob < ab) ? ob : ab;
+                if (start >= 0) {
+                    int end = start == ob ? text.lastIndexOf('}') : text.lastIndexOf(']');
+                    if (end > start) {
+                        node = tryParse(om, text.substring(start, end + 1));
+                    }
+                }
+            }
+            // 无法解析 → 保持原文本，由 caller 记录并重试
+            if (node == null) {
+                return raw;
+            }
+        }
+        if (node != null && node.isArray()) {
+            ObjectNode obj = om.createObjectNode();
+            obj.put("mode", "video");
+            obj.put("title", "Segment");
+            obj.put("logline", "分段方案");
+            obj.put("duration_sec", chunk);
+            obj.put("aspect_ratio", "16:9");
+            obj.set("shots", node);
+            obj.putObject("script").put("theme", "");
+            obj.putObject("audio").put("music_mood", "");
+            obj.putObject("edit_plan").put("fps", 30).put("transition_default", "cut").put("subtitle", false);
+            return obj;
+        }
+        return node;
+    }
+
+    private static JsonNode tryParse(com.fasterxml.jackson.databind.ObjectMapper om, String text) {
+        try {
+            JsonNode n = om.readTree(text);
+            return (n != null && (n.isObject() || n.isArray())) ? n : null;
+        } catch (JsonProcessingException e) {
+            return null;
+        }
+    }
+
+        private static String clip(String s, int max) {
         if (s == null) return "";
         StringBuilder sb = new StringBuilder();
         for (char c : s.trim().toCharArray()) {
