@@ -24,6 +24,10 @@ export const VIDEO_DURATIONS: Array<{ value: number; label: string }> = [
   { value: 12, label: '12 秒' },
   { value: 15, label: '15 秒' },
   { value: 30, label: '30 秒' },
+  { value: 60, label: '60 秒' },
+  { value: 120, label: '2 分钟' },
+  { value: 180, label: '3 分钟' },
+  { value: 300, label: '5 分钟' },
 ]
 
 export const DEFAULT_VIDEO_DURATION = 12

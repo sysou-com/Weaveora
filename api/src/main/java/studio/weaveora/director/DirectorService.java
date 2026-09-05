@@ -3,6 +3,7 @@ package studio.weaveora.director;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -64,10 +65,13 @@ public class DirectorService {
     private final SafetyGuard safety;
     private final QuotaService quota;
     private final Metrics metrics;
+    private final int planMaxSec;   // W8 分段导演：单次导演计划时长上限（默认 60s）
 
     public DirectorService(ProjectContextPort context, PromptRevisionRepository revisions,
                            ShotDraftRepository shots, DirectorLlm llm, ObjectMapper mapper,
-                           SafetyGuard safety, QuotaService quota, Metrics metrics) {
+                           SafetyGuard safety, QuotaService quota, Metrics metrics,
+                           @org.springframework.beans.factory.annotation.Value(
+                                   "${weaveora.video.plan-max-sec:60}") int planMaxSec) {
         this.context = context;
         this.revisions = revisions;
         this.shots = shots;
@@ -76,6 +80,7 @@ public class DirectorService {
         this.safety = safety;
         this.quota = quota;
         this.metrics = metrics;
+        this.planMaxSec = planMaxSec;
     }
 
     @Transactional
@@ -100,7 +105,7 @@ public class DirectorService {
         long t0 = System.nanoTime();
         JsonNode plan;
         try {
-            plan = callAndParse(system, user, brief, project, mode);
+            plan = fetchPlan(system, user, brief, project, mode);
             enrich(plan, mode, project.aspectRatio());
             validateOrThrow(plan, mode, project.durationSec());
             metrics.director(System.nanoTime() - t0, true);
@@ -122,6 +127,114 @@ public class DirectorService {
         context.markDirecting(workspaceId, projectId);
         log.info("director generate project={} revision={} source={}", projectId, revisionNo, llm.source());
         return new GenerateResponse(rev.id(), revisionNo, llm.source(), "directing", plan);
+    }
+
+    /**
+     * 单次导演或分段导演（W8 长片编排）：视频目标时长 > planMaxSec 时按 ≤planMax 自动分 K 段，
+     * 每段单独调用导演并携带上一段结尾的衔接提示，合并为一个可整体校验/落库的方案。
+     */
+    private JsonNode fetchPlan(String system, String user, BriefSnapshot brief,
+                               ProjectSnapshot project, String mode) {
+        if ("video".equals(mode) && project.durationSec() != null
+                && project.durationSec().intValue() > planMaxSec) {
+            return generateSegmented(system, brief, project);
+        }
+        return callAndParse(system, user, brief, project, mode);
+    }
+
+    private JsonNode generateSegmented(String system, BriefSnapshot brief, ProjectSnapshot project) {
+        int total = project.durationSec().intValue();
+        int cap = Math.max(planMaxSec, 15);
+        int k = (total + cap - 1) / cap;
+        int base = total / k;
+        int rem = total % k;
+
+        ObjectNode merged = mapper.createObjectNode();
+        merged.put("mode", "video");
+        merged.put("title", clip(brief.rawText(), 40));
+        merged.put("logline", clip(brief.rawText(), 120));
+        merged.put("duration_sec", total);
+        merged.put("aspect_ratio", project.aspectRatio());
+        ObjectNode script = merged.putObject("script");
+        script.put("theme", brief.rawText());
+        script.putArray("acts");
+        merged.putObject("audio").put("music_mood", "uniform, consistent");
+        ObjectNode edit = merged.putObject("edit_plan");
+        edit.put("fps", 30);
+        edit.put("transition_default", "cut");
+        edit.put("subtitle", false);
+
+        ArrayNode allShots = merged.putArray("shots");
+        ArrayNode segMeta = merged.putArray("segments");
+        String prevNote = "";
+        int start = 0;
+        int globalNo = 0;
+        for (int i = 1; i <= k; i++) {
+            int chunk = base + (i <= rem ? 1 : 0);
+            String note = i > 1 ? "（衔接上一段结尾：" + prevNote + "）" : "";
+            StringBuilder scope = new StringBuilder()
+                    .append("整片目标 ").append(total).append(" 秒，当前导演第 ").append(i)
+                    .append("/").append(k).append(" 段，本段时长恰好 ").append(chunk)
+                    .append(" 秒（镜头时长总和必须 == ").append(chunk).append("，单镜 <=10s）。用户 Brief：")
+                    .append(brief.rawText());
+            if (brief.constraints() != null && !brief.constraints().isEmpty()) {
+                scope.append(" 约束：").append(brief.constraints().toPrettyString());
+            }
+            String segUser = scope.toString() + note;
+            JsonNode seg = callSegment(system, segUser, chunk, i, brief.rawText());
+            for (JsonNode shot : seg.path("shots")) {
+                ObjectNode copy = (ObjectNode) shot.deepCopy();
+                globalNo++;
+                copy.put("shot_no", globalNo);
+                allShots.add(copy);
+            }
+            String last = seg.path("shots").size() > 0
+                    ? seg.path("shots").get(seg.path("shots").size() - 1).path("action").asText(
+                            seg.path("shots").get(seg.path("shots").size() - 1).path("positive_prompt").asText(""))
+                    : seg.path("logline").asText("");
+            if (!last.isBlank()) prevNote = clip(last, 160);
+            ObjectNode m = segMeta.addObject();
+            m.put("seq", i);
+            m.put("duration_sec", chunk);
+            m.put("start_sec", start);
+            m.put("end_sec", start + chunk);
+            start += chunk;
+        }
+        return merged;
+    }
+
+    private JsonNode callSegment(String system, String segUser, int chunk, int index, String briefText) {
+        LlmRequest req = new LlmRequest(system, segUser, clip(briefText, 40), briefText, "video", "16:9",
+                new BigDecimal(chunk), null);
+        Exception last = null;
+        for (int attempt = 1; attempt <= 2; attempt++) {
+            try {
+                String raw = llm.generateJson(req);
+                JsonNode seg = mapper.readTree(raw);
+                List<String> problems = DirectorPlanValidator.validate(seg, "video", new BigDecimal(chunk));
+                if (problems.isEmpty()) {
+                    return seg;
+                }
+                log.warn("第 {} 段第 {} 次校验不过: {}", index, attempt, String.join("；", problems));
+                last = new IllegalArgumentException(String.join("；", problems));
+            } catch (JsonProcessingException | IllegalArgumentException e) {
+                last = e;
+            } catch (RuntimeException e) {
+                last = e;
+            }
+        }
+        throw new BizException(ErrorCode.DIRECTOR_PARSE_FAILED,
+                "第 " + index + " 段导演失败（" + (last == null ? "" : last.getMessage()) + "）");
+    }
+
+    private static String clip(String s, int max) {
+        if (s == null) return "";
+        StringBuilder sb = new StringBuilder();
+        for (char c : s.trim().toCharArray()) {
+            if (c >= 32) sb.append(c);
+        }
+        String t = sb.toString().trim();
+        return t.length() <= max ? t : t.substring(0, max).trim() + "…";
     }
 
     @Transactional(readOnly = true)
