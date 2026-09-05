@@ -31,7 +31,8 @@ public enum ErrorCode {
     JOB_NOT_CANCELLABLE(409),
     WORKER_UNAVAILABLE(503),
     UPLOAD_TYPE_NOT_ALLOWED(400),
-    UPLOAD_TOO_LARGE(413);
+    UPLOAD_TOO_LARGE(413),
+    EXPORT_EMPTY(409);
 
     private final int httpStatus;
 

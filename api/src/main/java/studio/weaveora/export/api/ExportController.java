@@ -28,9 +28,11 @@ import java.util.UUID;
 public class ExportController {
 
     private final ExportService exportService;
+    private final studio.weaveora.export.ConcatService concatService;
 
-    public ExportController(ExportService exportService) {
+    public ExportController(ExportService exportService, studio.weaveora.export.ConcatService concatService) {
         this.exportService = exportService;
+        this.concatService = concatService;
     }
 
     @PostMapping("/projects/{projectId}/exports")
@@ -40,6 +42,16 @@ public class ExportController {
             @PathVariable UUID projectId,
             @Valid @RequestBody ExportRequest req) {
         return ResponseEntity.ok(exportService.create(
+                uid(request), ws(workspaceId), projectId, req.revisionId()));
+    }
+
+    @PostMapping("/projects/{projectId}/render")
+    public ResponseEntity<studio.weaveora.asset.api.AssetResponse> render(
+            HttpServletRequest request,
+            @RequestHeader(value = ProjectController.WORKSPACE_HEADER, required = false) String workspaceId,
+            @PathVariable UUID projectId,
+            @Valid @RequestBody RenderRequest req) {
+        return ResponseEntity.ok(concatService.renderMaster(
                 uid(request), ws(workspaceId), projectId, req.revisionId()));
     }
 

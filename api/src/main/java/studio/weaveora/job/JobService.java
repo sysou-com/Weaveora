@@ -229,14 +229,20 @@ public class JobService {
                 return out;
             }
         }
-        return Map.of("job", (Object) null);
+        Map<String, Object> empty = new LinkedHashMap<>();
+        empty.put("job", null);
+        return empty;
     }
 
     @Transactional
     public void progress(UUID jobId, int progress, String stage) {
         GenerationJob job = requireRunning(jobId);
         job.progress(progress, stage);
-        emit(jobs.save(job), Map.of("type", "job.progress", "progress", progress, "stage", stage));
+        Map<String, Object> evt = new LinkedHashMap<>();
+        evt.put("type", "job.progress");
+        evt.put("progress", progress);
+        evt.put("stage", stage == null ? "" : stage);
+        emit(jobs.save(job), evt);
     }
 
     @Transactional
