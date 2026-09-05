@@ -88,9 +88,10 @@ public class AssetService {
     /** Job 产物（W3 complete）：job 模块调用，落同一 assets 表。 */
     @Transactional
     public Asset createOutput(UUID workspaceId, UUID projectId, UUID jobId, UUID shotId, String kind,
-                              String storageKey, String mime, Integer width, Integer height, Long seed) {
+                              String storageKey, String mime, Integer width, Integer height, Long seed,
+                              Integer durationMs) {
         return assets.save(Asset.output(workspaceId, projectId, jobId, shotId, kind,
-                storageKey, mime, width, height, seed));
+                storageKey, mime, width, height, seed, durationMs));
     }
 
     public record Download(Asset asset, InputStream stream, String contentType) {

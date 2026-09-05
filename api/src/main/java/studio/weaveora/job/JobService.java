@@ -108,7 +108,18 @@ public class JobService {
                 payload.put("positive_prompt", shot.path("positive_prompt").asText(""));
                 payload.put("negative_prompt", shot.path("negative_prompt").asText(""));
                 payload.put("duration_sec", shot.path("duration_sec").asDouble(3));
+                payload.put("fps", plan.path("edit_plan").path("fps").asInt(30));
                 payload.put("seed", shot.path("seed").asLong(0) == 0 ? randomSeed() : shot.path("seed").asLong(0));
+                if ("clip".equals(req.kind())) {
+                    // W5 两段式闸门：motion 需要该镜已确认的关键帧（still 产物）作首帧
+                    List<studio.weaveora.asset.domain.Asset> kf =
+                            assetRepo.findByShotIdAndWorkspaceIdAndKindOrderByCreatedAtDesc(shotId, workspaceId, "still");
+                    if (kf.isEmpty()) {
+                        throw new BizException(ErrorCode.VALIDATION, "第 " + shot.path("shot_no").asInt()
+                                + " 镜尚无关键帧，请先生成 still（两段式 §11.3）");
+                    }
+                    payload.put("keyframeKey", kf.get(0).storageKey());
+                }
                 attachRefs(payload, refs);
                 GenerationJob job = createOne(workspaceId, projectId, req.revisionId(), shotId,
                         "clip".equals(req.kind()) ? PRESET_CLIP : PRESET_STILL, req.kind(), payload, userId);
@@ -243,7 +254,7 @@ public class JobService {
         for (CompleteAsset a : items) {
             AssetResponse resp = toAssetResponse(assets.createOutput(
                     job.workspaceId(), job.projectId(), job.id(), job.shotId(), kind,
-                    a.key(), a.mime(), a.width(), a.height(), a.seed()));
+                    a.key(), a.mime(), a.width(), a.height(), a.seed(), a.durationMs()));
             created.add(resp);
         }
         emit(job, Map.of("type", "job.succeeded", "assets", items.size()));

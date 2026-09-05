@@ -321,6 +321,27 @@ async function cancelOne(jobId: string): Promise<void> {
     cancelBusy.value = null
   }
 }
+async function startMotion(): Promise<void> {
+  if (!selectedRevId.value) return
+  genBusy.value = true
+  try {
+    const created = await createJobs(workspaceId.value, projectId.value, {
+      revisionId: selectedRevId.value,
+      kind: 'clip',
+    })
+    await queryClient.invalidateQueries({ queryKey: ['jobs'] })
+    message.success(`已创建 ${created.length} 个运动任务（关键帧→motion）`)
+  } catch (e) {
+    message.error(e instanceof Error ? e.message : '创建运动任务失败')
+  } finally {
+    genBusy.value = false
+  }
+}
+const motionReady = computed(() =>
+  detApproved.value &&
+  !!isVideoNow.value &&
+  (jobs.data.value ?? []).some((j) => j.kind === 'still' && j.state === 'succeeded'),
+)
 
 /** 首次：写 Brief 并立即导演 */
 async function handleFirstBrief(payload: { rawText: string; dirMode: 'image' | 'video' }): Promise<void> {
@@ -608,6 +629,10 @@ const shotTotal = computed(() => {
                   <option :value="4">4</option>
                 </select>
               </span>
+              <NButton v-if="isVideoNow" size="small" secondary :loading="genBusy" data-testid="btn-motion-jobs"
+                       :disabled="!motionReady" title="先出关键帧(still)后可用（两段式 §11.3）" @click="startMotion">
+                运动(motion)
+              </NButton>
               <NButton size="small" type="primary" :loading="genBusy" data-testid="btn-gen-jobs" @click="startGeneration">
                 {{ isVideoNow ? '生成关键帧(still)' : '开始生成' }}
               </NButton>
@@ -650,7 +675,15 @@ const shotTotal = computed(() => {
         </div>
         <div class="gallery-grid">
           <div v-for="a in outputAssets" :key="a.id" class="g-item">
-            <img v-if="galUrls[a.id]" :src="galUrls[a.id]" :alt="a.kind" loading="lazy" />
+            <video
+              v-if="a.kind === 'clip' && (a.mime ?? '').startsWith('video/') && galUrls[a.id]"
+              :src="galUrls[a.id]"
+              class="g-video"
+              controls
+              muted
+              playsinline
+            />
+            <img v-else-if="galUrls[a.id]" :src="galUrls[a.id]" :alt="a.kind" loading="lazy" />
             <div v-else class="g-loading">…</div>
             <div class="g-meta">
               <span class="g-kind font-mono">{{ a.kind }}<template v-if="a.width"> · {{ a.width }}×{{ a.height }}</template></span>
@@ -1055,5 +1088,13 @@ const shotTotal = computed(() => {
   padding: 2px 8px; cursor: pointer;
 }
 .g-ref:disabled { opacity: .5; cursor: default; }
+
+.g-video {
+  width: 100%;
+  aspect-ratio: 1;
+  object-fit: cover;
+  display: block;
+  background: #000;
+}
 
 </style>

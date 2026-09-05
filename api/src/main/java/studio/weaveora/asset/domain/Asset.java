@@ -87,7 +87,7 @@ public class Asset {
 
     public static Asset output(UUID workspaceId, UUID projectId, UUID jobId, UUID shotId, String kind,
                                String storageKey, String mime, Integer width, Integer height,
-                               Long seed) {
+                               Long seed, Integer durationMs) {
         Asset a = new Asset();
         a.workspaceId = workspaceId;
         a.projectId = projectId;
@@ -99,6 +99,7 @@ public class Asset {
         a.width = width;
         a.height = height;
         a.seed = seed;
+        a.durationMs = durationMs;
         return a;
     }
 

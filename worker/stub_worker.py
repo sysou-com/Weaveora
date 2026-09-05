@@ -85,56 +85,92 @@ def make_png(width, height, seed):
     return sig + chunk(b"IHDR", ihdr) + chunk(b"IDAT", comp) + chunk(b"IEND", b"")
 
 
-def _upload_and_complete(jid, payload, images):
-    """images: list[(bytes png, width, height)]；上传并 complete。"""
-    if not images:
-        _req("POST", "/internal/jobs/%s/fail" % jid,
-             {"code": "EMPTY_OUTPUT", "message": "引擎没有输出图片"})
+def make_animated_webp(width, height, seed, frames=14, duration_ms=110):
+    """stub motion 占位：PIL 生成动画 WebP（无 ffmpeg/GPU 也能演示运动）。"""
+    from PIL import Image, ImageDraw
+    import io as _io
+    w, h = max(8, width or 320), max(8, height or 320)
+    imgs = []
+    for i in range(frames):
+        img = Image.new("RGB", (w, h), ((seed * 3 + i * 7) % 256, (seed // 7 + i * 5) % 256, (seed // 13) % 256))
+        d = ImageDraw.Draw(img)
+        # 移动亮条模拟运动
+        step = (w * 2) // max(1, frames)
+        x0 = (i * step) % (w + 40) - 20
+        d.rectangle([x0, h // 3, x0 + max(10, w // 6), h - h // 3], fill=(255, 240, 200))
+        imgs.append(img)
+    buf = _io.BytesIO()
+    imgs[0].save(buf, format="WEBP", save_all=True, append_images=imgs[1:],
+                 duration=duration_ms, loop=0)
+    return buf.getvalue()
+
+
+def _complete(jid, payload, media):
+    """media: list[(bytes, mime, w, h, dur_ms)]；上传第一个产物并 complete。"""
+    if not media:
+        _req("POST", "/internal/jobs/%s/fail" % jid, {"code": "EMPTY_OUTPUT", "message": "引擎没有输出"})
         return False
+    data, mime, w, h, dur = media[0]
+    ext = {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp",
+           "video/mp4": "mp4", "video/webm": "webm"}.get(mime, "bin")
     seed = int(payload.get("seed") or random.randint(1, 2 ** 31))
     st, up = _req("POST", "/internal/jobs/%s/assets" % jid, files={
-        "file": ("out_%s.png" % jid[:8], images[0][0], "image/png")})
+        "file": ("out_%s.%s" % (jid[:8], ext), data, mime)})
     if st != 200:
         _req("POST", "/internal/jobs/%s/fail" % jid, {"code": "UPLOAD_FAIL", "message": str(up)[:200]})
         return False
     st, done = _req("POST", "/internal/jobs/%s/complete" % jid, {
-        "assets": [{"key": up["key"], "mime": "image/png",
-                    "width": images[0][1], "height": images[0][2], "seed": seed}]})
+        "assets": [{"key": up["key"], "mime": mime, "width": w, "height": h, "seed": seed,
+                    "durationMs": dur}]})
     if st != 200:
         _req("POST", "/internal/jobs/%s/fail" % jid, {"code": "COMPLETE_FAIL", "message": str(done)[:200]})
         return False
-    print("[%s] job %s ok key=%s" % (MODE, jid[:8], up["key"]), flush=True)
+    print("[%s] job %s ok kind=%s mime=%s key=%s" % (MODE, jid[:8], payload.get("kind"), mime, up["key"]),
+          flush=True)
     return True
 
 
 def execute_job(job):
     jid = job["jobId"]
     payload = job.get("payload") or {}
+    kind = payload.get("kind") or "still"
     seed = int(payload.get("seed") or random.randint(1, 2 ** 31))
     params = payload.get("params") or {}
     width = int(params.get("width") or 1024)
     height = int(params.get("height") or 1024)
-    _req("POST", "/internal/jobs/%s/progress" % jid, {"progress": 20, "stage": "loading_model"})
+    _req("POST", "/internal/jobs/%s/progress" % jid, {"progress": 15, "stage": "loading_model"})
 
     if MODE == "comfy":
         import comfy_client as engine
         try:
-            outs = engine.generate("weaveora-stub-worker", payload,
-                                   progress_fn=lambda p, s: _req(
-                                       "POST", "/internal/jobs/%s/progress" % jid,
-                                       {"progress": p, "stage": s}))
-            images = [(o["bytes"], width, height) for o in outs]
-            return _upload_and_complete(jid, payload, images)
+            if kind == "clip":
+                outs = engine.generate_motion("weaveora-stub-worker", payload,
+                                              progress_fn=lambda p, s: _req(
+                                                  "POST", "/internal/jobs/%s/progress" % jid,
+                                                  {"progress": p, "stage": s}))
+                media = [(o["bytes"], o.get("mime") or "image/webp",
+                          o.get("width") or width, o.get("height") or height,
+                          int(float(payload.get("duration_sec", 3.0)) * 1000)) for o in outs]
+            else:
+                outs = engine.generate("weaveora-stub-worker", payload,
+                                       progress_fn=lambda p, s: _req(
+                                           "POST", "/internal/jobs/%s/progress" % jid,
+                                           {"progress": p, "stage": s}))
+                media = [(o["bytes"], "image/png", width, height, None) for o in outs]
+            return _complete(jid, payload, media)
         except Exception as e:
-            _req("POST", "/internal/jobs/%s/fail" % jid,
-                 {"code": "COMFY_ERROR", "message": str(e)[:500]})
+            _req("POST", "/internal/jobs/%s/fail" % jid, {"code": "COMFY_ERROR", "message": str(e)[:500]})
             return False
 
-    # stub：占位 PNG
+    # stub：still → 占位 PNG；clip → 动画 WebP（motion 占位）
     _req("POST", "/internal/jobs/%s/progress" % jid, {"progress": 40, "stage": "sampling"})
-    png = make_png(width, height, seed)
     time.sleep(0.2)
-    return _upload_and_complete(jid, payload, [(png, width, height)])
+    if kind == "clip":
+        webp = make_animated_webp(width, height, seed)
+        return _complete(jid, payload, [(webp, "image/webp", width, height,
+                                         int(float(payload.get("duration_sec", 3.0)) * 1000))])
+    png = make_png(width, height, seed)
+    return _complete(jid, payload, [(png, "image/png", width, height, None)])
 
 
 def register():

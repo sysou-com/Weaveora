@@ -206,6 +206,87 @@ def generate(client_id, payload, progress_fn=None):
         raise
 
 
+
+def _wan_graph(client_id, payload, positive, negative, first_frame_name, prefix="weaveora"):
+    """Wan i2v（关键帧→运动）图（§11.2 wan_i2v 档位）。
+
+    注意：真实节点名/加载器随安装的 Wan 节点包而异（ComfyUI-WanVideoWrapper 等），
+    生产接入 GPU 机时按实际安装微调（可整体用 WEAVEORA_COMFY_WORKFLOW_WAN 覆盖为 JSON 文件）。
+    """
+    fps = int(payload.get("fps") or 24)
+    steps = int((payload.get("params") or {}).get("steps", 20))
+    cfg = float((payload.get("params") or {}).get("cfg", 5.0))
+    duration = float(payload.get("duration_sec") or 3.0)
+    seed = int(payload.get("seed") or 1)
+    # 帧数 = duration*fps（clamp 8..81）
+    frames = max(8, min(81, int(duration * fps)))
+    nodes = {
+        "load_model": {"class_type": "WanVideoModelLoader",
+                       "inputs": {"ckpt_name": (payload.get("params") or {}).get("model", "wan2.6_14B_fp8.safetensors")}},
+        "load_clip": {"class_type": "WanVideoTextEncoder",
+                      "inputs": {"clip": ["load_model", 1], "text": positive, "start_time": 0, "end_time": duration}},
+        "load_img": {"class_type": "LoadImage", "inputs": {"image": first_frame_name}},
+        "img2vid": {"class_type": "WanImageToVideo",
+                    "inputs": {"model": ["load_model", 0], "positive": ["load_clip", 0],
+                               "negative": ["load_clip", 1], "image": ["load_img", 0],
+                               "seed": seed, "steps": steps, "cfg": cfg,
+                               "width": 1024, "height": 1024, "frames": frames,
+                               "start_frames": 1, "end_frames": 1, "filename_prefix": prefix}},
+        "save": {"class_type": "VHS_VideoCombine",
+                 "inputs": {"images": ["img2vid", 0], "fps": fps,
+                            "filename_prefix": prefix, "format": "mp4"}},
+    }
+    return {"prompt": nodes, "client_id": client_id}
+
+
+def _download_generic(rec, prefix="weaveora"):
+    outs = []
+    outputs = rec.get("outputs") or {}
+    for node in outputs.values():
+        for key, fmt in (("gifs", "image/webp"), ("video", "video/mp4"), ("images", "image/png")):
+            for item in node.get(key) or []:
+                fname = item.get("filename", "")
+                if not fname.startswith(prefix):
+                    continue
+                sub = item.get("subfolder") or ""
+                typ = item.get("type") or "output"
+                q = urllib.parse.urlencode({"filename": fname, "subfolder": sub, "type": typ})
+                _, body = _comfy("GET", "/view?" + q)
+                if key == "video" and fname.endswith((".mp4", ".webm")):
+                    mime = "video/mp4" if fname.endswith(".mp4") else "video/webm"
+                elif key == "gifs":
+                    mime = "image/webp"
+                else:
+                    mime = fmt
+                outs.append({"bytes": body, "mime": mime, "width": item.get("width"), "height": item.get("height")})
+                break
+    return outs
+
+
+def generate_motion(client_id, payload, progress_fn=None):
+    """Wan i2v motion；返回 [{bytes,mime,width,height}]。真节点缺失抛 ComfyError。"""
+    if progress_fn:
+        progress_fn(25, "loading_model")
+    key = payload.get("keyframeKey")
+    if not key:
+        raise ComfyError("clip 任务缺少 keyframeKey（先出关键帧）")
+    data, ctype = fetch_reference_bytes(key)
+    positive = payload.get("positive_prompt", "")
+    negative = payload.get("negative_prompt", "")
+    prefix = "weaveora_" + str(payload.get("shot_no") or "motion")
+    if progress_fn:
+        progress_fn(35, "sampling")
+    _, body = _comfy("POST", "/upload/image",
+                     files={"image": (key.split("/")[-1], data, ctype)})
+    name = json.loads(body.decode()).get("name")
+    prompt = _wan_graph(client_id, payload, positive, negative, name, prefix)
+    st, resp = _comfy("POST", "/prompt", payload=prompt)
+    pid = json.loads(resp.decode()).get("prompt_id")
+    if not pid:
+        raise ComfyError("comfy /prompt 无 prompt_id")
+    rec = _poll_history(client_id, pid)
+    return _download_generic(rec, prefix)
+
 if __name__ == "__main__":
     import sys
     print("comfy engine url=%s api=%s" % (COMFY, API))

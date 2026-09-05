@@ -25,3 +25,9 @@ python e2e_local.py              # 全链路（注册→项目→导演→确认
 ## 环境变量
 `WEAVEORA_API_BASE`（默认 http://localhost:8080）、`WEAVEORA_WORKER_TOKEN`（默认 dev-worker-token）、
 `WEAVEORA_WORKER_NAME`、`WEAVEORA_WORKER_WORKSPACE`（BYO 填工作区 uuid；空=节点池）。
+
+## W5 motion（关键帧→运动）
+- clip 任务需该镜已有成功 still 关键帧（两段式闸门，§11.3）；payload 带 keyframeKey 作首帧
+- comfy：`comfy_client.generate_motion` 走 Wan i2v 图（WanVideoModelLoader/WanImageToVideo/VHS_VideoCombine）；
+  真实节点名随安装的 Wan 节点包而定，GPU 接入时按实调（可 `WEAVEORA_COMFY_WORKFLOW_WAN` 指向自定义 JSON）
+- stub：PIL 生成动画 WebP 占位（无 ffmpeg/GPU 也能演示运动）；真引擎会回 video/mp4 由资产库以 <video> 播放
