@@ -48,3 +48,16 @@ export async function fetchAssetBlob(workspaceId: string, assetId: string): Prom
   if (!resp.ok) return null
   return resp.blob()
 }
+
+/** 删除所选资产（删行 + 删存储文件） */
+export async function deleteAssets(
+  workspaceId: string,
+  projectId: string,
+  assetIds: string[],
+): Promise<{ deleted: number }> {
+  return request<{ deleted: number }>(`/api/v1/projects/${projectId}/assets/delete`, {
+    method: 'POST',
+    headers: { [WORKSPACE_HEADER]: workspaceId },
+    body: { assetIds },
+  })
+}

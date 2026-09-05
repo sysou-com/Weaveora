@@ -17,6 +17,7 @@ import studio.weaveora.shared.api.BizException;
 import studio.weaveora.shared.api.ErrorCode;
 
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 /** 对外 Job 端点（§17.2/§17.5）。 */
@@ -61,6 +62,27 @@ public class JobController {
             @RequestHeader(value = ProjectController.WORKSPACE_HEADER, required = false) String workspaceId,
             @PathVariable UUID jobId) {
         return ResponseEntity.ok(jobService.cancel(uid(request), ws(workspaceId), jobId));
+    }
+
+    /** 批量重试所选失败/已取消任务（§20.2：生成新 job） */
+    @PostMapping("/projects/{projectId}/jobs/retry")
+    public ResponseEntity<List<JobView>> retry(
+            HttpServletRequest request,
+            @RequestHeader(value = ProjectController.WORKSPACE_HEADER, required = false) String workspaceId,
+            @PathVariable UUID projectId,
+            @Valid @RequestBody BatchJobRequest req) {
+        return ResponseEntity.ok(jobService.retry(uid(request), ws(workspaceId), projectId, req.jobIds()));
+    }
+
+    /** 批量删除所选失败/已取消任务记录 */
+    @PostMapping("/projects/{projectId}/jobs/delete")
+    public ResponseEntity<Map<String, Integer>> deleteJobs(
+            HttpServletRequest request,
+            @RequestHeader(value = ProjectController.WORKSPACE_HEADER, required = false) String workspaceId,
+            @PathVariable UUID projectId,
+            @Valid @RequestBody BatchJobRequest req) {
+        int removed = jobService.delete(uid(request), ws(workspaceId), projectId, req.jobIds());
+        return ResponseEntity.ok(Map.of("deleted", removed));
     }
 
     private UUID uid(HttpServletRequest request) {

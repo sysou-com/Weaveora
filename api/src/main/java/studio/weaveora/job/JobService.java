@@ -207,6 +207,69 @@ public class JobService {
         return toView(jobs.save(job));
     }
 
+    // ---------- 对外：失败/取消任务的重试与删除 ----------
+
+    /**
+     * 重试（§20.2：failed → retry 生成<b>新</b> job，不改历史）：
+     * 复用原任务的 revision/shot/kind/payload 重新入队；仅 failed | cancelled 可重试。
+     */
+    @Transactional
+    public List<JobView> retry(UUID userId, UUID workspaceId, UUID projectId, List<UUID> jobIds) {
+        guard.requireMember(userId, workspaceId);
+        projects.require(userId, workspaceId, projectId);
+        List<JobView> created = new ArrayList<>();
+        for (UUID jobId : jobIds) {
+            GenerationJob old = jobs.findByIdAndWorkspaceId(jobId, workspaceId)
+                    .orElseThrow(() -> new BizException(ErrorCode.NOT_FOUND, "任务不存在或不在本工作区"));
+            if (!old.projectId().equals(projectId)) {
+                throw new BizException(ErrorCode.NOT_FOUND, "任务不属于该项目");
+            }
+            if (!List.of("failed", "cancelled").contains(old.state())) {
+                throw new BizException(ErrorCode.VALIDATION, "仅失败/已取消的任务可重试");
+            }
+            GenerationJob neu = createOne(old.workspaceId(), old.projectId(), old.revisionId(), old.shotId(),
+                    old.modelPresetId(), old.kind(), old.payload(), userId);
+            created.add(toView(neu));
+        }
+        log.info("jobs retried project={} count={}", projectId, created.size());
+        return created;
+    }
+
+    /** 删除所选 failed/cancelled 任务记录（§20.2；级联清掉其孤儿资产再删行，避免 FK 冲突）。 */
+    @Transactional
+    public int delete(UUID userId, UUID workspaceId, UUID projectId, List<UUID> jobIds) {
+        guard.requireMember(userId, workspaceId);
+        projects.require(userId, workspaceId, projectId);
+        int removed = 0;
+        for (UUID jobId : jobIds) {
+            GenerationJob job = jobs.findByIdAndWorkspaceId(jobId, workspaceId).orElse(null);
+            if (job == null || !job.projectId().equals(projectId)) {
+                continue;
+            }
+            if (!List.of("failed", "cancelled").contains(job.state())) {
+                continue;
+            }
+            // 该任务若有已落库产物（如取消竞态/半程失败遗留），先删资产行与文件再删 Job
+            for (studio.weaveora.asset.domain.Asset kid : assetRepo.findByJobIdAndWorkspaceId(jobId, workspaceId)) {
+                try {
+                    storage.delete(kid.storageKey());
+                    if (kid.thumbKey() != null && !kid.thumbKey().isBlank()) {
+                        storage.delete(kid.thumbKey());
+                    }
+                } catch (RuntimeException ignore) {
+                    // 文件缺失不阻塞
+                }
+                assetRepo.delete(kid);
+            }
+            jobs.delete(job);
+            removed++;
+        }
+        if (removed > 0) {
+            log.info("jobs deleted project={} count={}", projectId, removed);
+        }
+        return removed;
+    }
+
     // ---------- 内部：节点与认领 ----------
 
     @Transactional

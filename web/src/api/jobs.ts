@@ -28,6 +28,32 @@ export async function cancelJob(workspaceId: string, jobId: string): Promise<Job
   })
 }
 
+/** 重试所选失败/已取消任务（§20.2：返回新入队 job） */
+export async function retryJobs(
+  workspaceId: string,
+  projectId: string,
+  jobIds: string[],
+): Promise<JobRecord[]> {
+  return request<JobRecord[]>(`/api/v1/projects/${projectId}/jobs/retry`, {
+    method: 'POST',
+    headers: { [WORKSPACE_HEADER]: workspaceId },
+    body: { jobIds },
+  })
+}
+
+/** 删除所选失败/已取消任务记录 */
+export async function deleteJobs(
+  workspaceId: string,
+  projectId: string,
+  jobIds: string[],
+): Promise<{ deleted: number }> {
+  return request<{ deleted: number }>(`/api/v1/projects/${projectId}/jobs/delete`, {
+    method: 'POST',
+    headers: { [WORKSPACE_HEADER]: workspaceId },
+    body: { jobIds },
+  })
+}
+
 /** 只允许登出的文本编码，无逻辑。 */
 export const JOB_STATE_LABEL: Record<string, string> = {
   queued: '排队',

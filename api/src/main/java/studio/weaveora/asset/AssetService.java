@@ -85,6 +85,31 @@ public class AssetService {
         return new Download(a, obj.stream(), obj.contentType());
     }
 
+    /** 删除资产（资产库勾选：still/clip/参考图均可删）：删行 + 删存储文件（thumb 一并）。 */
+    @Transactional
+    public int delete(UUID userId, UUID workspaceId, UUID projectId, List<UUID> assetIds) {
+        guard.requireMember(userId, workspaceId);
+        projects.require(userId, workspaceId, projectId);
+        int removed = 0;
+        for (UUID assetId : assetIds) {
+            Asset a = assets.findByIdAndWorkspaceId(assetId, workspaceId).orElse(null);
+            if (a == null || !a.projectId().equals(projectId)) {
+                continue;
+            }
+            try {
+                storage.delete(a.storageKey());
+                if (a.thumbKey() != null && !a.thumbKey().isBlank()) {
+                    storage.delete(a.thumbKey());
+                }
+            } catch (RuntimeException ignore) {
+                // 文件缺失不阻塞记录删除
+            }
+            assets.delete(a);
+            removed++;
+        }
+        return removed;
+    }
+
     /** Job 产物（W3 complete）：job 模块调用，落同一 assets 表。 */
     @Transactional
     public Asset createOutput(UUID workspaceId, UUID projectId, UUID jobId, UUID shotId, String kind,

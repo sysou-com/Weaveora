@@ -8,6 +8,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
@@ -20,6 +21,7 @@ import studio.weaveora.shared.api.BizException;
 import studio.weaveora.shared.api.ErrorCode;
 
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 /** 资产端点：参考图上传/列表（项目维度）+ 下载。 */
@@ -65,6 +67,17 @@ public class AssetController {
                 .header(HttpHeaders.CONTENT_DISPOSITION, "inline; filename=\"" + name + "\"")
                 .contentType(MediaType.parseMediaType(d.contentType()))
                 .body(res);
+    }
+
+    /** 批量删除所选资产（资产库勾选，删行+删文件） */
+    @PostMapping("/projects/{projectId}/assets/delete")
+    public ResponseEntity<Map<String, Integer>> delete(
+            HttpServletRequest request,
+            @RequestHeader(value = ProjectController.WORKSPACE_HEADER, required = false) String workspaceId,
+            @PathVariable UUID projectId,
+            @jakarta.validation.Valid @RequestBody BatchAssetRequest req) {
+        int removed = assetService.delete(uid(request), ws(workspaceId), projectId, req.assetIds());
+        return ResponseEntity.ok(Map.of("deleted", removed));
     }
 
     private static String ext(String mime) {

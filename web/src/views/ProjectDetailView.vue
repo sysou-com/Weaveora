@@ -21,11 +21,11 @@ import {
   patchRevision,
 } from '@/api/director'
 import { createBrief, listBriefs } from '@/api/briefs'
-import { createJobs, listJobs, cancelJob, JOB_STATE_LABEL } from '@/api/jobs'
-import { listAssets, uploadReference, fetchAssetBlob } from '@/api/assets'
+import { createJobs, listJobs, cancelJob, retryJobs, deleteJobs, JOB_STATE_LABEL } from '@/api/jobs'
+import { listAssets, uploadReference, fetchAssetBlob, deleteAssets } from '@/api/assets'
 import { createExport, fetchExportBlob, renderMaster, timecode } from '@/api/export'
 import { getProject } from '@/api/projects'
-import type { DirectorPlan } from '@/api/types'
+import type { DirectorPlan, JobRecord } from '@/api/types'
 import BriefComposer from '@/components/director/BriefComposer.vue'
 import ImagePlanEditor from '@/components/director/ImagePlanEditor.vue'
 import RevisionRail from '@/components/director/RevisionRail.vue'
@@ -223,6 +223,53 @@ async function refreshGallery(): Promise<void> {
 }
 watch(() => outputAssets.value.map((a) => a.id).join(','), () => { void refreshGallery() }, { immediate: true })
 
+// ---------- 资产库：管理态（勾选批量删除 / 单个删除） ----------
+const galManage = ref(false)
+const galSel = ref<string[]>([])
+const galBusy = ref(false)
+const galAllSelected = computed(
+  () => outputAssets.value.length > 0 && galSel.value.length === outputAssets.value.length)
+function toggleGalManage(): void {
+  galManage.value = !galManage.value
+  galSel.value = []
+}
+function toggleGalSel(id: string): void {
+  galSel.value = galSel.value.includes(id)
+    ? galSel.value.filter((x) => x !== id)
+    : [...galSel.value, id]
+}
+function toggleGalAll(): void {
+  galSel.value = galAllSelected.value ? [] : outputAssets.value.map((a) => a.id)
+}
+async function removeAssets(ids: string[]): Promise<void> {
+  if (!ids.length) return
+  if (!window.confirm(`删除 ${ids.length} 个产物/资产？不可恢复（相关任务记录仍保留）。`)) return
+  galBusy.value = true
+  try {
+    const r = await deleteAssets(workspaceId.value, projectId.value, ids)
+    ids.forEach((id) => {
+      if (galUrls.value[id]) {
+        URL.revokeObjectURL(galUrls.value[id])
+        delete galUrls.value[id]
+      }
+    })
+    galSel.value = []
+    if (outputAssets.value.length - r.deleted <= 0) galManage.value = false
+    await queryClient.invalidateQueries({ queryKey: ['assets'] })
+    message.success(`已删除 ${r.deleted} 个产物`)
+  } catch (e) {
+    message.error(e instanceof Error ? e.message : '删除失败')
+  } finally {
+    galBusy.value = false
+  }
+}
+function removeGalSelected(): void {
+  void removeAssets([...galSel.value])
+}
+function removeAssetOne(id: string): void {
+  void removeAssets([id])
+}
+
 function setRefFromAsset(id: string): void {
   if (refSelected.value.includes(id)) return
   if (refSelected.value.length >= 4) {
@@ -321,6 +368,66 @@ async function cancelOne(jobId: string): Promise<void> {
   } finally {
     cancelBusy.value = null
   }
+}
+
+// ---------- 失败/取消任务：勾选批量/单个 重试 或 删除 ----------
+const eligibleJobs = computed(() => (jobs.data.value ?? []).filter(
+  (j) => j.state === 'failed' || j.state === 'cancelled'))
+const jobSel = ref<string[]>([])
+const jobActionBusy = ref(false)
+
+function isJobActionable(j: JobRecord): boolean {
+  return j.state === 'failed' || j.state === 'cancelled'
+}
+const eligibleAllSelected = computed(
+  () => eligibleJobs.value.length > 0 && jobSel.value.length === eligibleJobs.value.length)
+function toggleEligibleAll(): void {
+  jobSel.value = eligibleAllSelected.value ? [] : eligibleJobs.value.map((j) => j.id)
+}
+function toggleJobSel(id: string): void {
+  jobSel.value = jobSel.value.includes(id)
+    ? jobSel.value.filter((x) => x !== id)
+    : [...jobSel.value, id]
+}
+
+async function retryJobsSel(): Promise<void> {
+  const ids = [...jobSel.value]
+  if (!ids.length) return
+  jobActionBusy.value = true
+  try {
+    const created = await retryJobs(workspaceId.value, projectId.value, ids)
+    await queryClient.invalidateQueries({ queryKey: ['jobs'] })
+    jobSel.value = []
+    message.success(`已重试 ${created.length} 条，新任务已入队（旧失败记录保留可再删）`)
+  } catch (e) {
+    message.error(e instanceof Error ? e.message : '重试失败')
+  } finally {
+    jobActionBusy.value = false
+  }
+}
+async function deleteJobsSel(): Promise<void> {
+  const ids = [...jobSel.value]
+  if (!ids.length) return
+  if (!window.confirm(`删除所选 ${ids.length} 条失败/已取消记录？不可恢复。`)) return
+  jobActionBusy.value = true
+  try {
+    const r = await deleteJobs(workspaceId.value, projectId.value, ids)
+    await queryClient.invalidateQueries({ queryKey: ['jobs'] })
+    jobSel.value = []
+    message.success(`已删除 ${r.deleted} 条记录`)
+  } catch (e) {
+    message.error(e instanceof Error ? e.message : '删除失败')
+  } finally {
+    jobActionBusy.value = false
+  }
+}
+function retryJobOne(jobId: string): void {
+  jobSel.value = [jobId]
+  void retryJobsSel()
+}
+function deleteJobOne(jobId: string): void {
+  jobSel.value = [jobId]
+  void deleteJobsSel()
 }
 async function startMotion(): Promise<void> {
   if (!selectedRevId.value) return
@@ -699,8 +806,27 @@ const shotTotal = computed(() => {
           </div>
         </div>
 
+        <div v-if="eligibleJobs.length" class="batchbar" data-testid="job-batchbar">
+          <label class="batch-check">
+            <input type="checkbox" :checked="eligibleAllSelected" @change="toggleEligibleAll" />
+            <span class="text-secondary">全选失败/取消</span>
+          </label>
+          <span class="batch-count font-mono">{{ jobSel.length }} 已选</span>
+          <button type="button" class="op primary" :disabled="jobSel.length === 0 || jobActionBusy"
+                  data-testid="btn-retry-batch" @click="retryJobsSel">
+            重试选中
+          </button>
+          <button type="button" class="op danger" :disabled="jobSel.length === 0 || jobActionBusy"
+                  data-testid="btn-delete-batch" @click="deleteJobsSel">
+            删除选中
+          </button>
+        </div>
         <div v-if="(jobs.data.value ?? []).length" class="job-list">
           <div v-for="j in jobs.data.value ?? []" :key="j.id" class="job-row" :data-testid="'job-' + j.id.slice(0, 8)">
+            <label v-if="isJobActionable(j)" class="row-check">
+              <input type="checkbox" :checked="jobSel.includes(j.id)" @change="toggleJobSel(j.id)" />
+            </label>
+            <span v-else class="row-check" />
             <span class="job-kind font-mono">[{{ j.kind }}]</span>
             <span :class="['job-state', j.state]">
               {{ JOB_STATE_LABEL[j.state] ?? j.state }}{{ j.state === 'running' && j.stage ? ' · ' + j.stage : '' }}
@@ -718,6 +844,16 @@ const shotTotal = computed(() => {
               取消
             </NButton>
             <span v-else-if="j.errorMessage" class="job-err" :title="j.errorMessage">!</span>
+            <template v-if="isJobActionable(j)">
+              <button type="button" class="op primary" :disabled="jobActionBusy"
+                      data-testid="btn-retry-job" @click="retryJobOne(j.id)">
+                重试
+              </button>
+              <button type="button" class="op danger" :disabled="jobActionBusy"
+                      data-testid="btn-delete-job" @click="deleteJobOne(j.id)">
+                删除
+              </button>
+            </template>
           </div>
         </div>
         <p v-else-if="detApproved" class="job-empty text-secondary">
@@ -726,13 +862,37 @@ const shotTotal = computed(() => {
       </div>
 
       <!-- 资产库（W4） -->
-      <div v-if="outputAssets.length" class="gallery-panel" data-testid="gallery-panel">
+      <div v-if="outputAssets.length || galManage" class="gallery-panel" data-testid="gallery-panel">
         <div class="jobs-head">
           <span class="font-mono eyebrow">资产库</span>
           <span class="state-hint font-mono">{{ outputAssets.length }} 个产物</span>
+          <div class="jobs-actions">
+            <template v-if="galManage">
+              <label class="batch-check">
+                <input type="checkbox" :checked="galAllSelected" @change="toggleGalAll" />
+                <span class="text-secondary">全选</span>
+              </label>
+              <span class="batch-count font-mono">{{ galSel.length }} 已选</span>
+              <button type="button" class="op danger" :disabled="galSel.length === 0 || galBusy"
+                      data-testid="btn-del-assets-batch" @click="removeGalSelected">
+                删除选中
+              </button>
+              <button type="button" class="op" :disabled="galBusy" @click="toggleGalManage">完成</button>
+            </template>
+            <button v-else type="button" class="op" data-testid="btn-manage-assets" @click="toggleGalManage">
+              管理
+            </button>
+          </div>
         </div>
         <div class="gallery-grid">
-          <div v-for="a in outputAssets" :key="a.id" class="g-item">
+          <div v-for="a in outputAssets" :key="a.id" :class="['g-item', { manage: galManage, sel: galSel.includes(a.id) }]">
+            <label v-if="galManage" class="g-sel">
+              <input type="checkbox" :checked="galSel.includes(a.id)" @change="toggleGalSel(a.id)" />
+            </label>
+            <button v-if="galManage" type="button" class="g-del" :disabled="galBusy"
+                    :title="'删除此' + a.kind" @click="removeAssetOne(a.id)">
+              ×
+            </button>
             <video
               v-if="(a.kind === 'clip' || a.kind === 'master') && (a.mime ?? '').startsWith('video/') && galUrls[a.id]"
               :src="galUrls[a.id]"
@@ -1181,6 +1341,80 @@ const shotTotal = computed(() => {
   display: block;
   background: #000;
 }
+
+/* ---------- 批量操作 / 失败任务管理 ---------- */
+.batchbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 8px;
+  background: var(--wv-surface-sunken);
+  border: 1px solid var(--wv-line);
+  border-radius: 8px;
+}
+.batch-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--wv-text-3);
+}
+.batch-check input, .row-check input, .g-sel input {
+  accent-color: var(--wv-accent);
+  cursor: pointer;
+}
+.batch-count { font-size: 11px; color: var(--wv-text-4); }
+.op {
+  appearance: none;
+  border: 1px solid var(--wv-line-strong);
+  background: transparent;
+  color: var(--wv-text-3);
+  font-size: 12px;
+  line-height: 1;
+  padding: 4px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background var(--wv-dur) var(--wv-ease), color var(--wv-dur) var(--wv-ease);
+}
+.op:hover:not(:disabled) { color: var(--wv-text); background: var(--wv-surface-raised); }
+.op.primary { color: var(--wv-accent-text); border-color: var(--wv-accent-strong); }
+.op.primary:hover:not(:disabled) { background: var(--wv-accent-soft); }
+.op.danger { color: #d98a78; border-color: rgba(196, 92, 74, .55); }
+.op.danger:hover:not(:disabled) { background: rgba(196, 92, 74, .12); }
+.op:disabled { opacity: .4; cursor: default; }
+.row-check { width: 14px; flex: none; display: inline-flex; align-items: center; }
+
+/* ---------- 资产库管理态 ---------- */
+.g-item { position: relative; }
+.g-item.manage { outline: 1px dashed var(--wv-line-strong); outline-offset: 2px; }
+.g-item.sel { outline: 1px solid var(--wv-accent); outline-offset: 2px; }
+.g-sel {
+  position: absolute;
+  top: 6px; left: 6px;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px; height: 20px;
+  border-radius: 5px;
+  background: rgba(11, 11, 10, .66);
+}
+.g-del {
+  position: absolute;
+  top: 4px; right: 4px;
+  z-index: 2;
+  appearance: none;
+  border: none;
+  width: 20px; height: 20px;
+  border-radius: 5px;
+  background: rgba(196, 92, 74, .85);
+  color: #fff;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+.g-del:disabled { opacity: .5; cursor: default; }
 
 
 /* ---------- W6 成片时间线 ---------- */
