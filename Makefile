@@ -17,7 +17,7 @@ api-dev:
 	cd api && mvn spring-boot:run
 
 web-dev:
-	cd web && pnpm dev
+	cd web && npm run dev   # 本机无 pnpm：用 npm
 
 bootstrap:
 	@echo "建库（本机 weaveora_dev）：PGPASSWORD=postgres psql -h localhost -U postgres -c 'CREATE DATABASE weaveora_dev;'（幂等，已存在则跳过）"

@@ -1,0 +1,43 @@
+/* ===== Weaveora 织影 — 设计 token（§1.3 品牌视觉，实现必须遵守）=====
+   放映厅暗色：近黑暖底 / 骨白字 / 低饱和青绿强调（仅主按钮与「进行中」指示）。
+   禁止：紫/品红/霓虹赛博、大面积渐变、emoji 图标、金黄主色、Element 蓝。 */
+
+:root {
+  /* 色板 */
+  --wv-bg: #0b0b0a; /* 放映厅底色：近黑暖底 */
+  --wv-surface: #14120f; /* 卡片面 */
+  --wv-surface-raised: #1c1915; /* 浮起面（hover / 输入框） */
+  --wv-surface-sunken: #0f0e0c; /* 凹陷面（选中底） */
+
+  --wv-text: #f3f0e8; /* 骨白字（主文本） */
+  --wv-text-2: #c9c4b8; /* 次级主文本 */
+  --wv-text-3: #a39e93; /* 次级文字 */
+  --wv-text-4: #6f6a60; /* 占位 / 弱化 */
+
+  --wv-accent: #8fb9b4; /* 低饱和青绿（主按钮 / 进行中） */
+  --wv-accent-strong: #7ba6a0;
+  --wv-accent-soft: #12201e; /* 强调的极低对比底 */
+  --wv-accent-text: #a9ccc7; /* 强调上的浅青字 */
+
+  --wv-danger: #c45c4a;
+  --wv-success: #7aa87a;
+
+  --wv-divider: #24221f; /* 分割线 */
+  --wv-line: #2e2b26; /* 卡片描边 */
+  --wv-line-strong: #3a362f;
+
+  /* 圆角（§1.3：控件 8 / 卡片 12 / 弹层 16） */
+  --wv-radius-s: 8px;
+  --wv-radius-m: 12px;
+  --wv-radius-l: 16px;
+
+  /* 字体（§1.3：标题衬线 Fraunces/思源宋体，正文无衬线 Figtree/思源黑体，等宽 IBM Plex Mono） */
+  --wv-font-display: 'Fraunces', 'Noto Serif SC', 'Songti SC', 'SimSun', serif;
+  --wv-font-sans: 'Figtree', 'Noto Sans SC', 'PingFang SC', 'Hiragino Sans GB',
+    'Microsoft YaHei', system-ui, -apple-system, sans-serif;
+  --wv-font-mono: 'IBM Plex Mono', ui-monospace, 'Cascadia Mono', Consolas, monospace;
+
+  /* 动效：150–200ms ease，禁止弹跳与彩带（§1.3） */
+  --wv-ease: cubic-bezier(0.4, 0, 0.2, 1);
+  --wv-dur: 160ms;
+}

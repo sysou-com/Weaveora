@@ -1,0 +1,77 @@
+/* ===== 基础样式（放映厅基调，§1.3）===== */
+
+html,
+body,
+#app {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--wv-bg);
+  color: var(--wv-text);
+  font-family: var(--wv-font-sans);
+  font-size: 15px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+::selection {
+  background: color-mix(in srgb, var(--wv-accent) 32%, transparent);
+  color: var(--wv-text);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+h1,
+h2,
+h3,
+h4 {
+  margin: 0;
+  font-family: var(--wv-font-display);
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+/* 常用组合类 */
+.font-display {
+  font-family: var(--wv-font-display);
+}
+.font-mono {
+  font-family: var(--wv-font-mono);
+}
+.text-secondary {
+  color: var(--wv-text-3);
+}
+
+/* 聚焦态：用青绿细环，符合放映厅克制风格 */
+:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--wv-accent) 55%, transparent);
+  outline-offset: 2px;
+}
+
+/* 滚动条 */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--wv-line);
+  border-radius: 8px;
+  border: 2px solid var(--wv-bg);
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--wv-line-strong);
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
