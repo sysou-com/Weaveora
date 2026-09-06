@@ -233,7 +233,7 @@ const contact = { qq: '358532433', email: 'sysou.com@outlook.com' }
 }
 .nav-link.more { display: inline-flex; align-items: center; gap: 5px; }
 .nav-link .caret { font-size: 11px; color: var(--wv-text-4); }
-@media (max-width: 900px) { .topnav { display: none; } }
+
 .contact-line { margin: 0 0 8px; font-size: 14px; line-height: 1.8; }
 .contact-line a { color: var(--wv-accent-text); }
 
@@ -317,3 +317,11 @@ const contact = { qq: '358532433', email: 'sysou.com@outlook.com' }
   border-top: 1px solid var(--wv-divider);
 }
 </style>
+@media (max-width: 900px) {
+  .app-topbar { height: auto; flex-wrap: wrap; gap: 4px 10px; padding: 8px 14px; }
+  .topbar-right { margin-left: auto; }
+  .topnav { order: 3; width: 100%; margin: 0 -4px; padding: 2px 4px 4px; overflow-x: auto; overflow-y: hidden; gap: 2px; -webkit-overflow-scrolling: touch; scrollbar-width: none; }
+  .topnav::-webkit-scrollbar { display: none; }
+  .nav-link { flex: none; font-size: 14px; padding: 8px 11px; }
+  .user-name { max-width: 92px; }
+}

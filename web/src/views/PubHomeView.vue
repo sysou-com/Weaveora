@@ -116,5 +116,12 @@ function register(): void {
 }
 .line { margin: 0 0 8px; font-size: 14px; line-height: 1.8; }
 .line a { color: var(--wv-accent-text); }
-@media (max-width: 860px) { .pubnav { display: none; } }
+
 </style>
+@media (max-width: 860px) {
+  .pub-topbar { height: auto; flex-wrap: wrap; gap: 4px 10px; padding: 8px 14px; }
+  .pub-right { margin-left: auto; }
+  .pubnav { order: 3; width: 100%; margin: 0 -4px; padding: 2px 4px 4px; overflow-x: auto; overflow-y: hidden; gap: 2px; -webkit-overflow-scrolling: touch; scrollbar-width: none; }
+  .pubnav::-webkit-scrollbar { display: none; }
+  .nav-link { flex: none; font-size: 14px; padding: 8px 11px; }
+}
