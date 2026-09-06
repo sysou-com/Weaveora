@@ -4,6 +4,8 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.scheduling.annotation.EnableScheduling;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import studio.weaveora.asset.AssetService;
@@ -41,6 +43,7 @@ import java.util.concurrent.ThreadLocalRandom;
  * worker 回执带 cancel_requested 时以 cancelled 落终态。
  */
 @Service
+@EnableScheduling
 public class JobService {
 
     private static final Logger log = LoggerFactory.getLogger(JobService.class);
@@ -90,6 +93,18 @@ public class JobService {
         this.assetRepo = assetRepo;
         this.quota = quota;
         this.metrics = metrics;
+    }
+
+    /** 回收卡死 running 任务（默认 30min 无完成即失败，可重试） */
+    @Scheduled(fixedDelayString = "${weaveora.job.reaper-ms:300000}")
+    @Transactional
+    public void reapStaleRunning() {
+        java.time.OffsetDateTime cut = java.time.OffsetDateTime.now()
+                .minusMinutes(30);
+        int n = jobs.markStaleRunning(cut, java.time.OffsetDateTime.now());
+        if (n > 0) {
+            log.warn("reaped {} stale running jobs", n);
+        }
     }
 
     // ---------- 对外：创建 / 查询 / 取消 ----------

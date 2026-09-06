@@ -37,5 +37,13 @@ public interface GenerationJobRepository extends JpaRepository<GenerationJob, UU
     @Query("update GenerationJob j set j.cancelRequested=true where j.id=:id and j.state in ('queued','running')")
     int requestCancel(@Param("id") UUID id);
 
+    /** 回收卡死任务：running 超过阈值未完成 → failed(WORKER_STUCK)，可由用户重试 */
+    @Modifying
+    @Query("update GenerationJob j set j.state='failed', j.errorCode='WORKER_STUCK', " +
+            "j.errorMessage='执行超时（worker 无心跳完成）', j.finishedAt=:now " +
+            "where j.state='running' and (j.startedAt is null or j.startedAt < :cut)")
+    int markStaleRunning(@Param("cut") java.time.OffsetDateTime cut,
+                         @Param("now") java.time.OffsetDateTime now);
+
     long countByState(String state);
 }

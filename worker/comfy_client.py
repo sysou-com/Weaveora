@@ -252,7 +252,7 @@ def _motion_graph(client_id, payload, positive, negative, first_frame_name, pref
     cfg = float((payload.get("params") or {}).get("cfg", 5.0))
     duration = float(payload.get("duration_sec") or 2.0)
     seed = int(payload.get("seed") or 1)
-    raw = max(32, min(128, int(round(duration * fps))))  # Wan2.2 wrapper 需帧数>=32（不足会 seq_len 断言失败）
+    raw = max(32, min(64, int(round(duration * fps))))  # Wan2.2 需>=32；封顶 64 控制单条耗时
     frames = int((raw + 3) / 4) * 4
     width = int((payload.get("params") or {}).get("width", 512))
     height = int((payload.get("params") or {}).get("height", 512))

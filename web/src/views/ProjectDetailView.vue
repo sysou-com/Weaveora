@@ -369,7 +369,7 @@ watch(
     if (n > 0 && !jobsTimer) {
       jobsTimer = setInterval(() => {
         void jobs.refetch()
-      }, 3000)
+      }, 5000)
     } else if (n === 0 && jobsTimer) {
       clearInterval(jobsTimer)
       jobsTimer = undefined
