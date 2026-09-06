@@ -1136,9 +1136,6 @@ const shotTotal = computed(() => {
   display: block;
 }
 .col-brief {
-  position: sticky;
-  top: 68px;
-  z-index: 6;
   display: flex;
   flex-direction: row;
   align-items: stretch;
@@ -1174,7 +1171,6 @@ const shotTotal = computed(() => {
 }
 @media (max-width: 900px) {
   .col-brief {
-    position: static;
     flex-direction: column;
   }
   .refs-panel { width: auto !important; }

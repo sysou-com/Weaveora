@@ -39,17 +39,18 @@ async function loadThumb(pid: string, ws: string): Promise<void> {
   thumbs[pid] = { state: 'loading' }
   try {
     const list = await listAssets(ws, pid)
-    const latest = list.find((a) => a.kind !== 'reference') ?? list[0]
-    if (!latest) {
+    // 缩略图只用图片类资产（视频在资产库同样无预览帧/黑屏）；无图则回落系统默认图标
+    const img = list.find((a) => (a.mime ?? '').startsWith('image/'))
+    if (!img) {
       thumbs[pid] = { state: 'none' }
       return
     }
-    const blob = await fetchAssetBlob(ws, latest.id)
+    const blob = await fetchAssetBlob(ws, img.id)
     if (!blob) {
       thumbs[pid] = { state: 'none' }
       return
     }
-    thumbs[pid] = { state: 'ok', mime: latest.mime, url: URL.createObjectURL(blob) }
+    thumbs[pid] = { state: 'ok', mime: img.mime, url: URL.createObjectURL(blob) }
   } catch {
     thumbs[pid] = { state: 'none' }
   } finally {
@@ -93,14 +94,6 @@ function goNew(): void {
         <p class="desc text-secondary">
           {{ count > 0 ? `${count} 个项目正在放映厅里等待开机` : '你的创作工作台' }}
         </p>
-      </div>
-      <div class="head-actions">
-        <NButton type="primary" size="large" data-testid="btn-new-project-top" @click="goNew">
-          <template #icon>
-            <NIcon><Plus :size="16" /></NIcon>
-          </template>
-          新建项目
-        </NButton>
       </div>
     </header>
 
@@ -151,18 +144,7 @@ function goNew(): void {
         @click="openProject(p)"
       >
         <div class="thumb" data-testid="project-thumb">
-          <template v-if="thumbs[p.id]?.state === 'ok' && thumbs[p.id]?.url">
-            <video
-              v-if="(thumbs[p.id]?.mime ?? '').startsWith('video/')"
-              :src="thumbs[p.id]?.url"
-              class="thumb-media thumb-video"
-              muted
-              playsinline
-              preload="metadata"
-              loading="lazy"
-            />
-            <img v-else :src="thumbs[p.id]?.url" class="thumb-media" alt="" loading="lazy" />
-          </template>
+          <img v-if="thumbs[p.id]?.state === 'ok' && thumbs[p.id]?.url" :src="thumbs[p.id]?.url" class="thumb-media" alt="" loading="lazy" />
           <div v-else class="thumb-ph">
             <svg width="34" height="34" viewBox="0 0 96 96" fill="none" aria-hidden="true">
               <rect x="12" y="22" width="72" height="52" rx="9" stroke="#6F6A60" stroke-width="3" />
