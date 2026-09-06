@@ -10,7 +10,9 @@ const router = createRouter({
   routes: [
     {
       path: '/',
-      redirect: '/app',
+      name: 'pub-home',
+      component: () => import('@/views/PubHomeView.vue'),
+      meta: { public: true, title: '项目集市 · 织影 Weaveora' },
     },
     {
       path: '/login',
@@ -19,15 +21,39 @@ const router = createRouter({
       meta: { public: true, title: '登录 · 织影 Weaveora' },
     },
     {
+      path: '/guide',
+      name: 'guide',
+      component: () => import('@/views/GuideView.vue'),
+      meta: { public: true, title: '使用指南 · 织影 Weaveora' },
+    },
+    {
+      path: '/about',
+      name: 'about',
+      component: () => import('@/views/AboutView.vue'),
+      meta: { public: true, title: '关于 · 织影 Weaveora' },
+    },
+    {
+      path: '/market/:projectId',
+      name: 'market-project',
+      component: () => import('@/views/MarketProjectView.vue'),
+      meta: { public: true, title: '集市项目 · 织影 Weaveora' },
+    },
+    {
       path: '/app',
       component: () => import('@/layouts/AppLayout.vue'),
       meta: { requiresAuth: true },
       children: [
         {
           path: '',
+          name: 'home',
+          component: () => import('@/views/MarketHomeView.vue'),
+          meta: { title: '项目集市 · 织影 Weaveora' },
+        },
+        {
+          path: 'my',
           name: 'projects',
           component: () => import('@/views/ProjectListView.vue'),
-          meta: { title: '项目 · 织影 Weaveora' },
+          meta: { title: '我的项目 · 织影 Weaveora' },
         },
         {
           path: 'projects/new',
@@ -45,7 +71,7 @@ const router = createRouter({
     },
     {
       path: '/:pathMatch(.*)*',
-      redirect: '/app',
+      redirect: '/',
     },
   ],
 })

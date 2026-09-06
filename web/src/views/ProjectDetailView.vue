@@ -22,6 +22,7 @@ import {
 } from '@/api/director'
 import { createBrief, listBriefs } from '@/api/briefs'
 import { createJobs, listJobs, cancelJob, retryJobs, deleteJobs, JOB_STATE_LABEL } from '@/api/jobs'
+import { shareProject } from '@/api/market'
 import { listAssets, uploadReference, fetchAssetBlob, deleteAssets } from '@/api/assets'
 import { createExport, fetchExportBlob, renderMaster, timecode } from '@/api/export'
 import { getProject } from '@/api/projects'
@@ -270,6 +271,35 @@ function removeAssetOne(id: string): void {
   void removeAssets([id])
 }
 
+/** 资产库管理态：分享选中（整项目提交集市待审；集市后续开放素材只读浏览） */
+async function shareSelectedAssets(): Promise<void> {
+  if (!window.confirm('将当前项目提交到集市（等待管理员审批）？集市内容只读，其它用户可浏览。')) return
+  try {
+    await shareProject(workspaceId.value, projectId.value)
+    message.success('已提交集市，等待管理员审批')
+  } catch (e) {
+    message.error(e instanceof Error ? e.message : '分享失败')
+  }
+}
+
+function firstFrame(e: Event): void {
+  const v = e.target as HTMLVideoElement
+  if (v.readyState >= 2) {
+    v.currentTime = 0.05
+  } else {
+    v.addEventListener('loadedmetadata', () => {
+      v.currentTime = 0.05
+    }, { once: true })
+  }
+}
+
+// 沉浸式预览（大图/大视频）
+const immersive = ref<{ url: string; mime: string } | null>(null)
+function openImmersive(id: string, mime: string): void {
+  const url = galUrls.value[id]
+  if (!url) return
+  immersive.value = { url, mime }
+}
 function setRefFromAsset(id: string): void {
   if (refSelected.value.includes(id)) return
   if (refSelected.value.length >= 4) {
@@ -332,6 +362,8 @@ watch(
     } else if (n === 0 && jobsTimer) {
       clearInterval(jobsTimer)
       jobsTimer = undefined
+      // 任务全部结束后资产已落库 → 自动刷新资产库预览
+      void queryClient.invalidateQueries({ queryKey: ['assets'] })
     }
   },
   { immediate: true },
@@ -895,6 +927,10 @@ const shotTotal = computed(() => {
                 <span class="text-secondary">全选</span>
               </label>
               <span class="batch-count font-mono">{{ galSel.length }} 已选</span>
+              <button type="button" class="op primary" :disabled="!galSel.length || galBusy"
+                      data-testid="btn-share-assets" @click="shareSelectedAssets">
+                分享选中
+              </button>
               <button type="button" class="op danger" :disabled="galSel.length === 0 || galBusy"
                       data-testid="btn-del-assets-batch" @click="removeGalSelected">
                 删除选中
@@ -922,12 +958,18 @@ const shotTotal = computed(() => {
               controls
               muted
               playsinline
+              preload="metadata"
+              @loadedmetadata="firstFrame"
             />
             <img v-else-if="galUrls[a.id]" :src="galUrls[a.id]" :alt="a.kind" loading="lazy" />
             <div v-else class="g-loading">…</div>
             <div class="g-meta">
               <span class="g-kind font-mono">{{ a.kind }}<template v-if="a.width"> · {{ a.width }}×{{ a.height }}</template></span>
               <span class="g-actions">
+                <button v-if="galUrls[a.id]" type="button" class="g-max" title="沉浸预览/播放"
+                        @click.stop="openImmersive(a.id, a.mime ?? '')">
+                  ⤢
+                </button>
                 <a v-if="galUrls[a.id]" :href="galUrls[a.id]" :download="'weaveora-' + a.id.slice(0, 8) + '.png'" title="下载">↓</a>
                 <button
                   type="button"
@@ -941,6 +983,25 @@ const shotTotal = computed(() => {
               </span>
             </div>
           </div>
+        </div>
+      </div>
+
+      <!-- 沉浸式预览（大图/大视频） -->
+      <div v-if="immersive" class="im-overlay" @click.self="immersive = null">
+        <div class="im-card">
+          <button type="button" class="op im-close" @click="immersive = null">×</button>
+          <video
+            v-if="immersive.mime.startsWith('video/')"
+            :src="immersive.url"
+            class="im-media"
+            controls
+            playsinline
+            autoplay
+            muted
+            preload="metadata"
+            @loadedmetadata="firstFrame"
+          />
+          <img v-else :src="immersive.url" class="im-media im-img" alt="" />
         </div>
       </div>
 
@@ -1520,5 +1581,28 @@ const shotTotal = computed(() => {
 .tl-state.ok { color: var(--wv-success); }
 .tl-state.empty { color: var(--wv-text-4); }
 .export-hint { margin: 0; font-size: 12px; line-height: 1.7; }
+
+/* 沉浸预览 */
+.g-max {
+  appearance: none; border: none; background: var(--wv-accent-soft); color: var(--wv-accent-text);
+  font-size: 13px; line-height: 1; padding: 3px 7px; border-radius: 6px; cursor: pointer;
+}
+.g-max:hover { background: color-mix(in srgb, var(--wv-accent) 22%, var(--wv-accent-soft)); }
+.im-overlay {
+  position: fixed; inset: 0; z-index: 80; background: rgba(8, 8, 7, 0.9);
+  display: flex; align-items: center; justify-content: center; padding: 24px;
+}
+.im-card {
+  position: relative; width: min(1080px, 100%); max-height: 92vh;
+  display: flex; align-items: center; justify-content: center;
+}
+.im-media {
+  max-width: 100%; max-height: 92vh; border-radius: 8px; display: block;
+  background: #000;
+}
+.im-img { width: auto; }
+.im-close {
+  position: absolute; top: -6px; right: -6px; z-index: 2; font-size: 15px;
+}
 
 </style>

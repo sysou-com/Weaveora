@@ -106,7 +106,7 @@ public class ProjectController {
             HttpServletRequest request,
             @RequestParam(defaultValue = "0") int page,
             @RequestParam(defaultValue = "8") int size) {
-        return ResponseEntity.ok(projectService.marketPage(uid(request), page, size));
+        return ResponseEntity.ok(projectService.marketPage(uidOrNull(request), page, size));
     }
 
     /** 管理后台待审（管理员） */
@@ -141,7 +141,7 @@ public class ProjectController {
     public ResponseEntity<ProjectCard> marketGet(
             HttpServletRequest request,
             @PathVariable UUID projectId) {
-        return ResponseEntity.ok(projectService.marketGet(uid(request), projectId));
+        return ResponseEntity.ok(projectService.marketGet(uidOrNull(request), projectId));
     }
 
     /** 集市预览图（该集市项目最新图片资产；跨工作区无需成员身份） */
@@ -149,7 +149,7 @@ public class ProjectController {
     public ResponseEntity<org.springframework.core.io.Resource> marketPreview(
             HttpServletRequest request,
             @PathVariable UUID projectId) {
-        var opt = projectService.preview(uid(request), projectId);
+        var opt = projectService.preview(uidOrNull(request), projectId);
         if (opt.isEmpty()) {
             throw new BizException(ErrorCode.NOT_FOUND, "暂无预览图");
         }
@@ -162,6 +162,35 @@ public class ProjectController {
         return ResponseEntity.ok()
                 .contentType(MediaType.parseMediaType(pv.mime() == null ? "image/png" : pv.mime()))
                 .body(new InputStreamResource(pv.stream()));
+    }
+
+    /** 集市只读：项目资产列表（still/clip/master） */
+    @GetMapping("/marketplace/{projectId}/assets")
+    public ResponseEntity<List<ProjectService.MarketAsset>> marketAssets(
+            HttpServletRequest request,
+            @PathVariable UUID projectId) {
+        return ResponseEntity.ok(projectService.listMarketAssets(uidOrNull(request), projectId));
+    }
+
+    /** 集市只读：播放/下载某资产字节 */
+    @GetMapping("/marketplace/{projectId}/assets/{assetId}")
+    public ResponseEntity<org.springframework.core.io.Resource> marketAssetDownload(
+            HttpServletRequest request,
+            @PathVariable UUID projectId,
+            @PathVariable UUID assetId) {
+        var opt = projectService.downloadMarketAsset(uidOrNull(request), projectId, assetId);
+        if (opt.isEmpty()) {
+            throw new BizException(ErrorCode.NOT_FOUND, "资产不可见或不存在");
+        }
+        ProjectService.Preview pv = opt.get();
+        return ResponseEntity.ok()
+                .contentType(MediaType.parseMediaType(pv.mime() == null ? "image/png" : pv.mime()))
+                .body(new InputStreamResource(pv.stream()));
+    }
+
+    private UUID uidOrNull(HttpServletRequest request) {
+        String uid = (String) request.getAttribute(JwtAuthFilter.ATTR_USER_ID);
+        return uid == null ? null : UUID.fromString(uid);
     }
 
     private UUID uid(HttpServletRequest request) {

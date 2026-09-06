@@ -525,6 +525,7 @@ const shareLabel = (s: string | null): string =>
             {{ overlayCard.favorited ? '★' : '☆' }} 收藏 {{ overlayCard.favoriteCount }}
           </button>
           <button type="button" class="op" @click="downloadMarketPreview(overlayCard.id)">下载预览图</button>
+          <button type="button" class="op primary" @click="router.push({ path: '/market/' + overlayCard.id })">查看全部素材(只读)</button>
         </div>
       </div>
     </div>

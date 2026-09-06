@@ -15,7 +15,7 @@ const auth = useAuthStore()
 const route = useRoute()
 const router = useRouter()
 
-const panel = ref<Panel>('login')
+const panel = ref<Panel>(route.query.panel === 'register' ? 'register' : 'login')
 const busy = ref(false)
 const errorText = ref<string | null>(null)
 

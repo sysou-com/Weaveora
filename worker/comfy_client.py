@@ -6,6 +6,7 @@ WEAVEORA_COMFY_URL 指向 ComfyUI（默认 http://127.0.0.1:8188）。
 本模块只依赖标准库（urllib），不依赖 comfyui 客户端库。
 """
 import base64
+import io
 import json
 import os
 import sys
@@ -243,64 +244,87 @@ def _post_prompt(prompt, client_id):
 
 
 
-def _wan_graph(client_id, payload, positive, negative, first_frame_name, prefix="weaveora"):
-    """Wan i2v（关键帧→运动）图（§11.2 wan_i2v 档位）。
-
-    注意：真实节点名/加载器随安装的 Wan 节点包而异（ComfyUI-WanVideoWrapper 等），
-    生产接入 GPU 机时按实际安装微调（可整体用 WEAVEORA_COMFY_WORKFLOW_WAN 覆盖为 JSON 文件）。
-    """
-    fps = int(payload.get("fps") or 24)
+def _motion_graph(client_id, payload, positive, negative, first_frame_name, prefix):
+    """Wan2.2 ti2v 5B i2v（新 wrapper 节点集）：Sampler → Decode → SaveImage 帧。
+    输出帧由 generate_motion 用 ffmpeg 合成 mp4（不依赖 VHS）。"""
+    fps = int(payload.get("fps") or 16)
     steps = int((payload.get("params") or {}).get("steps", 20))
     cfg = float((payload.get("params") or {}).get("cfg", 5.0))
-    duration = float(payload.get("duration_sec") or 3.0)
+    duration = float(payload.get("duration_sec") or 2.0)
     seed = int(payload.get("seed") or 1)
-    # 帧数 = duration*fps（clamp 8..81）
-    frames = max(8, min(81, int(duration * fps)))
+    raw = max(32, min(128, int(round(duration * fps))))  # Wan2.2 wrapper 需帧数>=32（不足会 seq_len 断言失败）
+    frames = int((raw + 3) / 4) * 4
+    width = int((payload.get("params") or {}).get("width", 512))
+    height = int((payload.get("params") or {}).get("height", 512))
     nodes = {
-        "load_model": {"class_type": "WanVideoModelLoader",
-                       "inputs": {"ckpt_name": (payload.get("params") or {}).get("model", "wan2.6_14B_fp8.safetensors")}},
-        "load_clip": {"class_type": "WanVideoTextEncoder",
-                      "inputs": {"clip": ["load_model", 1], "text": positive, "start_time": 0, "end_time": duration}},
-        "load_img": {"class_type": "LoadImage", "inputs": {"image": first_frame_name}},
-        "img2vid": {"class_type": "WanImageToVideo",
-                    "inputs": {"model": ["load_model", 0], "positive": ["load_clip", 0],
-                               "negative": ["load_clip", 1], "image": ["load_img", 0],
-                               "seed": seed, "steps": steps, "cfg": cfg,
-                               "width": 1024, "height": 1024, "frames": frames,
-                               "start_frames": 1, "end_frames": 1, "filename_prefix": prefix}},
-        "save": {"class_type": "VHS_VideoCombine",
-                 "inputs": {"images": ["img2vid", 0], "fps": fps,
-                            "filename_prefix": prefix, "format": "mp4"}},
+        "ckpt": {"class_type": "WanVideoModelLoader",
+                 "inputs": {"model": (payload.get("params") or {}).get(
+                     "model", "wan2.2_ti2v_5B_fp16.safetensors"),
+                     "base_precision": "bf16", "quantization": "disabled",
+                     "load_device": "main_device"}},
+        "t5": {"class_type": "LoadWanVideoT5TextEncoder",
+               "inputs": {"model_name": (payload.get("params") or {}).get(
+                   "text_encoder", "umt5_xxl_fp16.safetensors"),
+                   "precision": "bf16", "load_device": "offload_device"}},
+        "vae": {"class_type": "WanVideoVAELoader",
+                "inputs": {"model_name": (payload.get("params") or {}).get(
+                    "vae", "wan2.2_vae.safetensors"), "precision": "fp16"}},
+        "txt": {"class_type": "WanVideoTextEncode",
+                "inputs": {"positive_prompt": positive, "negative_prompt": negative,
+                           "t5": ["t5", 0], "force_offload": True, "device": "cpu"}},
+        "img": {"class_type": "LoadImage", "inputs": {"image": first_frame_name}},
+        "enc": {"class_type": "WanVideoEncode",
+                "inputs": {"vae": ["vae", 0], "image": ["img", 0],
+                           "enable_vae_tiling": False, "tile_x": width, "tile_y": height,
+                           "tile_stride_x": max(width // 2, 1), "tile_stride_y": max(height // 2, 1)}},
+        "emb": {"class_type": "WanVideoEmptyEmbeds",
+                "inputs": {"width": width, "height": height, "num_frames": frames}},
+        "sm": {"class_type": "WanVideoSampler",
+               "inputs": {"model": ["ckpt", 0], "image_embeds": ["emb", 0],
+                          "text_embeds": ["txt", 0], "samples": ["enc", 0],
+                          "steps": steps, "cfg": cfg, "shift": 8.0, "seed": seed,
+                          "force_offload": True, "scheduler": "euler",
+                          "riflex_freq_index": 0}},
+        "dec": {"class_type": "WanVideoDecode",
+                "inputs": {"vae": ["vae", 0], "samples": ["sm", 0],
+                           "enable_vae_tiling": True, "tile_x": min(512, max(width, 16)),
+                           "tile_y": min(512, max(height, 16)),
+                           "tile_stride_x": min(256, max(width // 2, 1)),
+                           "tile_stride_y": min(256, max(height // 2, 1))}},
+        "save": {"class_type": "SaveImage",
+                 "inputs": {"images": ["dec", 0], "filename_prefix": prefix}},
     }
     return {"prompt": nodes, "client_id": client_id}
 
 
-def _download_generic(rec, prefix="weaveora"):
-    outs = []
-    outputs = rec.get("outputs") or {}
-    for node in outputs.values():
-        for key, fmt in (("gifs", "image/webp"), ("video", "video/mp4"), ("images", "image/png")):
-            for item in node.get(key) or []:
-                fname = item.get("filename", "")
-                if not fname.startswith(prefix):
-                    continue
-                sub = item.get("subfolder") or ""
-                typ = item.get("type") or "output"
-                q = urllib.parse.urlencode({"filename": fname, "subfolder": sub, "type": typ})
-                _, body = _comfy("GET", "/view?" + q)
-                if key == "video" and fname.endswith((".mp4", ".webm")):
-                    mime = "video/mp4" if fname.endswith(".mp4") else "video/webm"
-                elif key == "gifs":
-                    mime = "image/webp"
-                else:
-                    mime = fmt
-                outs.append({"bytes": body, "mime": mime, "width": item.get("width"), "height": item.get("height")})
-                break
-    return outs
+def _encode_frames_mp4(frames_bytes, fps, out_dir):
+    import subprocess as _sp
+    import tempfile
+    try:
+        import imageio_ffmpeg as _iif
+        ff = _iif.get_ffmpeg_exe()
+    except Exception as e:
+        raise ComfyError("imageio_ffmpeg 不可用: %s" % e)
+    if not frames_bytes:
+        raise ComfyError("motion 无输出帧")
+    for i, b in enumerate(frames_bytes):
+        with open(os.path.join(out_dir, "f_%04d.png" % i), "wb") as fh:
+            fh.write(b)
+    out = os.path.join(out_dir, "motion.mp4")
+    r = _sp.run([ff, "-y", "-framerate", str(fps), "-i",
+                 os.path.join(out_dir, "f_%04d.png"),
+                 "-c:v", "libx264", "-pix_fmt", "yuv420p", out],
+                capture_output=True, text=True)
+    if r.returncode != 0 or not os.path.exists(out):
+        raise ComfyError("ffmpeg 合成失败: %s" % (r.stderr or "")[-300:])
+    with open(out, "rb") as fh:
+        mp4 = fh.read()
+    return mp4
 
 
 def generate_motion(client_id, payload, progress_fn=None):
-    """Wan i2v motion；返回 [{bytes,mime,width,height}]。真节点缺失抛 ComfyError。"""
+    """Wan2.2 i2v motion（关键帧→短视频 mp4）。返回 [{bytes,mime,width,height}]。"""
+    import tempfile, uuid as _uuid
     if progress_fn:
         progress_fn(25, "loading_model")
     key = payload.get("keyframeKey")
@@ -309,19 +333,68 @@ def generate_motion(client_id, payload, progress_fn=None):
     data, ctype = fetch_reference_bytes(key)
     positive = payload.get("positive_prompt", "")
     negative = payload.get("negative_prompt", "")
-    prefix = "weaveora_" + str(payload.get("shot_no") or "motion")
+    fps = int(payload.get("fps") or 16)
+    # 关键帧实际尺寸决定输出尺寸（16 对齐），保证 enc/emb/dec 一致（否则 wrapper rope 断言失败）
+    try:
+        from PIL import Image as _PIL
+        _im = _PIL.open(io.BytesIO(data))
+        _w, _h = _im.size
+    except Exception:
+        _w, _h = None, None
+    if _w and _h:
+        def _snap(v):
+            v = max(256, min(1280, v))
+            return int((v + 15) / 16) * 16
+        # 长边封顶 832，避免高分辨率解码 OOM
+        scale = 832.0 / max(_w, _h)
+        if scale < 1.0:
+            _w, _h = int(_w * scale), int(_h * scale)
+        params2 = dict(payload.get("params") or {})
+        params2["width"] = _snap(_w)
+        params2["height"] = _snap(_h)
+        payload = dict(payload)
+        payload["params"] = params2
+    prefix = "weaveora_mot_" + _uuid.uuid4().hex[:6]
     if progress_fn:
         progress_fn(35, "sampling")
     _, body = _comfy("POST", "/upload/image",
                      files={"image": (key.split("/")[-1], data, ctype)})
     name = json.loads(body.decode()).get("name")
-    prompt = _wan_graph(client_id, payload, positive, negative, name, prefix)
+    prompt = _motion_graph(client_id, payload, positive, negative, name, prefix)
     st, resp = _comfy("POST", "/prompt", payload=prompt)
     pid = json.loads(resp.decode()).get("prompt_id")
     if not pid:
         raise ComfyError("comfy /prompt 无 prompt_id")
+    if progress_fn:
+        progress_fn(50, "sampling")
     rec = _poll_history(client_id, pid)
-    return _download_generic(rec, prefix)
+    # 收集输出帧
+    frames = []
+    outputs = rec.get("outputs") or {}
+    for node in outputs.values():
+        for it in node.get("images") or []:
+            fname = it.get("filename", "")
+            if not fname.startswith(prefix):
+                continue
+            q = urllib.parse.urlencode({"filename": fname,
+                                        "subfolder": it.get("subfolder", ""),
+                                        "type": it.get("type", "output")})
+            _, fb = _comfy("GET", "/view?" + q)
+            frames.append(fb)
+    if not frames:
+        raise ComfyError("motion 无输出帧（prefix=%s）" % prefix)
+    out_dir = tempfile.mkdtemp(prefix="wv_mot_")
+    try:
+        mp4 = _encode_frames_mp4(frames, fps, out_dir)
+    finally:
+        import shutil as _sh
+        _sh.rmtree(out_dir, ignore_errors=True)
+    w = (payload.get("params") or {}).get("width", 512)
+    h = (payload.get("params") or {}).get("height", 512)
+    if progress_fn:
+        progress_fn(100, "done")
+    return [{"bytes": mp4, "mime": "video/mp4", "width": int(w), "height": int(h)}]
+
 
 if __name__ == "__main__":
     import sys

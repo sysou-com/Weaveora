@@ -1,18 +1,27 @@
 <script setup lang="ts">
 import { LogOut, Plus } from 'lucide-vue-next'
-import { NDropdown, NIcon, NButton, type DropdownOption } from 'naive-ui'
-import { computed } from 'vue'
-import { useRouter } from 'vue-router'
+import { NDropdown, NIcon, NButton, NModal, type DropdownOption } from 'naive-ui'
+import { computed, ref } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 
 import BrandMark from '@/components/BrandMark.vue'
 import { useAuthStore } from '@/stores/auth'
 
 const auth = useAuthStore()
 const router = useRouter()
+const route = useRoute()
+const ADMIN_EMAIL = 'sysou.com@outlook.com'
 
 const userName = computed(() => auth.user?.displayName ?? '…')
 const email = computed(() => auth.user?.email ?? '')
 const hasWorkspace = computed(() => (auth.activeWorkspaceId ? true : false))
+const isAdmin = computed(() => auth.user?.email?.toLowerCase() === ADMIN_EMAIL)
+const showContact = ref(false)
+
+const moreOptions: DropdownOption[] = [
+  { label: '关于', key: 'about' },
+  { label: '联系开发者', key: 'contact' },
+]
 
 const menuOptions = computed<DropdownOption[]>(() => {
   const opts: DropdownOption[] = [{ label: userName.value, key: 'user', disabled: true }]
@@ -24,6 +33,11 @@ const menuOptions = computed<DropdownOption[]>(() => {
   return opts
 })
 
+function navActive(name: string): boolean {
+  const cur = String(route.name ?? '')
+  return cur === name
+}
+
 async function onMenuSelect(key: string): Promise<void> {
   if (key === 'logout') {
     await auth.logout()
@@ -31,9 +45,19 @@ async function onMenuSelect(key: string): Promise<void> {
   }
 }
 
-function goProjects(): void {
-  void router.push({ name: 'projects' })
+async function onMoreSelect(key: string): Promise<void> {
+  if (key === 'about') {
+    void router.push({ name: 'about' })
+  } else if (key === 'contact') {
+    showContact.value = true
+  }
 }
+
+function goProjects(): void {
+  void router.push({ name: 'home' })
+}
+
+const contact = { qq: '358532433', email: 'sysou.com@outlook.com' }
 </script>
 
 <template>
@@ -45,9 +69,18 @@ function goProjects(): void {
         <span class="brand-en font-mono">WEAVEORA</span>
       </button>
 
+      <nav class="topnav" aria-label="主导航">
+        <button type="button" class="nav-link" :class="{ on: navActive('home') }" @click="router.push({ name: 'home' })">首页</button>
+        <button type="button" class="nav-link" :class="{ on: navActive('projects') }" @click="router.push({ name: 'projects' })">我的项目</button>
+        <button type="button" class="nav-link" :class="{ on: navActive('guide') }" @click="router.push({ name: 'guide' })">使用指南</button>
+        <NDropdown :options="moreOptions" trigger="click" @select="onMoreSelect">
+          <button type="button" class="nav-link more">更多 <span class="caret">▾</span></button>
+        </NDropdown>
+      </nav>
+
       <div class="topbar-right">
         <NButton
-          v-if="hasWorkspace"
+          v-if="hasWorkspace && isAdmin"
           size="medium"
           type="primary"
           data-testid="btn-new-project"
@@ -82,6 +115,12 @@ function goProjects(): void {
         </button>
       </div>
     </header>
+
+    <!-- 联系开发者 -->
+    <NModal v-model:show="showContact" preset="card" :title="'联系开发者'" style="max-width: 420px">
+      <p class="contact-line">QQ：{{ contact.qq }}</p>
+      <p class="contact-line">邮箱：<a :href="`mailto:${contact.email}`">{{ contact.email }}</a></p>
+    </NModal>
 
     <main class="app-main">
       <router-view />
@@ -148,6 +187,41 @@ function goProjects(): void {
   display: flex;
   align-items: center;
   gap: 10px;
+}
+
+.topnav {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin: 0 auto;
+}
+.nav-link {
+  appearance: none;
+  background: none;
+  border: none;
+  color: var(--wv-text-3);
+  font-size: 14px;
+  line-height: 1;
+  padding: 8px 12px;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: color var(--wv-dur) var(--wv-ease), background var(--wv-dur) var(--wv-ease);
+}
+.nav-link:hover {
+  color: var(--wv-text);
+  background: var(--wv-surface);
+}
+.nav-link.on {
+  color: var(--wv-accent-text);
+  background: var(--wv-accent-soft);
+}
+.nav-link.more { display: inline-flex; align-items: center; gap: 4px; }
+.nav-link .caret { font-size: 10px; color: var(--wv-text-4); }
+.contact-line { margin: 0 0 8px; font-size: 14px; line-height: 1.8; }
+.contact-line a { color: var(--wv-accent-text); }
+
+@media (max-width: 860px) {
+  .topnav { display: none; }
 }
 
 .user-chip {

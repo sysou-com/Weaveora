@@ -49,6 +49,19 @@ public class JobService {
     private static final UUID PRESET_CLIP = UUID.fromString("22222222-2222-7222-8222-222222222222");
     private static final List<String> TERMINAL = List.of("succeeded", "failed", "cancelled");
 
+    /** 画面比例 → SDXL/视频 标准尺寸（64 对齐；16:9/9:16 兼顾竖屏） */
+    private static final java.util.Map<String, int[]> ASPECT_DIMS = java.util.Map.of(
+            "1:1", new int[]{1024, 1024},
+            "3:2", new int[]{1152, 768},
+            "2:3", new int[]{768, 1152},
+            "16:9", new int[]{1280, 704},
+            "9:16", new int[]{704, 1280});
+
+    private static int[] dimsFor(String aspect) {
+        int[] d = ASPECT_DIMS.get(aspect == null ? "1:1" : aspect);
+        return d == null ? new int[]{1024, 1024} : d;
+    }
+
     private final GenerationJobRepository jobs;
     private final WorkerNodeRepository nodes;
     private final AssetService assets;
@@ -127,6 +140,12 @@ public class JobService {
                 payload.put("duration_sec", shot.path("duration_sec").asDouble(3));
                 payload.put("fps", plan.path("edit_plan").path("fps").asInt(30));
                 payload.put("seed", shot.path("seed").asLong(0) == 0 ? randomSeed() : shot.path("seed").asLong(0));
+                // 画面比例：生成尺寸跟随 16:9 / 9:16 等（motion 亦按关键帧尺寸）
+                String aspect = plan.path("aspect_ratio").asText(project.aspectRatio());
+                payload.put("aspect_ratio", aspect);
+                int[] dd = dimsFor(aspect);
+                payload.set("params", mapper().createObjectNode()
+                        .put("width", dd[0]).put("height", dd[1]));
                 if ("clip".equals(req.kind())) {
                     // W5 两段式闸门：motion 需要该镜已确认的关键帧（still 产物）作首帧
                     List<studio.weaveora.asset.domain.Asset> kf =
@@ -159,7 +178,15 @@ public class JobService {
                 payload.put("positive_prompt", plan.path("positive_prompt").asText(""));
                 payload.put("negative_prompt", plan.path("negative_prompt").asText(""));
                 JsonNode params = plan.path("params");
-                payload.set("params", params.deepCopy());
+                com.fasterxml.jackson.databind.node.ObjectNode pnode =
+                        params != null && params.isObject()
+                                ? (com.fasterxml.jackson.databind.node.ObjectNode) params.deepCopy()
+                                : mapper().createObjectNode();
+                // 画面比例决定生成尺寸（LLM 常给 1024×1024，覆盖为项目比例）
+                int[] dd = dimsFor(project.aspectRatio());
+                pnode.put("width", dd[0]).put("height", dd[1]);
+                payload.put("aspect_ratio", project.aspectRatio());
+                payload.set("params", pnode);
                 payload.put("seed", randomSeed());
                 payload.put("title", plan.path("title").asText(""));
                 attachRefs(payload, refs);

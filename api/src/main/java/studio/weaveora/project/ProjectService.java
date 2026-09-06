@@ -220,15 +220,15 @@ public class ProjectService implements ProjectContextPort {
         return page(all, page, size, userId, false);
     }
 
-    /** 集市（已上架且非本人） */
+    /** 集市（已上架且非本人；游客 userId=null 也可浏览） */
     @Transactional(readOnly = true)
     public ProjectPage marketPage(UUID userId, int page, int size) {
         List<Project> all = new ArrayList<>(
                 projects.findByShareStatusAndDeletedAtIsNull("approved"));
-        all.removeIf(p -> p.createdBy().equals(userId));
+        all.removeIf(p -> userId != null && p.createdBy().equals(userId));
         all.sort(Comparator.comparing(Project::updatedAt,
                 Comparator.nullsFirst(Comparator.naturalOrder())).reversed());
-        return page(all, page, size, userId, true);
+        return page(all, page, size, userId, userId != null);
     }
 
     /** 管理后台：待审列表（仅管理员） */
@@ -260,17 +260,19 @@ public class ProjectService implements ProjectContextPort {
         return n;
     }
 
-    /** 集市只读详情（本人外已上架，含赞/藏计数与我的状态） */
+    /** 集市只读详情（本人外已上架，含赞/藏计数与我的状态；游客无我的状态） */
     @Transactional(readOnly = true)
     public ProjectCard marketGet(UUID userId, UUID projectId) {
         Project p = projects.findById(projectId).filter(x -> x.deletedAt() == null
-                && "approved".equals(x.shareStatus()) && !x.createdBy().equals(userId))
+                && "approved".equals(x.shareStatus())
+                && (userId == null || !x.createdBy().equals(userId)))
                 .orElseThrow(() -> new BizException(ErrorCode.NOT_FOUND, "集市项目不存在或不可见"));
+        boolean mine = userId != null;
         return toCardFull(p, ownerName(p.createdBy()),
                 marks.countByProjectIdAndKind(projectId, "like"),
                 marks.countByProjectIdAndKind(projectId, "fav"),
-                marks.existsByProjectIdAndUserIdAndKind(projectId, userId, "like"),
-                marks.existsByProjectIdAndUserIdAndKind(projectId, userId, "fav"));
+                mine && marks.existsByProjectIdAndUserIdAndKind(projectId, userId, "like"),
+                mine && marks.existsByProjectIdAndUserIdAndKind(projectId, userId, "fav"));
     }
 
     /** 点赞/收藏切换（集市可见项目；一用户一票） */
@@ -294,6 +296,38 @@ public class ProjectService implements ProjectContextPort {
     }
 
     public record MarkToggle(String kind, boolean active, long count) {
+    }
+
+    /** 集市只读：资产列表（still/clip/master；不含参考图），跨工作区可见 */
+    @Transactional(readOnly = true)
+    public List<MarketAsset> listMarketAssets(UUID userId, UUID projectId) {
+        Project p = projects.findById(projectId).filter(x -> x.deletedAt() == null
+                && "approved".equals(x.shareStatus()) && !x.createdBy().equals(userId))
+                .orElseThrow(() -> new BizException(ErrorCode.NOT_FOUND, "集市项目不存在或不可见"));
+        return assets.findByProjectIdAndWorkspaceIdOrderByCreatedAtDesc(
+                        projectId, p.workspaceId()).stream()
+                .filter(a -> List.of("still", "clip", "master").contains(a.kind()))
+                .map(a -> new MarketAsset(a.id(), a.kind(), a.mime(), a.width(), a.height(), a.durationMs()))
+                .toList();
+    }
+
+    /** 集市只读：下载/播放某资产字节（跨工作区） */
+    @Transactional(readOnly = true)
+    public java.util.Optional<Preview> downloadMarketAsset(UUID userId, UUID projectId, UUID assetId) {
+        Project p = projects.findById(projectId).filter(x -> x.deletedAt() == null
+                && "approved".equals(x.shareStatus()) && !x.createdBy().equals(userId))
+                .orElse(null);
+        if (p == null) return java.util.Optional.empty();
+        Asset a = assets.findById(assetId).filter(x -> x.projectId().equals(projectId)
+                && List.of("still", "clip", "master").contains(x.kind())).orElse(null);
+        if (a == null) return java.util.Optional.empty();
+        StoragePort.StoredObject obj = storage.get(a.storageKey());
+        if (obj == null) return java.util.Optional.empty();
+        return java.util.Optional.of(new Preview(a.storageKey(), obj.contentType(), obj.stream()));
+    }
+
+    public record MarketAsset(UUID id, String kind, String mime, Integer width, Integer height,
+                              Integer durationMs) {
     }
 
     /** 集市项目最新图片资产预览：非本人已上架任意登录可见；管理员可见任意项目（待审/驳回也用） */

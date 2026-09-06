@@ -94,3 +94,28 @@ export async function toggleMark(projectId: string, kind: 'like' | 'fav'): Promi
     body: {},
   })
 }
+
+/** 集市只读资产（still/clip/master） */
+export interface MarketAsset {
+  id: string
+  kind: 'still' | 'clip' | 'master' | string
+  mime: string
+  width: number | null
+  height: number | null
+  durationMs: number | null
+}
+
+/** 集市项目资产列表（公开读） */
+export async function listMarketAssets(projectId: string): Promise<MarketAsset[]> {
+  return request<MarketAsset[]>(`/api/v1/projects/marketplace/${projectId}/assets`)
+}
+
+/** 集市资产字节（图/视频，公开读） */
+export async function fetchMarketAssetBlob(projectId: string, assetId: string): Promise<Blob | null> {
+  const { accessToken } = loadTokens()
+  const resp = await fetch(`${API_BASE}/api/v1/projects/marketplace/${projectId}/assets/${assetId}`, {
+    headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : {},
+  })
+  if (!resp.ok) return null
+  return resp.blob()
+}

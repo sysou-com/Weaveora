@@ -42,6 +42,8 @@ public class SecurityConfig {
                 .sessionManagement(sm -> sm.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 .authorizeHttpRequests(auth -> auth
                         .requestMatchers(HttpMethod.POST, "/api/v1/auth/**").permitAll()
+                        // 集市浏览/预览/资产读公开（点赞/收藏/审批仍走鉴权 POST）
+                        .requestMatchers(HttpMethod.GET, "/api/v1/projects/marketplace/**").permitAll()
                         .requestMatchers("/api/v1/me", "/api/v1/projects/**").authenticated()
                         .requestMatchers("/api/v1/assets/**", "/api/v1/exports/**").authenticated()
                         .requestMatchers("/swagger-ui/**", "/swagger-ui.html", "/v3/api-docs/**").permitAll()
