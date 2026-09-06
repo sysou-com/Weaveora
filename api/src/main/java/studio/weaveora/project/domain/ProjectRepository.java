@@ -11,4 +11,10 @@ public interface ProjectRepository extends JpaRepository<Project, UUID> {
     List<Project> findByWorkspaceIdAndDeletedAtIsNullOrderByCreatedAtDesc(UUID workspaceId);
 
     Optional<Project> findByWorkspaceIdAndIdAndDeletedAtIsNull(UUID workspaceId, UUID id);
+
+    /** 集市：已上架（approved） */
+    List<Project> findByShareStatusAndDeletedAtIsNull(String shareStatus);
+
+    /** 管理后台：待审/驳回（pending/rejected） */
+    List<Project> findByShareStatusInAndDeletedAtIsNull(List<String> shareStatuses);
 }

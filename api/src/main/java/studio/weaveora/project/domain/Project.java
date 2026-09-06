@@ -49,6 +49,13 @@ public class Project {
     @Column(name = "approved_revision_id")
     private UUID approvedRevisionId;
 
+    /** 项目集市：null=未分享 | pending=待审 | approved=已上架 | rejected=驳回 */
+    @Column(name = "share_status")
+    private String shareStatus;
+
+    @Column(name = "shared_at")
+    private OffsetDateTime sharedAt;
+
     @CreationTimestamp
     @Column(name = "created_at", nullable = false, updatable = false)
     private OffsetDateTime createdAt;
@@ -94,6 +101,29 @@ public class Project {
         this.updatedAt = OffsetDateTime.now();
     }
 
+    /** 提交分享（集市待审） */
+    public void submitShare() {
+        this.shareStatus = "pending";
+        this.sharedAt = OffsetDateTime.now();
+        this.updatedAt = OffsetDateTime.now();
+    }
+
+    /** 软删除 */
+    public void markDeleted() {
+        this.deletedAt = OffsetDateTime.now();
+        this.updatedAt = OffsetDateTime.now();
+    }
+
+    public boolean deleted() {
+        return this.deletedAt != null;
+    }
+
+    /** 管理审批：approved | rejected */
+    public void reviewShare(boolean approved) {
+        this.shareStatus = approved ? "approved" : "rejected";
+        this.updatedAt = OffsetDateTime.now();
+    }
+
     /** 已确认版本是否可编辑判定：directing/draft 且未钉版本。 */
     public boolean editable() {
         return this.approvedRevisionId == null;
@@ -109,6 +139,9 @@ public class Project {
     public UUID styleTemplateId() { return styleTemplateId; }
     public String status() { return status; }
     public UUID approvedRevisionId() { return approvedRevisionId; }
+    public String shareStatus() { return shareStatus; }
+    public OffsetDateTime sharedAt() { return sharedAt; }
+    public OffsetDateTime deletedAt() { return deletedAt; }
     public OffsetDateTime createdAt() { return createdAt; }
     public OffsetDateTime updatedAt() { return updatedAt; }
 }

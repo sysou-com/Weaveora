@@ -7,7 +7,9 @@ import studio.weaveora.project.api.BriefResponse;
 import studio.weaveora.project.api.CreateBriefRequest;
 import studio.weaveora.project.api.CreateProjectRequest;
 import studio.weaveora.project.api.ProjectContextPort;
+import studio.weaveora.project.api.ProjectCard;
 import studio.weaveora.project.api.ProjectMapper;
+import studio.weaveora.project.api.ProjectPage;
 import studio.weaveora.project.api.ProjectResponse;
 import studio.weaveora.project.domain.Brief;
 import studio.weaveora.project.domain.BriefRepository;
@@ -15,10 +17,24 @@ import studio.weaveora.project.domain.Project;
 import studio.weaveora.project.domain.ProjectRepository;
 import studio.weaveora.shared.api.BizException;
 import studio.weaveora.shared.api.ErrorCode;
+import studio.weaveora.asset.domain.Asset;
+import studio.weaveora.asset.domain.AssetRepository;
+import studio.weaveora.identity.domain.User;
+import studio.weaveora.identity.domain.UserRepository;
+import studio.weaveora.infra.storage.StoragePort;
 
+import java.io.InputStream;
 import java.time.OffsetDateTime;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
+import java.util.function.Function;
+import java.util.stream.Collectors;
 
 /** 项目与 Brief（§17.2 / §28.1-3），全部带 workspace_id + membership 校验。
  *  同时实现 ProjectContextPort，供 director/job 模块经 *.api 端口推进状态机（§16.2/§16.3）。 */
@@ -33,19 +49,42 @@ public class ProjectService implements ProjectContextPort {
     private final BriefRepository briefs;
     private final WorkspaceGuard guard;
     private final int maxVideoSec; // W8 视频目标时长上限(默认300s)
+    private final AssetRepository assets;
+    private final UserRepository users;
+    private final StoragePort storage;
+    private final String adminEmail;
+    private final boolean restrictCreate;
+    private final String creatorSuffix;
 
     public ProjectService(ProjectRepository projects, BriefRepository briefs, WorkspaceGuard guard,
+                          AssetRepository assets, UserRepository users, StoragePort storage,
                           @org.springframework.beans.factory.annotation.Value(
-                                  "${weaveora.video.max-duration-sec:300}") int maxVideoSec) {
+                                  "${weaveora.video.max-duration-sec:300}") int maxVideoSec,
+                          @org.springframework.beans.factory.annotation.Value(
+                                  "${weaveora.access.admin-email:sysou.com@outlook.com}") String adminEmail,
+                          @org.springframework.beans.factory.annotation.Value(
+                                  "${weaveora.access.restrict-create:false}") boolean restrictCreate,
+                          @org.springframework.beans.factory.annotation.Value(
+                                  "${weaveora.access.creator-suffix:}") String creatorSuffix) {
         this.projects = projects;
         this.briefs = briefs;
         this.guard = guard;
+        this.assets = assets;
+        this.users = users;
+        this.storage = storage;
         this.maxVideoSec = maxVideoSec;
+        this.adminEmail = adminEmail == null ? "" : adminEmail;
+        this.restrictCreate = restrictCreate;
+        this.creatorSuffix = creatorSuffix == null ? "" : creatorSuffix.trim().toLowerCase();
     }
 
     @Transactional
     public ProjectResponse create(UUID userId, UUID workspaceId, CreateProjectRequest req) {
         guard.requireMember(userId, workspaceId);
+        if (restrictCreate && !isAdmin(userId) && !isCreatorSuffix(userId)) {
+            throw new BizException(ErrorCode.FORBIDDEN,
+                    "内测阶段暂未开放新建项目，请联系管理员 sysou.com@outlook.com");
+        }
         String mode = (req.mode() == null || req.mode().isBlank()) ? "image" : req.mode();
         String ratio = (req.aspectRatio() == null || req.aspectRatio().isBlank()) ? "16:9" : req.aspectRatio();
         if (!ALLOWED_MODES.contains(mode)) {
@@ -126,6 +165,176 @@ public class ProjectService implements ProjectContextPort {
         return briefs.findByProjectIdAndWorkspaceIdOrderByCreatedAtDesc(projectId, workspaceId).stream()
                 .map(this::toBriefResponse)
                 .toList();
+    }
+
+    // ---------- 项目集市 / 管理（内测） ----------
+
+    /** 管理态：批量删除（仅本人创建的项目；管理员可删任何） */
+    @Transactional
+    public int deleteBatch(UUID userId, UUID workspaceId, List<UUID> projectIds) {
+        guard.requireMember(userId, workspaceId);
+        boolean admin = isAdmin(userId);
+        int removed = 0;
+        for (UUID id : projectIds) {
+            Project p = projects.findByWorkspaceIdAndIdAndDeletedAtIsNull(workspaceId, id).orElse(null);
+            if (p == null) continue;
+            if (!admin && !p.createdBy().equals(userId)) continue;
+            p.markDeleted();
+            projects.save(p);
+            removed++;
+        }
+        return removed;
+    }
+
+    /** 提交分享（客户 → 集市待审） */
+    @Transactional
+    public ProjectCard share(UUID userId, UUID workspaceId, UUID projectId) {
+        guard.requireMember(userId, workspaceId);
+        Project p = findInWorkspace(workspaceId, projectId);
+        if (!p.createdBy().equals(userId) && !isAdmin(userId)) {
+            throw new BizException(ErrorCode.FORBIDDEN, "仅项目创建者可分享");
+        }
+        p.submitShare();
+        projects.save(p);
+        return toCard(p, ownerName(p.createdBy()));
+    }
+
+    /** 我的项目（分页，更新时间倒序） */
+    @Transactional(readOnly = true)
+    public ProjectPage ownPage(UUID userId, UUID workspaceId, int page, int size) {
+        guard.requireMember(userId, workspaceId);
+        List<Project> all = new ArrayList<>(
+                projects.findByWorkspaceIdAndDeletedAtIsNullOrderByCreatedAtDesc(workspaceId));
+        all.sort(Comparator.comparing(Project::updatedAt,
+                Comparator.nullsFirst(Comparator.naturalOrder())).reversed());
+        return page(all, page, size);
+    }
+
+    /** 集市（已上架且非本人） */
+    @Transactional(readOnly = true)
+    public ProjectPage marketPage(UUID userId, int page, int size) {
+        List<Project> all = new ArrayList<>(
+                projects.findByShareStatusAndDeletedAtIsNull("approved"));
+        all.removeIf(p -> p.createdBy().equals(userId));
+        all.sort(Comparator.comparing(Project::updatedAt,
+                Comparator.nullsFirst(Comparator.naturalOrder())).reversed());
+        return page(all, page, size);
+    }
+
+    /** 管理后台：待审列表（仅管理员） */
+    @Transactional(readOnly = true)
+    public ProjectPage pendingPage(UUID userId, int page, int size) {
+        requireAdmin(userId);
+        List<Project> all = new ArrayList<>(
+                projects.findByShareStatusInAndDeletedAtIsNull(List.of("pending", "rejected")));
+        all.sort(Comparator.comparing(Project::sharedAt,
+                Comparator.nullsFirst(Comparator.naturalOrder())).reversed());
+        return page(all, page, size);
+    }
+
+    /** 管理审批（批量） */
+    @Transactional
+    public int review(UUID userId, List<UUID> projectIds, boolean approved) {
+        requireAdmin(userId);
+        int n = 0;
+        for (UUID id : projectIds) {
+            var opt = projects.findById(id);
+            if (opt.isEmpty()) continue;
+            Project p = opt.get();
+            if (p.deletedAt() == null && "pending".equals(p.shareStatus())) {
+                p.reviewShare(approved);
+                projects.save(p);
+                n++;
+            }
+        }
+        return n;
+    }
+
+    /** 集市只读详情（本人外已上架） */
+    @Transactional(readOnly = true)
+    public ProjectCard marketGet(UUID userId, UUID projectId) {
+        Project p = projects.findById(projectId).filter(x -> x.deletedAt() == null
+                && "approved".equals(x.shareStatus()) && !x.createdBy().equals(userId))
+                .orElseThrow(() -> new BizException(ErrorCode.NOT_FOUND, "集市项目不存在或不可见"));
+        return toCard(p, ownerName(p.createdBy()));
+    }
+
+    /** 集市项目最新图片资产预览（任意登录用户可取，无需同一工作区） */
+    @Transactional(readOnly = true)
+    public java.util.Optional<Preview> preview(UUID userId, UUID projectId) {
+        Project p = projects.findById(projectId).filter(x -> x.deletedAt() == null
+                && "approved".equals(x.shareStatus())).orElse(null);
+        if (p == null || p.createdBy().equals(userId)) {
+            return java.util.Optional.empty();
+        }
+        Asset img = assets.findFirstByProjectIdAndKindInOrderByCreatedAtDesc(
+                projectId, List.of("still", "reference"));
+        if (img == null) {
+            return java.util.Optional.empty();
+        }
+        StoragePort.StoredObject obj = storage.get(img.storageKey());
+        if (obj == null) {
+            return java.util.Optional.empty();
+        }
+        return java.util.Optional.of(new Preview(img.storageKey(), obj.contentType(), obj.stream()));
+    }
+
+    public record Preview(String storageKey, String mime, InputStream stream) {
+    }
+
+    // ---------- 内部工具 ----------
+
+    private ProjectPage page(List<Project> all, int page, int size) {
+        int p = Math.max(0, page);
+        int s = Math.max(1, Math.min(size, 50));
+        int from = Math.min(p * s, all.size());
+        int to = Math.min(from + s, all.size());
+        List<Project> slice = all.subList(from, to);
+        Map<UUID, String> names = ownerNames(slice);
+        List<ProjectCard> items = slice.stream()
+                .map(x -> toCard(x, names.getOrDefault(x.createdBy(), "")))
+                .collect(Collectors.toList());
+        return new ProjectPage(items, p, s, all.size(), to < all.size());
+    }
+
+    private ProjectCard toCard(Project p, String ownerName) {
+        return new ProjectCard(p.id(), p.title(), p.mode(), p.aspectRatio(), p.durationSec(),
+                p.status(), p.shareStatus(), ownerName, p.createdAt(), p.updatedAt());
+    }
+
+    private Map<UUID, String> ownerNames(List<Project> slice) {
+        Set<UUID> ids = slice.stream().map(Project::createdBy).collect(Collectors.toSet());
+        if (ids.isEmpty()) return Map.of();
+        Map<UUID, String> out = new HashMap<>();
+        for (User u : users.findAllById(ids)) {
+            out.put(u.id(), u.displayName());
+        }
+        return out;
+    }
+
+    private String ownerName(UUID userId) {
+        if (userId == null) return "";
+        return users.findById(userId).map(User::displayName).orElse("");
+    }
+
+    private String emailOf(UUID userId) {
+        return users.findById(userId).map(User::email).orElse("");
+    }
+
+    private boolean isAdmin(UUID userId) {
+        String em = emailOf(userId);
+        return !adminEmail.isBlank() && em.equalsIgnoreCase(adminEmail);
+    }
+
+    private boolean isCreatorSuffix(UUID userId) {
+        if (creatorSuffix.isBlank()) return false;
+        return emailOf(userId).toLowerCase().endsWith(creatorSuffix);
+    }
+
+    private void requireAdmin(UUID userId) {
+        if (!isAdmin(userId)) {
+            throw new BizException(ErrorCode.FORBIDDEN, "仅管理员可操作项目集市审批");
+        }
     }
 
     // ---------- ProjectContextPort（director 等模块使用） ----------

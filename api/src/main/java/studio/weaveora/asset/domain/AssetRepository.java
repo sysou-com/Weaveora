@@ -17,4 +17,7 @@ public interface AssetRepository extends JpaRepository<Asset, UUID> {
     List<Asset> findByIdInAndWorkspaceId(List<UUID> ids, UUID workspaceId);
 
     List<Asset> findByShotIdAndWorkspaceIdAndKindOrderByCreatedAtDesc(UUID shotId, UUID workspaceId, String kind);
+
+    /** 项目最新图片资产（still/参考图均可，供列表缩略/集市预览） */
+    Asset findFirstByProjectIdAndKindInOrderByCreatedAtDesc(UUID projectId, List<String> kinds);
 }

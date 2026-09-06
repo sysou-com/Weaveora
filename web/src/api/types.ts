@@ -19,6 +19,29 @@ export interface Me {
   workspaces: WorkspaceInfo[]
 }
 
+/** 列表卡片（我的项目 / 集市 / 待审） */
+export interface ProjectCard {
+  id: string
+  title: string
+  mode: ProjectMode
+  aspectRatio: string
+  durationSec: number | null
+  status: string
+  shareStatus: string | null
+  ownerName: string
+  createdAt: string
+  updatedAt: string
+}
+
+/** 分页卡片列表 */
+export interface ProjectPage {
+  items: ProjectCard[]
+  page: number
+  size: number
+  total: number
+  hasMore: boolean
+}
+
 /** 项目模式（§7.1） */
 export type ProjectMode = 'image' | 'video' | 'mixed'
 
