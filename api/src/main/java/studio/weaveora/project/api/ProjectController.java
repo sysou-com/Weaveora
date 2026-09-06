@@ -91,13 +91,15 @@ public class ProjectController {
         return ResponseEntity.ok(Map.of("deleted", n));
     }
 
-    /** 提交分享（进入集市待审） */
+    /** 提交分享（进入集市待审；assetIds=仅所选素材） */
     @PostMapping("/{projectId}/share")
     public ResponseEntity<ProjectCard> share(
             HttpServletRequest request,
             @RequestHeader(value = WORKSPACE_HEADER, required = false) String workspaceId,
-            @PathVariable UUID projectId) {
-        return ResponseEntity.ok(projectService.share(uid(request), ws(workspaceId), projectId));
+            @PathVariable UUID projectId,
+            @RequestBody(required = false) ShareProjectRequest req) {
+        java.util.List<UUID> ids = req == null ? null : req.assetIds();
+        return ResponseEntity.ok(projectService.share(uid(request), ws(workspaceId), projectId, ids));
     }
 
     /** 集市（已上架，非本人） */

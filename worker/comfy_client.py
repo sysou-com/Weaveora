@@ -334,26 +334,20 @@ def generate_motion(client_id, payload, progress_fn=None):
     positive = payload.get("positive_prompt", "")
     negative = payload.get("negative_prompt", "")
     fps = int(payload.get("fps") or 16)
-    # 关键帧实际尺寸决定输出尺寸（16 对齐），保证 enc/emb/dec 一致（否则 wrapper rope 断言失败）
+    # motion 固定 512×512（ti2v5B wrapper 兼容 bucket），关键帧缩放后上传保证一致
     try:
         from PIL import Image as _PIL
-        _im = _PIL.open(io.BytesIO(data))
-        _w, _h = _im.size
+        _im = _PIL.open(io.BytesIO(data)).convert("RGB").resize((512, 512), _PIL.LANCZOS)
+        _buf = io.BytesIO()
+        _im.save(_buf, format="PNG")
+        data = _buf.getvalue()
     except Exception:
-        _w, _h = None, None
-    if _w and _h:
-        def _snap(v):
-            v = max(256, min(1280, v))
-            return int((v + 15) / 16) * 16
-        # 长边封顶 832，避免高分辨率解码 OOM
-        scale = 832.0 / max(_w, _h)
-        if scale < 1.0:
-            _w, _h = int(_w * scale), int(_h * scale)
-        params2 = dict(payload.get("params") or {})
-        params2["width"] = _snap(_w)
-        params2["height"] = _snap(_h)
-        payload = dict(payload)
-        payload["params"] = params2
+        pass
+    params2 = dict(payload.get("params") or {})
+    params2["width"] = 512
+    params2["height"] = 512
+    payload = dict(payload)
+    payload["params"] = params2
     prefix = "weaveora_mot_" + _uuid.uuid4().hex[:6]
     if progress_fn:
         progress_fn(35, "sampling")

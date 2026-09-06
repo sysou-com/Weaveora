@@ -271,12 +271,13 @@ function removeAssetOne(id: string): void {
   void removeAssets([id])
 }
 
-/** 资产库管理态：分享选中（整项目提交集市待审；集市后续开放素材只读浏览） */
+/** 资产库管理态：分享选中素材（仅将所选上架集市；待审） */
 async function shareSelectedAssets(): Promise<void> {
-  if (!window.confirm('将当前项目提交到集市（等待管理员审批）？集市内容只读，其它用户可浏览。')) return
+  if (!galSel.value.length) return
+  if (!window.confirm(`将所选 ${galSel.value.length} 个素材提交到集市（等待管理员审批）？集市仅展示这些素材，只读浏览。`)) return
   try {
-    await shareProject(workspaceId.value, projectId.value)
-    message.success('已提交集市，等待管理员审批')
+    await shareProject(workspaceId.value, projectId.value, [...galSel.value])
+    message.success('已提交集市（仅所选素材），等待管理员审批')
   } catch (e) {
     message.error(e instanceof Error ? e.message : '分享失败')
   }
@@ -350,10 +351,20 @@ const jobs = useQuery({
 const activeJobCount = computed(() => (jobs.data.value ?? []).filter((j) =>
   ['queued', 'running'].includes(j.state)).length)
 
+// 轮询只针对“新鲜”任务（创建 25 分钟内）；超时的 queued/running 视为卡死，不再刷接口
+const freshActiveCount = computed(() => {
+  const now = Date.now()
+  return (jobs.data.value ?? []).filter((j) => {
+    if (!['queued', 'running'].includes(j.state)) return false
+    const age = now - new Date(j.createdAt).getTime()
+    return age < 25 * 60 * 1000
+  }).length
+})
+
 // 有进行中任务时 3s 轮询（避免查询配置自引用）
 let jobsTimer: ReturnType<typeof setInterval> | undefined
 watch(
-  activeJobCount,
+  freshActiveCount,
   (n) => {
     if (n > 0 && !jobsTimer) {
       jobsTimer = setInterval(() => {
@@ -847,7 +858,7 @@ const shotTotal = computed(() => {
                 {{ isVideoNow ? '生成关键帧(still)' : '开始生成' }}
               </NButton>
             </template>
-            <span v-else class="state-hint font-mono">{{ activeJobCount }} 个进行中，实时刷新…</span>
+            <span v-else class="state-hint font-mono">{{ freshActiveCount || activeJobCount }} 个进行中，实时刷新…</span>
           </div>
         </div>
 

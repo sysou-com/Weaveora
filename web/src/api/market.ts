@@ -21,7 +21,7 @@ export async function listOwnPage(
   })
 }
 
-/** 项目集市（已上架，非本人） */
+/** 项目精选（已上架，非本人） */
 export async function listMarketPage(page = 0, size = 8): Promise<ProjectPage> {
   return request<ProjectPage>(q('/api/v1/projects/marketplace', page, size))
 }
@@ -43,15 +43,16 @@ export async function deleteProjects(
   })
 }
 
-/** 提交分享（进入待审） */
+/** 提交分享（进入待审；assetIds=仅上架所选素材，省略=整项目素材） */
 export async function shareProject(
   workspaceId: string,
   projectId: string,
+  assetIds?: string[],
 ): Promise<ProjectCard> {
   return request<ProjectCard>(`/api/v1/projects/${projectId}/share`, {
     method: 'POST',
     headers: { [WORKSPACE_HEADER]: workspaceId },
-    body: {},
+    body: assetIds && assetIds.length ? { assetIds } : {},
   })
 }
 

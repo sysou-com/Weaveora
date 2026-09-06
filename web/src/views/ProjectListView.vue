@@ -298,7 +298,7 @@ const shareLabel = (s: string | null): string =>
         <p class="eyebrow font-mono">PROJECTS</p>
         <h1 class="title">项目</h1>
         <p class="desc text-secondary">
-          {{ isAdmin ? '管理你的项目与项目集市' : '创作工作台 · 内测阶段由管理员开通创作' }}
+          {{ isAdmin ? '管理你的项目与项目精选' : '创作工作台 · 内测阶段由管理员开通创作' }}
         </p>
       </div>
       <div class="head-actions">
@@ -442,10 +442,10 @@ const shareLabel = (s: string | null): string =>
       <div v-else class="empty-state"><p class="text-secondary">暂无待审分享。</p></div>
     </section>
 
-    <!-- ============ 三、项目集市 ============ -->
+    <!-- ============ 三、项目精选 ============ -->
     <section class="zone" data-testid="zone-market">
       <div class="zone-head">
-        <h2 class="zone-title">项目集市</h2>
+        <h2 class="zone-title">项目精选</h2>
         <span class="zone-hint text-secondary">管理员审核通过的分享项目</span>
       </div>
       <div v-if="marketPending" class="grid">

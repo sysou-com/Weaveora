@@ -92,10 +92,10 @@ async function downloadPreview(id: string): Promise<void> {
   <div class="page">
     <header class="page-head">
       <div class="head-copy">
-        <p class="eyebrow font-mono">MARKETPLACE · 项目集市</p>
-        <h1 class="title">项目集市</h1>
+        <p class="eyebrow font-mono">MARKETPLACE · 项目精选</p>
+        <h1 class="title">项目精选</h1>
         <p class="desc text-secondary">
-          管理员审核通过的分享项目；集市内容仅供浏览与点赞收藏，不能编辑。
+          精选值得一看的作品与素材：创作者分享、管理员审核后在此展示；可浏览、点赞、收藏与下载预览，创作请前往「我的项目」。
         </p>
       </div>
     </header>

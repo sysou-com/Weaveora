@@ -76,9 +76,9 @@ function register(): void {
 <style scoped>
 .pub-shell { min-height: 100vh; display: flex; flex-direction: column; }
 .pub-topbar {
-  position: sticky; top: 0; z-index: 20; height: 60px;
+  position: sticky; top: 0; z-index: 20; height: 66px;
   display: flex; align-items: center; gap: 18px;
-  padding: 0 28px;
+  padding: 0 30px;
   background: rgba(11, 11, 10, 0.86); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
   border-bottom: 1px solid var(--wv-divider);
 }
@@ -87,12 +87,12 @@ function register(): void {
   display: inline-flex; align-items: center; gap: 9px; padding: 4px 6px; margin-left: -6px;
   background: none; border: none; color: var(--wv-text); cursor: pointer; border-radius: var(--wv-radius-s);
 }
-.brand-name { font-size: 19px; line-height: 1; }
+.brand-name { font-size: 21px; line-height: 1; }
 .brand-en { font-size: 9px; letter-spacing: 0.3em; color: var(--wv-text-3); }
-.pubnav { display: flex; align-items: center; gap: 4px; margin: 0 auto; }
+.pubnav { display: flex; align-items: center; gap: 6px; margin: 0 auto; }
 .nav-link {
-  appearance: none; background: none; border: none; color: var(--wv-text-3);
-  font-size: 14px; padding: 8px 12px; border-radius: 8px; cursor: pointer;
+  appearance: none; background: none; border: none; position: relative; color: var(--wv-text-2);
+  font-size: 15.5px; padding: 10px 15px; border-radius: 9px; cursor: pointer;
 }
 .nav-link:hover { color: var(--wv-text); background: var(--wv-surface); }
 .nav-link.on { color: var(--wv-accent-text); background: var(--wv-accent-soft); }

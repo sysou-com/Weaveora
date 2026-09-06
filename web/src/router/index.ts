@@ -12,7 +12,7 @@ const router = createRouter({
       path: '/',
       name: 'pub-home',
       component: () => import('@/views/PubHomeView.vue'),
-      meta: { public: true, title: '项目集市 · 织影 Weaveora' },
+      meta: { public: true, title: '项目精选 · 织影 Weaveora' },
     },
     {
       path: '/login',
@@ -47,7 +47,7 @@ const router = createRouter({
           path: '',
           name: 'home',
           component: () => import('@/views/MarketHomeView.vue'),
-          meta: { title: '项目集市 · 织影 Weaveora' },
+          meta: { title: '项目精选 · 织影 Weaveora' },
         },
         {
           path: 'my',

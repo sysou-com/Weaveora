@@ -143,12 +143,12 @@ const contact = { qq: '358532433', email: 'sysou.com@outlook.com' }
   position: sticky;
   top: 0;
   z-index: 20;
-  height: 60px;
+  height: 66px;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
-  padding: 0 28px;
+  gap: 18px;
+  padding: 0 30px;
   background: rgba(11, 11, 10, 0.86);
   backdrop-filter: blur(14px);
   -webkit-backdrop-filter: blur(14px);
@@ -171,9 +171,9 @@ const contact = { qq: '358532433', email: 'sysou.com@outlook.com' }
   background: var(--wv-surface);
 }
 .brand-name {
-  font-size: 19px;
+  font-size: 21px;
   line-height: 1;
-  letter-spacing: 0.02em;
+  letter-spacing: 0.03em;
 }
 .brand-en {
   font-size: 10px;
@@ -192,18 +192,20 @@ const contact = { qq: '358532433', email: 'sysou.com@outlook.com' }
 .topnav {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 6px;
   margin: 0 auto;
 }
 .nav-link {
   appearance: none;
   background: none;
   border: none;
-  color: var(--wv-text-3);
-  font-size: 14px;
+  position: relative;
+  color: var(--wv-text-2);
+  font-size: 15.5px;
+  letter-spacing: 0.02em;
   line-height: 1;
-  padding: 8px 12px;
-  border-radius: 8px;
+  padding: 10px 15px;
+  border-radius: 9px;
   cursor: pointer;
   transition: color var(--wv-dur) var(--wv-ease), background var(--wv-dur) var(--wv-ease);
 }
@@ -215,8 +217,19 @@ const contact = { qq: '358532433', email: 'sysou.com@outlook.com' }
   color: var(--wv-accent-text);
   background: var(--wv-accent-soft);
 }
-.nav-link.more { display: inline-flex; align-items: center; gap: 4px; }
-.nav-link .caret { font-size: 10px; color: var(--wv-text-4); }
+.nav-link.on::after {
+  content: '';
+  position: absolute;
+  left: 14px;
+  right: 14px;
+  bottom: 5px;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--wv-accent);
+}
+.nav-link.more { display: inline-flex; align-items: center; gap: 5px; }
+.nav-link .caret { font-size: 11px; color: var(--wv-text-4); }
+@media (max-width: 900px) { .topnav { display: none; } }
 .contact-line { margin: 0 0 8px; font-size: 14px; line-height: 1.8; }
 .contact-line a { color: var(--wv-accent-text); }
 

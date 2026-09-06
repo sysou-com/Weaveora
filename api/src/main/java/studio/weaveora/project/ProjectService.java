@@ -17,6 +17,8 @@ import studio.weaveora.project.domain.MarketMark;
 import studio.weaveora.project.domain.MarketMarkRepository;
 import studio.weaveora.project.domain.Project;
 import studio.weaveora.project.domain.ProjectRepository;
+import studio.weaveora.project.domain.ShareAsset;
+import studio.weaveora.project.domain.ShareAssetRepository;
 import studio.weaveora.shared.api.BizException;
 import studio.weaveora.shared.api.ErrorCode;
 import studio.weaveora.asset.domain.Asset;
@@ -55,13 +57,14 @@ public class ProjectService implements ProjectContextPort {
     private final UserRepository users;
     private final StoragePort storage;
     private final MarketMarkRepository marks;
+    private final ShareAssetRepository shareAssets;
     private final String adminEmail;
     private final boolean restrictCreate;
     private final String creatorSuffix;
 
     public ProjectService(ProjectRepository projects, BriefRepository briefs, WorkspaceGuard guard,
                           AssetRepository assets, UserRepository users, StoragePort storage,
-                          MarketMarkRepository marks,
+                          MarketMarkRepository marks, ShareAssetRepository shareAssets,
                           @org.springframework.beans.factory.annotation.Value(
                                   "${weaveora.video.max-duration-sec:300}") int maxVideoSec,
                           @org.springframework.beans.factory.annotation.Value(
@@ -77,6 +80,7 @@ public class ProjectService implements ProjectContextPort {
         this.users = users;
         this.storage = storage;
         this.marks = marks;
+        this.shareAssets = shareAssets;
         this.maxVideoSec = maxVideoSec;
         this.adminEmail = adminEmail == null ? "" : adminEmail;
         this.restrictCreate = restrictCreate;
@@ -196,13 +200,26 @@ public class ProjectService implements ProjectContextPort {
         return removed;
     }
 
-    /** 提交分享（客户 → 集市待审） */
+    /** 提交分享（客户 → 集市待审；assetIds=选中的素材，集市仅展示这些） */
     @Transactional
-    public ProjectCard share(UUID userId, UUID workspaceId, UUID projectId) {
+    public ProjectCard share(UUID userId, UUID workspaceId, UUID projectId, java.util.List<UUID> assetIds) {
         guard.requireMember(userId, workspaceId);
         Project p = findInWorkspace(workspaceId, projectId);
         if (!p.createdBy().equals(userId) && !isAdmin(userId)) {
             throw new BizException(ErrorCode.FORBIDDEN, "仅项目创建者可分享");
+        }
+        if (assetIds != null) {
+            shareAssets.deleteByProjectId(projectId);
+            if (!assetIds.isEmpty()) {
+                Set<UUID> ids = new HashSet<>(assetIds);
+                List<Asset> owned = assets.findAllById(ids);
+                for (Asset a : owned) {
+                    if (a.projectId().equals(projectId)
+                            && List.of("still", "clip", "master").contains(a.kind())) {
+                        shareAssets.save(ShareAsset.create(projectId, a.id()));
+                    }
+                }
+            }
         }
         p.submitShare();
         projects.save(p);
@@ -304,9 +321,11 @@ public class ProjectService implements ProjectContextPort {
         Project p = projects.findById(projectId).filter(x -> x.deletedAt() == null
                 && "approved".equals(x.shareStatus()) && !x.createdBy().equals(userId))
                 .orElseThrow(() -> new BizException(ErrorCode.NOT_FOUND, "集市项目不存在或不可见"));
+        Set<UUID> sel = selectedShareAssets(projectId);
         return assets.findByProjectIdAndWorkspaceIdOrderByCreatedAtDesc(
                         projectId, p.workspaceId()).stream()
                 .filter(a -> List.of("still", "clip", "master").contains(a.kind()))
+                .filter(a -> sel.isEmpty() || sel.contains(a.id()))
                 .map(a -> new MarketAsset(a.id(), a.kind(), a.mime(), a.width(), a.height(), a.durationMs()))
                 .toList();
     }
@@ -318,8 +337,10 @@ public class ProjectService implements ProjectContextPort {
                 && "approved".equals(x.shareStatus()) && !x.createdBy().equals(userId))
                 .orElse(null);
         if (p == null) return java.util.Optional.empty();
+        Set<UUID> sel = selectedShareAssets(projectId);
         Asset a = assets.findById(assetId).filter(x -> x.projectId().equals(projectId)
-                && List.of("still", "clip", "master").contains(x.kind())).orElse(null);
+                && List.of("still", "clip", "master").contains(x.kind())
+                && (sel.isEmpty() || sel.contains(x.id()))).orElse(null);
         if (a == null) return java.util.Optional.empty();
         StoragePort.StoredObject obj = storage.get(a.storageKey());
         if (obj == null) return java.util.Optional.empty();
@@ -342,6 +363,16 @@ public class ProjectService implements ProjectContextPort {
         }
         Asset img = assets.findFirstByProjectIdAndKindInOrderByCreatedAtDesc(
                 projectId, List.of("still", "reference"));
+        if (img != null) {
+            Set<UUID> sel = selectedShareAssets(projectId);
+            if (!sel.isEmpty() && !sel.contains(img.id())) {
+                // 封面优先取自“选中素材”中的图片
+                img = assets.findByProjectIdAndWorkspaceIdOrderByCreatedAtDesc(
+                                projectId, p.workspaceId()).stream()
+                        .filter(a -> sel.contains(a.id()) && List.of("still", "reference").contains(a.kind()))
+                        .findFirst().orElse(null);
+            }
+        }
         if (img == null) {
             return java.util.Optional.empty();
         }
@@ -353,6 +384,16 @@ public class ProjectService implements ProjectContextPort {
     }
 
     public record Preview(String storageKey, String mime, InputStream stream) {
+    }
+
+
+    /** 该集市项目的“选中素材”id 集合（分享时指定；空=老数据全部可见） */
+    private Set<UUID> selectedShareAssets(UUID projectId) {
+        List<ShareAsset> sel = shareAssets.findByProjectId(projectId);
+        if (sel == null || sel.isEmpty()) return java.util.Collections.emptySet();
+        Set<UUID> out = new HashSet<>();
+        for (ShareAsset sa : sel) out.add(sa.assetId());
+        return out;
     }
 
     // ---------- 内部工具 ----------
@@ -417,6 +458,7 @@ public class ProjectService implements ProjectContextPort {
     }
 
     private String emailOf(UUID userId) {
+        if (userId == null) return "";
         return users.findById(userId).map(User::email).orElse("");
     }
 
