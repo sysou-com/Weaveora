@@ -287,7 +287,7 @@ def _motion_graph(client_id, payload, positive, negative, first_frame_name, pref
                "inputs": {"model": ["ckpt", 0], "image_embeds": ["emb", 0],
                           "text_embeds": ["txt", 0], "samples": ["enc", 0],
                           "steps": steps, "cfg": cfg, "shift": 8.0, "seed": seed,
-                          "force_offload": True, "scheduler": "euler",
+                          "force_offload": False, "scheduler": "euler",
                           "riflex_freq_index": 0}},
         "dec": {"class_type": "WanVideoDecode",
                 "inputs": {"vae": ["vae", 0], "samples": ["sm", 0],
