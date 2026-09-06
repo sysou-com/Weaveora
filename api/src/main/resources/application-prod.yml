@@ -23,8 +23,8 @@ weaveora:
   security:
     jwt:
       secret: ${WEAVEORA_JWT_SECRET}    # 必填：由 env 文件注入（openssl rand -hex 32）
-      access-ttl: 15m
-      refresh-ttl: 14d
+      access-ttl: ${WEAVEORA_JWT_ACCESS_TTL:2h}
+      refresh-ttl: ${WEAVEORA_JWT_REFRESH_TTL:30d}
   billing:
     mode: ${WEAVEORA_BILLING_MODE:simplified}
   llm:

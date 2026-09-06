@@ -1,7 +1,13 @@
 import { request, API_BASE } from './client'
-import { loadTokens } from './session'
+import { clearTokens, loadTokens } from './session'
 import { WORKSPACE_HEADER } from './projects'
 import type { AssetRef } from './types'
+
+/** 401 = 会话失效 → 清 token 并发全局事件（路由守卫据此跳 /login） */
+function onUnauthorized(): void {
+  clearTokens()
+  window.dispatchEvent(new CustomEvent('weaveora:session-expired'))
+}
 
 /** 上传参考图（W2C，multipart） */
 export async function uploadReference(workspaceId: string, projectId: string, file: File): Promise<AssetRef> {
@@ -17,6 +23,7 @@ export async function uploadReference(workspaceId: string, projectId: string, fi
     body: fd,
   })
   if (!resp.ok) {
+    if (resp.status === 401) onUnauthorized()
     let msg = `上传失败（HTTP ${resp.status}）`
     try {
       const e = (await resp.json()) as { message?: string }
@@ -45,7 +52,10 @@ export async function fetchAssetBlob(workspaceId: string, assetId: string): Prom
       ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
     },
   })
-  if (!resp.ok) return null
+  if (!resp.ok) {
+    if (resp.status === 401) onUnauthorized()
+    return null
+  }
   return resp.blob()
 }
 

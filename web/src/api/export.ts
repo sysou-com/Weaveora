@@ -1,5 +1,5 @@
 import { API_BASE, request } from './client'
-import { loadTokens } from './session'
+import { clearTokens, loadTokens } from './session'
 import { WORKSPACE_HEADER } from './projects'
 import type { AssetRef as AssetLike } from './types'
 
@@ -29,7 +29,13 @@ export async function fetchExportBlob(workspaceId: string, exportId: string): Pr
       ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
     },
   })
-  if (!resp.ok) return null
+  if (!resp.ok) {
+    if (resp.status === 401) {
+      clearTokens()
+      window.dispatchEvent(new CustomEvent('weaveora:session-expired'))
+    }
+    return null
+  }
   return resp.blob()
 }
 

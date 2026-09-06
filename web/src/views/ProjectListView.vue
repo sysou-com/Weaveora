@@ -2,9 +2,10 @@
 import { useQuery } from '@tanstack/vue-query'
 import { ArrowRight, Plus } from 'lucide-vue-next'
 import { NButton, NIcon, NSkeleton } from 'naive-ui'
-import { computed } from 'vue'
+import { computed, onUnmounted, reactive, watch } from 'vue'
 import { useRouter } from 'vue-router'
 
+import { listAssets, fetchAssetBlob } from '@/api/assets'
 import { listProjects } from '@/api/projects'
 import type { Project } from '@/api/types'
 import { useAuthStore } from '@/stores/auth'
@@ -22,6 +23,57 @@ const { data: projects, isPending, isError, refetch } = useQuery({
 })
 
 const count = computed(() => projects.value?.length ?? 0)
+
+// 卡片缩略图：每个项目取“资产库最新一条”产物预览；无资产→系统默认图标
+interface Thumb {
+  state: 'none' | 'loading' | 'ok'
+  mime?: string
+  url?: string
+}
+const thumbs = reactive<Record<string, Thumb>>({})
+const thumbsLoading = new Set<string>()
+
+async function loadThumb(pid: string, ws: string): Promise<void> {
+  if (thumbsLoading.has(pid)) return
+  thumbsLoading.add(pid)
+  thumbs[pid] = { state: 'loading' }
+  try {
+    const list = await listAssets(ws, pid)
+    const latest = list.find((a) => a.kind !== 'reference') ?? list[0]
+    if (!latest) {
+      thumbs[pid] = { state: 'none' }
+      return
+    }
+    const blob = await fetchAssetBlob(ws, latest.id)
+    if (!blob) {
+      thumbs[pid] = { state: 'none' }
+      return
+    }
+    thumbs[pid] = { state: 'ok', mime: latest.mime, url: URL.createObjectURL(blob) }
+  } catch {
+    thumbs[pid] = { state: 'none' }
+  } finally {
+    thumbsLoading.delete(pid)
+  }
+}
+
+watch(
+  () => projects.value,
+  (list) => {
+    const ws = workspaceId.value
+    if (!ws) return
+    for (const p of list ?? []) {
+      void loadThumb(p.id, ws)
+    }
+  },
+  { immediate: true },
+)
+
+onUnmounted(() => {
+  for (const t of Object.values(thumbs)) {
+    if (t.url) URL.revokeObjectURL(t.url)
+  }
+})
 
 function openProject(project: Project): void {
   void router.push({ name: 'project-detail', params: { projectId: project.id } })
@@ -98,6 +150,30 @@ function goNew(): void {
         :data-testid="`project-card-${p.mode}`"
         @click="openProject(p)"
       >
+        <div class="thumb" data-testid="project-thumb">
+          <template v-if="thumbs[p.id]?.state === 'ok' && thumbs[p.id]?.url">
+            <video
+              v-if="(thumbs[p.id]?.mime ?? '').startsWith('video/')"
+              :src="thumbs[p.id]?.url"
+              class="thumb-media thumb-video"
+              muted
+              playsinline
+              preload="metadata"
+              loading="lazy"
+            />
+            <img v-else :src="thumbs[p.id]?.url" class="thumb-media" alt="" loading="lazy" />
+          </template>
+          <div v-else class="thumb-ph">
+            <svg width="34" height="34" viewBox="0 0 96 96" fill="none" aria-hidden="true">
+              <rect x="12" y="22" width="72" height="52" rx="9" stroke="#6F6A60" stroke-width="3" />
+              <rect x="22" y="32" width="52" height="32" rx="4" stroke="#3A362F" stroke-width="3" />
+              <path d="M20 47H76" stroke="#3A362F" stroke-width="3" />
+              <path d="M40 32L40 64M56 32L56 64" stroke="#8FB9B4" stroke-width="3" />
+            </svg>
+            <span v-if="thumbs[p.id]?.state === 'loading'" class="thumb-load font-mono">加载预览…</span>
+            <span v-else class="thumb-load font-mono">待生成</span>
+          </div>
+        </div>
         <div class="card-top">
           <span class="card-mode font-mono">{{ modeLabel(p.mode) }}</span>
           <span class="card-status font-mono" :title="p.status">{{ p.status }}</span>
@@ -177,6 +253,41 @@ function goNew(): void {
   display: flex;
   align-items: center;
   justify-content: space-between;
+}
+
+/* 卡片缩略图：最新资产预览 / 默认图标 */
+.thumb {
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--wv-surface-sunken);
+  border: 1px solid var(--wv-line);
+  pointer-events: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.thumb-media {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.thumb-video {
+  background: #000;
+}
+.thumb-ph {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  color: var(--wv-text-4);
+}
+.thumb-load {
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  color: var(--wv-text-4);
 }
 .card-mode {
   font-size: 11px;

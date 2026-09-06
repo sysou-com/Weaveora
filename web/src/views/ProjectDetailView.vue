@@ -340,6 +340,13 @@ const imgCount = ref(1)
 const genBusy = ref(false)
 const cancelBusy = ref<string | null>(null)
 
+// 任务默认展示 10 条，点“查看更多”逐次再展示 10 条
+const jobLimit = ref(10)
+const visibleJobs = computed(() => (jobs.data.value ?? []).slice(0, jobLimit.value))
+function showMoreJobs(): void {
+  jobLimit.value += 10
+}
+
 async function startGeneration(): Promise<void> {
   if (!selectedRevId.value) return
   genBusy.value = true
@@ -471,6 +478,12 @@ const exportTotalSec = computed(() => {
   return last ? last.start + last.dur : 0
 })
 const exportTotal = computed(() => timecode(exportTotalSec.value))
+// 成片时间线同样默认 10 条 + 查看更多
+const tlLimit = ref(10)
+const visibleExportRows = computed(() => exportRows.value.slice(0, tlLimit.value))
+function showMoreTl(): void {
+  tlLimit.value += 10
+}
 async function doExport(): Promise<void> {
   if (!selectedRevId.value) return
   exportBusy.value = true
@@ -822,7 +835,7 @@ const shotTotal = computed(() => {
           </button>
         </div>
         <div v-if="(jobs.data.value ?? []).length" class="job-list">
-          <div v-for="j in jobs.data.value ?? []" :key="j.id" class="job-row" :data-testid="'job-' + j.id.slice(0, 8)">
+          <div v-for="j in visibleJobs" :key="j.id" class="job-row" :data-testid="'job-' + j.id.slice(0, 8)">
             <label v-if="isJobActionable(j)" class="row-check">
               <input type="checkbox" :checked="jobSel.includes(j.id)" @change="toggleJobSel(j.id)" />
             </label>
@@ -855,6 +868,15 @@ const shotTotal = computed(() => {
               </button>
             </template>
           </div>
+          <button
+            v-if="(jobs.data.value ?? []).length > jobLimit"
+            type="button"
+            class="op panel-more"
+            data-testid="btn-more-jobs"
+            @click="showMoreJobs"
+          >
+            查看更多（余 {{ (jobs.data.value ?? []).length - jobLimit }} 条）
+          </button>
         </div>
         <p v-else-if="detApproved" class="job-empty text-secondary">
           方案已确认 —— 点「{{ isVideoNow ? '生成关键帧(still)' : '开始生成' }}」发起（先出静帧关键帧，确认后再运动）。
@@ -939,13 +961,22 @@ const shotTotal = computed(() => {
           </div>
         </div>
         <div class="tl-rows">
-          <div v-for="r in exportRows" :key="r.rec.id" class="tl-row">
+          <div v-for="r in visibleExportRows" :key="r.rec.id" class="tl-row">
             <span class="tl-no font-mono">SHOT {{ r.rec.shotNo }}</span>
             <span class="tl-tc font-mono">{{ timecode(r.start) }}–{{ timecode(r.start + r.dur) }}</span>
             <div class="tl-bar"><span class="tl-fill" :style="{ width: (r.dur / Math.max(exportTotalSec, 1)) * 100 + '%' }" /></div>
             <span :class="['tl-state', r.hasMedia ? 'ok' : 'empty']">{{ r.hasMedia ? '素材已就绪' : '待生成' }}</span>
           </div>
         </div>
+        <button
+          v-if="exportRows.length > tlLimit"
+          type="button"
+          class="op panel-more"
+          data-testid="btn-more-tl"
+          @click="showMoreTl"
+        >
+          查看更多（余 {{ exportRows.length - tlLimit }} 条）
+        </button>
         <p class="export-hint text-secondary">按方案分镜顺序生成 edit_list.json + 素材（clip 优先，无 motion 时用关键帧兜底）；剪映导入为兼容可选项。</p>
       </div>
 
@@ -1012,17 +1043,24 @@ const shotTotal = computed(() => {
   display: flex;
   flex-direction: column;
   gap: 18px;
+  max-width: 1120px;
+  margin: 0 auto;
+  width: 100%;
 }
 .studio-head {
+  position: relative;
   display: flex;
   flex-direction: column;
   gap: 10px;
+  padding-top: 8px;
 }
 .back {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  align-self: flex-start;
+  position: absolute;
+  left: 0;
+  top: 8px;
   padding: 5px 10px;
   margin-left: -10px;
   background: none;
@@ -1038,12 +1076,15 @@ const shotTotal = computed(() => {
 }
 .head-main {
   display: flex;
-  align-items: flex-end;
-  justify-content: space-between;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
 }
 .eyebrow-row {
   display: flex;
   align-items: center;
+  justify-content: center;
   gap: 10px;
 }
 .eyebrow {
@@ -1090,25 +1131,53 @@ const shotTotal = computed(() => {
   line-height: 1.9;
 }
 
-/* 三块导演台 */
+/* 导演台：标题下固定 Brief+参考图横条；下方分镜/任务/资产库/成片单列同宽卡片 */
 .studio-grid {
-  display: grid;
-  grid-template-columns: 264px minmax(0, 1fr);
-  gap: 18px;
-  align-items: start;
+  display: block;
 }
 .col-brief {
   position: sticky;
-  top: 76px;
+  top: 68px;
+  z-index: 6;
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
+  align-items: stretch;
   gap: 12px;
+  margin-bottom: 16px;
 }
 .brief-panel {
+  flex: 1 1 auto;
+  min-width: 260px;
   padding: 16px;
   background: var(--wv-surface);
   border: 1px solid var(--wv-line);
   border-radius: var(--wv-radius-m);
+}
+.brief-text {
+  margin: 0;
+  white-space: pre-wrap;
+  font-size: 13px;
+  line-height: 1.85;
+  color: var(--wv-text-2);
+  max-height: 140px;
+  overflow: auto;
+}
+.link-btn:hover,
+.ghost-line:hover {
+  color: var(--wv-accent-text);
+  background: var(--wv-surface-raised);
+}
+.brief-spinner {
+  display: flex;
+  justify-content: center;
+  padding: 6px 0;
+}
+@media (max-width: 900px) {
+  .col-brief {
+    position: static;
+    flex-direction: column;
+  }
+  .refs-panel { width: auto !important; }
 }
 .brief-head {
   display: flex;
@@ -1122,7 +1191,7 @@ const shotTotal = computed(() => {
   font-size: 13px;
   line-height: 1.85;
   color: var(--wv-text-2);
-  max-height: 46vh;
+  max-height: 140px;
   overflow: auto;
 }
 .link-btn,
@@ -1136,21 +1205,16 @@ const shotTotal = computed(() => {
   padding: 2px 4px;
   border-radius: 6px;
 }
-.link-btn:hover,
-.ghost-line:hover {
-  color: var(--wv-accent-text);
-  background: var(--wv-surface-raised);
-}
-.brief-spinner {
-  display: flex;
-  justify-content: center;
-}
 
 .col-main {
   display: flex;
   flex-direction: column;
   gap: 14px;
   min-width: 0;
+  background: var(--wv-surface);
+  border: 1px solid var(--wv-line);
+  border-radius: var(--wv-radius-m);
+  padding: 16px;
 }
 .plan-empty {
   min-height: 240px;
@@ -1193,6 +1257,8 @@ const shotTotal = computed(() => {
 
 /* ---------- W2C 参考图 ---------- */
 .refs-panel {
+  width: 330px;
+  flex: none;
   padding: 14px 14px 12px;
   background: var(--wv-surface);
   border: 1px dashed var(--wv-line-strong);
@@ -1215,7 +1281,7 @@ const shotTotal = computed(() => {
 .upload-link input { display: none; }
 .refs-grid {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(auto-fill, minmax(64px, 1fr));
   gap: 6px;
 }
 .ref-thumb {
@@ -1308,15 +1374,28 @@ const shotTotal = computed(() => {
   gap: 10px;
 }
 .gallery-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
-  gap: 10px;
+  display: flex;
+  flex-direction: row;
+  gap: 12px;
+  overflow-x: auto;
+  padding-bottom: 6px;
+  scroll-snap-type: x proximity;
+  -webkit-overflow-scrolling: touch;
 }
+.gallery-grid::-webkit-scrollbar { height: 8px; }
+.gallery-grid::-webkit-scrollbar-thumb {
+  background: var(--wv-line-strong);
+  border-radius: 999px;
+}
+.gallery-grid::-webkit-scrollbar-track { background: transparent; }
 .g-item {
+  flex: none;
+  width: 216px;
   border: 1px solid var(--wv-line);
   border-radius: 10px;
   overflow: hidden;
   background: var(--wv-surface-sunken);
+  scroll-snap-align: start;
 }
 .g-item img { width: 100%; aspect-ratio: 1; object-fit: cover; display: block; }
 .g-loading { width: 100%; aspect-ratio: 1; display: flex; align-items: center; justify-content: center; color: var(--wv-text-4); }
@@ -1415,6 +1494,11 @@ const shotTotal = computed(() => {
   cursor: pointer;
 }
 .g-del:disabled { opacity: .5; cursor: default; }
+
+/* 更多分页 / 对齐 */
+.panel-more {
+  align-self: center;
+}
 
 
 /* ---------- W6 成片时间线 ---------- */

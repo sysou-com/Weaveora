@@ -32,8 +32,8 @@ weaveora:
   security:
     jwt:
       secret: ${WEAVEORA_JWT_SECRET:}          # 必填：生产/开发由环境变量注入
-      access-ttl: 15m
-      refresh-ttl: 14d
+      access-ttl: ${WEAVEORA_JWT_ACCESS_TTL:2h}   # 访问 token：15m→2h（长操作不频繁过期）
+      refresh-ttl: ${WEAVEORA_JWT_REFRESH_TTL:30d}
   billing:
     mode: ${WEAVEORA_BILLING_MODE:simplified}  # wallet|simplified（v1.3 #14）
     simplified:
