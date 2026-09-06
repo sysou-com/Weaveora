@@ -13,6 +13,8 @@ import studio.weaveora.billing.QuotaService;
 import studio.weaveora.infra.obs.Metrics;
 import studio.weaveora.asset.api.AssetResponse;
 import studio.weaveora.identity.api.WorkspaceGuard;
+import studio.weaveora.identity.domain.User;
+import studio.weaveora.identity.domain.UserRepository;
 import studio.weaveora.infra.storage.StoragePort;
 import studio.weaveora.infra.ws.JobWsHandler;
 import studio.weaveora.job.api.CreateJobRequest;
@@ -76,12 +78,23 @@ public class JobService {
     private final studio.weaveora.asset.domain.AssetRepository assetRepo;
     private final QuotaService quota;
     private final Metrics metrics;
+    private final UserRepository users;
+    private final String adminEmail;
+    private final int motionFramesMin;
+    private final int motionFramesMax;
 
     public JobService(GenerationJobRepository jobs, WorkerNodeRepository nodes, AssetService assets,
                       StoragePort storage, ProjectContextPort projects, WorkspaceGuard guard, JobWsHandler ws,
                       studio.weaveora.director.PlanReader planReader,
                       studio.weaveora.asset.domain.AssetRepository assetRepo,
-                      QuotaService quota, Metrics metrics) {
+                      QuotaService quota, Metrics metrics,
+                      UserRepository users,
+                      @org.springframework.beans.factory.annotation.Value(
+                              "${weaveora.access.admin-email:sysou.com@outlook.com}") String adminEmail,
+                      @org.springframework.beans.factory.annotation.Value(
+                              "${weaveora.video.motion-frames-min:32}") int motionFramesMin,
+                      @org.springframework.beans.factory.annotation.Value(
+                              "${weaveora.video.motion-frames-max:96}") int motionFramesMax) {
         this.jobs = jobs;
         this.nodes = nodes;
         this.assets = assets;
@@ -93,6 +106,10 @@ public class JobService {
         this.assetRepo = assetRepo;
         this.quota = quota;
         this.metrics = metrics;
+        this.users = users;
+        this.adminEmail = adminEmail == null ? "" : adminEmail;
+        this.motionFramesMin = motionFramesMin;
+        this.motionFramesMax = motionFramesMax;
     }
 
     /** 回收卡死 running 任务（默认 30min 无完成即失败，可重试） */
@@ -100,7 +117,7 @@ public class JobService {
     @Transactional
     public void reapStaleRunning() {
         java.time.OffsetDateTime cut = java.time.OffsetDateTime.now()
-                .minusMinutes(30);
+                .minusMinutes(15);
         int n = jobs.markStaleRunning(cut, java.time.OffsetDateTime.now());
         if (n > 0) {
             log.warn("reaped {} stale running jobs", n);
@@ -161,6 +178,15 @@ public class JobService {
                 int[] dd = dimsFor(aspect);
                 payload.set("params", mapper().createObjectNode()
                         .put("width", dd[0]).put("height", dd[1]));
+                // motion 帧数：可显式指定（范围校验），缺省由引擎按时长算
+                if ("clip".equals(req.kind()) && req.frames() != null) {
+                    int f = req.frames();
+                    if (f < motionFramesMin || f > motionFramesMax) {
+                        throw new BizException(ErrorCode.VALIDATION,
+                                "运动帧数须在 " + motionFramesMin + "–" + motionFramesMax + " 之间");
+                    }
+                    payload.put("frames", f);
+                }
                 if ("clip".equals(req.kind())) {
                     // W5 两段式闸门：motion 需要该镜已确认的关键帧（still 产物）作首帧
                     List<studio.weaveora.asset.domain.Asset> kf =
@@ -238,11 +264,7 @@ public class JobService {
         if (TERMINAL.contains(job.state())) {
             throw new BizException(ErrorCode.JOB_NOT_CANCELLABLE, "任务已进入终态，不可取消");
         }
-        if ("running".equals(job.state())) {
-            jobs.requestCancel(jobId);
-            emit(job, Map.of("type", "job.cancel_requested"));
-            return toView(job);
-        }
+        // 运行中/排队：立即取消为终态（worker 迟到回执会被忽略）；卡住不再阻塞队列
         job.cancel();
         emit(job, Map.of("type", "job.cancelled"));
         metrics.jobCancelled();
@@ -310,6 +332,38 @@ public class JobService {
             log.info("jobs deleted project={} count={}", projectId, removed);
         }
         return removed;
+    }
+
+    // ---------- 管理员：任务队列 ----------
+
+    private boolean isAdminJob(UUID userId) {
+        if (userId == null || adminEmail.isBlank()) return false;
+        return users.findById(userId).map(User::email)
+                .map(em -> em.equalsIgnoreCase(adminEmail)).orElse(false);
+    }
+
+    /** 全部 queued/running 任务（管理员） */
+    @Transactional(readOnly = true)
+    public List<JobView> adminQueue(UUID userId) {
+        if (!isAdminJob(userId)) {
+            throw new BizException(ErrorCode.FORBIDDEN, "仅管理员可查看任务队列");
+        }
+        return jobs.findByStateInOrderByCreatedAtAsc(List.of("queued", "running")).stream()
+                .map(this::toView).toList();
+    }
+
+    /** 管理员手工让超长任务失败（解除队列阻塞） */
+    @Transactional
+    public int adminFail(UUID userId, UUID jobId) {
+        if (!isAdminJob(userId)) {
+            throw new BizException(ErrorCode.FORBIDDEN, "仅管理员可操作任务队列");
+        }
+        GenerationJob job = jobs.findById(jobId)
+                .filter(j -> List.of("queued", "running").contains(j.state())).orElse(null);
+        if (job == null) return 0;
+        job.fail("ADMIN_FAIL", "管理员手工终止（避免阻塞队列）");
+        emit(jobs.save(job), Map.of("type", "job.failed", "code", "ADMIN_FAIL"));
+        return 1;
     }
 
     // ---------- 内部：节点与认领 ----------

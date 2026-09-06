@@ -8,7 +8,7 @@ import {
   Save,
   WandSparkles,
 } from 'lucide-vue-next'
-import { NAlert, NButton, NIcon, NSkeleton, NTag, useMessage } from 'naive-ui'
+import { NAlert, NButton, NIcon, NInputNumber, NModal, NSkeleton, NTag, useMessage } from 'naive-ui'
 import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
@@ -479,13 +479,32 @@ function deleteJobOne(jobId: string): void {
   jobSel.value = [jobId]
   void deleteJobsSel()
 }
-async function startMotion(): Promise<void> {
+// motion 帧数（系统范围 32–96）
+const MOTION_MIN = 32
+const MOTION_MAX = 96
+const motionOpen = ref(false)
+const motionFrames = ref(48)
+function openMotionModal(): void {
+  motionFrames.value = 48
+  motionOpen.value = true
+}
+function confirmMotion(): void {
+  const f = Number(motionFrames.value)
+  if (!Number.isInteger(f) || f < MOTION_MIN || f > MOTION_MAX) {
+    message.warning(`运动帧数需在 ${MOTION_MIN}–${MOTION_MAX} 之间`)
+    return
+  }
+  motionOpen.value = false
+  void startMotion(f)
+}
+async function startMotion(frames?: number): Promise<void> {
   if (!selectedRevId.value) return
   genBusy.value = true
   try {
     const created = await createJobs(workspaceId.value, projectId.value, {
       revisionId: selectedRevId.value,
       kind: 'clip',
+      ...(frames ? { frames } : {}),
     })
     await queryClient.invalidateQueries({ queryKey: ['jobs'] })
     message.success(`已创建 ${created.length} 个运动任务（关键帧→motion）`)
@@ -851,7 +870,7 @@ const shotTotal = computed(() => {
                 </select>
               </span>
               <NButton v-if="isVideoNow" size="small" secondary :loading="genBusy" data-testid="btn-motion-jobs"
-                       :disabled="!motionReady" title="先出关键帧(still)后可用（两段式 §11.3）" @click="startMotion">
+                       :disabled="!motionReady" title="先出关键帧(still)后可用（两段式 §11.3）" @click="openMotionModal">
                 运动(motion)
               </NButton>
               <NButton size="small" type="primary" :loading="genBusy" data-testid="btn-gen-jobs" @click="startGeneration">
@@ -996,6 +1015,20 @@ const shotTotal = computed(() => {
           </div>
         </div>
       </div>
+
+      <!-- 沉浸式预览（大图/大视频） -->
+      <NModal v-model:show="motionOpen" preset="card" :title="'生成运动(motion)'" style="max-width: 420px">
+        <div class="motion-form">
+          <p class="text-secondary">
+            设置视频帧数（系统支持 {{ MOTION_MIN }}–{{ MOTION_MAX }}，帧数越高越流畅、耗时越长）：
+          </p>
+          <NInputNumber v-model:value="motionFrames" :min="MOTION_MIN" :max="MOTION_MAX" :step="4" style="width: 180px" />
+          <div class="motion-ops">
+            <NButton size="small" @click="motionOpen = false">取消</NButton>
+            <NButton size="small" type="primary" @click="confirmMotion">开始生成</NButton>
+          </div>
+        </div>
+      </NModal>
 
       <!-- 沉浸式预览（大图/大视频） -->
       <div v-if="immersive" class="im-overlay" @click.self="immersive = null">
@@ -1594,6 +1627,8 @@ const shotTotal = computed(() => {
 .export-hint { margin: 0; font-size: 12px; line-height: 1.7; }
 
 /* 沉浸预览 */
+.motion-form { display: flex; flex-direction: column; gap: 12px; }
+.motion-ops { display: flex; justify-content: flex-end; gap: 8px; }
 .g-max {
   appearance: none; border: none; background: var(--wv-accent-soft); color: var(--wv-accent-text);
   font-size: 13px; line-height: 1; padding: 3px 7px; border-radius: 6px; cursor: pointer;

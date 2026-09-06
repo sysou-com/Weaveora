@@ -18,10 +18,12 @@ const hasWorkspace = computed(() => (auth.activeWorkspaceId ? true : false))
 const isAdmin = computed(() => auth.user?.email?.toLowerCase() === ADMIN_EMAIL)
 const showContact = ref(false)
 
-const moreOptions: DropdownOption[] = [
-  { label: '关于', key: 'about' },
-  { label: '联系开发者', key: 'contact' },
-]
+const moreOptions = computed<DropdownOption[]>(() => {
+  const opts: DropdownOption[] = []
+  if (isAdmin.value) opts.push({ label: '任务队列（管理员）', key: 'queue' })
+  opts.push({ label: '关于', key: 'about' }, { label: '联系开发者', key: 'contact' })
+  return opts
+})
 
 const menuOptions = computed<DropdownOption[]>(() => {
   const opts: DropdownOption[] = [{ label: userName.value, key: 'user', disabled: true }]
@@ -50,6 +52,8 @@ async function onMoreSelect(key: string): Promise<void> {
     void router.push({ name: 'about' })
   } else if (key === 'contact') {
     showContact.value = true
+  } else if (key === 'queue') {
+    void router.push({ name: 'admin-queue' })
   }
 }
 

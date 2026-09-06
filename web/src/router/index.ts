@@ -56,6 +56,12 @@ const router = createRouter({
           meta: { title: '我的项目 · 织影 Weaveora' },
         },
         {
+          path: 'admin/queue',
+          name: 'admin-queue',
+          component: () => import('@/views/AdminQueueView.vue'),
+          meta: { title: '任务队列 · 织影 Weaveora' },
+        },
+        {
           path: 'projects/new',
           name: 'project-new',
           component: () => import('@/views/ProjectNewView.vue'),

@@ -6,7 +6,13 @@ import type { JobRecord } from './types'
 export async function createJobs(
   workspaceId: string,
   projectId: string,
-  input: { revisionId: string; shotId?: string | null; kind: 'still' | 'clip'; count?: number },
+  input: {
+    revisionId: string
+    shotId?: string | null
+    kind: 'still' | 'clip'
+    count?: number
+    frames?: number | null
+  },
 ): Promise<JobRecord[]> {
   return request<JobRecord[]>(`/api/v1/projects/${projectId}/jobs`, {
     method: 'POST',

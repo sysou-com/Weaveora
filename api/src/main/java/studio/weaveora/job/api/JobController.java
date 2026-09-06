@@ -85,6 +85,20 @@ public class JobController {
         return ResponseEntity.ok(Map.of("deleted", removed));
     }
 
+    /** 管理员：查看全部 queued/running 任务 */
+    @GetMapping("/admin/queue/jobs")
+    public ResponseEntity<List<JobView>> adminQueue(HttpServletRequest request) {
+        return ResponseEntity.ok(jobService.adminQueue(uid(request)));
+    }
+
+    /** 管理员：手工让任务失败（解除阻塞） */
+    @PostMapping("/admin/queue/jobs/{jobId}/fail")
+    public ResponseEntity<Map<String, Integer>> adminFail(
+            HttpServletRequest request,
+            @PathVariable UUID jobId) {
+        return ResponseEntity.ok(Map.of("failed", jobService.adminFail(uid(request), jobId)));
+    }
+
     private UUID uid(HttpServletRequest request) {
         String uid = (String) request.getAttribute(JwtAuthFilter.ATTR_USER_ID);
         if (uid == null) {

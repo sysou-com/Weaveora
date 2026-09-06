@@ -46,4 +46,6 @@ public interface GenerationJobRepository extends JpaRepository<GenerationJob, UU
                          @Param("now") java.time.OffsetDateTime now);
 
     long countByState(String state);
+
+    List<GenerationJob> findByStateInOrderByCreatedAtAsc(List<String> states);
 }
