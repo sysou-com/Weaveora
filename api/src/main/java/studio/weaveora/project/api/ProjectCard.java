@@ -15,6 +15,10 @@ public record ProjectCard(
         String shareStatus,
         String ownerName,
         OffsetDateTime createdAt,
-        OffsetDateTime updatedAt
+        OffsetDateTime updatedAt,
+        long likeCount,
+        long favoriteCount,
+        boolean liked,
+        boolean favorited
 ) {
 }

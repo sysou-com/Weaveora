@@ -80,3 +80,17 @@ export async function fetchMarketPreview(projectId: string): Promise<Blob | null
   if (!resp.ok) return null
   return resp.blob()
 }
+
+/** 点赞/收藏切换（like|fav）→ 返回 { kind, active, count } */
+export interface MarkToggle {
+  kind: 'like' | 'fav'
+  active: boolean
+  count: number
+}
+
+export async function toggleMark(projectId: string, kind: 'like' | 'fav'): Promise<MarkToggle> {
+  return request<MarkToggle>(`/api/v1/projects/marketplace/${projectId}/toggle/${kind}`, {
+    method: 'POST',
+    body: {},
+  })
+}

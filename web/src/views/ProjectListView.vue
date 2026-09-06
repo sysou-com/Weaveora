@@ -6,17 +6,19 @@ import {
   Plus,
   X,
 } from 'lucide-vue-next'
-import { NButton, NIcon, NSkeleton, NTag, useMessage } from 'naive-ui'
+import { NButton, NIcon, NSkeleton, useMessage } from 'naive-ui'
 import { computed, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 
 import {
   deleteProjects,
+  fetchMarketPreview,
   listMarketPage,
   listOwnPage,
   listPendingPage,
   reviewProjects,
   shareProject,
+  toggleMark,
 } from '@/api/market'
 import type { ProjectCard } from '@/api/types'
 import { marketThumb, ownThumb } from '@/utils/thumbs'
@@ -98,8 +100,53 @@ const { data: market, isPending: marketPending } = useQuery({
 const marketTotal = computed(() => market.value?.total ?? 0)
 const marketPages = computed(() => Math.max(1, Math.ceil(marketTotal.value / PAGE_SIZE)))
 
-// 集市只读详情浮层
+// 集市只读详情浮层（market） / 待审详情+操作（pending）
 const viewingMarket = ref<ProjectCard | null>(null)
+const viewingPending = ref<ProjectCard | null>(null)
+const overlayMode = ref<'market' | 'pending' | ''>('')
+const overlayCard = computed(() =>
+  overlayMode.value === 'pending' ? viewingPending.value : viewingMarket.value,
+)
+function openMarket(p: ProjectCard): void {
+  viewingMarket.value = p
+  overlayMode.value = 'market'
+}
+function openPending(p: ProjectCard): void {
+  viewingPending.value = p
+  overlayMode.value = 'pending'
+}
+function closeOverlay(): void {
+  viewingMarket.value = null
+  viewingPending.value = null
+  overlayMode.value = ''
+}
+async function reviewOne(id: string, approved: boolean): Promise<void> {
+  try {
+    await reviewProjects([id], approved)
+    message.success(approved ? '已通过' : '已驳回')
+    closeOverlay()
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: ['pending-projects'] }),
+      queryClient.invalidateQueries({ queryKey: ['market-projects'] }),
+    ])
+  } catch (e) {
+    message.error(e instanceof Error ? e.message : '审批失败')
+  }
+}
+async function deleteOnePending(id: string): Promise<void> {
+  if (!window.confirm('删除该待审项目？不可恢复。')) return
+  try {
+    await deleteProjects(workspaceId.value, [id])
+    message.success('已删除')
+    closeOverlay()
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: ['pending-projects'] }),
+      queryClient.invalidateQueries({ queryKey: ['market-projects'] }),
+    ])
+  } catch (e) {
+    message.error(e instanceof Error ? e.message : '删除失败')
+  }
+}
 
 // ---------- 管理审批（管理员） ----------
 const pendingPage = ref(0)
@@ -109,6 +156,29 @@ const { data: pending } = useQuery({
   queryFn: () => listPendingPage(pendingPage.value, PAGE_SIZE),
   enabled: isAdmin,
 })
+const pendingTotal = computed(() => pending.value?.total ?? 0)
+const pendingPages = computed(() => Math.max(1, Math.ceil(pendingTotal.value / PAGE_SIZE)))
+function togglePending(id: string): void {
+  pendingSel.value = pendingSel.value.includes(id)
+    ? pendingSel.value.filter((x) => x !== id)
+    : [...pendingSel.value, id]
+}
+async function deletePendingSel(): Promise<void> {
+  const ids = [...pendingSel.value]
+  if (!ids.length) return
+  if (!window.confirm(`删除所选 ${ids.length} 个待审分享（连同其项目）？不可恢复。`)) return
+  try {
+    const r = await deleteProjects(workspaceId.value, ids)
+    message.success(`已删除 ${r.deleted} 个`)
+    pendingSel.value = []
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: ['pending-projects'] }),
+      queryClient.invalidateQueries({ queryKey: ['market-projects'] }),
+    ])
+  } catch (e) {
+    message.error(e instanceof Error ? e.message : '删除失败')
+  }
+}
 async function reviewSel(approved: boolean): Promise<void> {
   const ids = [...pendingSel.value]
   if (!ids.length) return
@@ -125,9 +195,65 @@ async function reviewSel(approved: boolean): Promise<void> {
   }
 }
 
+// 点赞/收藏：切换并同步当前页数据（浮层引同一对象，自动更新）
+async function doMark(id: string, kind: 'like' | 'fav'): Promise<void> {
+  try {
+    const r = await toggleMark(id, kind)
+    const it = (market.value?.items ?? []).find((x) => x.id === id)
+    if (it) {
+      if (r.kind === 'like') {
+        it.likeCount = r.count
+        it.liked = r.active
+      } else {
+        it.favoriteCount = r.count
+        it.favorited = r.active
+      }
+    }
+  } catch (e) {
+    message.error(e instanceof Error ? e.message : '操作失败')
+  }
+}
+
+async function downloadMarketPreview(id: string): Promise<void> {
+  try {
+    const blob = await fetchMarketPreview(id)
+    if (!blob) {
+      message.warning('暂无预览图')
+      return
+    }
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `weaveora-${id.slice(0, 8)}.png`
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    setTimeout(() => URL.revokeObjectURL(url), 4000)
+  } catch (e) {
+    message.error(e instanceof Error ? e.message : '下载失败')
+  }
+}
+
 // ---------- 缩略图（缓存，后台拉取） ----------
 const ownThumbs = reactive<Record<string, { url: string; mime: string }>>({})
 const marketThumbs = reactive<Record<string, string>>({})
+const pendingThumbs = reactive<Record<string, string>>({})
+
+function thumbOf(id: string): string {
+  return ownThumbs[id]?.url ?? marketThumbs[id] ?? pendingThumbs[id] ?? ''
+}
+watch(
+  () => pending.value?.items,
+  (items) => {
+    for (const p of items ?? []) {
+      if (pendingThumbs[p.id]) continue
+      void marketThumb(p.id).then((t) => {
+        if (t) pendingThumbs[p.id] = t.url
+      })
+    }
+  },
+  { immediate: true },
+)
 watch(
   () => own.value?.items,
   (items) => {
@@ -266,25 +392,54 @@ const shareLabel = (s: string | null): string =>
     <section v-if="isAdmin" class="zone" data-testid="zone-pending">
       <div class="zone-head">
         <h2 class="zone-title">集市待审</h2>
-        <span class="zone-hint font-mono">{{ pending?.total ?? 0 }} 个待处理</span>
+        <span class="zone-hint font-mono">{{ pending?.total ?? 0 }} 个</span>
         <div class="zone-actions">
-          <button class="op" @click="pendingSel = pending?.items?.length ? [] : (pending?.items ?? []).map((p: ProjectCard) => p.id)">
+          <button class="op"
+                  @click="pendingSel = pendingSel.length === (pending?.items ?? []).length && (pending?.items ?? []).length ? [] : (pending?.items ?? []).map((p: ProjectCard) => p.id)">
             {{ pendingSel.length === (pending?.items ?? []).length && (pending?.items ?? []).length ? '取消全选' : '全选' }}
           </button>
-          <button class="op primary" :disabled="!pendingSel.length" @click="reviewSel(true)">批量通过</button>
-          <button class="op danger" :disabled="!pendingSel.length" @click="reviewSel(false)">批量驳回</button>
+          <button class="op primary" :disabled="!pendingSel.length" @click="reviewSel(true)">通过</button>
+          <button class="op danger" :disabled="!pendingSel.length" @click="reviewSel(false)">驳回</button>
+          <button class="op danger" :disabled="!pendingSel.length" @click="deletePendingSel">删除</button>
         </div>
       </div>
-      <div class="pending-list">
-        <div v-for="p in pending?.items ?? []" :key="p.id" class="pending-row">
-          <label class="pick"><input type="checkbox" :checked="pendingSel.includes(p.id)" @change="pendingSel = pendingSel.includes(p.id) ? pendingSel.filter((x) => x !== p.id) : [...pendingSel, p.id]" /></label>
-          <span class="pending-title">{{ p.title }}</span>
-          <span class="font-mono pending-meta">{{ modeLabel(p.mode) }} · {{ p.aspectRatio }}</span>
-          <span class="font-mono pending-meta">{{ p.ownerName || '—' }}</span>
-          <NTag v-if="p.shareStatus === 'rejected'" size="small" :bordered="false" type="error">已驳回</NTag>
+      <template v-if="(pending?.items ?? []).length">
+        <div class="grid">
+          <div v-for="p in pending?.items ?? []" :key="p.id" class="card" :class="{ sel: pendingSel.includes(p.id) }">
+            <label class="pick" :title="pendingSel.includes(p.id) ? '取消' : '选择'">
+              <input type="checkbox" :checked="pendingSel.includes(p.id)" @change="togglePending(p.id)" />
+            </label>
+            <button type="button" class="card-inner" @click="togglePending(p.id)">
+              <div class="thumb">
+                <img v-if="pendingThumbs[p.id]" :src="pendingThumbs[p.id]" class="thumb-media" alt="" loading="lazy" />
+                <div v-else class="thumb-ph">
+                  <NIcon size="26" class="thumb-ic"><Film /></NIcon>
+                </div>
+              </div>
+              <div class="card-top">
+                <span class="card-mode font-mono">{{ modeLabel(p.mode) }}</span>
+                <span class="chip-share font-mono">{{ p.shareStatus === 'rejected' ? '已驳回' : '待审' }}</span>
+              </div>
+              <h3 class="card-title">{{ p.title }}</h3>
+              <p class="card-meta font-mono text-secondary">
+                {{ p.aspectRatio }} {{ aspectNote(p.aspectRatio) }}
+                <template v-if="p.mode === 'video' && p.durationSec">· {{ p.durationSec }}s</template>
+              </p>
+              <div class="card-foot">
+                <span class="card-date font-mono">{{ p.ownerName || '匿名' }}</span>
+                <span class="card-date font-mono">{{ formatDateShort(p.updatedAt) }}</span>
+              </div>
+            </button>
+            <button type="button" class="op view" :data-testid="'pending-view-' + p.id.slice(0, 8)" @click.stop="openPending(p)">查看</button>
+          </div>
         </div>
-        <p v-if="!(pending?.items ?? []).length" class="text-secondary">暂无待审分享。</p>
-      </div>
+        <nav v-if="pendingPages > 1" class="pager">
+          <button class="op" :disabled="pendingPage === 0" @click="pendingPage--">上一页</button>
+          <span class="pager-info font-mono">{{ pendingPage + 1 }} / {{ pendingPages }}</span>
+          <button class="op" :disabled="pendingPage >= pendingPages - 1" @click="pendingPage++">下一页</button>
+        </nav>
+      </template>
+      <div v-else class="empty-state"><p class="text-secondary">暂无待审分享。</p></div>
     </section>
 
     <!-- ============ 三、项目集市 ============ -->
@@ -298,25 +453,34 @@ const shareLabel = (s: string | null): string =>
       </div>
       <template v-else-if="marketTotal > 0">
         <div class="grid">
-          <button v-for="p in market?.items ?? []" :key="p.id" type="button" class="card market"
-                  @click="viewingMarket = p">
-            <div class="thumb">
-              <img v-if="marketThumbs[p.id]" :src="marketThumbs[p.id]" class="thumb-media" alt="" loading="lazy" />
-              <div v-else class="thumb-ph">
-                <NIcon size="26" class="thumb-ic"><Film /></NIcon>
+          <div v-for="p in market?.items ?? []" :key="p.id" class="card market">
+            <button type="button" class="card-inner" @click="openMarket(p)">
+              <div class="thumb">
+                <img v-if="marketThumbs[p.id]" :src="marketThumbs[p.id]" class="thumb-media" alt="" loading="lazy" />
+                <div v-else class="thumb-ph">
+                  <NIcon size="26" class="thumb-ic"><Film /></NIcon>
+                </div>
               </div>
+              <div class="card-top">
+                <span class="card-mode font-mono">{{ modeLabel(p.mode) }}</span>
+                <span class="card-date font-mono">{{ p.ownerName || '匿名' }}</span>
+              </div>
+              <h3 class="card-title">{{ p.title }}</h3>
+              <p class="card-meta font-mono text-secondary">{{ p.aspectRatio }} {{ aspectNote(p.aspectRatio) }}</p>
+              <div class="card-foot">
+                <span class="card-date font-mono">{{ formatDateShort(p.updatedAt) }}</span>
+                <NIcon size="16" class="card-arrow"><ArrowRight /></NIcon>
+              </div>
+            </button>
+            <div class="mark-bar">
+              <button type="button" class="mk" :class="{ on: p.liked }" @click="doMark(p.id, 'like')">
+                {{ p.liked ? '♥' : '♡' }} {{ p.likeCount }}
+              </button>
+              <button type="button" class="mk" :class="{ on: p.favorited }" @click="doMark(p.id, 'fav')">
+                {{ p.favorited ? '★' : '☆' }} {{ p.favoriteCount }}
+              </button>
             </div>
-            <div class="card-top">
-              <span class="card-mode font-mono">{{ modeLabel(p.mode) }}</span>
-              <span class="card-date font-mono">{{ p.ownerName || '匿名' }}</span>
-            </div>
-            <h3 class="card-title">{{ p.title }}</h3>
-            <p class="card-meta font-mono text-secondary">{{ p.aspectRatio }} {{ aspectNote(p.aspectRatio) }}</p>
-            <div class="card-foot">
-              <span class="card-date font-mono">{{ formatDateShort(p.updatedAt) }}</span>
-              <NIcon size="16" class="card-arrow"><ArrowRight /></NIcon>
-            </div>
-          </button>
+          </div>
         </div>
         <nav v-if="marketPages > 1" class="pager">
           <button class="op" :disabled="marketPage === 0" @click="marketPage--">上一页</button>
@@ -329,23 +493,39 @@ const shareLabel = (s: string | null): string =>
       </div>
     </section>
 
-    <!-- 集市只读详情浮层 -->
-    <div v-if="viewingMarket" class="overlay" @click.self="viewingMarket = null">
+    <!-- 详情浮层：集市只读 / 待审操作 -->
+    <div v-if="overlayCard" class="overlay" @click.self="closeOverlay">
       <div class="overlay-card">
-        <button type="button" class="op x" @click="viewingMarket = null"><X :size="14" /></button>
-        <h3 class="overlay-title font-display">{{ viewingMarket.title }}</h3>
+        <button type="button" class="op x" @click="closeOverlay"><X :size="14" /></button>
+        <h3 class="overlay-title font-display">{{ overlayCard.title }}</h3>
         <p class="overlay-meta font-mono">
-          {{ modeLabel(viewingMarket.mode) }} · {{ viewingMarket.aspectRatio }}
-          <template v-if="viewingMarket.mode === 'video' && viewingMarket.durationSec">
-            · {{ viewingMarket.durationSec }}s
+          {{ modeLabel(overlayCard.mode) }} · {{ overlayCard.aspectRatio }}
+          <template v-if="overlayCard.mode === 'video' && overlayCard.durationSec">
+            · {{ overlayCard.durationSec }}s
           </template>
-          · 分享者：{{ viewingMarket.ownerName || '匿名' }}
+          · 分享者：{{ overlayCard.ownerName || '匿名' }}
         </p>
         <div class="thumb big">
-          <img v-if="marketThumbs[viewingMarket.id]" :src="marketThumbs[viewingMarket.id]" class="thumb-media" alt="" />
+          <img v-if="thumbOf(overlayCard.id)" :src="thumbOf(overlayCard.id)" class="thumb-media" alt="" />
           <div v-else class="thumb-ph"><span class="text-secondary">暂无预览图</span></div>
         </div>
-        <p class="overlay-note text-secondary">集市为只读浏览，创作请到「我的项目」。</p>
+        <p class="overlay-note text-secondary">
+          {{ overlayMode === 'pending' ? '审批后即上架/驳回，删除将从集市与待审移除。' : '集市为只读浏览；可点赞/收藏/下载预览图，不能编辑内容。' }}
+        </p>
+        <div v-if="overlayMode === 'pending'" class="overlay-ops">
+          <button type="button" class="op primary" @click="reviewOne(overlayCard.id, true)">通过</button>
+          <button type="button" class="op danger" @click="reviewOne(overlayCard.id, false)">驳回</button>
+          <button type="button" class="op danger" @click="deleteOnePending(overlayCard.id)">删除</button>
+        </div>
+        <div v-else-if="overlayMode === 'market'" class="overlay-ops">
+          <button type="button" class="op" :class="{ on: overlayCard.liked }" @click="doMark(overlayCard.id, 'like')">
+            {{ overlayCard.liked ? '♥' : '♡' }} 赞 {{ overlayCard.likeCount }}
+          </button>
+          <button type="button" class="op" :class="{ on: overlayCard.favorited }" @click="doMark(overlayCard.id, 'fav')">
+            {{ overlayCard.favorited ? '★' : '☆' }} 收藏 {{ overlayCard.favoriteCount }}
+          </button>
+          <button type="button" class="op" @click="downloadMarketPreview(overlayCard.id)">下载预览图</button>
+        </div>
       </div>
     </div>
   </div>
@@ -378,10 +558,17 @@ const shareLabel = (s: string | null): string =>
   padding: 14px 16px 12px; display: flex; flex-direction: column; gap: 10px;
   color: var(--wv-text); cursor: pointer; text-align: left;
 }
-button.card.market {
-  cursor: pointer; text-align: left; width: 100%;
-  display: flex; flex-direction: column; gap: 10px; padding: 14px 16px 12px; color: var(--wv-text);
+.mark-bar {
+  display: flex; align-items: center; gap: 6px;
+  padding: 0 12px 10px;
 }
+.mk {
+  appearance: none; border: none; background: transparent; cursor: pointer;
+  color: var(--wv-text-3); font-size: 12px; padding: 2px 6px; border-radius: 6px;
+}
+.mk:hover { background: var(--wv-surface-sunken); }
+.mk.on { color: var(--wv-accent-text); }
+.op.on { color: var(--wv-accent-text); border-color: var(--wv-accent-strong); background: var(--wv-accent-soft); }
 .card:hover { background: var(--wv-surface-raised); border-color: color-mix(in srgb, var(--wv-accent) 38%, var(--wv-line)); }
 .card.managing .card-inner { cursor: default; }
 .pick {
@@ -390,6 +577,13 @@ button.card.market {
   width: 22px; height: 22px; border-radius: 6px; background: rgba(11,11,10,.7);
 }
 .pick input { accent-color: var(--wv-accent); cursor: pointer; }
+.card.sel { outline: 1px solid var(--wv-accent); outline-offset: 1px; }
+.card .op.view {
+  position: absolute; top: 8px; right: 8px; z-index: 3;
+  background: rgba(11, 11, 10, .72); color: var(--wv-accent-text); border-color: transparent;
+  opacity: 0; pointer-events: none; transition: opacity var(--wv-dur) var(--wv-ease);
+}
+.card:hover .op.view { opacity: 1; pointer-events: auto; }
 
 .thumb {
   width: 100%; aspect-ratio: 16 / 9; border-radius: 8px; overflow: hidden;
@@ -430,16 +624,9 @@ button.card.market {
 .op:disabled { opacity: .4; cursor: default; }
 .op.x { position: absolute; top: 10px; right: 10px; display: inline-flex; }
 
-.pending-list { display: flex; flex-direction: column; gap: 6px; }
-.pending-row {
-  display: flex; align-items: center; gap: 12px; padding: 8px 10px;
-  background: var(--wv-surface-sunken); border-radius: 8px;
-}
-.pending-title { font-size: 14px; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.pending-meta { font-size: 11px; color: var(--wv-text-4); flex: none; }
-
 .empty-state { display: flex; flex-direction: column; align-items: center; gap: 12px; padding: 34px 20px; border: 1px dashed var(--wv-line-strong); border-radius: var(--wv-radius-m); }
 .skel { min-height: 190px; padding: 20px; background: var(--wv-surface); border: 1px solid var(--wv-line); border-radius: var(--wv-radius-m); }
+.overlay-ops { display: flex; gap: 8px; }
 
 .overlay {
   position: fixed; inset: 0; z-index: 60; background: rgba(11,11,10,.62);

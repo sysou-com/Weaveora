@@ -31,6 +31,10 @@ export interface ProjectCard {
   ownerName: string
   createdAt: string
   updatedAt: string
+  likeCount: number
+  favoriteCount: number
+  liked: boolean
+  favorited: boolean
 }
 
 /** 分页卡片列表 */

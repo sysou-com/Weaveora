@@ -13,6 +13,8 @@ import studio.weaveora.project.api.ProjectPage;
 import studio.weaveora.project.api.ProjectResponse;
 import studio.weaveora.project.domain.Brief;
 import studio.weaveora.project.domain.BriefRepository;
+import studio.weaveora.project.domain.MarketMark;
+import studio.weaveora.project.domain.MarketMarkRepository;
 import studio.weaveora.project.domain.Project;
 import studio.weaveora.project.domain.ProjectRepository;
 import studio.weaveora.shared.api.BizException;
@@ -52,12 +54,14 @@ public class ProjectService implements ProjectContextPort {
     private final AssetRepository assets;
     private final UserRepository users;
     private final StoragePort storage;
+    private final MarketMarkRepository marks;
     private final String adminEmail;
     private final boolean restrictCreate;
     private final String creatorSuffix;
 
     public ProjectService(ProjectRepository projects, BriefRepository briefs, WorkspaceGuard guard,
                           AssetRepository assets, UserRepository users, StoragePort storage,
+                          MarketMarkRepository marks,
                           @org.springframework.beans.factory.annotation.Value(
                                   "${weaveora.video.max-duration-sec:300}") int maxVideoSec,
                           @org.springframework.beans.factory.annotation.Value(
@@ -72,6 +76,7 @@ public class ProjectService implements ProjectContextPort {
         this.assets = assets;
         this.users = users;
         this.storage = storage;
+        this.marks = marks;
         this.maxVideoSec = maxVideoSec;
         this.adminEmail = adminEmail == null ? "" : adminEmail;
         this.restrictCreate = restrictCreate;
@@ -176,7 +181,12 @@ public class ProjectService implements ProjectContextPort {
         boolean admin = isAdmin(userId);
         int removed = 0;
         for (UUID id : projectIds) {
-            Project p = projects.findByWorkspaceIdAndIdAndDeletedAtIsNull(workspaceId, id).orElse(null);
+            Project p = projects.findByWorkspaceIdAndIdAndDeletedAtIsNull(workspaceId, id)
+                    .orElse(null);
+            // 管理员：跨工作区兜底（集市待审/上架项目也可删）
+            if (p == null && admin) {
+                p = projects.findById(id).filter(x -> x.deletedAt() == null).orElse(null);
+            }
             if (p == null) continue;
             if (!admin && !p.createdBy().equals(userId)) continue;
             p.markDeleted();
@@ -207,7 +217,7 @@ public class ProjectService implements ProjectContextPort {
                 projects.findByWorkspaceIdAndDeletedAtIsNullOrderByCreatedAtDesc(workspaceId));
         all.sort(Comparator.comparing(Project::updatedAt,
                 Comparator.nullsFirst(Comparator.naturalOrder())).reversed());
-        return page(all, page, size);
+        return page(all, page, size, userId, false);
     }
 
     /** 集市（已上架且非本人） */
@@ -218,7 +228,7 @@ public class ProjectService implements ProjectContextPort {
         all.removeIf(p -> p.createdBy().equals(userId));
         all.sort(Comparator.comparing(Project::updatedAt,
                 Comparator.nullsFirst(Comparator.naturalOrder())).reversed());
-        return page(all, page, size);
+        return page(all, page, size, userId, true);
     }
 
     /** 管理后台：待审列表（仅管理员） */
@@ -229,7 +239,7 @@ public class ProjectService implements ProjectContextPort {
                 projects.findByShareStatusInAndDeletedAtIsNull(List.of("pending", "rejected")));
         all.sort(Comparator.comparing(Project::sharedAt,
                 Comparator.nullsFirst(Comparator.naturalOrder())).reversed());
-        return page(all, page, size);
+        return page(all, page, size, userId, false);
     }
 
     /** 管理审批（批量） */
@@ -250,21 +260,50 @@ public class ProjectService implements ProjectContextPort {
         return n;
     }
 
-    /** 集市只读详情（本人外已上架） */
+    /** 集市只读详情（本人外已上架，含赞/藏计数与我的状态） */
     @Transactional(readOnly = true)
     public ProjectCard marketGet(UUID userId, UUID projectId) {
         Project p = projects.findById(projectId).filter(x -> x.deletedAt() == null
                 && "approved".equals(x.shareStatus()) && !x.createdBy().equals(userId))
                 .orElseThrow(() -> new BizException(ErrorCode.NOT_FOUND, "集市项目不存在或不可见"));
-        return toCard(p, ownerName(p.createdBy()));
+        return toCardFull(p, ownerName(p.createdBy()),
+                marks.countByProjectIdAndKind(projectId, "like"),
+                marks.countByProjectIdAndKind(projectId, "fav"),
+                marks.existsByProjectIdAndUserIdAndKind(projectId, userId, "like"),
+                marks.existsByProjectIdAndUserIdAndKind(projectId, userId, "fav"));
     }
 
-    /** 集市项目最新图片资产预览（任意登录用户可取，无需同一工作区） */
+    /** 点赞/收藏切换（集市可见项目；一用户一票） */
+    @Transactional
+    public MarkToggle toggle(UUID userId, UUID projectId, String kind) {
+        if (!List.of("like", "fav").contains(kind)) {
+            throw new BizException(ErrorCode.VALIDATION, "kind 必须为 like|fav");
+        }
+        Project p = projects.findById(projectId).filter(x -> x.deletedAt() == null
+                && "approved".equals(x.shareStatus()) && !x.createdBy().equals(userId))
+                .orElseThrow(() -> new BizException(ErrorCode.NOT_FOUND, "集市项目不存在或不可见"));
+        boolean active;
+        if (marks.existsByProjectIdAndUserIdAndKind(projectId, userId, kind)) {
+            marks.deleteByProjectIdAndUserIdAndKind(projectId, userId, kind);
+            active = false;
+        } else {
+            marks.save(MarketMark.create(projectId, userId, kind));
+            active = true;
+        }
+        return new MarkToggle(kind, active, marks.countByProjectIdAndKind(projectId, kind));
+    }
+
+    public record MarkToggle(String kind, boolean active, long count) {
+    }
+
+    /** 集市项目最新图片资产预览：非本人已上架任意登录可见；管理员可见任意项目（待审/驳回也用） */
     @Transactional(readOnly = true)
     public java.util.Optional<Preview> preview(UUID userId, UUID projectId) {
-        Project p = projects.findById(projectId).filter(x -> x.deletedAt() == null
-                && "approved".equals(x.shareStatus())).orElse(null);
-        if (p == null || p.createdBy().equals(userId)) {
+        Project p = projects.findById(projectId).filter(x -> x.deletedAt() == null).orElse(null);
+        if (p == null) return java.util.Optional.empty();
+        boolean admin = isAdmin(userId);
+        boolean visibleApproved = "approved".equals(p.shareStatus()) && !p.createdBy().equals(userId);
+        if (!admin && !visibleApproved) {
             return java.util.Optional.empty();
         }
         Asset img = assets.findFirstByProjectIdAndKindInOrderByCreatedAtDesc(
@@ -284,22 +323,48 @@ public class ProjectService implements ProjectContextPort {
 
     // ---------- 内部工具 ----------
 
-    private ProjectPage page(List<Project> all, int page, int size) {
+    private ProjectPage page(List<Project> all, int page, int size, UUID viewer, boolean withMarks) {
         int p = Math.max(0, page);
         int s = Math.max(1, Math.min(size, 50));
         int from = Math.min(p * s, all.size());
         int to = Math.min(from + s, all.size());
         List<Project> slice = all.subList(from, to);
         Map<UUID, String> names = ownerNames(slice);
+        Map<UUID, long[]> markStats = withMarks ? markStats(slice, viewer) : Map.of();
         List<ProjectCard> items = slice.stream()
-                .map(x -> toCard(x, names.getOrDefault(x.createdBy(), "")))
+                .map(x -> {
+                    long[] m = withMarks ? markStats.getOrDefault(x.id(), new long[2]) : new long[2];
+                    boolean liked = withMarks && marks.existsByProjectIdAndUserIdAndKind(x.id(), viewer, "like");
+                    boolean faved = withMarks && marks.existsByProjectIdAndUserIdAndKind(x.id(), viewer, "fav");
+                    return toCardFull(x, names.getOrDefault(x.createdBy(), ""),
+                            m[0], m[1], liked, faved);
+                })
                 .collect(Collectors.toList());
         return new ProjectPage(items, p, s, all.size(), to < all.size());
     }
 
+    private Map<UUID, long[]> markStats(List<Project> slice, UUID viewer) {
+        Map<UUID, long[]> out = new HashMap<>();
+        List<UUID> ids = slice.stream().map(Project::id).toList();
+        if (ids.isEmpty()) return out;
+        for (MarketMark mm : marks.findByProjectIdInAndKind(ids, "like")) {
+            out.computeIfAbsent(mm.projectId(), k -> new long[2])[0]++;
+        }
+        for (MarketMark mm : marks.findByProjectIdInAndKind(ids, "fav")) {
+            out.computeIfAbsent(mm.projectId(), k -> new long[2])[1]++;
+        }
+        return out;
+    }
+
     private ProjectCard toCard(Project p, String ownerName) {
+        return toCardFull(p, ownerName, 0, 0, false, false);
+    }
+
+    private ProjectCard toCardFull(Project p, String ownerName,
+                                   long like, long fav, boolean liked, boolean faved) {
         return new ProjectCard(p.id(), p.title(), p.mode(), p.aspectRatio(), p.durationSec(),
-                p.status(), p.shareStatus(), ownerName, p.createdAt(), p.updatedAt());
+                p.status(), p.shareStatus(), ownerName, p.createdAt(), p.updatedAt(),
+                like, fav, liked, faved);
     }
 
     private Map<UUID, String> ownerNames(List<Project> slice) {

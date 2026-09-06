@@ -127,6 +127,15 @@ public class ProjectController {
         return ResponseEntity.ok(Map.of("reviewed", n));
     }
 
+    /** 点赞/收藏切换（like|fav） */
+    @PostMapping("/marketplace/{projectId}/toggle/{kind}")
+    public ResponseEntity<ProjectService.MarkToggle> toggle(
+            HttpServletRequest request,
+            @PathVariable UUID projectId,
+            @PathVariable String kind) {
+        return ResponseEntity.ok(projectService.toggle(uid(request), projectId, kind));
+    }
+
     /** 集市只读详情卡片 */
     @GetMapping("/marketplace/{projectId}")
     public ResponseEntity<ProjectCard> marketGet(
