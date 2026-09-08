@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { LogOut, Plus } from 'lucide-vue-next'
-import { NDropdown, NIcon, NButton, NModal, type DropdownOption } from 'naive-ui'
+import { LogOut } from 'lucide-vue-next'
+import { NDropdown, NIcon, NModal, type DropdownOption } from 'naive-ui'
 import { computed, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
@@ -14,7 +14,6 @@ const ADMIN_EMAIL = 'sysou.com@outlook.com'
 
 const userName = computed(() => auth.user?.displayName ?? '…')
 const email = computed(() => auth.user?.email ?? '')
-const hasWorkspace = computed(() => (auth.activeWorkspaceId ? true : false))
 const isAdmin = computed(() => auth.user?.email?.toLowerCase() === ADMIN_EMAIL)
 const showContact = ref(false)
 
@@ -29,6 +28,8 @@ const menuOptions = computed<DropdownOption[]>(() => {
   const opts: DropdownOption[] = [{ label: userName.value, key: 'user', disabled: true }]
   if (email.value) opts.push({ label: email.value, key: 'email', disabled: true })
   opts.push(
+    { type: 'divider', key: 'd0' } as DropdownOption,
+    { label: '生成引擎配置', key: 'engine' },
     { type: 'divider', key: 'd1' } as DropdownOption,
     { label: '退出登录', key: 'logout' },
   )
@@ -41,7 +42,9 @@ function navActive(name: string): boolean {
 }
 
 async function onMenuSelect(key: string): Promise<void> {
-  if (key === 'logout') {
+  if (key === 'engine') {
+    void router.push({ name: 'engine-settings' })
+  } else if (key === 'logout') {
     await auth.logout()
     void router.push({ name: 'login' })
   }
@@ -83,19 +86,6 @@ const contact = { qq: '358532433', email: 'sysou.com@outlook.com' }
       </nav>
 
       <div class="topbar-right">
-        <NButton
-          v-if="hasWorkspace && isAdmin"
-          size="medium"
-          type="primary"
-          data-testid="btn-new-project"
-          @click="router.push({ name: 'project-new' })"
-        >
-          <template #icon>
-            <NIcon><Plus :size="16" /></NIcon>
-          </template>
-          新建项目
-        </NButton>
-
         <NDropdown :options="menuOptions" trigger="click" @select="onMenuSelect">
           <button type="button" class="user-chip" aria-label="账号菜单">
             <span class="user-avatar">{{ userName.slice(0, 1).toUpperCase() }}</span>
@@ -237,8 +227,47 @@ const contact = { qq: '358532433', email: 'sysou.com@outlook.com' }
 .contact-line { margin: 0 0 8px; font-size: 14px; line-height: 1.8; }
 .contact-line a { color: var(--wv-accent-text); }
 
+/* 移动端：顶部导航收起为第二行，可左右滑动切换菜单 */
 @media (max-width: 860px) {
-  .topnav { display: none; }
+  .app-topbar {
+    height: auto;
+    flex-wrap: wrap;
+    gap: 4px 10px;
+    padding: 8px 12px;
+  }
+  .brand-name {
+    font-size: 19px;
+  }
+  .brand-en {
+    display: none;
+  }
+  .topbar-right {
+    margin-left: auto;
+  }
+  .topnav {
+    order: 3;
+    width: 100%;
+    flex-flow: row nowrap;
+    overflow-x: auto;
+    overflow-y: hidden;
+    gap: 2px;
+    margin: 0;
+    padding: 2px 0 4px;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+  .topnav::-webkit-scrollbar {
+    display: none;
+  }
+  .nav-link {
+    flex: none;
+    font-size: 14.5px;
+    padding: 9px 13px;
+    white-space: nowrap;
+  }
+  .user-name {
+    max-width: 92px;
+  }
 }
 
 .user-chip {
@@ -317,11 +346,3 @@ const contact = { qq: '358532433', email: 'sysou.com@outlook.com' }
   border-top: 1px solid var(--wv-divider);
 }
 </style>
-@media (max-width: 900px) {
-  .app-topbar { height: auto; flex-wrap: wrap; gap: 4px 10px; padding: 8px 14px; }
-  .topbar-right { margin-left: auto; }
-  .topnav { order: 3; width: 100%; margin: 0 -4px; padding: 2px 4px 4px; overflow-x: auto; overflow-y: hidden; gap: 2px; -webkit-overflow-scrolling: touch; scrollbar-width: none; }
-  .topnav::-webkit-scrollbar { display: none; }
-  .nav-link { flex: none; font-size: 14px; padding: 8px 11px; }
-  .user-name { max-width: 92px; }
-}

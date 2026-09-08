@@ -68,6 +68,12 @@ const router = createRouter({
           meta: { title: '新建项目 · 织影 Weaveora' },
         },
         {
+          path: 'settings/engine',
+          name: 'engine-settings',
+          component: () => import('@/views/EngineSettingsView.vue'),
+          meta: { title: '生成引擎配置 · 织影 Weaveora' },
+        },
+        {
           path: 'projects/:projectId',
           name: 'project-detail',
           component: () => import('@/views/ProjectDetailView.vue'),

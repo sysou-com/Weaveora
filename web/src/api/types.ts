@@ -49,6 +49,13 @@ export interface ProjectPage {
 /** 项目模式（§7.1） */
 export type ProjectMode = 'image' | 'video' | 'mixed'
 
+/** 风格模板（StyleTemplateController） */
+export interface StyleTemplate {
+  id: string
+  slug: string
+  name: string
+}
+
 /** 项目（ProjectResponse） */
 export interface Project {
   id: string
@@ -58,6 +65,7 @@ export interface Project {
   aspectRatio: string
   durationSec: number | null
   status: string
+  styleTemplateId: string | null
   createdAt: string
 }
 
@@ -195,6 +203,40 @@ export interface CreateProjectInput {
   mode?: ProjectMode
   aspectRatio?: string
   durationSec?: number | null
+  styleTemplateId?: string | null
+}
+
+export type EngineKind = 'gpu' | 'cloud'
+
+/** 生成引擎配置（GET/PUT /api/v1/me/engine-settings） */
+export interface EngineSettings {
+  imageEngine: EngineKind
+  videoEngine: EngineKind
+  imageCloudBaseUrl: string | null
+  imageCloudAuthType: 'api_key' | 'basic'
+  imageCloudModel: string | null
+  imageCloudApiKeyMask: string
+  imageCloudUsername: string | null
+  imageCloudPasswordSet: boolean
+  videoCloudModel: string | null
+  videoCloudApiKeyMask: string
+  gpuServerUrl: string | null
+  gpuServerPort: number | null
+}
+
+export interface EngineSettingsInput {
+  imageEngine?: EngineKind
+  videoEngine?: EngineKind
+  imageCloudBaseUrl?: string | null
+  imageCloudAuthType?: 'api_key' | 'basic'
+  imageCloudApiKey?: string
+  imageCloudUsername?: string | null
+  imageCloudPassword?: string
+  imageCloudModel?: string | null
+  videoCloudApiKey?: string
+  videoCloudModel?: string | null
+  gpuServerUrl?: string | null
+  gpuServerPort?: number | null
 }
 
 /** 统一错误体（§17）：{ code, message, traceId } */

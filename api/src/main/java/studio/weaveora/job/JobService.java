@@ -26,6 +26,8 @@ import studio.weaveora.job.domain.WorkerNodeRepository;
 import studio.weaveora.project.api.ProjectContextPort;
 import studio.weaveora.project.api.ProjectContextPort.BriefSnapshot;
 import studio.weaveora.project.api.ProjectContextPort.ProjectSnapshot;
+import studio.weaveora.project.domain.StyleTemplate;
+import studio.weaveora.project.domain.StyleTemplateRepository;
 import studio.weaveora.shared.api.BizException;
 import studio.weaveora.shared.api.ErrorCode;
 import studio.weaveora.shared.api.ErrorResponse;
@@ -67,6 +69,26 @@ public class JobService {
         return d == null ? new int[]{1024, 1024} : d;
     }
 
+    /** 风格注入：模板前缀+原文+后缀；负面词与原文合并（优先模板）。 */
+    private static String styledPositive(StyleTemplate st, String raw) {
+        if (st == null) return raw;
+        String prefix = st.promptPrefix() == null ? "" : st.promptPrefix();
+        String suffix = st.promptSuffix() == null ? "" : st.promptSuffix();
+        if (prefix.isEmpty() && suffix.isEmpty()) return raw;
+        String base = raw == null ? "" : raw;
+        return prefix + base + suffix;
+    }
+
+    private static String styledNegative(StyleTemplate st, String raw) {
+        if (st == null) return raw == null ? "" : raw;
+        String neg = st.negative();
+        if (neg == null || neg.isEmpty()) return raw == null ? "" : raw;
+        String base = raw == null ? "" : raw.trim();
+        if (base.isEmpty()) return neg;
+        String sep = (neg.endsWith(",") || neg.endsWith("，")) ? " " : ", ";
+        return neg + sep + base;
+    }
+
     private final GenerationJobRepository jobs;
     private final WorkerNodeRepository nodes;
     private final AssetService assets;
@@ -78,6 +100,8 @@ public class JobService {
     private final studio.weaveora.asset.domain.AssetRepository assetRepo;
     private final QuotaService quota;
     private final Metrics metrics;
+    private final StyleTemplateRepository styleRepo;
+    private final studio.weaveora.engine.EngineSettingsService engineSettings;
     private final UserRepository users;
     private final String adminEmail;
     private final int motionFramesMin;
@@ -87,7 +111,8 @@ public class JobService {
                       StoragePort storage, ProjectContextPort projects, WorkspaceGuard guard, JobWsHandler ws,
                       studio.weaveora.director.PlanReader planReader,
                       studio.weaveora.asset.domain.AssetRepository assetRepo,
-                      QuotaService quota, Metrics metrics,
+                      QuotaService quota, Metrics metrics, StyleTemplateRepository styleRepo,
+                      studio.weaveora.engine.EngineSettingsService engineSettings,
                       UserRepository users,
                       @org.springframework.beans.factory.annotation.Value(
                               "${weaveora.access.admin-email:sysou.com@outlook.com}") String adminEmail,
@@ -106,6 +131,8 @@ public class JobService {
         this.assetRepo = assetRepo;
         this.quota = quota;
         this.metrics = metrics;
+        this.styleRepo = styleRepo;
+        this.engineSettings = engineSettings;
         this.users = users;
         this.adminEmail = adminEmail == null ? "" : adminEmail;
         this.motionFramesMin = motionFramesMin;
@@ -140,8 +167,15 @@ public class JobService {
         // 读取 revision plan（导演层产物）构造 payload
         JsonNode plan = planReader.revisionPlan(req.revisionId());
         String planMode = plan.path("mode").asText("image");
+        // 风格模板（W 项目风格：前缀/后缀/负面词注入出图与出视频）
+        StyleTemplate style = null;
+        if (project.styleTemplateId() != null) {
+            style = styleRepo.findById(project.styleTemplateId()).orElse(null);
+        }
         // W4 一致性锚定：把项目 approved 方案的参考图(storage key)带给引擎
         RefCtx refs = loadRefs(userId, workspaceId, projectId, req.revisionId());
+        // 引擎路由（用户设置）：本批次按 kind 决定 gpu|cloud
+        String engineRoute = engineSettings.resolveEngine(userId, req.kind());
 
         List<GenerationJob> created = new ArrayList<>();
         if ("video".equals(planMode)) {
@@ -167,8 +201,8 @@ public class JobService {
                 payload.put("revisionId", req.revisionId().toString());
                 payload.put("shotId", shotId.toString());
                 payload.put("shot_no", shot.path("shot_no").asInt());
-                payload.put("positive_prompt", shot.path("positive_prompt").asText(""));
-                payload.put("negative_prompt", shot.path("negative_prompt").asText(""));
+                payload.put("positive_prompt", styledPositive(style, shot.path("positive_prompt").asText("")));
+                payload.put("negative_prompt", styledNegative(style, shot.path("negative_prompt").asText("")));
                 payload.put("duration_sec", shot.path("duration_sec").asDouble(3));
                 payload.put("fps", plan.path("edit_plan").path("fps").asInt(30));
                 payload.put("seed", shot.path("seed").asLong(0) == 0 ? randomSeed() : shot.path("seed").asLong(0));
@@ -199,7 +233,8 @@ public class JobService {
                 }
                 attachRefs(payload, refs);
                 GenerationJob job = createOne(workspaceId, projectId, req.revisionId(), shotId,
-                        "clip".equals(req.kind()) ? PRESET_CLIP : PRESET_STILL, req.kind(), payload, userId);
+                        "clip".equals(req.kind()) ? PRESET_CLIP : PRESET_STILL, req.kind(), payload, userId,
+                        engineRoute);
                 created.add(job);
             }
         } else {
@@ -216,8 +251,8 @@ public class JobService {
                 payload.put("kind", "still");
                 payload.put("mode", "image");
                 payload.put("revisionId", req.revisionId().toString());
-                payload.put("positive_prompt", plan.path("positive_prompt").asText(""));
-                payload.put("negative_prompt", plan.path("negative_prompt").asText(""));
+                payload.put("positive_prompt", styledPositive(style, plan.path("positive_prompt").asText("")));
+                payload.put("negative_prompt", styledNegative(style, plan.path("negative_prompt").asText("")));
                 JsonNode params = plan.path("params");
                 com.fasterxml.jackson.databind.node.ObjectNode pnode =
                         params != null && params.isObject()
@@ -232,7 +267,7 @@ public class JobService {
                 payload.put("title", plan.path("title").asText(""));
                 attachRefs(payload, refs);
                 GenerationJob job = createOne(workspaceId, projectId, req.revisionId(), null,
-                        PRESET_STILL, "still", payload, userId);
+                        PRESET_STILL, "still", payload, userId, engineRoute);
                 created.add(job);
             }
         }
@@ -292,7 +327,7 @@ public class JobService {
                 throw new BizException(ErrorCode.VALIDATION, "仅失败/已取消的任务可重试");
             }
             GenerationJob neu = createOne(old.workspaceId(), old.projectId(), old.revisionId(), old.shotId(),
-                    old.modelPresetId(), old.kind(), old.payload(), userId);
+                    old.modelPresetId(), old.kind(), old.payload(), userId, old.engineRoute());
             created.add(toView(neu));
         }
         log.info("jobs retried project={} count={}", projectId, created.size());
@@ -394,8 +429,14 @@ public class JobService {
     public Map<String, Object> claim(UUID nodeId) {
         WorkerNode n = node(nodeId);
         UUID scope = n.workspaceId(); // NULL = 节点池 → 任意工作区
+        // 引擎路由匹配：节点能力 engine（缺省 gpu）只认领同引擎任务
+        String nodeEngine = n.capabilities() == null ? "gpu"
+                : n.capabilities().path("engine").asText("gpu");
         for (GenerationJob candidate : jobs.findQueuedForClaim()) {
             if (scope != null && !scope.equals(candidate.workspaceId())) {
+                continue;
+            }
+            if (!nodeEngine.equals(candidate.engineRoute())) {
                 continue;
             }
             int updated = jobs.claim(candidate.id(), nodeId.toString(), OffsetDateTime.now());
@@ -517,11 +558,13 @@ public class JobService {
     // ---------- 内部工具 ----------
 
     private GenerationJob createOne(UUID workspaceId, UUID projectId, UUID revisionId, UUID shotId,
-                                    UUID presetId, String kind, JsonNode payload, UUID userId) {
+                                    UUID presetId, String kind, JsonNode payload, UUID userId,
+                                    String engineRoute) {
         String idem = "j:" + workspaceId + ":" + projectId + ":" + revisionId + ":" + shotId + ":"
                 + kind + ":" + Integer.toHexString(ThreadLocalRandom.current().nextInt());
         GenerationJob job = GenerationJob.create(workspaceId, projectId, revisionId, shotId, presetId,
                 kind, idem, payload, userId);
+        job.setEngineRoute(engineRoute);
         GenerationJob saved = jobs.save(job);
         emit(saved, Map.of("type", "job.queued", "state", "queued"));
         metrics.jobQueued();
@@ -589,6 +632,8 @@ public class JobService {
         Map<String, Object> m = new LinkedHashMap<>();
         m.put("jobId", j.id().toString());
         m.put("kind", j.kind());
+        m.put("engineRoute", j.engineRoute());
+        m.put("userId", j.createdBy() == null ? null : j.createdBy().toString());
         m.put("projectId", j.projectId().toString());
         m.put("workspaceId", j.workspaceId().toString());
         m.put("revisionId", j.revisionId() == null ? null : j.revisionId().toString());

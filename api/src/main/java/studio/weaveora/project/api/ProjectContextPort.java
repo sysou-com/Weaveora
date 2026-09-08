@@ -28,7 +28,8 @@ public interface ProjectContextPort {
             String aspectRatio,   // 1:1 | 3:2 | 2:3 | 16:9 | 9:16
             BigDecimal durationSec,
             String status,        // §20.1
-            UUID approvedRevisionId
+            UUID approvedRevisionId,
+            UUID styleTemplateId
     ) {
     }
 

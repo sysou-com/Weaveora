@@ -55,6 +55,10 @@ public class GenerationJob {
     @Column(nullable = false)
     private JsonNode payload;
 
+    /** 引擎路由：gpu（自有 GPU/Comfy 池）| cloud（用户云 API）。claim 按节点能力匹配。 */
+    @Column(name = "engine_route", nullable = false)
+    private String engineRoute = "gpu";
+
     @Column(nullable = false)
     private int progress = 0;
 
@@ -164,6 +168,14 @@ public class GenerationJob {
     public String errorMessage() { return errorMessage; }
     public String workerId() { return workerId; }
     public UUID createdBy() { return createdBy; }
+
+    public String engineRoute() {
+        return engineRoute == null ? "gpu" : engineRoute;
+    }
+
+    public void setEngineRoute(String route) {
+        this.engineRoute = "cloud".equals(route) ? "cloud" : "gpu";
+    }
     public OffsetDateTime createdAt() { return createdAt; }
     public OffsetDateTime startedAt() { return startedAt; }
     public OffsetDateTime finishedAt() { return finishedAt; }

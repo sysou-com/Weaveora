@@ -12,6 +12,7 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.multipart.MultipartFile;
 import studio.weaveora.asset.api.AssetResponse;
+import studio.weaveora.engine.EngineSettingsService;
 import studio.weaveora.job.JobService;
 
 import java.io.IOException;
@@ -27,9 +28,11 @@ import java.util.UUID;
 public class InternalController {
 
     private final JobService jobService;
+    private final EngineSettingsService engineSettings;
 
-    public InternalController(JobService jobService) {
+    public InternalController(JobService jobService, EngineSettingsService engineSettings) {
         this.jobService = jobService;
+        this.engineSettings = engineSettings;
     }
 
     public record RegisterRequest(String name, UUID workspaceId, JsonNode capabilities) {
@@ -57,6 +60,12 @@ public class InternalController {
     public ResponseEntity<Map<String, Object>> heartbeat(@PathVariable UUID nodeId) {
         jobService.heartbeat(nodeId);
         return ResponseEntity.ok(Map.of("ok", true));
+    }
+
+    /** 云执行凭据（worker 认领 cloud 任务后按 userId 拉取；明文仅限内部通道）。 */
+    @GetMapping("/users/{userId}/cloud-config")
+    public ResponseEntity<Map<String, Object>> cloudConfig(@PathVariable UUID userId) {
+        return ResponseEntity.ok(engineSettings.cloudPlain(userId));
     }
 
     @PostMapping("/nodes/{nodeId}/claim")

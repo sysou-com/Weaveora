@@ -258,43 +258,41 @@ def _motion_graph(client_id, payload, positive, negative, first_frame_name, pref
     else:
         raw = max(32, min(64, int(round(duration * fps))))  # 缺省：>=32，封顶64
         frames = int((raw + 3) / 4) * 4
-    width = int((payload.get("params") or {}).get("width", 512))
-    height = int((payload.get("params") or {}).get("height", 512))
+    width = int((payload.get("params") or {}).get("width", 768))
+    height = int((payload.get("params") or {}).get("height", 768))
+    length = frames + 1  # Comfy 原生 Wan latent 帧数 = 4n+1（32 采样帧 → 33）
     nodes = {
-        "ckpt": {"class_type": "WanVideoModelLoader",
-                 "inputs": {"model": (payload.get("params") or {}).get(
+        "unet": {"class_type": "UNETLoader",
+                 "inputs": {"unet_name": (payload.get("params") or {}).get(
                      "model", "wan2.2_ti2v_5B_fp16.safetensors"),
-                     "base_precision": "bf16", "quantization": "disabled",
-                     "load_device": "main_device"}},
-        "t5": {"class_type": "LoadWanVideoT5TextEncoder",
-               "inputs": {"model_name": (payload.get("params") or {}).get(
-                   "text_encoder", "umt5_xxl_fp16.safetensors"),
-                   "precision": "bf16", "load_device": "offload_device"}},
-        "vae": {"class_type": "WanVideoVAELoader",
-                "inputs": {"model_name": (payload.get("params") or {}).get(
-                    "vae", "wan2.2_vae.safetensors"), "precision": "fp16"}},
-        "txt": {"class_type": "WanVideoTextEncode",
-                "inputs": {"positive_prompt": positive, "negative_prompt": negative,
-                           "t5": ["t5", 0], "force_offload": True, "device": "cpu"}},
+                     "weight_dtype": (payload.get("params") or {}).get(
+                         "quantization", "fp8_e4m3fn")}},
+        "clip": {"class_type": "CLIPLoader",
+                 "inputs": {"clip_name": (payload.get("params") or {}).get(
+                     "text_encoder", "umt5_xxl_fp8_e4m3fn_scaled.safetensors"),
+                     "type": "wan"}},
+        "vae": {"class_type": "VAELoader",
+                "inputs": {"vae_name": (payload.get("params") or {}).get(
+                    "vae", "wan2.2_vae.safetensors")}},
+        "shift": {"class_type": "ModelSamplingSD3",
+                  "inputs": {"model": ["unet", 0], "shift": 8.0}},
+        "pos": {"class_type": "CLIPTextEncode",
+                "inputs": {"text": positive, "clip": ["clip", 0]}},
+        "neg": {"class_type": "CLIPTextEncode",
+                "inputs": {"text": negative, "clip": ["clip", 0]}},
         "img": {"class_type": "LoadImage", "inputs": {"image": first_frame_name}},
-        "enc": {"class_type": "WanVideoEncode",
-                "inputs": {"vae": ["vae", 0], "image": ["img", 0],
-                           "enable_vae_tiling": False, "tile_x": width, "tile_y": height,
-                           "tile_stride_x": max(width // 2, 1), "tile_stride_y": max(height // 2, 1)}},
-        "emb": {"class_type": "WanVideoEmptyEmbeds",
-                "inputs": {"width": width, "height": height, "num_frames": frames}},
-        "sm": {"class_type": "WanVideoSampler",
-               "inputs": {"model": ["ckpt", 0], "image_embeds": ["emb", 0],
-                          "text_embeds": ["txt", 0], "samples": ["enc", 0],
-                          "steps": steps, "cfg": cfg, "shift": 8.0, "seed": seed,
-                          "force_offload": False, "scheduler": "euler",
-                          "riflex_freq_index": 0}},
-        "dec": {"class_type": "WanVideoDecode",
-                "inputs": {"vae": ["vae", 0], "samples": ["sm", 0],
-                           "enable_vae_tiling": True, "tile_x": min(512, max(width, 16)),
-                           "tile_y": min(512, max(height, 16)),
-                           "tile_stride_x": min(256, max(width // 2, 1)),
-                           "tile_stride_y": min(256, max(height // 2, 1))}},
+        "latent": {"class_type": "Wan22ImageToVideoLatent",
+                   "inputs": {"vae": ["vae", 0], "start_image": ["img", 0],
+                              "width": width, "height": height, "length": length,
+                              "batch_size": 1}},
+        "sampler": {"class_type": "KSampler",
+                    "inputs": {"model": ["shift", 0], "positive": ["pos", 0],
+                               "negative": ["neg", 0], "latent_image": ["latent", 0],
+                               "seed": seed, "steps": steps, "cfg": cfg,
+                               "sampler_name": "uni_pc", "scheduler": "simple",
+                               "denoise": 1.0}},
+        "dec": {"class_type": "VAEDecode",
+                "inputs": {"samples": ["sampler", 0], "vae": ["vae", 0]}},
         "save": {"class_type": "SaveImage",
                  "inputs": {"images": ["dec", 0], "filename_prefix": prefix}},
     }
@@ -338,18 +336,20 @@ def generate_motion(client_id, payload, progress_fn=None):
     positive = payload.get("positive_prompt", "")
     negative = payload.get("negative_prompt", "")
     fps = int(payload.get("fps") or 16)
-    # motion 固定 512×512（ti2v5B wrapper 兼容 bucket），关键帧缩放后上传保证一致
+    # motion 固定 768×768（Comfy 原生 Wan2.2 方形档位；8GB fp8），关键帧缩放后上传保证一致
+    mw = int((payload.get("params") or {}).get("width", 768))
+    mh = int((payload.get("params") or {}).get("height", 768))
     try:
         from PIL import Image as _PIL
-        _im = _PIL.open(io.BytesIO(data)).convert("RGB").resize((512, 512), _PIL.LANCZOS)
+        _im = _PIL.open(io.BytesIO(data)).convert("RGB").resize((mw, mh), _PIL.LANCZOS)
         _buf = io.BytesIO()
         _im.save(_buf, format="PNG")
         data = _buf.getvalue()
     except Exception:
         pass
     params2 = dict(payload.get("params") or {})
-    params2["width"] = 512
-    params2["height"] = 512
+    params2["width"] = mw
+    params2["height"] = mh
     payload = dict(payload)
     payload["params"] = params2
     prefix = "weaveora_mot_" + _uuid.uuid4().hex[:6]
@@ -370,6 +370,8 @@ def generate_motion(client_id, payload, progress_fn=None):
     frames = []
     outputs = rec.get("outputs") or {}
     for node in outputs.values():
+        if not isinstance(node, dict):
+            continue
         for it in node.get("images") or []:
             fname = it.get("filename", "")
             if not fname.startswith(prefix):
@@ -387,8 +389,8 @@ def generate_motion(client_id, payload, progress_fn=None):
     finally:
         import shutil as _sh
         _sh.rmtree(out_dir, ignore_errors=True)
-    w = (payload.get("params") or {}).get("width", 512)
-    h = (payload.get("params") or {}).get("height", 512)
+    w = (payload.get("params") or {}).get("width", 768)
+    h = (payload.get("params") or {}).get("height", 768)
     if progress_fn:
         progress_fn(100, "done")
     return [{"bytes": mp4, "mime": "video/mp4", "width": int(w), "height": int(h)}]

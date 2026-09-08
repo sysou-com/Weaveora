@@ -70,7 +70,8 @@ public class Project {
     }
 
     public static Project create(UUID workspaceId, UUID createdBy, String title,
-                                 String mode, String aspectRatio, BigDecimal durationSec) {
+                                 String mode, String aspectRatio, BigDecimal durationSec,
+                                 UUID styleTemplateId) {
         Project p = new Project();
         p.workspaceId = workspaceId;
         p.createdBy = createdBy;
@@ -78,6 +79,7 @@ public class Project {
         p.mode = mode;
         p.aspectRatio = aspectRatio;
         p.durationSec = durationSec;
+        p.styleTemplateId = styleTemplateId;
         p.status = "draft";
         return p;
     }

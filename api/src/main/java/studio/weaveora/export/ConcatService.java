@@ -21,6 +21,7 @@ import studio.weaveora.shared.api.ErrorCode;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -28,18 +29,33 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
- * W8 P0/P1：ffmpeg 把已确认视频项目的素材合成单 mp4（“可交付自动成片”）。
- * 轻精修：统一分辨率/fps/像素格式 → 每段编码（静帧幻灯或视频，附静音 AAC 轨）→ concat；
- * transition=fade 时对每段做入/出 0.25s 淡入淡出；转场统一、无黑帧（重编码保证）、时长守恒。
- * 依赖宿主 ffmpeg（生产 VPS 已装 7.0.2-static；dev 需自带）。
+ * W8 成片：把已确认视频项目的素材合成单 mp4（“可交付自动成片”）。
+ * - 画布按项目画幅自适应（9:16 → 720×1280 竖屏，不再压横屏）。
+ * - 转场（transition=fade|crossfade）：镜头间用 ffmpeg xfade 真叠化（交叉淡化），
+ *   不再是每段独立 fade in/out 造成的闪黑场；为保持时长守恒，每段素材尾帧 clone 延长
+ *   CROSSFADE_SEC 后叠化（成片时长 = 素材总长 - 转场重叠 + 片尾定格）。
+ * - 每段先统一分辨率/fps/yuv420p + 静音 AAC 轨，重编码保证可 concat / xfade。
+ * 依赖宿主 ffmpeg + ffprobe（生产 VPS 已装 7.0.2-static；dev 需自带）。
  */
 @Service
 public class ConcatService {
 
     private static final Logger log = LoggerFactory.getLogger(ConcatService.class);
     private static final long FFMPEG_TIMEOUT_SEC = 1200;
+    /** 转场叠化时长（秒）。 */
+    private static final double CROSSFADE_SEC = 0.4;
+
+    /** 成片画布：按项目画幅（修复竖屏 9:16 被压成横屏）。高基准 720（横） / 1280（竖）。 */
+    private static int[] canvasFor(String aspect) {
+        String a = aspect == null ? "" : aspect.trim();
+        if (a.startsWith("9:16")) return new int[]{720, 1280};
+        if (a.startsWith("1:1")) return new int[]{720, 720};
+        return new int[]{1280, 720};
+    }
 
     private final AssetService assets;
     private final AssetRepository assetRepo;
@@ -73,8 +89,10 @@ public class ConcatService {
         if (!"video".equals(plan.path("mode").asText(""))) {
             throw new BizException(ErrorCode.VALIDATION, "仅视频项目可渲染成片");
         }
-        boolean fade = "fade".equals(transition);
+        boolean crossfade = "fade".equals(transition) || "crossfade".equals(transition);
         int fps = plan.path("edit_plan").path("fps").asInt(30);
+        String aspect = plan.path("aspect_ratio").asText("");
+        int[] canvas = canvasFor(aspect);
         List<UUID> shotIds = planReader.shotIds(revisionId);
         List<MediaClip> clips = orderedMedia(workspaceId, plan, shotIds);
         if (clips.isEmpty()) {
@@ -85,24 +103,34 @@ public class ConcatService {
         try {
             work = Files.createTempDirectory("weaveora-render-");
             List<Path> segs = new ArrayList<>();
+            List<String> segDurs = new ArrayList<>();
             int idx = 0;
             for (MediaClip c : clips) {
                 idx++;
                 Path raw = work.resolve("src_" + idx);
                 writeAsset(c.assetKey(), raw);
                 Path seg = work.resolve("seg_" + idx + ".mp4");
-                encodeSegment(raw, seg, c, fps, fade, c.durationSec());
+                // 叠化模式：每段素材尾部 clone 延长 CROSSFADE_SEC，供 xfade 重叠且时长守恒
+                double pad = crossfade ? CROSSFADE_SEC : 0.0;
+                double target = c.durationSec() + pad;
+                encodeSegment(raw, seg, c, fps, target, pad, canvas[0], canvas[1]);
                 segs.add(seg);
+                segDurs.add(String.valueOf(c.durationSec() + pad));
             }
-            Path list = work.resolve("list.txt");
-            StringBuilder sb = new StringBuilder();
-            for (Path s : segs) sb.append("file '").append(s.toAbsolutePath()).append("'\n");
-            Files.writeString(list, sb.toString());
             Path master = work.resolve("master.mp4");
-            // concat（各段同参数含 AAC 轨）→ 封装拷贝，无二次转码损失
-            run("ffmpeg-concat", "-y", "-f", "concat", "-safe", "0", "-i",
-                    list.toString(), "-c", "copy",
-                    "-metadata", "title=" + plan.path("title").asText(""), master.toString());
+            if (crossfade && segs.size() > 1) {
+                mergeCrossfade(segs, segDurs, master,
+                        plan.path("title").asText(""));
+            } else {
+                // cut：直接 concat（各段同参数含 AAC 轨）→ 封装拷贝，无二次转码损失
+                Path list = work.resolve("list.txt");
+                StringBuilder sb = new StringBuilder();
+                for (Path s : segs) sb.append("file '").append(s.toAbsolutePath()).append("'\n");
+                Files.writeString(list, sb.toString());
+                run("ffmpeg-concat", "-y", "-f", "concat", "-safe", "0", "-i",
+                        list.toString(), "-c", "copy",
+                        "-metadata", "title=" + plan.path("title").asText(""), master.toString());
+            }
             byte[] bytes = Files.readAllBytes(master);
             String key = workspaceId + "/" + projectId + "/master/" + UUID.randomUUID() + ".mp4";
             try (InputStream in = new ByteArrayInputStream(bytes)) {
@@ -128,30 +156,126 @@ public class ConcatService {
         }
     }
 
-    /** 单段编码：统一 1280x720/fps/yuv420p + 静音 AAC 轨；fade 时加淡入淡出。 */
-    private void encodeSegment(Path raw, Path out, MediaClip c, int fps, boolean fade, double shotDur)
+    /**
+     * 单段编码：统一画布/fps/yuv420p + 静音 AAC 轨；输出精确时长 target 秒。
+     * pad>0 时用 tpad 尾帧 clone 补足（供 xfade 叠化与时长守恒）。
+     */
+    private void encodeSegment(Path raw, Path out, MediaClip c, int fps, double target, double pad,
+                               int cw, int ch)
             throws IOException, InterruptedException {
-        String vf = "scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2,"
+        String vf = "scale=" + cw + ":" + ch + ":force_original_aspect_ratio=decrease,"
+                + "pad=" + cw + ":" + ch + ":(ow-iw)/2:(oh-ih)/2,"
                 + "fps=" + fps + ",format=yuv420p";
-        if (fade) {
-            double fadeD = Math.min(0.25, shotDur / 4);
-            vf += ",fade=t=in:st=0:d=" + fadeD + ",fade=t=out:st="
-                    + Math.max(0, shotDur - fadeD) + ":d=" + fadeD;
+        if (pad > 0) {
+            vf += ",tpad=stop_mode=clone:stop_duration=" + pad;
         }
         List<String> args = new ArrayList<>(List.of("-y"));
         if (c.video()) {
             args.addAll(List.of("-i", raw.toString()));
         } else {
-            args.addAll(List.of("-loop", "1", "-t", String.valueOf(shotDur), "-i", raw.toString()));
+            args.addAll(List.of("-loop", "1", "-i", raw.toString()));
         }
         args.addAll(List.of(
                 "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
                 "-map", "0:v:0", "-map", "1:a:0",
                 "-vf", vf,
                 "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
-                "-c:a", "aac", "-b:a", "96k", "-shortest",
+                "-c:a", "aac", "-b:a", "96k",
+                "-t", String.format("%.3f", target),
+                "-shortest",
                 out.toString()));
         run("ffmpeg-seg", args.toArray(new String[0]));
+    }
+
+    /** 多段 xfade 叠化串接成 master（时长守恒：Σdur - (n-1)*overlap + 片尾定格 ≈ Σdur）。 */
+    private void mergeCrossfade(List<Path> segs, List<String> durs, Path master, String title)
+            throws IOException, InterruptedException {
+        int n = segs.size();
+        double[] len = new double[n];
+        for (int i = 0; i < n; i++) {
+            len[i] = durationOf(segs.get(i));
+        }
+        List<String> args = new ArrayList<>();
+        args.add("-y");
+        for (Path s : segs) {
+            args.add("-i");
+            args.add(s.toString());
+        }
+        // 全长静音轨（音频输入位于最后，索引 n）
+        double total = 0.0;
+        StringBuilder g = new StringBuilder();
+        String left = "[0:v]";
+        double acc = len[0];
+        for (int k = 1; k < n; k++) {
+            double off = acc - CROSSFADE_SEC;
+            if (off < 0.0) off = 0.0;
+            String outLabel = "[v" + k + "]";
+            g.append(left).append("[").append(k).append(":v]")
+                    .append("xfade=transition=fade:duration=").append(CROSSFADE_SEC)
+                    .append(":offset=").append(String.format("%.3f", off)).append(outLabel).append(";");
+            left = outLabel;
+            acc = off + len[k];
+        }
+        total = acc;
+        args.add("-f");
+        args.add("lavfi");
+        args.add("-t");
+        args.add(String.format("%.3f", total));
+        args.add("-i");
+        args.add("anullsrc=channel_layout=stereo:sample_rate=44100");
+        args.add("-filter_complex");
+        args.add(g.toString());
+        args.add("-map");
+        args.add(left);
+        args.add("-map");
+        args.add(n + ":a:0");
+        args.add("-c:v");
+        args.add("libx264");
+        args.add("-preset");
+        args.add("veryfast");
+        args.add("-crf");
+        args.add("20");
+        args.add("-c:a");
+        args.add("aac");
+        args.add("-b:a");
+        args.add("96k");
+        args.add("-movflags");
+        args.add("+faststart");
+        args.add("-metadata");
+        args.add("title=" + title);
+        args.add(master.toString());
+        run("ffmpeg-xfade", args.toArray(new String[0]));
+    }
+
+    /** 用 ffprobe 读视频时长（秒）。 */
+    private double durationOf(Path file) throws IOException, InterruptedException {
+        String probe = ffprobeBin();
+        ProcessBuilder pb = new ProcessBuilder(probe, "-v", "error",
+                "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1",
+                file.toString());
+        pb.redirectErrorStream(false);
+        Process p = pb.start();
+        String out = new String(p.getInputStream().readAllBytes(), StandardCharsets.UTF_8).trim();
+        boolean done = p.waitFor(FFMPEG_TIMEOUT_SEC, TimeUnit.SECONDS);
+        if (!done) {
+            p.destroyForcibly();
+            throw new IllegalStateException("ffprobe 超时");
+        }
+        if (p.exitValue() != 0) {
+            throw new IllegalStateException("ffprobe 失败 exit=" + p.exitValue());
+        }
+        Matcher m = Pattern.compile("(\\d+(?:\\.\\d+)?)").matcher(out);
+        if (m.find()) {
+            return Double.parseDouble(m.group(1));
+        }
+        return 0.0;
+    }
+
+    private String ffprobeBin() {
+        if (ffmpeg != null && ffmpeg.contains("/") && !"ffmpeg".equals(ffmpeg)) {
+            return ffmpeg.replaceAll("(^|/)ffmpeg$", "$1ffprobe");
+        }
+        return "ffprobe";
     }
 
     private List<MediaClip> orderedMedia(UUID workspaceId, JsonNode plan, List<UUID> shotIds) {

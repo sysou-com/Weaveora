@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import { useMutation, useQueryClient } from '@tanstack/vue-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/vue-query'
 import { ArrowLeft, Film, Image as ImageIcon, Layers, Sparkles } from 'lucide-vue-next'
 import { NButton, NForm, NFormItem, NIcon, NInput, NSelect, useMessage } from 'naive-ui'
 import { computed, ref } from 'vue'
 import { useRouter } from 'vue-router'
 
 import { createProject } from '@/api/projects'
+import { fetchStyleTemplates } from '@/api/styleTemplates'
 import type { ProjectMode } from '@/api/types'
 import { useAuthStore } from '@/stores/auth'
 import { ASPECT_OPTIONS, DEFAULT_VIDEO_DURATION, VIDEO_DURATIONS, aspectNote } from '@/utils/format'
@@ -19,9 +20,21 @@ const title = ref('')
 const mode = ref<ProjectMode>('image')
 const aspectRatio = ref('16:9')
 const durationSec = ref<number | null>(DEFAULT_VIDEO_DURATION)
+const styleTemplateId = ref<string | null>(null)
 
 const workspaceId = computed(() => auth.activeWorkspaceId ?? '')
 const showDuration = computed(() => mode.value === 'video')
+
+const { data: styleTemplates } = useQuery({
+  queryKey: ['style-templates'],
+  queryFn: () => fetchStyleTemplates(),
+  staleTime: 10 * 60 * 1000,
+})
+
+const styleOptions = computed(() => [
+  { label: '默认（跟随描述）', value: '' as string },
+  ...(styleTemplates.value ?? []).map((s) => ({ label: s.name, value: s.id })),
+])
 
 const modeOptions: Array<{ value: ProjectMode; label: string; hint: string }> = [
   { value: 'image', label: '图片', hint: '一张成片 / 批量一致素材' },
@@ -68,8 +81,10 @@ const mutation = useMutation({
       mode: mode.value,
       aspectRatio: aspectRatio.value,
       durationSec: mode.value === 'video' ? durationSec.value : null,
+      styleTemplateId: styleTemplateId.value ? styleTemplateId.value : null,
     }),
   onSuccess: (project) => {
+    void queryClient.invalidateQueries({ queryKey: ['own-projects'] })
     void queryClient.invalidateQueries({ queryKey: ['projects'] })
     message.success(`已创建「${project.title}」`)
     void router.push({ name: 'project-detail', params: { projectId: project.id } })
@@ -143,6 +158,17 @@ function submit(): void {
               :options="ASPECT_OPTIONS"
               size="large"
               data-testid="new-project-aspect"
+            />
+          </NFormItem>
+
+          <NFormItem label="视觉风格">
+            <NSelect
+              v-model:value="styleTemplateId"
+              :options="styleOptions"
+              size="large"
+              clearable
+              placeholder="默认（跟随描述）"
+              data-testid="new-project-style"
             />
           </NFormItem>
 

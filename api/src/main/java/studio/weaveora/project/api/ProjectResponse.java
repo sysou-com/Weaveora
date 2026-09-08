@@ -12,6 +12,7 @@ public record ProjectResponse(
         String aspectRatio,
         BigDecimal durationSec,
         String status,
+        UUID styleTemplateId,
         OffsetDateTime createdAt
 ) {
 }

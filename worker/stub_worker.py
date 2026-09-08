@@ -146,19 +146,52 @@ def execute_job(job):
     _req("POST", "/internal/jobs/%s/progress" % jid, {"progress": 15, "stage": "loading_model"})
 
     if MODE == "cloud":
-        if kind == "clip":
-            _req("POST", "/internal/jobs/%s/fail" % jid,
-                 {"code": "CLOUD_MOTION_UNSUPPORTED",
-                  "message": "运动(clip)暂需本地 Wan 引擎或云视频适配器（尚未接线）"})
-            return False
         import cloud_client as cloud
+        # 用户云凭据（图片=OpenAI-compatible；视频=Replicate），经 internal 通道拉取
+        cfg = {}
+        uid = (job or {}).get("userId") or payload.get("userId")
+        if uid:
+            try:
+                _, cfg = _req("GET", "/internal/users/%s/cloud-config" % uid)
+            except Exception:
+                cfg = {}
         try:
-            outs = cloud.generate_still(payload, progress_fn=lambda p, st: _req(
-                "POST", "/internal/jobs/%s/progress" % jid,
-                {"progress": p, "stage": st}))
-            media = [(o[0], o[1], o[2], o[3], o[4]) for o in outs]
+            if kind == "clip":
+                vcfg = cfg.get("video") or {}
+                outs = cloud.generate_motion_via_replicate(
+                    payload, vcfg.get("apiKey") or "", vcfg.get("model") or "",
+                    progress_fn=lambda p, st: _req(
+                        "POST", "/internal/jobs/%s/progress" % jid,
+                        {"progress": p, "stage": st}))
+                media = [(o[0], o[1], o[2], o[3], o[4]) for o in outs]
+            else:
+                import cloud_image
+                icfg = cfg.get("image") or {}
+                base = icfg.get("baseUrl") or ""
+                if base.startswith("http"):
+                    pngs = cloud_image.generate(
+                        payload.get("positive_prompt", ""), payload.get("params") or {}, icfg)
+                    params = payload.get("params") or {}
+                    w = int(params.get("width") or 1024)
+                    h = int(params.get("height") or 1024)
+                    media = [(pngs[0], "image/png", w, h, None)]
+                else:
+                    # BaseURL 留空 = Replicate 通道（apiKey 为 Replicate token）
+                    if not (icfg.get("apiKey") or ""):
+                        raise RuntimeError("未配置云图片凭据（图片云 API：填 BaseURL+Key 或 Replicate Key）")
+                    params = payload.get("params") or {}
+                    outs = cloud.replicate_image(
+                        payload, icfg.get("apiKey") or "", icfg.get("model") or "",
+                        progress_fn=lambda p, st: _req(
+                            "POST", "/internal/jobs/%s/progress" % jid,
+                            {"progress": p, "stage": st}))
+                    media = [(o[0], "image/png",
+                              int(params.get("width") or 1024), int(params.get("height") or 1024), None)
+                             for o in outs]
             return _complete(jid, payload, media)
         except Exception as e:
+            import traceback as _tb
+            _tb.print_exc()
             _req("POST", "/internal/jobs/%s/fail" % jid,
                  {"code": "CLOUD_ERROR", "message": str(e)[:500]})
             return False
@@ -197,10 +230,14 @@ def execute_job(job):
 
 
 def register():
+    engine = "cloud" if MODE == "cloud" else "gpu"
+    caps = {"engine": engine, "gpu": MODE, "workflows": ["stub_txt2img", "stub_motion"]}
+    if MODE == "comfy":
+        caps = {"engine": "gpu", "gpu": "comfy", "workflows": ["sdxl_txt2img", "wan_i2v", "ipadapter"]}
     st, body = _req("POST", "/internal/nodes/register", {
         "name": NAME,
         "workspaceId": WORKSPACE or None,
-        "capabilities": {"gpu": "stub-cpu", "workflows": ["stub_txt2img", "stub_motion"]},
+        "capabilities": caps,
     })
     if st != 200:
         raise SystemExit("register failed: %s %s" % (st, body))
