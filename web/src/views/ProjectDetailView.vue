@@ -9,7 +9,7 @@ import {
   WandSparkles,
 } from 'lucide-vue-next'
 import { NAlert, NButton, NIcon, NInputNumber, NModal, NSkeleton, NTag, useMessage } from 'naive-ui'
-import { computed, ref, watch } from 'vue'
+import { computed, onErrorCaptured, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import {
@@ -49,6 +49,12 @@ const router = useRouter()
 const auth = useAuthStore()
 const message = useMessage()
 const queryClient = useQueryClient()
+
+// 渲染错误浮出（调试：若方案编辑器某处运行时报错，控制台可见原因）
+onErrorCaptured((err, _instance, info) => {
+  console.error('[weaveora detail render error]', info, err)
+  return false
+})
 
 const workspaceId = computed(() => auth.activeWorkspaceId ?? '')
 const projectId = computed(() => String(route.params.projectId ?? ''))
