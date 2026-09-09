@@ -17,8 +17,8 @@ const props = defineProps<{
 
 const emit = defineEmits<{ approveShot: [shotNo: number]; aiPrompt: [shot: DirectorShot]; aiSyncAll: [] }>()
 
-const hasZh = computed(() =>
-  (props.plan.shots ?? []).some((s) => (s.zh ?? '').trim().length > 0))
+const hasAction = computed(() =>
+  (props.plan.shots ?? []).some((s) => (s.action ?? '').trim().length > 0))
 
 /** 成片总时长 = 各镜时长之和；修改镜头时长后同步 plan.duration_sec。 */
 const totalDur = computed(() =>
@@ -57,10 +57,22 @@ const transitions = ['cut', 'dissolve', 'fade', 'wipe'].map((v) => ({ label: v, 
     </section>
 
     <section class="block">
-      <p class="block-label font-mono">
-        <NIcon size="12" style="vertical-align: -1px"><Film /></NIcon>&nbsp;分镜 / 镜头表
-        <span class="hint">（逐镜可改可单镜确认；先确认关键帧，运动在 W3）</span>
-      </p>
+      <div class="zh-head">
+        <p class="block-label font-mono" style="margin: 0">
+          <NIcon size="12" style="vertical-align: -1px"><Film /></NIcon>&nbsp;分镜 / 镜头表
+          <span class="hint">（逐镜可改可单镜确认；展开卡片编辑 EN 提示词）</span>
+        </p>
+        <NButton
+          size="small"
+          type="primary"
+          secondary
+          :disabled="!!disabled || !hasAction"
+          data-testid="ai-sync-all"
+          @click="emit('aiSyncAll')"
+        >
+          AI 同步提示词（按画面动作）
+        </NButton>
+      </div>
       <div class="shot-list">
         <ShotCard
           v-for="shot in props.plan.shots"
@@ -94,43 +106,6 @@ const transitions = ['cut', 'dissolve', 'fade', 'wipe'].map((v) => ({ label: v, 
         </label>
       </div>
       </template>
-    </section>
-
-    <section class="block">
-      <div class="zh-head">
-        <p class="block-label font-mono" style="margin: 0">镜头中文描述 / AI 提示词</p>
-        <span class="hint">（EN 正负提示词在分镜折叠框内编辑）</span>
-        <NButton
-          size="small"
-          type="primary"
-          secondary
-          :disabled="!!disabled || !hasZh"
-          data-testid="ai-sync-all"
-          @click="emit('aiSyncAll')"
-        >
-          AI 同步全部提示词
-        </NButton>
-      </div>
-      <div v-for="shot in props.plan.shots" :key="shot.shot_no" class="zh-row">
-        <span class="key narration-key">第 {{ shot.shot_no }} 镜</span>
-        <NInput
-          v-model:value="shot.zh"
-          size="small"
-          :disabled="!!disabled"
-          maxlength="200"
-          placeholder="本镜中文描述（可留空；填写后可用 AI 生成正/负提示词）"
-        />
-        <NButton
-          size="small"
-          secondary
-          type="primary"
-          :disabled="!!disabled || !shot.zh || !shot.zh.trim()"
-          data-testid="ai-prompt"
-          @click="emit('aiPrompt', shot)"
-        >
-          AI 生成提示词
-        </NButton>
-      </div>
     </section>
 
     <section class="block">

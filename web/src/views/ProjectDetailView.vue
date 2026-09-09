@@ -648,7 +648,7 @@ async function openAiRewrite(shot: DirectorShot): Promise<void> {
   aiBusy.value = true
   aiPreview.value = null
   try {
-    const r = await rewritePromptFromZh(workspaceId.value, projectId.value, (shot.zh ?? '').trim())
+    const r = await rewritePromptFromZh(workspaceId.value, projectId.value, ((shot.action ?? shot.zh) ?? '').trim())
     aiPreview.value = r
   } catch (e) {
     message.error(e instanceof Error ? e.message : '生成失败，请重试')
@@ -693,7 +693,7 @@ const aiBatch = ref<BatchItem[]>([])
 
 async function aiSyncAll(): Promise<void> {
   const shots = ((draft.value as unknown as { shots?: DirectorShot[] })?.shots ?? []).filter(
-    (s) => (s.zh ?? '').trim().length > 0,
+    (s) => ((s.action ?? s.zh) ?? '').trim().length > 0,
   )
   if (!shots.length) {
     message.info('没有填写中文描述的镜头，请先填写')
@@ -703,10 +703,10 @@ async function aiSyncAll(): Promise<void> {
   aiBatch.value = []
   try {
     for (const shot of shots) {
-      const r = await rewritePromptFromZh(workspaceId.value, projectId.value, (shot.zh ?? '').trim())
+      const r = await rewritePromptFromZh(workspaceId.value, projectId.value, ((shot.action ?? shot.zh) ?? '').trim())
       aiBatch.value.push({
         shot,
-        zh: (shot.zh ?? '').trim(),
+        zh: ((shot.action ?? shot.zh) ?? '').trim(),
         positive: r.positive_prompt,
         negative: r.negative_prompt,
       })
@@ -1168,7 +1168,7 @@ const shotTotal = computed(() => {
       <!-- AI 提示词确认（①：可确认/取消/微调后应用） -->
       <NModal v-model:show="aiOpen" preset="card" title="AI 生成提示词（可确认或取消）" style="max-width: 720px">
         <p class="text-secondary" style="margin: 0 0 10px; font-size: 13px;">
-          第 {{ aiShot?.shot_no ?? '' }} 镜 · 中文：{{ aiShot?.zh ?? '' }}
+          第 {{ aiShot?.shot_no ?? '' }} 镜 · 中文：{{ (aiShot?.action ?? aiShot?.zh) ?? '' }}
         </p>
         <template v-if="aiBusy">
           <div class="g-loading" style="padding: 24px 0">AI 生成中…</div>
