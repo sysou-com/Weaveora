@@ -199,6 +199,7 @@ export interface JobRecord {
   errorCode: string | null
   errorMessage: string | null
   createdAt: string
+  payload?: { shot_no?: number } | null
 }
 
 /** POST /projects 请求体 */

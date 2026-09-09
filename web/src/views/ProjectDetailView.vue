@@ -393,7 +393,18 @@ const cancelBusy = ref<string | null>(null)
 
 // 任务默认展示 10 条，点“查看更多”逐次再展示 10 条
 const jobLimit = ref(10)
-const visibleJobs = computed(() => (jobs.data.value ?? []).slice(0, jobLimit.value))
+const filterLatest = ref(true)
+/** 只显示“每个 镜+kind 最近一条”；重跑后旧记录默认隐藏 */
+const latestJobs = computed(() => {
+  const all = jobs.data.value ?? []
+  if (!filterLatest.value) return all
+  const newest = new Map<string, JobRecord>()
+  for (const j of all) {
+    newest.set(`${j.kind}:${j.payload?.shot_no ?? 'x'}`, j)
+  }
+  return [...newest.values()]
+})
+const visibleJobs = computed(() => latestJobs.value.slice(0, jobLimit.value))
 function showMoreJobs(): void {
   jobLimit.value += 10
 }
@@ -1021,6 +1032,10 @@ const shotTotal = computed(() => {
       <div v-if="detApproved || (jobs.data.value ?? []).length" class="jobs-panel" data-testid="jobs-panel">
         <div class="jobs-head">
           <span class="font-mono eyebrow">任务 / 生成</span>
+          <label class="filter-latest">
+            <input type="checkbox" v-model="filterLatest" />
+            只看最近一轮
+          </label>
           <div class="jobs-actions">
             <template v-if="!activeJobCount">
               <span v-if="!isVideoNow" class="count-inline">
@@ -1064,7 +1079,7 @@ const shotTotal = computed(() => {
               <input type="checkbox" :checked="jobSel.includes(j.id)" @change="toggleJobSel(j.id)" />
             </label>
             <span v-else class="row-check" />
-            <span class="job-kind font-mono">[{{ j.kind }}]</span>
+            <span class="job-kind font-mono">[{{ j.kind === 'still' ? '关键帧' : '运动' }} · 第{{ j.payload?.shot_no ?? '—' }}镜]</span>
             <span :class="['job-state', j.state]">
               {{ JOB_STATE_LABEL[j.state] ?? j.state }}{{ j.state === 'running' && j.stage ? ' · ' + j.stage : '' }}
             </span>
@@ -1643,6 +1658,19 @@ const shotTotal = computed(() => {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+  flex-wrap: wrap;
+}
+.filter-latest {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  color: var(--wv-text-2);
+  cursor: pointer;
+  user-select: none;
+}
+.filter-latest input {
+  accent-color: var(--wv-accent, #d0a24e);
 }
 .jobs-actions { display: flex; align-items: center; gap: 8px; }
 .count-inline { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--wv-text-3); }

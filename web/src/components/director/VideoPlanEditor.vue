@@ -19,6 +19,8 @@ const emit = defineEmits<{ approveShot: [shotNo: number]; aiPrompt: [shot: Direc
 
 const hasAction = computed(() =>
   (props.plan.shots ?? []).some((s) => (s.action ?? '').trim().length > 0))
+const hasNarration = computed(() =>
+  (props.plan.shots ?? []).some((s) => (s.narration ?? '').trim().length > 0))
 
 /** 成片总时长 = 各镜时长之和；修改镜头时长后同步 plan.duration_sec。 */
 const totalDur = computed(() =>
@@ -132,8 +134,8 @@ const transitions = ['cut', 'dissolve', 'fade', 'wipe'].map((v) => ({ label: v, 
       </div>
     </section>
 
-    <section v-if="props.plan.edit_plan.subtitle" class="block">
-      <p class="block-label font-mono">旁白 / 字幕（每镜一句，渲染时烧录到成片）</p>
+    <section v-if="props.plan.edit_plan.subtitle || hasNarration" class="block">
+      <p class="block-label font-mono">旁白 / 字幕（有内容即可编辑；渲染烧录由“字幕”开关控制）</p>
       <div
         v-for="shot in props.plan.shots"
         :key="shot.shot_no"
