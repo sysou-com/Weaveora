@@ -101,7 +101,8 @@ public class DirectorService {
         quota.checkDirector(userId);
 
         String system = loadSystemPrompt(mode);
-        String user = buildUserPrompt(brief, project, mode);
+        JsonNode prev = latestPlan(projectId, mode);
+        String user = buildUserPrompt(brief, project, mode, prev);
         long t0 = System.nanoTime();
         JsonNode plan;
         try {
@@ -487,7 +488,8 @@ public class DirectorService {
         }
     }
 
-    private String buildUserPrompt(BriefSnapshot brief, ProjectSnapshot project, String mode) {
+    private String buildUserPrompt(BriefSnapshot brief, ProjectSnapshot project, String mode,
+                                   JsonNode prevPlan) {
         StringBuilder sb = new StringBuilder();
         sb.append("项目标题/画幅：").append(project.aspectRatio());
         if (project.durationSec() != null) sb.append("，目标时长 ").append(project.durationSec()).append(" 秒");
@@ -495,8 +497,49 @@ public class DirectorService {
         if (brief.constraints() != null && !brief.constraints().isEmpty()) {
             sb.append("\n\n约束（constraints）：\n").append(brief.constraints().toPrettyString());
         }
+        if (prevPlan != null) {
+            sb.append("\n\n上一版方案（作为本版基准）：\n").append(planSummary(prevPlan));
+            sb.append("\n\n要求：基于上一版方案重导出新一版——镜头顺序与叙事保持连贯，")
+                    .append("若无新需求则延续上一版结构/文案并做打磨精修；仅当用户 Brief 有新要求时才调整镜头内容与数量。");
+        }
         sb.append("\n\n请按 System Prompt 的 JSON 结构输出。");
         return sb.toString();
+    }
+
+    /** 最近一版同模式方案（供“再导演基于上一版”注入）。 */
+    private JsonNode latestPlan(UUID projectId, String mode) {
+        try {
+            PromptRevision r = revisions.findTopByProjectIdOrderByRevisionNoDesc(projectId).orElse(null);
+            if (r == null || r.schemaJson() == null) return null;
+            String m = r.schemaJson().path("mode").asText("");
+            return m.equals(mode) ? r.schemaJson() : null;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** 上一版方案摘要（控制 token，逐镜给画面与正词要点）。 */
+    private static String planSummary(JsonNode plan) {
+        StringBuilder s = new StringBuilder();
+        s.append("标题：").append(plan.path("title").asText("")).append("；logline：")
+                .append(plan.path("logline").asText("").length() > 100
+                        ? plan.path("logline").asText("").substring(0, 100) + "…"
+                        : plan.path("logline").asText(""))
+                .append("；总时长 ").append(plan.path("duration_sec").asDouble(0)).append("s");
+        int i = 0;
+        for (JsonNode sh : plan.path("shots")) {
+            i++;
+            if (i > 12) { s.append("\n…共 ").append(plan.path("shots").size()).append(" 镜（其余略）"); break; }
+            s.append("\n镜头").append(sh.path("shot_no").asInt(i))
+                    .append("[").append(sh.path("duration_sec").asDouble(0)).append("s]");
+            String act = sh.path("action").asText("");
+            if (!act.isBlank()) s.append(" 画面:").append(act.length() > 120 ? act.substring(0, 120) + "…" : act);
+            String pos = sh.path("positive_prompt").asText("");
+            if (!pos.isBlank()) s.append(" pos:").append(pos.length() > 160 ? pos.substring(0, 160) + "…" : pos);
+            String nar = sh.path("narration").asText("");
+            if (!nar.isBlank()) s.append(" 旁白:").append(nar);
+        }
+        return s.toString();
     }
 
     private RevisionSummaryResponse toSummary(PromptRevision r, UUID approvedId) {

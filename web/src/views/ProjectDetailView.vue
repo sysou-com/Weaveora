@@ -25,7 +25,7 @@ import { createJobs, listJobs, cancelJob, retryJobs, deleteJobs, JOB_STATE_LABEL
 import { shareProject } from '@/api/market'
 import { listAssets, uploadReference, fetchAssetBlob, deleteAssets } from '@/api/assets'
 import { createExport, fetchExportBlob, renderMaster, timecode } from '@/api/export'
-import { getProject } from '@/api/projects'
+import { getProject, updateProjectDuration } from '@/api/projects'
 import type { DirectorPlan, JobRecord } from '@/api/types'
 import BriefComposer from '@/components/director/BriefComposer.vue'
 import ImagePlanEditor from '@/components/director/ImagePlanEditor.vue'
@@ -610,6 +610,17 @@ async function handleSave(): Promise<void> {
   if (!draft.value || !selectedRevId.value) return
   saving.value = true
   try {
+    // 视频：镜头总长变化 → 先同步项目时长（patch 与 approve 按项目时长校验镜头总长）
+    if (draft.value.mode === 'video') {
+      const total = (draft.value.shots ?? []).reduce(
+        (a, s) => a + (Number(s.duration_sec) || 0),
+        0,
+      )
+      if (total >= 1) {
+        await updateProjectDuration(workspaceId.value, projectId.value, Math.round(total * 100) / 100)
+        void queryClient.invalidateQueries({ queryKey: ['project'] })
+      }
+    }
     await patchRevision(workspaceId.value, projectId.value, selectedRevId.value, draft.value)
     // 以服务端回读为准重建草稿（负词合并/尺寸补齐等归一化），并刷新版本摘要（source→user）
     initKey.value = ''

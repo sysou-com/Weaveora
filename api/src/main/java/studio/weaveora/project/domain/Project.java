@@ -89,6 +89,11 @@ public class Project {
         this.updatedAt = OffsetDateTime.now();
     }
 
+    public void setDuration(java.math.BigDecimal durationSec) {
+        this.durationSec = durationSec;
+        this.updatedAt = OffsetDateTime.now();
+    }
+
     /** §20.1：产生新 revision → directing（draft/approved/reviewing 可进），并解除旧确认。 */
     public void startDirecting() {
         this.status = "directing";

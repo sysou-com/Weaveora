@@ -134,6 +134,23 @@ public class ProjectService implements ProjectContextPort {
         return ProjectMapper.toResponse(projects.save(p));
     }
 
+    /** 更新视频项目总时长（配合逐镜改时长：approve 时按镜头总长=项目时长校验）。 */
+    @Transactional
+    public ProjectResponse updateDuration(UUID userId, UUID workspaceId, UUID projectId,
+                                          java.math.BigDecimal dur) {
+        guard.requireMember(userId, workspaceId);
+        Project p = findInWorkspace(workspaceId, projectId);
+        if (dur == null || dur.compareTo(java.math.BigDecimal.ONE) < 0) {
+            throw new BizException(ErrorCode.VALIDATION, "时长至少 1 秒");
+        }
+        if (dur.intValue() > maxVideoSec) {
+            throw new BizException(ErrorCode.VALIDATION,
+                    "视频总时长不能超过 " + maxVideoSec + " 秒（W8 长片编排上限）");
+        }
+        p.setDuration(dur);
+        return ProjectMapper.toResponse(projects.save(p));
+    }
+
     @Transactional
     public BriefResponse createBrief(UUID userId, UUID workspaceId, UUID projectId, CreateBriefRequest req) {
         guard.requireMember(userId, workspaceId);

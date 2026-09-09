@@ -20,6 +20,19 @@ export async function createProject(workspaceId: string, input: CreateProjectInp
   })
 }
 
+/** PATCH /api/v1/projects/{id}/duration —— 视频项目总时长（配合逐镜时长编辑） */
+export async function updateProjectDuration(
+  workspaceId: string,
+  projectId: string,
+  durationSec: number,
+): Promise<Project> {
+  return request<Project>(`/api/v1/projects/${projectId}/duration`, {
+    method: 'PATCH',
+    headers: { [WORKSPACE_HEADER]: workspaceId },
+    body: { durationSec },
+  })
+}
+
 /** GET /api/v1/projects/{id} */
 export async function getProject(workspaceId: string, projectId: string): Promise<Project> {
   return request<Project>(`/api/v1/projects/${projectId}`, {

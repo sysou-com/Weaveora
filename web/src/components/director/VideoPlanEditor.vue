@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { Film } from 'lucide-vue-next'
 import { NIcon, NInput, NInputNumber, NSwitch } from 'naive-ui'
-import { computed } from 'vue'
+import { computed, watch } from 'vue'
 
 import ShotCard from '@/components/director/ShotCard.vue'
 import type { ShotRecord, VideoPlan } from '@/api/types'
@@ -16,6 +16,16 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{ approveShot: [shotNo: number] }>()
+
+/** 成片总时长 = 各镜时长之和；修改镜头时长后同步 plan.duration_sec。 */
+const totalDur = computed(() =>
+  (props.plan.shots ?? []).reduce((a, s) => a + (Number(s.duration_sec) || 0), 0))
+watch(
+  () => (props.plan.shots ?? []).map((s) => s.duration_sec).join(','),
+  () => {
+    props.plan.duration_sec = Math.round(totalDur.value * 100) / 100
+  },
+)
 
 const statusOf = (no: number): string =>
   props.records?.find((r) => r.shotNo === no)?.status ?? 'draft'
@@ -81,6 +91,30 @@ const transitions = ['cut', 'dissolve', 'fade', 'wipe'].map((v) => ({ label: v, 
       </div>
     </section>
 
+    <section class="block">
+      <p class="block-label font-mono">镜头时长（成片总长 {{ totalDur.toFixed(2) }}s）</p>
+      <p class="hint-line text-secondary">
+        逐镜调节时长后「保存方案」即生效；云端按镜头计费，短镜更省。留空镜将跳过字幕，时长需 ≥1s。
+      </p>
+      <div
+        v-for="shot in props.plan.shots"
+        :key="shot.shot_no"
+        class="narration-row"
+      >
+        <span class="key narration-key">第 {{ shot.shot_no }} 镜</span>
+        <NInputNumber
+          v-model:value="shot.duration_sec"
+          :min="1"
+          :max="10"
+          :step="0.5"
+          size="small"
+          style="width: 120px"
+          :disabled="!!disabled"
+        />
+        <span class="hint-line text-secondary">秒</span>
+      </div>
+    </section>
+
     <section v-if="props.plan.edit_plan.subtitle" class="block">
       <p class="block-label font-mono">旁白 / 字幕（每镜一句，渲染时烧录到成片）</p>
       <div
@@ -108,6 +142,11 @@ const transitions = ['cut', 'dissolve', 'fade', 'wipe'].map((v) => ({ label: v, 
   align-items: center;
   gap: 10px;
   margin-bottom: 8px;
+}
+.hint-line {
+  margin: 0 0 10px;
+  font-size: 12.5px;
+  line-height: 1.7;
 }
 .narration-key {
   flex: none;

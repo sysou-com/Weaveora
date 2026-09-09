@@ -3,6 +3,7 @@ package studio.weaveora.project.api;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.NotNull;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.core.io.InputStreamResource;
@@ -210,6 +211,19 @@ public class ProjectController {
         return UUID.fromString(workspaceId);
     }
 
+    @PatchMapping("/{projectId}/duration")
+    public ResponseEntity<ProjectResponse> duration(
+            HttpServletRequest request,
+            @RequestHeader(value = WORKSPACE_HEADER, required = false) String workspaceId,
+            @PathVariable UUID projectId,
+            @Valid @RequestBody DurationRequest req) {
+        return ResponseEntity.ok(projectService.updateDuration(
+                uid(request), ws(workspaceId), projectId, req.durationSec()));
+    }
+
     public record RenameRequest(@NotBlank String title) {
+    }
+
+    public record DurationRequest(@NotNull java.math.BigDecimal durationSec) {
     }
 }
