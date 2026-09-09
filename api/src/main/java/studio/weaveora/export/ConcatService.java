@@ -172,8 +172,8 @@ public class ConcatService {
     private void encodeSegment(Path raw, Path out, MediaClip c, int fps, double target, double pad,
                                int cw, int ch, String narration, Path workDir)
             throws IOException, InterruptedException {
-        String vf = "scale=" + cw + ":" + ch + ":force_original_aspect_ratio=decrease,"
-                + "pad=" + cw + ":" + ch + ":(ow-iw)/2:(oh-ih)/2,"
+        String vf = "scale=" + cw + ":" + ch + ":force_original_aspect_ratio=increase,"
+                + "crop=" + cw + ":" + ch + ","
                 + "fps=" + fps + ",format=yuv420p";
         if (pad > 0) {
             vf += ",tpad=stop_mode=clone:stop_duration=" + pad;

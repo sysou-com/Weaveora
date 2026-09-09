@@ -151,6 +151,13 @@ def replicate_image(payload, token, model, progress_fn=None):
     positive = payload.get("positive_prompt", "")
     params = payload.get("params") or {}
     inp = {"prompt": positive}
+    ar = payload.get("aspect_ratio")
+    if (model or "").lower().startswith("stability-ai/") or "sdxl" in (model or "").lower():
+        # SDXL 类按 width/height 出图（aspect_ratio 不生效）
+        inp["width"] = int(params.get("width") or 1024)
+        inp["height"] = int(params.get("height") or 1024)
+    elif ar in ("16:9", "9:16", "1:1", "3:2", "2:3"):
+        inp["aspect_ratio"] = ar
     body_in = {"input": inp}
     if ":" in model:
         body_in["version"] = model.split(":", 1)[1]
@@ -278,8 +285,9 @@ def generate_motion_via_replicate(payload, token, model, progress_fn=None):
                 raise CloudError("参考帧上传失败: %s" % e)
     positive = payload.get("positive_prompt", "")
     inp = _video_input(model, positive, img_url)
-    if "minimax" not in (model or "").lower():
-        # kling 等图生视频：画幅与负面词可选注入
+    ml = (model or "").lower()
+    if "minimax" not in ml and "wan" not in ml:
+        # kling 等图生视频：画幅与负面词可选注入（wan 系不支持 aspect_ratio，随参考图比例）
         ar = payload.get("aspect_ratio")
         if ar in ("16:9", "9:16", "1:1", "3:2", "2:3"):
             inp["aspect_ratio"] = ar
