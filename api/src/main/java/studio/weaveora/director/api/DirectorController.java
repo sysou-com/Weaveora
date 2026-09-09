@@ -2,6 +2,7 @@ package studio.weaveora.director.api;
 
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
+import jakarta.validation.constraints.NotBlank;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PatchMapping;
@@ -29,6 +30,19 @@ public class DirectorController {
 
     public DirectorController(DirectorService directorService) {
         this.directorService = directorService;
+    }
+
+    @PostMapping("/director/rewrite-prompt")
+    public ResponseEntity<java.util.Map<String, String>> rewritePrompt(
+            HttpServletRequest request,
+            @RequestHeader(value = ProjectController.WORKSPACE_HEADER, required = false) String workspaceId,
+            @PathVariable UUID projectId,
+            @Valid @RequestBody RewritePromptRequest body) {
+        return ResponseEntity.ok(directorService.rewritePrompt(
+                uid(request), ws(workspaceId), projectId, body.rawText()));
+    }
+
+    public record RewritePromptRequest(@NotBlank String rawText) {
     }
 
     @PostMapping("/director/generate")

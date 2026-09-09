@@ -488,6 +488,29 @@ public class DirectorService {
         }
     }
 
+    /** ① 中文描述 → LLM 重写该镜正/负提示词（供前端确认后再应用）。 */
+    @Transactional(readOnly = true)
+    public java.util.Map<String, String> rewritePrompt(UUID userId, UUID workspaceId, UUID projectId,
+                                                       String rawText) {
+        context.require(userId, workspaceId, projectId);
+        String system = "你是专业提示词工程师。把用户的中文镜头描述转换为英文生成提示词。"
+                + "要求：positive_prompt 为英文（<=60 个英文词），含主体/镜头/光线/氛围/质感细节；"
+                + "negative_prompt 为中文常见负面项（画质、结构、多余元素等）。"
+                + "只输出 JSON：{\"positive_prompt\":\"...\",\"negative_prompt\":\"...\"}";
+        String user = "中文描述：\n" + rawText + "\n请按上述要求输出 JSON。";
+        LlmRequest req = new LlmRequest(system, user, "rewrite", rawText, "image", "16:9", null, null);
+        try {
+            String raw = llm.generateJson(req);
+            JsonNode n = mapper.readTree(raw);
+            java.util.Map<String, String> out = new java.util.LinkedHashMap<>();
+            out.put("positive_prompt", n.path("positive_prompt").asText(""));
+            out.put("negative_prompt", n.path("negative_prompt").asText(""));
+            return out;
+        } catch (Exception e) {
+            throw new IllegalStateException("提示词重写失败: " + e.getMessage(), e);
+        }
+    }
+
     private String buildUserPrompt(BriefSnapshot brief, ProjectSnapshot project, String mode,
                                    JsonNode prevPlan) {
         StringBuilder sb = new StringBuilder();
