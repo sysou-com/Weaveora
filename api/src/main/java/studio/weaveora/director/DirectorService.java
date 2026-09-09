@@ -117,6 +117,8 @@ public class DirectorService {
         if (plan instanceof ObjectNode obj && !obj.has("mode")) {
             obj.put("mode", mode);
         }
+        // 新一版保留上一版同镜的中文描述与旁白（zh/narration 是用户编辑字段，LLM 不自带）
+        mergePrevMeta(plan, prev);
 
         int revisionNo = nextRevisionNo(projectId);
         PromptRevision rev = PromptRevision.create(workspaceId, projectId, brief.id(), revisionNo,
@@ -605,6 +607,26 @@ public class DirectorService {
     private ShotView toShotView(ShotDraft s) {
         return new ShotView(s.id(), s.shotNo(), s.durationSec(), s.shotSize(), s.cameraMove(), s.action(),
                 s.positivePrompt(), s.negativePrompt(), s.seedLock(), s.refShotNo(), s.status());
+    }
+
+    /** 把上一版每镜的用户字段（zh/narration）迁移到新一版对应镜位。 */
+    private static void mergePrevMeta(JsonNode plan, JsonNode prev) {
+        if (prev == null || !prev.has("shots") || !plan.has("shots")) return;
+        JsonNode ps = prev.path("shots");
+        int i = 0;
+        for (JsonNode ns : plan.path("shots")) {
+            if (!ns.isObject()) continue;
+            JsonNode p = i < ps.size() ? ps.get(i) : null;
+            i++;
+            if (p == null || !p.isObject()) continue;
+            ObjectNode o = (ObjectNode) ns;
+            for (String f : new String[]{"zh", "narration"}) {
+                if (p.has(f) && !p.path(f).asText("").isBlank()
+                        && o.path(f).asText("").isBlank()) {
+                    o.put(f, p.path(f).asText(""));
+                }
+            }
+        }
     }
 
     private static String textOrNull(JsonNode node, String field) {
