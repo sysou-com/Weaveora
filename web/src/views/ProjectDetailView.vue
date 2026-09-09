@@ -19,6 +19,7 @@ import {
   getRevision,
   listRevisions,
   patchRevision,
+  rewritePromptFromZh,
 } from '@/api/director'
 import { createBrief, listBriefs } from '@/api/briefs'
 import { createJobs, listJobs, cancelJob, retryJobs, deleteJobs, JOB_STATE_LABEL } from '@/api/jobs'
@@ -26,7 +27,7 @@ import { shareProject } from '@/api/market'
 import { listAssets, uploadReference, fetchAssetBlob, deleteAssets } from '@/api/assets'
 import { createExport, fetchExportBlob, renderMaster, timecode } from '@/api/export'
 import { getProject, updateProjectDuration } from '@/api/projects'
-import type { DirectorPlan, JobRecord } from '@/api/types'
+import type { DirectorPlan, DirectorShot, JobRecord, RewriteResult } from '@/api/types'
 import BriefComposer from '@/components/director/BriefComposer.vue'
 import ImagePlanEditor from '@/components/director/ImagePlanEditor.vue'
 import RevisionRail from '@/components/director/RevisionRail.vue'
@@ -606,6 +607,37 @@ async function handleNewBrief(payload: { rawText: string; dirMode: 'image' | 'vi
   briefEditing.value = false
 }
 
+const aiShot = ref<DirectorShot | null>(null)
+const aiOpen = ref(false)
+const aiBusy = ref(false)
+const aiPreview = ref<RewriteResult | null>(null)
+
+async function openAiRewrite(shot: DirectorShot): Promise<void> {
+  aiShot.value = shot
+  aiOpen.value = true
+  aiBusy.value = true
+  aiPreview.value = null
+  try {
+    const r = await rewritePromptFromZh(workspaceId.value, projectId.value, (shot.zh ?? '').trim())
+    aiPreview.value = r
+  } catch (e) {
+    message.error(e instanceof Error ? e.message : '生成失败，请重试')
+    aiOpen.value = false
+  } finally {
+    aiBusy.value = false
+  }
+}
+
+function applyAiPrompt(): void {
+  const s = aiShot.value
+  const p = aiPreview.value
+  if (!s || !p) return
+  s.positive_prompt = p.positive_prompt
+  s.negative_prompt = p.negative_prompt
+  aiOpen.value = false
+  message.success('已写入该镜提示词（记得保存方案）')
+}
+
 async function handleSave(): Promise<void> {
   if (!draft.value || !selectedRevId.value) return
   saving.value = true
@@ -833,11 +865,13 @@ const shotTotal = computed(() => {
               </template>
               <template v-else-if="isVideoNow">
                 <VideoPlanEditor
+                  v-if="draft.value?.mode === 'video'"
                   :plan="vidPlanForEdit"
                   :records="detail.data.value?.shots ?? []"
                   :disabled="!canEdit"
                   :busy-shot="shotBusy"
                   @approve-shot="handleApproveShot"
+                  @ai-prompt="openAiRewrite"
                 />
               </template>
             </section>
@@ -1039,6 +1073,28 @@ const shotTotal = computed(() => {
             <NButton size="small" type="primary" @click="confirmMotion">开始生成</NButton>
           </div>
         </div>
+      </NModal>
+
+      <!-- AI 提示词确认（①：可确认/取消/微调后应用） -->
+      <NModal v-model:show="aiOpen" preset="card" title="AI 生成提示词（可确认或取消）" style="max-width: 720px">
+        <p class="text-secondary" style="margin: 0 0 10px; font-size: 13px;">
+          第 {{ aiShot?.shot_no ?? '' }} 镜 · 中文：{{ aiShot?.zh ?? '' }}
+        </p>
+        <template v-if="aiBusy">
+          <div class="g-loading" style="padding: 24px 0">AI 生成中…</div>
+        </template>
+        <template v-else-if="aiPreview">
+          <div class="ai-fields">
+            <label class="ai-label">正向提示词（英文，可微调）</label>
+            <NInput v-model:value="aiPreview.positive_prompt" type="textarea" :autosize="{ minRows: 3, maxRows: 8 }" />
+            <label class="ai-label">负向提示词（中文，可微调）</label>
+            <NInput v-model:value="aiPreview.negative_prompt" type="textarea" :autosize="{ minRows: 2, maxRows: 6 }" />
+          </div>
+          <div class="ai-actions">
+            <NButton size="small" @click="aiOpen = false">取消</NButton>
+            <NButton size="small" type="primary" data-testid="ai-apply" @click="applyAiPrompt">应用并写入</NButton>
+          </div>
+        </template>
       </NModal>
 
       <!-- 沉浸式预览（大图/大视频） -->

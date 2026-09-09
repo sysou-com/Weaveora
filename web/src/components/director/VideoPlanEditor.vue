@@ -1,10 +1,10 @@
 <script setup lang="ts">
 import { Film } from 'lucide-vue-next'
-import { NIcon, NInput, NInputNumber, NSwitch } from 'naive-ui'
+import { NButton, NIcon, NInput, NInputNumber, NSwitch } from 'naive-ui'
 import { computed, watch } from 'vue'
 
 import ShotCard from '@/components/director/ShotCard.vue'
-import type { ShotRecord, VideoPlan } from '@/api/types'
+import type { DirectorShot, ShotRecord, VideoPlan } from '@/api/types'
 
 const props = defineProps<{
   plan: VideoPlan
@@ -15,7 +15,7 @@ const props = defineProps<{
   busyShot?: number | null
 }>()
 
-const emit = defineEmits<{ approveShot: [shotNo: number] }>()
+const emit = defineEmits<{ approveShot: [shotNo: number]; aiPrompt: [shot: DirectorShot] }>()
 
 /** 成片总时长 = 各镜时长之和；修改镜头时长后同步 plan.duration_sec。 */
 const totalDur = computed(() =>
@@ -92,6 +92,30 @@ const transitions = ['cut', 'dissolve', 'fade', 'wipe'].map((v) => ({ label: v, 
     </section>
 
     <section class="block">
+      <p class="block-label font-mono">镜头文案 / AI 提示词</p>
+      <div v-for="shot in props.plan.shots" :key="shot.shot_no" class="zh-row">
+        <span class="key narration-key">第 {{ shot.shot_no }} 镜</span>
+        <NInput
+          v-model:value="shot.zh"
+          size="small"
+          :disabled="!!disabled"
+          maxlength="200"
+          placeholder="本镜中文描述（可留空；填写后可用 AI 生成正/负提示词）"
+        />
+        <NButton
+          size="small"
+          secondary
+          type="primary"
+          :disabled="!!disabled || !shot.zh || !shot.zh.trim()"
+          data-testid="ai-prompt"
+          @click="emit('aiPrompt', shot)"
+        >
+          AI 生成提示词
+        </NButton>
+      </div>
+    </section>
+
+    <section class="block">
       <p class="block-label font-mono">镜头时长（成片总长 {{ totalDur.toFixed(2) }}s）</p>
       <p class="hint-line text-secondary">
         逐镜调节时长后「保存方案」即生效；云端按镜头计费，短镜更省。留空镜将跳过字幕，时长需 ≥1s。
@@ -142,6 +166,15 @@ const transitions = ['cut', 'dissolve', 'fade', 'wipe'].map((v) => ({ label: v, 
   align-items: center;
   gap: 10px;
   margin-bottom: 8px;
+}
+.zh-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.zh-row .n-input {
+  flex: 1;
 }
 .hint-line {
   margin: 0 0 10px;

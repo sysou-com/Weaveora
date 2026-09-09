@@ -70,3 +70,21 @@ export async function approveShot(
     headers: { [WORKSPACE_HEADER]: workspaceId },
   })
 }
+
+/** POST director/rewrite-prompt —— 中文描述 → LLM 重写正/负提示词（供确认后应用） */
+export interface RewriteResult {
+  positive_prompt: string
+  negative_prompt: string
+}
+
+export async function rewritePromptFromZh(
+  workspaceId: string,
+  projectId: string,
+  rawText: string,
+): Promise<RewriteResult> {
+  return request<RewriteResult>(`/api/v1/projects/${projectId}/director/rewrite-prompt`, {
+    method: 'POST',
+    headers: { [WORKSPACE_HEADER]: workspaceId },
+    body: { rawText },
+  })
+}

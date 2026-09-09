@@ -91,6 +91,7 @@ export interface DirectorShot {
   seed_lock: boolean
   ref_shot_no?: number | null
   narration?: string
+  zh?: string
 }
 
 export interface BasePlan {
