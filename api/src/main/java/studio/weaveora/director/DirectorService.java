@@ -494,8 +494,10 @@ public class DirectorService {
                                                        String rawText) {
         context.require(userId, workspaceId, projectId);
         String system = "你是专业提示词工程师。把用户的中文镜头描述转换为英文生成提示词。"
-                + "要求：positive_prompt 为英文（<=60 个英文词），含主体/镜头/光线/氛围/质感细节；"
-                + "negative_prompt 为中文常见负面项（画质、结构、多余元素等）。"
+                + "要求：positive_prompt 与 negative_prompt 均使用英文。"
+                + "positive_prompt <=60 个英文词，含主体/镜头/光线/氛围/质感细节；"
+                + "negative_prompt 为英文常见负面项（如 blurry, low quality, distorted, extra limbs, "
+                + "duplicated, watermark, text, oversaturated 等，结合画面给出合适列表）。"
                 + "只输出 JSON：{\"positive_prompt\":\"...\",\"negative_prompt\":\"...\"}";
         String user = "中文描述：\n" + rawText + "\n请按上述要求输出 JSON。";
         LlmRequest req = new LlmRequest(system, user, "rewrite", rawText, "image", "16:9", null, null);
