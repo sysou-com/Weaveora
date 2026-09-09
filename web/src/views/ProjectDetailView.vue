@@ -611,8 +611,32 @@ const aiShot = ref<DirectorShot | null>(null)
 const aiOpen = ref(false)
 const aiBusy = ref(false)
 const aiPreview = ref<RewriteResult | null>(null)
+const aiImageMode = ref(false)
+
+async function openAiImageRewrite(): Promise<void> {
+  const plan = draft.value as unknown as { prompt_zh?: string } | undefined
+  const zh = (plan?.prompt_zh ?? '').trim()
+  if (!zh) {
+    message.info('请先填写中文解释 prompt_zh')
+    return
+  }
+  aiImageMode.value = true
+  aiShot.value = null
+  aiOpen.value = true
+  aiBusy.value = true
+  aiPreview.value = null
+  try {
+    aiPreview.value = await rewritePromptFromZh(workspaceId.value, projectId.value, zh)
+  } catch (e) {
+    message.error(e instanceof Error ? e.message : '生成失败，请重试')
+    aiOpen.value = false
+  } finally {
+    aiBusy.value = false
+  }
+}
 
 async function openAiRewrite(shot: DirectorShot): Promise<void> {
+  aiImageMode.value = false
   aiShot.value = shot
   aiOpen.value = true
   aiBusy.value = true
@@ -629,9 +653,21 @@ async function openAiRewrite(shot: DirectorShot): Promise<void> {
 }
 
 function applyAiPrompt(): void {
-  const s = aiShot.value
   const p = aiPreview.value
-  if (!s || !p) return
+  if (!p) return
+  if (aiImageMode.value) {
+    const plan = draft.value as unknown as { positive_prompt?: string; negative_prompt?: string } | undefined
+    if (plan) {
+      plan.positive_prompt = p.positive_prompt
+      plan.negative_prompt = p.negative_prompt
+    }
+    aiImageMode.value = false
+    aiOpen.value = false
+    message.success('已写入图片正/负提示词（记得保存方案）')
+    return
+  }
+  const s = aiShot.value
+  if (!s) return
   s.positive_prompt = p.positive_prompt
   s.negative_prompt = p.negative_prompt
   aiOpen.value = false
@@ -909,7 +945,7 @@ const shotTotal = computed(() => {
                 <span v-if="activeRevision?.source === 'stub'" class="stub-note">未接 LLM，示例方案（配置 weaveora.llm.* 启用真导演）</span>
               </div>
               <template v-if="isImageNow">
-                <ImagePlanEditor :plan="imgPlanForEdit" :disabled="!canEdit" />
+                <ImagePlanEditor :plan="imgPlanForEdit" :disabled="!canEdit" @ai-prompt-zh="openAiImageRewrite" />
               </template>
               <template v-else-if="isVideoNow">
                 <VideoPlanEditor

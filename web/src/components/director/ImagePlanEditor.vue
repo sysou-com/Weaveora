@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { NInput, NInputNumber } from 'naive-ui'
+import { NButton, NInput, NInputNumber } from 'naive-ui'
 
 import type { ImagePlan } from '@/api/types'
 
 const props = defineProps<{ plan: ImagePlan; disabled?: boolean }>()
+const emit = defineEmits<{ aiPromptZh: [] }>()
 
 const sizeOptions = ['extreme-wide', 'wide', 'medium', 'close-up', 'extreme-close-up'].map((v) => ({
   label: v,
@@ -32,6 +33,19 @@ const sizeOptions = ['extreme-wide', 'wide', 'medium', 'close-up', 'extreme-clos
           :disabled="disabled"
         />
       </label>
+      <div class="zh-head">
+        <NButton
+          size="small"
+          type="primary"
+          secondary
+          :disabled="!!disabled || !(props.plan.prompt_zh || '').trim()"
+          data-testid="img-ai-sync"
+          @click="emit('aiPromptZh')"
+        >
+          AI 同步提示词（按中文更新正/负向）
+        </NButton>
+        <span class="text-secondary" style="font-size: 12px">修改中文后点此用 LLM 重写 EN 正负提示词（可确认/取消）</span>
+      </div>
     </section>
 
     <section class="block">
@@ -131,5 +145,15 @@ const sizeOptions = ['extreme-wide', 'wide', 'medium', 'close-up', 'extreme-clos
 }
 .select:focus {
   border-color: color-mix(in srgb, var(--wv-accent) 55%, var(--wv-line));
+}
+</style>
+
+<style scoped>
+.zh-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+  flex-wrap: wrap;
 }
 </style>

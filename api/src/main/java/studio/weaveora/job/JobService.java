@@ -521,17 +521,28 @@ public class JobService {
         try {
             UUID briefId = planReader.revisionBriefId(revisionId);
             BriefSnapshot brief = projects.requireBrief(userId, workspaceId, projectId, briefId);
-            if (brief.constraints() == null || !brief.constraints().has("referenceAssetIds")) {
-                return RefCtx.empty();
-            }
+            // ① brief 显式挂的参考图
             List<UUID> ids = new ArrayList<>();
-            for (JsonNode n : brief.constraints().get("referenceAssetIds")) {
-                try { ids.add(UUID.fromString(n.asText())); } catch (IllegalArgumentException ignored) { }
+            if (brief.constraints() != null && brief.constraints().has("referenceAssetIds")) {
+                for (JsonNode n : brief.constraints().get("referenceAssetIds")) {
+                    try { ids.add(UUID.fromString(n.asText())); } catch (IllegalArgumentException ignored) { }
+                }
             }
-            if (ids.isEmpty()) return RefCtx.empty();
-            List<String> keys = assetRepo.findByIdInAndWorkspaceId(ids, workspaceId).stream()
-                    .map(studio.weaveora.asset.domain.Asset::storageKey)
-                    .toList();
+            List<String> keys = new ArrayList<>();
+            if (ids.isEmpty()) {
+                // ② 兜底：项目最新上传的参考图（用户上传即作为参考）
+                List<studio.weaveora.asset.domain.Asset> refs =
+                        assetRepo.findByProjectIdAndWorkspaceIdAndKindOrderByCreatedAtDesc(projectId, workspaceId, "reference");
+                if (!refs.isEmpty()) {
+                    studio.weaveora.asset.domain.Asset a = refs.get(0);
+                    ids.add(a.id());
+                    keys.add(a.storageKey());
+                }
+            } else {
+                keys = assetRepo.findByIdInAndWorkspaceId(ids, workspaceId).stream()
+                        .map(studio.weaveora.asset.domain.Asset::storageKey)
+                        .toList();
+            }
             return new RefCtx(ids.stream().map(UUID::toString).toList(), keys);
         } catch (BizException e) {
             return RefCtx.empty(); // 引用缺失不阻塞出图（仅丢锚定）
