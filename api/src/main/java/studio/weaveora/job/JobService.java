@@ -327,11 +327,36 @@ public class JobService {
                 throw new BizException(ErrorCode.VALIDATION, "仅失败/已取消的任务可重试");
             }
             GenerationJob neu = createOne(old.workspaceId(), old.projectId(), old.revisionId(), old.shotId(),
-                    old.modelPresetId(), old.kind(), old.payload(), userId, old.engineRoute());
+                    old.modelPresetId(), old.kind(), reshuffleSeed(old.payload()), userId, old.engineRoute());
             created.add(toView(neu));
         }
         log.info("jobs retried project={} count={}", projectId, created.size());
         return created;
+    }
+
+    /** 任务重生成（含已成功的）：单条入队为新 job，随机新 seed；引擎按当前用户设置路由。 */
+    @Transactional
+    public JobView rerun(UUID userId, UUID workspaceId, UUID jobId) {
+        guard.requireMember(userId, workspaceId);
+        GenerationJob old = jobs.findByIdAndWorkspaceId(jobId, workspaceId)
+                .orElseThrow(() -> new BizException(ErrorCode.NOT_FOUND, "任务不存在或不在本工作区"));
+        if (!TERMINAL.contains(old.state())) {
+            throw new BizException(ErrorCode.VALIDATION, "任务运行中/排队，先取消再重生成");
+        }
+        String route = engineSettings.resolveEngine(userId, old.kind());
+        GenerationJob neu = createOne(old.workspaceId(), old.projectId(), old.revisionId(), old.shotId(),
+                old.modelPresetId(), old.kind(), reshuffleSeed(old.payload()), userId, route);
+        log.info("job rerun id={} -> new {} route={}", old.id(), neu.id(), route);
+        return toView(neu);
+    }
+
+    /** 复制 payload 并替换 seed，使重跑/重生成得到不同结果。 */
+    private static JsonNode reshuffleSeed(JsonNode payload) {
+        ObjectNode cp = payload == null || !payload.isObject()
+                ? com.fasterxml.jackson.databind.node.JsonNodeFactory.instance.objectNode()
+                : (ObjectNode) payload.deepCopy();
+        cp.put("seed", randomSeed());
+        return cp;
     }
 
     /** 删除所选 failed/cancelled 任务记录（§20.2；级联清掉其孤儿资产再删行，避免 FK 冲突）。 */

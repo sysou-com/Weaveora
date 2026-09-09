@@ -64,6 +64,14 @@ public class JobController {
         return ResponseEntity.ok(jobService.cancel(uid(request), ws(workspaceId), jobId));
     }
 
+    @PostMapping("/jobs/{jobId}/rerun")
+    public ResponseEntity<JobView> rerun(
+            HttpServletRequest request,
+            @RequestHeader(value = ProjectController.WORKSPACE_HEADER, required = false) String workspaceId,
+            @PathVariable UUID jobId) {
+        return ResponseEntity.ok(jobService.rerun(uid(request), ws(workspaceId), jobId));
+    }
+
     /** 批量重试所选失败/已取消任务（§20.2：生成新 job） */
     @PostMapping("/projects/{projectId}/jobs/retry")
     public ResponseEntity<List<JobView>> retry(

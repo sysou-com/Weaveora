@@ -93,6 +93,7 @@ export interface DirectorShot {
   ref_shot_no?: number | null
   narration?: string
   zh?: string
+  en_synced?: boolean
 }
 
 export interface BasePlan {

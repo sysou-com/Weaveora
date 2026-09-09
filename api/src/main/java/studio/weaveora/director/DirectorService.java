@@ -101,7 +101,7 @@ public class DirectorService {
         quota.checkDirector(userId);
 
         String system = loadSystemPrompt(mode);
-        JsonNode prev = latestPlan(projectId, mode);
+        JsonNode prev = latestPlan(projectId, project.approvedRevisionId(), mode);
         String user = buildUserPrompt(brief, project, mode, prev);
         long t0 = System.nanoTime();
         JsonNode plan;
@@ -333,10 +333,7 @@ public class DirectorService {
                                                 PatchRevisionRequest req) {
         ProjectSnapshot project = context.require(userId, workspaceId, projectId);
         PromptRevision r = findRevision(workspaceId, projectId, revisionId);
-        if (revisionId.equals(project.approvedRevisionId())) {
-            // 已确认版本允许解锁微调：解除确认（→ directing），保存后需重新确认
-            context.markDirecting(workspaceId, projectId);
-        }
+        boolean copyFromApproved = revisionId.equals(project.approvedRevisionId());
         JsonNode incoming = req.plan();
         String curMode = r.schemaJson() == null ? "" : r.schemaJson().path("mode").asText("");
         String newMode = incoming.path("mode").asText(curMode);
@@ -345,6 +342,17 @@ public class DirectorService {
         }
         enrich(incoming, curMode, project.aspectRatio());
         validateOrThrow(incoming, curMode, project.durationSec());
+        if (copyFromApproved) {
+            // 在已确认版本上微调 → 另存新版本号（保留旧确认稿；前端切到新版本，重新确认即 vN+1）
+            int no = nextRevisionNo(projectId);
+            PromptRevision copy = PromptRevision.create(workspaceId, projectId, r.briefId(), no,
+                    "user", incoming, userId);
+            revisions.save(copy);
+            if ("video".equals(curMode)) {
+                syncShots(copy.id(), incoming);
+            }
+            return toDetail(copy, project.approvedRevisionId());
+        }
         r.replacePlan(incoming);
         r.setSource("user");
         revisions.save(r);
@@ -561,12 +569,19 @@ public class DirectorService {
     }
 
     /** 最近一版同模式方案（供“再导演基于上一版”注入）。 */
-    private JsonNode latestPlan(UUID projectId, String mode) {
+    /** 再导演参考：优先最新已确认版本方案；无确认稿则用最新 revision。 */
+    private JsonNode latestPlan(UUID projectId, UUID approvedId, String mode) {
         try {
-            PromptRevision r = revisions.findTopByProjectIdOrderByRevisionNoDesc(projectId).orElse(null);
-            if (r == null || r.schemaJson() == null) return null;
-            String m = r.schemaJson().path("mode").asText("");
-            return m.equals(mode) ? r.schemaJson() : null;
+            PromptRevision pick = null;
+            if (approvedId != null) {
+                pick = revisions.findById(approvedId).orElse(null);
+            }
+            if (pick == null) {
+                pick = revisions.findTopByProjectIdOrderByRevisionNoDesc(projectId).orElse(null);
+            }
+            if (pick == null || pick.schemaJson() == null) return null;
+            String m = pick.schemaJson().path("mode").asText("");
+            return m.equals(mode) ? pick.schemaJson() : null;
         } catch (Exception e) {
             return null;
         }

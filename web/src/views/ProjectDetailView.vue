@@ -677,6 +677,7 @@ function applyAiPrompt(): void {
   if (!s) return
   s.positive_prompt = p.positive_prompt
   s.negative_prompt = p.negative_prompt
+  s.en_synced = true
   aiOpen.value = false
   message.success('已写入该镜提示词（记得保存方案）')
 }
@@ -693,11 +694,12 @@ const aiBatchBusy = ref(false)
 const aiBatch = ref<BatchItem[]>([])
 
 async function aiSyncAll(): Promise<void> {
+  // 只同步“改动过但未 AI 同步”的镜头（en_synced===false；未改动/已同步的跳过）
   const shots = ((draft.value as unknown as { shots?: DirectorShot[] })?.shots ?? []).filter(
-    (s) => ((s.action ?? s.zh) ?? '').trim().length > 0,
+    (s) => s.en_synced === false && ((s.action ?? s.zh) ?? '').trim().length > 0,
   )
   if (!shots.length) {
-    message.info('没有填写中文描述的镜头，请先填写')
+    message.info('没有待同步的镜头（改动画面动作后会标记待同步；未改动的不会重复生成）')
     return
   }
   aiBatchBusy.value = true
@@ -724,6 +726,7 @@ function aiBatchApply(): void {
   for (const item of aiBatch.value) {
     item.shot.positive_prompt = item.positive
     item.shot.negative_prompt = item.negative
+    item.shot.en_synced = true
   }
   aiBatchOpen.value = false
   message.success('已写入 ' + aiBatch.value.length + ' 镜提示词（记得保存方案）')
@@ -744,13 +747,15 @@ async function handleSave(): Promise<boolean> {
         void queryClient.invalidateQueries({ queryKey: ['project'] })
       }
     }
-    await patchRevision(workspaceId.value, projectId.value, selectedRevId.value, draft.value)
+    const det = await patchRevision(workspaceId.value, projectId.value, selectedRevId.value, draft.value)
+    // 已确认版本微调会“另存新版本”：跟随新版本 id
+    if (det && det.id && det.id !== selectedRevId.value) {
+      selectedRevId.value = det.id
+    }
     // 以服务端回读为准重建草稿（负词合并/尺寸补齐等归一化），并刷新版本摘要（source→user）
     initKey.value = ''
-    await Promise.all([
-      queryClient.invalidateQueries({ queryKey: ['revision', workspaceId.value, projectId.value, selectedRevId.value] }),
-      queryClient.invalidateQueries({ queryKey: ['revisions'] }),
-    ])
+    void queryClient.invalidateQueries({ queryKey: ['revisions'] })
+    await queryClient.invalidateQueries({ queryKey: ['revision', workspaceId.value, projectId.value, selectedRevId.value] })
     message.success('已保存修改（手改版）')
     return true
   } catch (e) {

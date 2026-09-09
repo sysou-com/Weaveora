@@ -91,12 +91,13 @@ const sizeOptions = [
       <label class="field wide">
         <span class="fl">画面动作（中文描述，供确认/剪辑用）</span>
         <NInput
-          v-model:value="shot.action"
+          :value="shot.action"
           size="small"
           type="textarea"
           :autosize="{ minRows: 1, maxRows: 3 }"
           :disabled="disabled"
           placeholder="本镜发生什么"
+          @update:value="(v) => { shot.action = v as string; shot.en_synced = false }"
         />
       </label>
       <label class="field wide">
