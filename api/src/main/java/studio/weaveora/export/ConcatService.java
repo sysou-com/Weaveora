@@ -64,10 +64,12 @@ public class ConcatService {
     private final WorkspaceGuard guard;
     private final PlanReader planReader;
     private final String ffmpeg;
+    private final String subtitleFont;
 
     public ConcatService(AssetService assets, AssetRepository assetRepo, StoragePort storage,
                          ProjectContextPort projects, WorkspaceGuard guard, PlanReader planReader,
-                         @Value("${weaveora.ffmpeg:ffmpeg}") String ffmpeg) {
+                         @Value("${weaveora.ffmpeg:ffmpeg}") String ffmpeg,
+                         @Value("${weaveora.subtitle-font:}") String subtitleFont) {
         this.assets = assets;
         this.assetRepo = assetRepo;
         this.storage = storage;
@@ -75,6 +77,7 @@ public class ConcatService {
         this.guard = guard;
         this.planReader = planReader;
         this.ffmpeg = ffmpeg;
+        this.subtitleFont = subtitleFont == null ? "" : subtitleFont;
     }
 
     @Transactional
@@ -90,6 +93,12 @@ public class ConcatService {
             throw new BizException(ErrorCode.VALIDATION, "仅视频项目可渲染成片");
         }
         boolean crossfade = "fade".equals(transition) || "crossfade".equals(transition);
+        boolean subtitleOn = plan.path("edit_plan").path("subtitle").asBoolean(false);
+        boolean fontOk = !subtitleFont.isEmpty()
+                && java.nio.file.Files.isReadable(java.nio.file.Path.of(subtitleFont));
+        if (subtitleOn && !fontOk) {
+            log.warn("subtitle enabled but font missing: {}", subtitleFont);
+        }
         int fps = plan.path("edit_plan").path("fps").asInt(30);
         String aspect = plan.path("aspect_ratio").asText("");
         int[] canvas = canvasFor(aspect);
@@ -113,7 +122,8 @@ public class ConcatService {
                 // 叠化模式：每段素材尾部 clone 延长 CROSSFADE_SEC，供 xfade 重叠且时长守恒
                 double pad = crossfade ? CROSSFADE_SEC : 0.0;
                 double target = c.durationSec() + pad;
-                encodeSegment(raw, seg, c, fps, target, pad, canvas[0], canvas[1]);
+                encodeSegment(raw, seg, c, fps, target, pad, canvas[0], canvas[1],
+                        subtitleOn && fontOk ? c.narration() : null, work);
                 segs.add(seg);
                 segDurs.add(String.valueOf(c.durationSec() + pad));
             }
@@ -161,13 +171,29 @@ public class ConcatService {
      * pad>0 时用 tpad 尾帧 clone 补足（供 xfade 叠化与时长守恒）。
      */
     private void encodeSegment(Path raw, Path out, MediaClip c, int fps, double target, double pad,
-                               int cw, int ch)
+                               int cw, int ch, String narration, Path workDir)
             throws IOException, InterruptedException {
         String vf = "scale=" + cw + ":" + ch + ":force_original_aspect_ratio=decrease,"
                 + "pad=" + cw + ":" + ch + ":(ow-iw)/2:(oh-ih)/2,"
                 + "fps=" + fps + ",format=yuv420p";
         if (pad > 0) {
             vf += ",tpad=stop_mode=clone:stop_duration=" + pad;
+        }
+        // 字幕（旁白）：textfile 免转义；按画布宽与字号自动折行；显示窗口避开首尾（含叠化/开场）
+        if (narration != null && !narration.isBlank()) {
+            Path txt = workDir.resolve("sub_" + (out.getFileName()) + ".txt");
+            double fs = Math.max(22, ch * 0.05);
+            int perLine = Math.max(8, (int) Math.floor(cw / fs));
+            Files.writeString(txt, wrapNarration(narration.trim(), perLine), StandardCharsets.UTF_8);
+            double start = Math.min(0.8, Math.max(0.2, target * 0.15));
+            double end = Math.max(0.4, target - 0.35);
+            vf += ",drawtext=fontfile=" + quoteFilter(subtitleFont)
+                    + ":textfile=" + quoteFilter(txt.toString())
+                    + ":fontcolor=white:fontsize=" + String.format("%.0f", fs)
+                    + ":borderw=2:bordercolor=black@0.85:shadowx=1:shadowy=1:shadowcolor=black@0.5"
+                    + ":line_spacing=6"
+                    + ":x=(w-text_w)/2:y=h-text_h-" + Math.round(ch * 0.07)
+                    + ":enable='between(t," + start + "," + end + ")'";
         }
         List<String> args = new ArrayList<>(List.of("-y"));
         if (c.video()) {
@@ -185,6 +211,23 @@ public class ConcatService {
                 "-shortest",
                 out.toString()));
         run("ffmpeg-seg", args.toArray(new String[0]));
+    }
+
+    /** 按每行字数折行（中英混排近似按字符）。 */
+    private static String wrapNarration(String text, int perLine) {
+        if (text.length() <= perLine) return text;
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < text.length(); i += perLine) {
+            if (sb.length() > 0) sb.append('\n');
+            sb.append(text, i, Math.min(text.length(), i + perLine));
+        }
+        return sb.toString();
+    }
+
+    /** ffmpeg filter 选项值加引号并转义（逗号/冒号/单引号是 filter 语法保留字）。 */
+    private static String quoteFilter(String path) {
+        String esc = path.replace("\\", "/").replace("'", "\\\\'");
+        return "'" + esc + "'";
     }
 
     /** 多段 xfade 叠化串接成 master（时长守恒：Σdur - (n-1)*overlap + 片尾定格 ≈ Σdur）。 */
@@ -287,7 +330,8 @@ public class ConcatService {
             UUID shotId = order <= shotIds.size() ? shotIds.get(order - 1) : null;
             Asset m = pickClipOrStill(workspaceId, shotId);
             if (m == null) continue;
-            out.add(new MediaClip(m.storageKey(), isVideo(m), dur));
+            String nar = shot.path("narration").asText("");
+            out.add(new MediaClip(m.storageKey(), isVideo(m), dur, nar.isBlank() ? null : nar));
         }
         return out;
     }
@@ -338,6 +382,6 @@ public class ConcatService {
                 a.width(), a.height(), a.createdAt());
     }
 
-    private record MediaClip(String assetKey, boolean video, double durationSec) {
+    private record MediaClip(String assetKey, boolean video, double durationSec, String narration) {
     }
 }

@@ -90,6 +90,7 @@ export interface DirectorShot {
   negative_prompt: string
   seed_lock: boolean
   ref_shot_no?: number | null
+  narration?: string
 }
 
 export interface BasePlan {

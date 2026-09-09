@@ -80,10 +80,39 @@ const transitions = ['cut', 'dissolve', 'fade', 'wipe'].map((v) => ({ label: v, 
         </label>
       </div>
     </section>
+
+    <section v-if="props.plan.edit_plan.subtitle" class="block">
+      <p class="block-label font-mono">旁白 / 字幕（每镜一句，渲染时烧录到成片）</p>
+      <div
+        v-for="shot in props.plan.shots"
+        :key="shot.shot_no"
+        class="narration-row"
+      >
+        <span class="key narration-key">第 {{ shot.shot_no }} 镜</span>
+        <NInput
+          v-model:value="shot.narration"
+          size="small"
+          :disabled="!!disabled"
+          maxlength="80"
+          show-count
+          placeholder="输入本镜旁白（留空则本镜不烧字幕）"
+        />
+      </div>
+    </section>
   </div>
 </template>
 
 <style scoped>
+.narration-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+.narration-key {
+  flex: none;
+  width: 60px;
+}
 .editor-stack {
   display: flex;
   flex-direction: column;
