@@ -98,7 +98,8 @@ const transitions = ['cut', 'dissolve', 'fade', 'wipe'].map((v) => ({ label: v, 
 
     <section class="block">
       <div class="zh-head">
-        <p class="block-label font-mono" style="margin: 0">镜头文案 / AI 提示词</p>
+        <p class="block-label font-mono" style="margin: 0">镜头中文描述 / AI 提示词</p>
+        <span class="hint">（EN 正负提示词在分镜折叠框内编辑）</span>
         <NButton
           size="small"
           type="primary"
@@ -109,15 +110,6 @@ const transitions = ['cut', 'dissolve', 'fade', 'wipe'].map((v) => ({ label: v, 
         >
           AI 同步全部提示词
         </NButton>
-      </div>
-      <div class="shot-prompt-list">
-        <div v-for="shot in props.plan.shots" :key="shot.shot_no" class="shot-prompt">
-          <div class="sp-title">第 {{ shot.shot_no }} 镜 · EN 提示词</div>
-          <label class="ai-label">positive_prompt</label>
-          <NInput v-model:value="shot.positive_prompt" type="textarea" :autosize="{ minRows: 2, maxRows: 8 }" :disabled="!!disabled" />
-          <label class="ai-label">negative_prompt</label>
-          <NInput v-model:value="shot.negative_prompt" type="textarea" :autosize="{ minRows: 1, maxRows: 5 }" :disabled="!!disabled" />
-        </div>
       </div>
       <div v-for="shot in props.plan.shots" :key="shot.shot_no" class="zh-row">
         <span class="key narration-key">第 {{ shot.shot_no }} 镜</span>
