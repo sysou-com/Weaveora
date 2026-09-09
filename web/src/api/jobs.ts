@@ -68,3 +68,11 @@ export const JOB_STATE_LABEL: Record<string, string> = {
   failed: '失败',
   cancelled: '已取消',
 }
+
+/** POST /api/v1/jobs/{jobId}/rerun —— 单条任务重生成（终态均可，含成功；自动换 seed） */
+export async function rerunJob(workspaceId: string, jobId: string): Promise<JobRecord> {
+  return request<JobRecord>(`/api/v1/jobs/${jobId}/rerun`, {
+    method: 'POST',
+    headers: { [WORKSPACE_HEADER]: workspaceId },
+  })
+}

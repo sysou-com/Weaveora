@@ -22,7 +22,7 @@ import {
   rewritePromptFromZh,
 } from '@/api/director'
 import { createBrief, listBriefs } from '@/api/briefs'
-import { createJobs, listJobs, cancelJob, retryJobs, deleteJobs, JOB_STATE_LABEL } from '@/api/jobs'
+import { createJobs, listJobs, cancelJob, rerunJob, retryJobs, deleteJobs, JOB_STATE_LABEL } from '@/api/jobs'
 import { shareProject } from '@/api/market'
 import { listAssets, uploadReference, fetchAssetBlob, deleteAssets } from '@/api/assets'
 import { createExport, fetchExportBlob, renderMaster, timecode } from '@/api/export'
@@ -425,6 +425,20 @@ async function cancelOne(jobId: string): Promise<void> {
     message.error(e instanceof Error ? e.message : '取消失败')
   } finally {
     cancelBusy.value = null
+  }
+}
+
+const rerunBusy = ref<string | null>(null)
+async function rerunJobOne(jobId: string): Promise<void> {
+  rerunBusy.value = jobId
+  try {
+    const neu = await rerunJob(workspaceId.value, jobId)
+    void queryClient.invalidateQueries({ queryKey: ['jobs'] })
+    message.success(`已重新生成并加入队列（${neu.kind}）`)
+  } catch (e) {
+    message.error(e instanceof Error ? e.message : '重生成失败')
+  } finally {
+    rerunBusy.value = null
   }
 }
 
@@ -1067,6 +1081,17 @@ const shotTotal = computed(() => {
               取消
             </NButton>
             <span v-else-if="j.errorMessage" class="job-err" :title="j.errorMessage">!</span>
+            <NButton
+              v-if="['succeeded', 'failed', 'cancelled'].includes(j.state)"
+              size="tiny"
+              quaternary
+              type="primary"
+              :loading="rerunBusy === j.id"
+              data-testid="btn-rerun-job"
+              @click="rerunJobOne(j.id)"
+            >
+              重跑
+            </NButton>
             <template v-if="isJobActionable(j)">
               <button type="button" class="op primary" :disabled="jobActionBusy"
                       data-testid="btn-retry-job" @click="retryJobOne(j.id)">
