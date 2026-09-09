@@ -29,7 +29,8 @@ public interface ProjectContextPort {
             BigDecimal durationSec,
             String status,        // §20.1
             UUID approvedRevisionId,
-            UUID styleTemplateId
+            UUID styleTemplateId,
+            java.math.BigDecimal shotDurationSec
     ) {
     }
 

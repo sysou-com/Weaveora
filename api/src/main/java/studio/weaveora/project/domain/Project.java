@@ -40,6 +40,9 @@ public class Project {
     @Column(name = "duration_sec", precision = 6, scale = 2)
     private BigDecimal durationSec;
 
+    @Column(name = "shot_duration_sec", precision = 6, scale = 2)
+    private BigDecimal shotDurationSec;
+
     @Column(name = "style_template_id")
     private UUID styleTemplateId;
 
@@ -71,7 +74,7 @@ public class Project {
 
     public static Project create(UUID workspaceId, UUID createdBy, String title,
                                  String mode, String aspectRatio, BigDecimal durationSec,
-                                 UUID styleTemplateId) {
+                                 UUID styleTemplateId, BigDecimal shotDurationSec) {
         Project p = new Project();
         p.workspaceId = workspaceId;
         p.createdBy = createdBy;
@@ -79,6 +82,7 @@ public class Project {
         p.mode = mode;
         p.aspectRatio = aspectRatio;
         p.durationSec = durationSec;
+        p.shotDurationSec = shotDurationSec;
         p.styleTemplateId = styleTemplateId;
         p.status = "draft";
         return p;
@@ -143,6 +147,8 @@ public class Project {
     public String mode() { return mode; }
     public String aspectRatio() { return aspectRatio; }
     public BigDecimal durationSec() { return durationSec; }
+
+    public BigDecimal shotDurationSec() { return shotDurationSec; }
     public UUID styleTemplateId() { return styleTemplateId; }
     public String status() { return status; }
     public UUID approvedRevisionId() { return approvedRevisionId; }

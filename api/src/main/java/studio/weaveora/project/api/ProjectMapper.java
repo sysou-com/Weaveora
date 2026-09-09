@@ -12,6 +12,6 @@ public final class ProjectMapper {
     public static ProjectResponse toResponse(Project p) {
         return new ProjectResponse(
                 p.id(), p.workspaceId(), p.title(), p.mode(), p.aspectRatio(),
-                p.durationSec(), p.status(), p.styleTemplateId(), p.createdAt());
+                p.durationSec(), p.status(), p.styleTemplateId(), p.shotDurationSec(), p.createdAt());
     }
 }

@@ -13,6 +13,7 @@ public record ProjectResponse(
         BigDecimal durationSec,
         String status,
         UUID styleTemplateId,
+        java.math.BigDecimal shotDurationSec,
         OffsetDateTime createdAt
 ) {
 }

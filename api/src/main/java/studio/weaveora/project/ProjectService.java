@@ -108,7 +108,7 @@ public class ProjectService implements ProjectContextPort {
                     "视频目标时长不能超过 " + maxVideoSec + " 秒（W8 长片编排上限）");
         }
         Project p = Project.create(workspaceId, userId, req.title().trim(), mode, ratio,
-                req.durationSec(), req.styleTemplateId());
+                req.durationSec(), req.styleTemplateId(), req.shotDurationSec());
         return ProjectMapper.toResponse(projects.save(p));
     }
 
@@ -504,7 +504,7 @@ public class ProjectService implements ProjectContextPort {
         guard.requireMember(userId, workspaceId);
         Project p = findInWorkspace(workspaceId, projectId);
         return new ProjectSnapshot(p.id(), p.mode(), p.aspectRatio(), p.durationSec(),
-                p.status(), p.approvedRevisionId(), p.styleTemplateId());
+                p.status(), p.approvedRevisionId(), p.styleTemplateId(), p.shotDurationSec());
     }
 
     @Override

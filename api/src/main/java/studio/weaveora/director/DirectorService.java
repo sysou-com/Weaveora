@@ -176,8 +176,15 @@ public class DirectorService {
             StringBuilder scope = new StringBuilder()
                     .append("整片目标 ").append(total).append(" 秒，当前导演第 ").append(i)
                     .append("/").append(k).append(" 段，本段时长恰好 ").append(chunk)
-                    .append(" 秒（镜头时长总和必须 == ").append(chunk).append("，单镜 <=10s）。")
-                    .append("输出要精炼：每镜 positive_prompt <=60 个英文词（信息完整但勿啰嗦），镜头数尽量少而完整覆盖本段内容。")
+                    .append(" 秒（镜头时长总和必须 == ").append(chunk).append("，单镜 <=10s）。");
+            if (project.shotDurationSec() != null && project.shotDurationSec().doubleValue() >= 1.5) {
+                double sd = project.shotDurationSec().doubleValue();
+                int segShots = Math.max(1, (int) Math.round(chunk / sd));
+                scope.append("分镜规则：每镜时长约 ").append(sd)
+                        .append(" 秒，本段镜头数约 ").append(segShots)
+                        .append("（镜头尽量等长 ≈每镜时长，可 ±0.5s 消化余量）。");
+            }
+            scope.append("输出要精炼：每镜 positive_prompt <=60 个英文词（信息完整但勿啰嗦），镜头数尽量少而完整覆盖本段内容。")
                     .append("用户 Brief：").append(brief.rawText());
             if (brief.constraints() != null && !brief.constraints().isEmpty()) {
                 scope.append(" 约束：").append(brief.constraints().toPrettyString());
@@ -518,6 +525,17 @@ public class DirectorService {
         StringBuilder sb = new StringBuilder();
         sb.append("项目标题/画幅：").append(project.aspectRatio());
         if (project.durationSec() != null) sb.append("，目标时长 ").append(project.durationSec()).append(" 秒");
+        // 分镜规则：每镜时长偏好 → 镜头数 = 总时长 / 每镜时长（倍数关系），镜头尽量等长
+        if ("video".equals(project.mode()) && project.shotDurationSec() != null
+                && project.durationSec() != null) {
+            double sd = project.shotDurationSec().doubleValue();
+            if (sd >= 1.5) {
+                int n = Math.max(1, (int) Math.round(project.durationSec().intValue() / sd));
+                sb.append("；分镜规则：每镜时长约 ").append(sd)
+                        .append(" 秒，全片镜头数约 ").append(n)
+                        .append("（按总时长与每镜时长的倍数关系定镜头数，各镜尽量等长 ≈每镜时长，可 ±0.5s 消化余量，单镜 ≤10s）");
+            }
+        }
         sb.append("\n\n用户 Brief：\n").append(brief.rawText());
         if (brief.constraints() != null && !brief.constraints().isEmpty()) {
             sb.append("\n\n约束（constraints）：\n").append(brief.constraints().toPrettyString());

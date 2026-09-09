@@ -64,6 +64,7 @@ export interface Project {
   mode: ProjectMode
   aspectRatio: string
   durationSec: number | null
+  shotDurationSec: number | null
   status: string
   styleTemplateId: string | null
   createdAt: string
@@ -205,6 +206,7 @@ export interface CreateProjectInput {
   mode?: ProjectMode
   aspectRatio?: string
   durationSec?: number | null
+  shotDurationSec?: number | null
   styleTemplateId?: string | null
 }
 

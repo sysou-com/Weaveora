@@ -11,6 +11,16 @@ import type { ProjectMode } from '@/api/types'
 import { useAuthStore } from '@/stores/auth'
 import { ASPECT_OPTIONS, DEFAULT_VIDEO_DURATION, VIDEO_DURATIONS, aspectNote } from '@/utils/format'
 
+/** 每镜时长选项（视频项目按 总时长/每镜 分镜；null=导演自动） */
+const SHOT_DURATIONS = [
+  { label: '自动（导演定镜）', value: null as number | null },
+  { label: '每镜 2 秒', value: 2 },
+  { label: '每镜 3 秒', value: 3 },
+  { label: '每镜 5 秒', value: 5 },
+  { label: '每镜 8 秒', value: 8 },
+  { label: '每镜 10 秒', value: 10 },
+]
+
 const auth = useAuthStore()
 const router = useRouter()
 const message = useMessage()
@@ -20,6 +30,7 @@ const title = ref('')
 const mode = ref<ProjectMode>('image')
 const aspectRatio = ref('16:9')
 const durationSec = ref<number | null>(DEFAULT_VIDEO_DURATION)
+const shotDurationSec = ref<number | null>(null)
 const styleTemplateId = ref<string | null>(null)
 
 const workspaceId = computed(() => auth.activeWorkspaceId ?? '')
@@ -81,6 +92,7 @@ const mutation = useMutation({
       mode: mode.value,
       aspectRatio: aspectRatio.value,
       durationSec: mode.value === 'video' ? durationSec.value : null,
+      shotDurationSec: mode.value === 'video' ? shotDurationSec.value : null,
       styleTemplateId: styleTemplateId.value ? styleTemplateId.value : null,
     }),
   onSuccess: (project) => {
@@ -178,6 +190,16 @@ function submit(): void {
               :options="VIDEO_DURATIONS.map((d) => ({ label: d.label, value: d.value }))"
               size="large"
               data-testid="new-project-duration"
+            />
+          </NFormItem>
+
+          <NFormItem v-if="showDuration" label="每镜时长">
+            <NSelect
+              v-model:value="shotDurationSec"
+              :options="SHOT_DURATIONS"
+              size="large"
+              placeholder="自动"
+              data-testid="new-project-shot-duration"
             />
           </NFormItem>
 
