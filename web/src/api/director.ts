@@ -81,10 +81,12 @@ export async function rewritePromptFromZh(
   workspaceId: string,
   projectId: string,
   rawText: string,
+  originalPositive?: string,
+  originalNegative?: string,
 ): Promise<RewriteResult> {
   return request<RewriteResult>(`/api/v1/projects/${projectId}/director/rewrite-prompt`, {
     method: 'POST',
     headers: { [WORKSPACE_HEADER]: workspaceId },
-    body: { rawText },
+    body: { rawText, originalPositive, originalNegative },
   })
 }

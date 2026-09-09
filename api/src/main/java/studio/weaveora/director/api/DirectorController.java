@@ -39,10 +39,13 @@ public class DirectorController {
             @PathVariable UUID projectId,
             @Valid @RequestBody RewritePromptRequest body) {
         return ResponseEntity.ok(directorService.rewritePrompt(
-                uid(request), ws(workspaceId), projectId, body.rawText()));
+                uid(request), ws(workspaceId), projectId, body.rawText(),
+                body.originalPositive(), body.originalNegative()));
     }
 
-    public record RewritePromptRequest(@NotBlank String rawText) {
+    public record RewritePromptRequest(@NotBlank String rawText,
+                                       String originalPositive,
+                                       String originalNegative) {
     }
 
     @PostMapping("/director/generate")

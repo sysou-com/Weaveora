@@ -517,15 +517,29 @@ public class DirectorService {
     /** ① 中文描述 → LLM 重写该镜正/负提示词（供前端确认后再应用）。 */
     @Transactional(readOnly = true)
     public java.util.Map<String, String> rewritePrompt(UUID userId, UUID workspaceId, UUID projectId,
-                                                       String rawText) {
+                                                       String rawText, String originalPositive,
+                                                       String originalNegative) {
         context.require(userId, workspaceId, projectId);
-        String system = "你是专业提示词工程师。把用户的中文镜头描述转换为英文生成提示词。"
-                + "要求：positive_prompt 与 negative_prompt 均使用英文。"
-                + "positive_prompt <=60 个英文词，含主体/镜头/光线/氛围/质感细节；"
-                + "negative_prompt 为英文常见负面项（如 blurry, low quality, distorted, extra limbs, "
-                + "duplicated, watermark, text, oversaturated 等，结合画面给出合适列表）。"
-                + "只输出 JSON：{\"positive_prompt\":\"...\",\"negative_prompt\":\"...\"}";
-        String user = "中文描述：\n" + rawText + "\n请按上述要求输出 JSON。";
+        boolean amend = originalPositive != null && !originalPositive.isBlank();
+        String sysBase = "你是专业提示词工程师。positive_prompt 与 negative_prompt 均使用英文；"
+                + "positive_prompt 含主体/镜头/光线/氛围/质感细节（<=60 英文词）；"
+                + "negative_prompt 为英文常见负面项（blurry, low quality, distorted, extra limbs, "
+                + "duplicated, watermark, text, oversaturated 等）。只输出 JSON：{\"positive_prompt\":\"...\",\"negative_prompt\":\"...\"}";
+        String system;
+        String user;
+        if (amend) {
+            // 修正模式：保留原有画面/风格基础上，按新的中文动作做补充或修正，而非整句翻译
+            system = sysBase + " 当提供“原正向/负向提示词”与“新的中文动作描述”时：基于原正向词，结合新动作的差异"
+                    + "做补充/修正（保留镜头主体、风格、光线基调的一致性），不要整句直译中文，不要丢掉原有可取内容；"
+                    + "如动作无实质改动则保持原词不动。";
+            user = "原 positive_prompt：\n" + originalPositive
+                    + "\n\n原 negative_prompt：\n" + (originalNegative == null ? "" : originalNegative)
+                    + "\n\n新的中文动作描述（action）：\n" + rawText
+                    + "\n\n请输出修正后的 JSON。";
+        } else {
+            system = sysBase;
+            user = "中文描述：\n" + rawText + "\n请按上述要求输出 JSON。";
+        }
         LlmRequest req = new LlmRequest(system, user, "rewrite", rawText, "image", "16:9", null, null);
         try {
             String raw = llm.generateJson(req);
@@ -680,10 +694,13 @@ public class DirectorService {
             }
         }
         if (pend.isEmpty()) return false;
-        StringBuilder sb = new StringBuilder("请为以下镜头的画面动作(action，中文)生成英文 positive_prompt 与 negative_prompt，逐镜输出、不要合并或新增镜头：\n");
+        StringBuilder sb = new StringBuilder("以下镜头“画面动作(action)已修改”，请基于各自原有的 positive/negative 提示词做补充/修正"
+                + "（保留主体/风格/光线基调，按新动作差异调整；不要整句直译中文；动作无实质变化则保持原词）。\n");
         for (ObjectNode o : pend) {
             sb.append("镜头").append(o.path("shot_no").asInt(0))
-                    .append("：").append(o.path("action").asText("")).append("\n");
+                    .append(" 原positive：").append(o.path("positive_prompt").asText("")).append("\n")
+                    .append("  原negative：").append(o.path("negative_prompt").asText("")).append("\n")
+                    .append("  新action：").append(o.path("action").asText("")).append("\n");
         }
         sb.append("输出 JSON：{\"shots\":[{\"shot_no\":N,\"positive_prompt\":\"...\",\"negative_prompt\":\"...\"}]}");
         String sys = "你是专业提示词工程师。positive 与 negative 均使用英文；positive<=60 个英文词（主体/镜头/光线/氛围/质感）；negative 为英文常见负面项。";

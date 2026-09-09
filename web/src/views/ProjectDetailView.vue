@@ -394,13 +394,13 @@ const cancelBusy = ref<string | null>(null)
 // 任务默认展示 10 条，点“查看更多”逐次再展示 10 条
 const jobLimit = ref(10)
 const filterLatest = ref(true)
-/** 只显示“每个 镜+kind 最近一条”；重跑后旧记录默认隐藏 */
+/** 只显示“每个分镜最近一条任务”（不分 still/clip）；重跑后旧记录默认隐藏 */
 const latestJobs = computed(() => {
   const all = jobs.data.value ?? []
   if (!filterLatest.value) return all
   const newest = new Map<string, JobRecord>()
   for (const j of all) {
-    newest.set(`${j.kind}:${j.payload?.shot_no ?? 'x'}`, j)
+    newest.set(`shot:${j.payload?.shot_no ?? 'x'}`, j)
   }
   return [...newest.values()]
 })
@@ -674,7 +674,7 @@ async function openAiRewrite(shot: DirectorShot): Promise<void> {
   aiBusy.value = true
   aiPreview.value = null
   try {
-    const r = await rewritePromptFromZh(workspaceId.value, projectId.value, ((shot.action ?? shot.zh) ?? '').trim())
+    const r = await rewritePromptFromZh(workspaceId.value, projectId.value, ((shot.action ?? shot.zh) ?? '').trim(), shot.positive_prompt, shot.negative_prompt)
     aiPreview.value = r
   } catch (e) {
     message.error(e instanceof Error ? e.message : '生成失败，请重试')
@@ -731,7 +731,7 @@ async function aiSyncAll(): Promise<void> {
   aiBatch.value = []
   try {
     for (const shot of shots) {
-      const r = await rewritePromptFromZh(workspaceId.value, projectId.value, ((shot.action ?? shot.zh) ?? '').trim())
+      const r = await rewritePromptFromZh(workspaceId.value, projectId.value, ((shot.action ?? shot.zh) ?? '').trim(), shot.positive_prompt, shot.negative_prompt)
       aiBatch.value.push({
         shot,
         zh: ((shot.action ?? shot.zh) ?? '').trim(),
