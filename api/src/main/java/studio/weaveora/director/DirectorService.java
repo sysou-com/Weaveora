@@ -333,7 +333,8 @@ public class DirectorService {
         ProjectSnapshot project = context.require(userId, workspaceId, projectId);
         PromptRevision r = findRevision(workspaceId, projectId, revisionId);
         if (revisionId.equals(project.approvedRevisionId())) {
-            throw new BizException(ErrorCode.REVISION_LOCKED, "该版本已是本项目确认稿，修改请另存新版本");
+            // 已确认版本允许解锁微调：解除确认（→ directing），保存后需重新确认
+            context.markDirecting(workspaceId, projectId);
         }
         JsonNode incoming = req.plan();
         String curMode = r.schemaJson() == null ? "" : r.schemaJson().path("mode").asText("");

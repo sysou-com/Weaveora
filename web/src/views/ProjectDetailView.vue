@@ -130,7 +130,8 @@ watch(draft, () => {
 }, { deep: true })
 
 const detApproved = computed(() => detail.data.value?.approved === true)
-const canEdit = computed(() => !!draft.value && !detApproved.value)
+// 已确认版本也可编辑（保存时后端自动解除确认，改后可重新确认）
+const canEdit = computed(() => !!draft.value)
 const latestBrief = computed(() => briefs.data.value?.[0] ?? null)
 const activeRevision = computed(() =>
   (revisions.data.value ?? []).find((r) => r.id === selectedRevId.value) ?? null,
