@@ -108,6 +108,15 @@ const transitions = ['cut', 'dissolve', 'fade', 'wipe'].map((v) => ({ label: v, 
           AI 同步全部提示词
         </NButton>
       </div>
+      <div class="shot-prompt-list">
+        <div v-for="shot in props.plan.shots" :key="shot.shot_no" class="shot-prompt">
+          <div class="sp-title">第 {{ shot.shot_no }} 镜 · EN 提示词</div>
+          <label class="ai-label">positive_prompt</label>
+          <NInput v-model:value="shot.positive_prompt" type="textarea" :autosize="{ minRows: 2, maxRows: 8 }" :disabled="!!disabled" />
+          <label class="ai-label">negative_prompt</label>
+          <NInput v-model:value="shot.negative_prompt" type="textarea" :autosize="{ minRows: 1, maxRows: 5 }" :disabled="!!disabled" />
+        </div>
+      </div>
       <div v-for="shot in props.plan.shots" :key="shot.shot_no" class="zh-row">
         <span class="key narration-key">第 {{ shot.shot_no }} 镜</span>
         <NInput
@@ -181,6 +190,23 @@ const transitions = ['cut', 'dissolve', 'fade', 'wipe'].map((v) => ({ label: v, 
   align-items: center;
   gap: 10px;
   margin-bottom: 8px;
+}
+.ai-label {
+  display: block;
+  font-size: 12px;
+  color: var(--wv-text-3);
+  margin: 6px 0 4px;
+}
+.shot-prompt {
+  border: 1px solid var(--wv-divider);
+  border-radius: 10px;
+  padding: 10px 12px;
+  margin-bottom: 10px;
+}
+.sp-title {
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 4px;
 }
 .zh-head {
   display: flex;
