@@ -42,18 +42,18 @@ const transitions = ['cut', 'dissolve', 'fade', 'wipe'].map((v) => ({ label: v, 
   <div class="editor-stack" data-testid="video-plan-editor">
     <section class="block">
       <p class="block-label font-mono">主题</p>
-      <label class="row">
-        <span class="key">一句话 logline</span>
-        <NInput v-model:value="props.plan.logline" size="small" :disabled="disabled" />
-      </label>
-      <label class="row">
-        <span class="key">主题 theme（中文）</span>
-        <NInput v-model:value="props.plan.script.theme" size="small" :disabled="disabled" />
-      </label>
-      <label class="row">
-        <span class="key">BGM 情绪 music_mood</span>
-        <NInput v-model:value="props.plan.audio.music_mood" size="small" :disabled="disabled" />
-      </label>
+      <template v-if="props.plan.script">
+        <label class="row">
+          <span class="key">主题 theme（中文）</span>
+          <NInput v-model:value="props.plan.script.theme" size="small" :disabled="disabled" />
+        </label>
+      </template>
+      <template v-if="props.plan.audio">
+        <label class="row">
+          <span class="key">BGM 情绪 music_mood</span>
+          <NInput v-model:value="props.plan.audio.music_mood" size="small" :disabled="disabled" />
+        </label>
+      </template>
     </section>
 
     <section class="block">
@@ -76,6 +76,7 @@ const transitions = ['cut', 'dissolve', 'fade', 'wipe'].map((v) => ({ label: v, 
 
     <section class="block">
       <p class="block-label font-mono">编辑设定 edit_plan</p>
+      <template v-if="props.plan.edit_plan">
       <div class="grid3">
         <label class="row">
           <span class="key">fps</span>
@@ -92,6 +93,7 @@ const transitions = ['cut', 'dissolve', 'fade', 'wipe'].map((v) => ({ label: v, 
           <NSwitch v-model:value="props.plan.edit_plan.subtitle" size="small" :disabled="disabled" />
         </label>
       </div>
+      </template>
     </section>
 
     <section class="block">

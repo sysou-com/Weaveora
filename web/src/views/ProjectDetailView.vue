@@ -140,6 +140,14 @@ const problems = computed(() => (draft.value ? planProblems(draft.value) : []))
 const isImageNow = computed(() => draft.value?.mode === 'image')
 const isVideoNow = computed(() => draft.value?.mode === 'video')
 
+const shotOverview = computed(() => {
+  const shots = ((draft.value as unknown as { shots?: Array<{ shot_no: number; duration_sec?: number; zh?: string; narration?: string; positive_prompt?: string; negative_prompt?: string }> })?.shots) ?? []
+  if (!shots.length) return '（无镜头数据）'
+  return shots
+    .map((s) => `#${s.shot_no} ${Number(s.duration_sec ?? 0)}s\n  zh: ${(s.zh ?? '').slice(0, 60)}\n  旁白: ${(s.narration ?? '').slice(0, 60)}\n  pos: ${(s.positive_prompt ?? '').slice(0, 90)}\n  neg: ${(s.negative_prompt ?? '').slice(0, 70)}`)
+    .join('\n\n')
+})
+
 /** 编辑 Brief 的入口模式：auto → 跟随项目；否则跟随该 brief 的显式模式 */
 const composerMode = computed(() => {
   const pm = project.data.value?.mode ?? 'image'
@@ -954,6 +962,7 @@ const shotTotal = computed(() => {
                 <ImagePlanEditor :plan="imgPlanForEdit" :disabled="!canEdit" @ai-prompt-zh="openAiImageRewrite" />
               </template>
               <template v-else-if="isVideoNow">
+                <div class="debug-flag" data-testid="debug-video-editor">●方案编辑器(video)已挂载 · 镜头数 {{ (vidPlanForEdit.shots ?? []).length }} · draft.mode={{ draft.value?.mode }}</div>
                 <VideoPlanEditor
                   v-if="draft.value?.mode === 'video'"
                   :plan="vidPlanForEdit"
@@ -965,6 +974,11 @@ const shotTotal = computed(() => {
                   @ai-sync-all="aiSyncAll"
                 />
               </template>
+
+              <details v-if="isVideoNow && (vidPlanForEdit.shots ?? []).length" class="debug-overview">
+                <summary>只读镜头速览（定位用，可关闭）</summary>
+                <pre>{{ shotOverview }}</pre>
+              </details>
             </section>
 
             <NAlert
@@ -1501,6 +1515,27 @@ const shotTotal = computed(() => {
   align-items: center;
   justify-content: center;
 }
+.debug-flag {
+  font-size: 12px;
+  color: #b7791f;
+  border: 1px dashed #d0a24e;
+  padding: 4px 8px;
+  border-radius: 6px;
+  margin-bottom: 6px;
+}
+.debug-overview {
+  margin: 10px 0;
+  font-size: 12px;
+}
+.debug-overview pre {
+  white-space: pre-wrap;
+  background: var(--wv-surface-raised);
+  padding: 8px;
+  border-radius: 8px;
+  font-family: var(--wv-font-mono);
+  color: var(--wv-text-2);
+}
+
 .plan-head {
   display: flex;
   flex-direction: column;
