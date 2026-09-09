@@ -119,6 +119,7 @@ public class DirectorService {
         }
         // 新一版保留上一版同镜的中文描述与旁白（zh/narration 是用户编辑字段，LLM 不自带）
         mergePrevMeta(plan, prev);
+        ensureShotSyncedDefault(plan);
 
         int revisionNo = nextRevisionNo(projectId);
         PromptRevision rev = PromptRevision.create(workspaceId, projectId, brief.id(), revisionNo,
@@ -358,8 +359,15 @@ public class DirectorService {
                                                  UUID revisionId) {
         ProjectSnapshot project = context.require(userId, workspaceId, projectId);
         PromptRevision r = findRevision(workspaceId, projectId, revisionId);
-        validateOrThrow(r.schemaJson(), r.schemaJson().path("mode").asText("image"), project.durationSec());
-        if ("video".equals(r.schemaJson().path("mode").asText("image"))) {
+        JsonNode plan = r.schemaJson();
+        // 确认前：对改过画面动作但未 AI 同步的镜头自动补 EN 提示词（已同步则跳过，不再额外调 LLM）
+        if ("video".equals(plan.path("mode").asText("")) && autoSyncPending(plan)) {
+            r.replacePlan(plan);
+            revisions.save(r);
+            syncShots(r.id(), plan);
+        }
+        validateOrThrow(plan, plan.path("mode").asText("image"), project.durationSec());
+        if ("video".equals(plan.path("mode").asText(""))) {
             shots.findByRevisionIdOrderByShotNo(r.id()).forEach(ShotDraft::approve);
         }
         context.markApproved(workspaceId, projectId, r.id());
@@ -610,7 +618,7 @@ public class DirectorService {
                 s.positivePrompt(), s.negativePrompt(), s.seedLock(), s.refShotNo(), s.status());
     }
 
-    /** 把上一版每镜的用户字段（zh/narration）迁移到新一版对应镜位。 */
+    /** 把上一版每镜的用户字段（zh/narration/en_synced）迁移到新一版对应镜位。 */
     private static void mergePrevMeta(JsonNode plan, JsonNode prev) {
         if (prev == null || !prev.has("shots") || !plan.has("shots")) return;
         JsonNode ps = prev.path("shots");
@@ -627,6 +635,65 @@ public class DirectorService {
                     o.put(f, p.path(f).asText(""));
                 }
             }
+            if (p.has("en_synced") && !o.has("en_synced")) {
+                o.put("en_synced", p.path("en_synced").asBoolean(true));
+            }
+        }
+    }
+
+    /** 新导出的镜头若无同步标记，视为已同步（LLM 自带 EN）；用户改动作后由前端置 false。 */
+    private static void ensureShotSyncedDefault(JsonNode plan) {
+        if (plan == null || !plan.has("shots")) return;
+        for (JsonNode ns : plan.path("shots")) {
+            if (ns.isObject() && !ns.has("en_synced")) {
+                ((ObjectNode) ns).put("en_synced", true);
+            }
+        }
+    }
+
+    /** 确认前自动补词：仅同步“en_synced!=true 且 action 非空”的镜头（一次 LLM 批量）。 */
+    private boolean autoSyncPending(JsonNode plan) {
+        if (plan == null || !plan.has("shots")) return false;
+        java.util.List<ObjectNode> pend = new java.util.ArrayList<>();
+        for (JsonNode ns : plan.path("shots")) {
+            if (!ns.isObject()) continue;
+            ObjectNode o = (ObjectNode) ns;
+            boolean synced = o.path("en_synced").asBoolean(true);
+            String act = o.path("action").asText("");
+            if (!synced && !act.isBlank()) {
+                pend.add(o);
+            }
+        }
+        if (pend.isEmpty()) return false;
+        StringBuilder sb = new StringBuilder("请为以下镜头的画面动作(action，中文)生成英文 positive_prompt 与 negative_prompt，逐镜输出、不要合并或新增镜头：\n");
+        for (ObjectNode o : pend) {
+            sb.append("镜头").append(o.path("shot_no").asInt(0))
+                    .append("：").append(o.path("action").asText("")).append("\n");
+        }
+        sb.append("输出 JSON：{\"shots\":[{\"shot_no\":N,\"positive_prompt\":\"...\",\"negative_prompt\":\"...\"}]}");
+        String sys = "你是专业提示词工程师。positive 与 negative 均使用英文；positive<=60 个英文词（主体/镜头/光线/氛围/质感）；negative 为英文常见负面项。";
+        try {
+            String raw = llm.generateJson(new LlmRequest(sys, sb.toString(), "autosync", "", "video",
+                    plan.path("aspect_ratio").asText("16:9"), null, null));
+            JsonNode out = mapper.readTree(raw);
+            for (JsonNode s : out.path("shots")) {
+                int no = s.path("shot_no").asInt(-1);
+                for (ObjectNode o : pend) {
+                    if (o.path("shot_no").asInt() == no) {
+                        if (s.has("positive_prompt") && !s.path("positive_prompt").asText("").isBlank()) {
+                            o.put("positive_prompt", s.path("positive_prompt").asText(""));
+                        }
+                        if (s.has("negative_prompt") && !s.path("negative_prompt").asText("").isBlank()) {
+                            o.put("negative_prompt", s.path("negative_prompt").asText(""));
+                        }
+                        o.put("en_synced", true);
+                    }
+                }
+            }
+            return true;
+        } catch (Exception e) {
+            log.warn("autoSyncPending failed: {}", e.getMessage());
+            return false;
         }
     }
 

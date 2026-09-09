@@ -729,8 +729,8 @@ function aiBatchApply(): void {
   message.success('已写入 ' + aiBatch.value.length + ' 镜提示词（记得保存方案）')
 }
 
-async function handleSave(): Promise<void> {
-  if (!draft.value || !selectedRevId.value) return
+async function handleSave(): Promise<boolean> {
+  if (!draft.value || !selectedRevId.value) return false
   saving.value = true
   try {
     // 视频：镜头总长变化 → 先同步项目时长（patch 与 approve 按项目时长校验镜头总长）
@@ -752,8 +752,10 @@ async function handleSave(): Promise<void> {
       queryClient.invalidateQueries({ queryKey: ['revisions'] }),
     ])
     message.success('已保存修改（手改版）')
+    return true
   } catch (e) {
     message.error(e instanceof Error ? e.message : '保存失败')
+    return false
   } finally {
     saving.value = false
   }
@@ -761,6 +763,11 @@ async function handleSave(): Promise<void> {
 
 async function handleApprove(): Promise<void> {
   if (!selectedRevId.value) return
+  // 有未保存改动：先保存草稿再确认（否则确认会用服务端旧方案，草稿丢失）
+  if (dirty.value && draft.value) {
+    const ok = await handleSave()
+    if (!ok) return
+  }
   approving.value = true
   try {
     const res = await approveRevision(workspaceId.value, projectId.value, selectedRevId.value)
