@@ -561,6 +561,8 @@ public class DirectorService {
             if (!pos.isBlank()) s.append(" pos:").append(pos.length() > 160 ? pos.substring(0, 160) + "…" : pos);
             String nar = sh.path("narration").asText("");
             if (!nar.isBlank()) s.append(" 旁白:").append(nar);
+            String zh = sh.path("zh").asText("");
+            if (!zh.isBlank()) s.append(" 中文描述:").append(zh.length() > 120 ? zh.substring(0, 120) + "…" : zh);
         }
         return s.toString();
     }

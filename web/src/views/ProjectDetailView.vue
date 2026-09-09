@@ -638,6 +638,54 @@ function applyAiPrompt(): void {
   message.success('已写入该镜提示词（记得保存方案）')
 }
 
+interface BatchItem {
+  shot: DirectorShot
+  zh: string
+  positive: string
+  negative: string
+}
+
+const aiBatchOpen = ref(false)
+const aiBatchBusy = ref(false)
+const aiBatch = ref<BatchItem[]>([])
+
+async function aiSyncAll(): Promise<void> {
+  const shots = ((draft.value as unknown as { shots?: DirectorShot[] })?.shots ?? []).filter(
+    (s) => (s.zh ?? '').trim().length > 0,
+  )
+  if (!shots.length) {
+    message.info('没有填写中文描述的镜头，请先填写')
+    return
+  }
+  aiBatchBusy.value = true
+  aiBatch.value = []
+  try {
+    for (const shot of shots) {
+      const r = await rewritePromptFromZh(workspaceId.value, projectId.value, (shot.zh ?? '').trim())
+      aiBatch.value.push({
+        shot,
+        zh: (shot.zh ?? '').trim(),
+        positive: r.positive_prompt,
+        negative: r.negative_prompt,
+      })
+    }
+    aiBatchOpen.value = true
+  } catch (e) {
+    message.error(e instanceof Error ? e.message : '批量生成失败')
+  } finally {
+    aiBatchBusy.value = false
+  }
+}
+
+function aiBatchApply(): void {
+  for (const item of aiBatch.value) {
+    item.shot.positive_prompt = item.positive
+    item.shot.negative_prompt = item.negative
+  }
+  aiBatchOpen.value = false
+  message.success('已写入 ' + aiBatch.value.length + ' 镜提示词（记得保存方案）')
+}
+
 async function handleSave(): Promise<void> {
   if (!draft.value || !selectedRevId.value) return
   saving.value = true
@@ -872,6 +920,7 @@ const shotTotal = computed(() => {
                   :busy-shot="shotBusy"
                   @approve-shot="handleApproveShot"
                   @ai-prompt="openAiRewrite"
+                  @ai-sync-all="aiSyncAll"
                 />
               </template>
             </section>
@@ -1093,6 +1142,26 @@ const shotTotal = computed(() => {
           <div class="ai-actions">
             <NButton size="small" @click="aiOpen = false">取消</NButton>
             <NButton size="small" type="primary" data-testid="ai-apply" @click="applyAiPrompt">应用并写入</NButton>
+          </div>
+        </template>
+      </NModal>
+
+      <!-- AI 批量同步（①：多镜中文→LLM 更新，可确认/取消/逐镜微调） -->
+      <NModal v-model:show="aiBatchOpen" preset="card" title="AI 同步提示词（确认或取消）" style="max-width: 760px">
+        <template v-if="aiBatchBusy">
+          <div class="g-loading" style="padding: 24px 0">AI 批量生成中（逐镜进行）…</div>
+        </template>
+        <template v-else>
+          <div v-for="item in aiBatch" :key="item.shot.shot_no" class="ai-batch-item">
+            <p class="ai-batch-title">第 {{ item.shot.shot_no }} 镜 · {{ item.zh }}</p>
+            <label class="ai-label">正向提示词（英文，可微调）</label>
+            <NInput v-model:value="item.positive" type="textarea" :autosize="{ minRows: 2, maxRows: 6 }" />
+            <label class="ai-label">负向提示词（中文，可微调）</label>
+            <NInput v-model:value="item.negative" type="textarea" :autosize="{ minRows: 1, maxRows: 4 }" />
+          </div>
+          <div class="ai-actions">
+            <NButton size="small" @click="aiBatchOpen = false">取消（不应用）</NButton>
+            <NButton size="small" type="primary" data-testid="ai-batch-apply" @click="aiBatchApply">应用全部</NButton>
           </div>
         </template>
       </NModal>

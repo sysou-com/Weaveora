@@ -15,7 +15,10 @@ const props = defineProps<{
   busyShot?: number | null
 }>()
 
-const emit = defineEmits<{ approveShot: [shotNo: number]; aiPrompt: [shot: DirectorShot] }>()
+const emit = defineEmits<{ approveShot: [shotNo: number]; aiPrompt: [shot: DirectorShot]; aiSyncAll: [] }>()
+
+const hasZh = computed(() =>
+  (props.plan.shots ?? []).some((s) => (s.zh ?? '').trim().length > 0))
 
 /** 成片总时长 = 各镜时长之和；修改镜头时长后同步 plan.duration_sec。 */
 const totalDur = computed(() =>
@@ -92,7 +95,19 @@ const transitions = ['cut', 'dissolve', 'fade', 'wipe'].map((v) => ({ label: v, 
     </section>
 
     <section class="block">
-      <p class="block-label font-mono">镜头文案 / AI 提示词</p>
+      <div class="zh-head">
+        <p class="block-label font-mono" style="margin: 0">镜头文案 / AI 提示词</p>
+        <NButton
+          size="small"
+          type="primary"
+          secondary
+          :disabled="!!disabled || !hasZh"
+          data-testid="ai-sync-all"
+          @click="emit('aiSyncAll')"
+        >
+          AI 同步全部提示词
+        </NButton>
+      </div>
       <div v-for="shot in props.plan.shots" :key="shot.shot_no" class="zh-row">
         <span class="key narration-key">第 {{ shot.shot_no }} 镜</span>
         <NInput
@@ -166,6 +181,13 @@ const transitions = ['cut', 'dissolve', 'fade', 'wipe'].map((v) => ({ label: v, 
   align-items: center;
   gap: 10px;
   margin-bottom: 8px;
+}
+.zh-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 12px;
 }
 .zh-row {
   display: flex;
