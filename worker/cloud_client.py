@@ -151,6 +151,16 @@ def replicate_image(payload, token, model, progress_fn=None):
     positive = payload.get("positive_prompt", "")
     params = payload.get("params") or {}
     inp = {"prompt": positive}
+    # 参考图（③：支持图片输入的模型要真正用上参考图）
+    refs = payload.get("referenceKeys") or []
+    if refs:
+        ref = _fetch_asset(refs[0])
+        ref_url = _upload_file(token, refs[0].split("/")[-1] or "ref.png", ref)
+        if "flux" in (model or "").lower():
+            inp["input_images"] = [ref_url]
+        else:
+            inp["image"] = ref_url
+        print("[cloud-image] ref attached model=%s url=%s" % (model, ref_url[:70]), flush=True)
     ar = payload.get("aspect_ratio")
     if (model or "").lower().startswith("stability-ai/") or "sdxl" in (model or "").lower():
         # SDXL 类按 width/height 出图（aspect_ratio 不生效）
