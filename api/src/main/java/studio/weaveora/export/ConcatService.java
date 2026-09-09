@@ -94,10 +94,9 @@ public class ConcatService {
         }
         boolean crossfade = "fade".equals(transition) || "crossfade".equals(transition);
         boolean subtitleOn = plan.path("edit_plan").path("subtitle").asBoolean(false);
-        boolean fontOk = !subtitleFont.isEmpty()
-                && java.nio.file.Files.isReadable(java.nio.file.Path.of(subtitleFont));
-        if (subtitleOn && !fontOk) {
-            log.warn("subtitle enabled but font missing: {}", subtitleFont);
+        boolean subOk = hasFilter("ass");
+        if (subtitleOn && !subOk) {
+            log.warn("subtitle enabled but ffmpeg lacks ass/libass filter; skip burning");
         }
         int fps = plan.path("edit_plan").path("fps").asInt(30);
         String aspect = plan.path("aspect_ratio").asText("");
@@ -123,7 +122,7 @@ public class ConcatService {
                 double pad = crossfade ? CROSSFADE_SEC : 0.0;
                 double target = c.durationSec() + pad;
                 encodeSegment(raw, seg, c, fps, target, pad, canvas[0], canvas[1],
-                        subtitleOn && fontOk ? c.narration() : null, work);
+                        subtitleOn && subOk ? c.narration() : null, work);
                 segs.add(seg);
                 segDurs.add(String.valueOf(c.durationSec() + pad));
             }
@@ -179,21 +178,15 @@ public class ConcatService {
         if (pad > 0) {
             vf += ",tpad=stop_mode=clone:stop_duration=" + pad;
         }
-        // 字幕（旁白）：textfile 免转义；按画布宽与字号自动折行；显示窗口避开首尾（含叠化/开场）
+        // 字幕（旁白）：ASS 字幕（libass）渲染，避免 drawtext 依赖；按画布宽折行，白字黑边
         if (narration != null && !narration.isBlank()) {
-            Path txt = workDir.resolve("sub_" + (out.getFileName()) + ".txt");
-            double fs = Math.max(22, ch * 0.05);
-            int perLine = Math.max(8, (int) Math.floor(cw / fs));
-            Files.writeString(txt, wrapNarration(narration.trim(), perLine), StandardCharsets.UTF_8);
-            double start = Math.min(0.8, Math.max(0.2, target * 0.15));
-            double end = Math.max(0.4, target - 0.35);
-            vf += ",drawtext=fontfile=" + quoteFilter(subtitleFont)
-                    + ":textfile=" + quoteFilter(txt.toString())
-                    + ":fontcolor=white:fontsize=" + String.format("%.0f", fs)
-                    + ":borderw=2:bordercolor=black@0.85:shadowx=1:shadowy=1:shadowcolor=black@0.5"
-                    + ":line_spacing=6"
-                    + ":x=(w-text_w)/2:y=h-text_h-" + Math.round(ch * 0.07)
-                    + ":enable='between(t," + start + "," + end + ")'";
+            Path ass = workDir.resolve("sub_" + out.getFileName() + ".ass");
+            double fs = Math.max(24, ch * 0.055);
+            int perLine = Math.max(8, (int) Math.floor((cw - 60) / (fs * 0.9)));
+            String body = assBody(cw, ch, (int) fs, target,
+                    wrapNarration(narration.trim(), perLine).replace("\n", "\\N"));
+            Files.writeString(ass, body, StandardCharsets.UTF_8);
+            vf += ",ass=filename=" + quoteFilter(ass.toString());
         }
         List<String> args = new ArrayList<>(List.of("-y"));
         if (c.video()) {
@@ -222,6 +215,45 @@ public class ConcatService {
             sb.append(text, i, Math.min(text.length(), i + perLine));
         }
         return sb.toString();
+    }
+
+    /** 生成 ASS 字幕文本（libass）：白字黑边、底部居中、自动换行已含 \N。 */
+    private static String assBody(int cw, int ch, int fs, double target, String text) {
+        String t = text.replace("\\", "\\\\").replace("{", "\\{").replace("}", "\\}");
+        int endSec = Math.max(1, (int) Math.floor(target - 0.3));
+        int endCs = Math.max(0, (int) Math.round((target - 0.3 - Math.floor(target - 0.3)) * 100));
+        int marginV = (int) Math.round(ch * 0.08);
+        StringBuilder b = new StringBuilder();
+        b.append("[Script Info]\nScriptType: v4.00+\nPlayResX: ").append(cw)
+                .append("\nPlayResY: ").append(ch).append("\nWrapStyle: 0\n\n");
+        b.append("[V4+ Styles]\n")
+                .append("Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour,")
+                .append(" BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle,")
+                .append(" BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n")
+                .append("Style: Sub,Noto Sans CJK SC,").append(fs)
+                .append(",&H00FFFFFF,&H000000FF,&H00000000,&H90000000,0,0,0,0,100,100,0,0,")
+                .append("1,2.2,1,2,40,40,").append(marginV).append(",1\n\n");
+        b.append("[Events]\n")
+                .append("Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n")
+                .append("Dialogue: 0,0:00:00.40,0:00:").append(String.format("%02d.%02d", endSec, endCs))
+                .append(",Sub,,0,0,0,,").append(t).append("\n");
+        return b.toString();
+    }
+
+    /** 探测 ffmpeg 是否带某滤镜（如 ass），用于字幕降级保护。 */
+    private boolean hasFilter(String name) {
+        if (ffmpeg == null || ffmpeg.isBlank()) return false;
+        try {
+            ProcessBuilder pb = new ProcessBuilder(ffmpeg, "-hide_banner", "-filters");
+            pb.redirectErrorStream(true);
+            Process p = pb.start();
+            String out = new String(p.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+            boolean ok = p.waitFor(20, TimeUnit.SECONDS) && p.exitValue() == 0
+                    && out.contains(" " + name + " ");
+            return ok;
+        } catch (Exception e) {
+            return false;
+        }
     }
 
     /** ffmpeg filter 选项值加引号并转义（逗号/冒号/单引号是 filter 语法保留字）。 */
