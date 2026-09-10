@@ -16,6 +16,7 @@ import argparse
 import json
 import os
 import random
+import socket as _socket
 import struct
 import threading
 import time
@@ -23,6 +24,23 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import zlib
+
+# VPS 无 IPv6 路由，而 api.replicate.com 等 CDN 域名偶发返回 AAAA → urllib 报
+# [Errno 101] Network is unreachable。进程级强制 IPv4（失败再回退默认解析）。
+_orig_getaddrinfo = _socket.getaddrinfo
+
+
+def _ipv4_first(host, port, family=0, type=0, proto=0, flags=0):
+    try:
+        infos = _orig_getaddrinfo(host, port, _socket.AF_INET, type, proto, flags)
+        if infos:
+            return infos
+    except Exception:
+        pass
+    return _orig_getaddrinfo(host, port, family, type, proto, flags)
+
+
+_socket.getaddrinfo = _ipv4_first
 
 API = os.environ.get("WEAVEORA_API_BASE", "http://localhost:8080").rstrip("/")
 TOKEN = os.environ.get("WEAVEORA_WORKER_TOKEN", "dev-worker-token")

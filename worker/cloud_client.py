@@ -63,11 +63,28 @@ def _post(path, payload, timeout=300):
         raise CloudError("replicate %s -> %s %s" % (path, e.code, body), status=e.code)
 
 
+def _open_retry(req, timeout=120, attempts=4):
+    """网络层瞬断重试（Errno 101 Network unreachable / 111 / 104 / 超时）；HTTPError 直接上抛。"""
+    last = None
+    for i in range(1, attempts + 1):
+        try:
+            return urllib.request.urlopen(req, timeout=timeout)
+        except urllib.error.HTTPError:
+            raise
+        except Exception as e:
+            last = e
+            if i < attempts:
+                wait = min(3 * i, 12)
+                print("[cloud] network retry %d/%d after %ss: %s" % (i, attempts, wait, e), flush=True)
+                time.sleep(wait)
+    raise CloudError("replicate 网络不可达（重试 %d 次后仍失败）: %s" % (attempts, last))
+
+
 def _get(path, timeout=60):
     target = path if path.startswith("http") else API + path
     req = urllib.request.Request(target, headers=_headers())
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
+        with _open_retry(req, timeout=timeout, attempts=3) as r:
             return json.loads(r.read())
     except urllib.error.HTTPError as e:
         raise CloudError("replicate %s -> %s %s" % (path, e.code, e.read()[:300]),
@@ -91,7 +108,7 @@ def _create_with_retry(body):
 
 def _download(url):
     req = urllib.request.Request(url)
-    with urllib.request.urlopen(req, timeout=180) as r:
+    with _open_retry(req, timeout=180, attempts=3) as r:
         return r.read()
 
 
@@ -209,7 +226,7 @@ def replicate_image(payload, token, model, progress_fn=None):
         req = urllib.request.Request(API + "/models/%s/%s/predictions" % (owner, name),
                                      data=json.dumps(body_in).encode(), headers=_auth(token), method="POST")
     try:
-        with urllib.request.urlopen(req, timeout=120) as r:
+        with _open_retry(req, timeout=120) as r:
             pred = json.loads(r.read())
     except urllib.error.HTTPError as e:
         raise CloudError("replicate 图片创建失败: %s %s" % (e.code, e.read()[:300]), status=e.code)
@@ -382,7 +399,7 @@ def generate_motion_via_replicate(payload, token, model, progress_fn=None):
         req = urllib.request.Request(API + "/models/%s/%s/predictions" % (owner, name),
                                      data=json.dumps(body_in).encode(), headers=_auth(token), method="POST")
     try:
-        with urllib.request.urlopen(req, timeout=120) as r:
+        with _open_retry(req, timeout=120) as r:
             pred = json.loads(r.read())
     except urllib.error.HTTPError as e:
         raise CloudError("replicate 视频创建失败: %s %s" % (e.code, e.read()[:300]), status=e.code)

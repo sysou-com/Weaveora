@@ -43,3 +43,11 @@ python worker/qa_acceptance.py --base https://sysou.com/weaveora --engine cloud
   `proxy_read_timeout 1800s; proxy_send_timeout 1800s;`（5 分钟上限 × 多段 × 重试余量）。
 - 验证：31s→200（~95s）、60s→200（~156s）走公共 https 通过。
 - 演进：若走向 5 分钟长片批量并发，应把 director/generate 改异步任务 + 进度（现状同步等待）。
+
+## 运维备忘：云图片任务 `[Errno 101] Network is unreachable`（2026-09-10）
+- 症状：女儿国 v7 第 1 镜重跑 still 任务在 `cloud_submit` 20% 失败，`error_code=CLOUD_ERROR`，`error_message=<urlopen error [Errno 101] Network is unreachable>`；同一任务参考图上传（api.replicate.com/files）已成功。
+- 诊断：VPS 无 IPv6 默认路由（`curl -6` 直接 000），api.replicate.com（Cloudflare）偶发返回 AAAA；python3.6 urllib 命中 IPv6 → Errno 101。VPS 侧 `curl -4`/默认均可达（401=缺 token），属**瞬断**而非封禁。
+- 修复（worker）：`stub_worker.py` 进程级 `socket.getaddrinfo` 强制 IPv4（失败回退默认）；`cloud_client.py` 新增 `_open_retry()`，对创建预测/轮询/下载做网络瞬断指数重试（HTTPError 不重试，避免误重试 4xx）。
+- 验证：worker 进程内 `socket.getaddrinfo('api.replicate.com',443)` 仅返回 `AF_INET`。
+- 旁证：该失败任务 payload 已是 `revision_no=7 + prompt_md5 + v7 正词`，确认版锚定修复生效（不再是旧版取词问题）。
+- 遗留：引擎设置里图片模型为 `black-forest-labs/flux-2-pro`；按 §11.6 测试口径应把模型留空，走默认 `stability-ai/stable-diffusion:ac732df8…`。
