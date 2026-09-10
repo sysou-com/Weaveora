@@ -57,3 +57,9 @@ python worker/qa_acceptance.py --base https://sysou.com/weaveora --engine cloud
 - 根因：① 参考图选择只在新建 Brief 时随 constraints 落库，改方案时未持久化（`briefs.constraints={}`）；② 重试/重跑重锚只重建 prompt，未刷新 `referenceKeys/referenceAssetIds`；③ 无“主体↔参考图”绑定。
 - 修复：`plan.referenceAssets=[{assetId,subject}]` 随方案保存；JobService 逐镜按文案命中主体自动绑定并追加“形象以参考图为准”锚定词；重锚时重新解析 refs；前端参考图面板可标注主体、生成前自动保存草稿；任务「只看最近一轮」按 镜号+类型+帧号 取最新（不分状态）。
 - 复现验证：v8 勾选唐僧图 → 标注「唐僧」→ 保存/生成 → 新任务 payload 的 referenceAssetIds 应为新图且正词含 reference image 锚定句，`prompt_md5` 随之变化。
+
+## 多主体参考图串脸（2026-09-10）
+- 症状：同时勾选「女王」「唐僧」两张参考图重跑 S1，结果两个人物变成同一张脸（全女王或全唐僧）。
+- 根因：① worker `replicate_image` 只用 `referenceKeys[0]`，并以单张图作 `image`（img2img/编辑语义）→ 整图身份被这一张带偏；② 方案内主体↔图映射顺序被 DB 查询顺序打乱，且 payload 未下发 `referenceSubjects`；③ 提示词只有一句笼统 “must follow the provided reference image”，未说明“第几张图=谁”。
+- 修复：JobService 按标注顺序重建 ids/keys/subjects（新增 `referenceSubjects`/`primarySubject`），anchor 改为显式图序映射 + “各角色各随其图、禁止换脸/混脸”，多主体自动追加防串脸负词；worker 多图模型（flux/kontext/nano-banana）传全部 `input_images` 并把图序映射写进 prompt，单图/img2img 模型只用主主体那张（GPU IP-Adapter 同规则）。
+- 已知限制：单图 img2img 类模型无法真正按角色分别绑脸；同框多主体要稳定需用多参考模型或拆镜/分帧，或后续做 IP-Adapter 分区遮罩（GPU）。

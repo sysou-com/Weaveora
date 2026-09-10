@@ -190,16 +190,48 @@ def replicate_image(payload, token, model, progress_fn=None):
     positive = payload.get("positive_prompt", "")
     params = payload.get("params") or {}
     inp = {"prompt": positive}
-    # 参考图（③：支持图片输入的模型要真正用上参考图）
+    # 参考图：多主体必须带全 + 保留“第 i 张=哪个主体”的映射；单图模型不得拿多图当 img2img（会整图串脸）
     refs = payload.get("referenceKeys") or []
+    subjects = payload.get("referenceSubjects") or []
+    primary = payload.get("primarySubject") or ""
+    ml_lower = (model or "").lower()
     if refs:
-        ref = _fetch_asset(refs[0])
-        ref_url = _upload_file(token, refs[0].split("/")[-1] or "ref.png", ref)
-        if "flux" in (model or "").lower():
-            inp["input_images"] = [ref_url]
-        else:
-            inp["image"] = ref_url
-        print("[cloud-image] ref attached model=%s url=%s" % (model, ref_url[:70]), flush=True)
+        picked_idx = list(range(len(refs)))
+        if len(refs) > 1:
+            # 单图/img2img 系模型：只允许用“该镜主主体”对应的那张，其余不挂（避免两张脸互相带偏）
+            multi_ok = ("flux" in ml_lower) or ("kontext" in ml_lower) or ("nano-banana" in ml_lower)
+            if not multi_ok:
+                chosen = None
+                for i, s in enumerate(subjects):
+                    if primary and s == primary:
+                        chosen = i
+                        break
+                if chosen is None:
+                    chosen = 0
+                picked_idx = [chosen]
+                print("[cloud-image] 模型 %s 不支持多图，只用主主体图 idx=%d subject=%s"
+                      % (model, chosen, (subjects[chosen] if chosen < len(subjects) else "-")), flush=True)
+        urls = []
+        mapping = []
+        for i in picked_idx:
+            try:
+                blob = _fetch_asset(refs[i])
+                u = _upload_file(token, refs[i].split("/")[-1] or "ref.png", blob)
+                urls.append(u)
+                subj = subjects[i] if i < len(subjects) else ""
+                if subj:
+                    mapping.append("%d) %s" % (len(urls), subj))
+            except Exception as e:
+                print("[cloud-image] ref#%d 上传失败，跳过: %s" % (i, e), flush=True)
+        if urls:
+            if "flux" in ml_lower or len(urls) > 1:
+                inp["input_images"] = urls
+            else:
+                inp["image"] = urls[0]
+            if len(urls) > 1 and mapping:
+                # 把“图序→主体”写进 prompt，降低串脸
+                inp["prompt"] = "Reference images in order: " + "; ".join(mapping) + ". " + positive
+            print("[cloud-image] refs=%d subjects=%s model=%s" % (len(urls), mapping, model), flush=True)
     ar = payload.get("aspect_ratio")
     if (model or "").lower().startswith("stability-ai/") or "sdxl" in (model or "").lower():
         # SD 系按 width/height 出图（aspect_ratio 不生效；尺寸必须为 64 倍数）

@@ -296,7 +296,7 @@ public class JobService {
                 String pos = styledPositive(style, plan.path("positive_prompt").asText(""));
                 if (!refs.anchor().isBlank()) pos = pos + refs.anchor();
                 payload.put("positive_prompt", pos);
-                payload.put("negative_prompt", styledNegative(style, plan.path("negative_prompt").asText("")));
+                payload.put("negative_prompt", negWithRefGuard(styledNegative(style, plan.path("negative_prompt").asText("")), refs));
                 stampRevisionMeta(payload, revisionNo, pos);
                 JsonNode params = plan.path("params");
                 com.fasterxml.jackson.databind.node.ObjectNode pnode =
@@ -473,7 +473,7 @@ public class JobService {
             RefCtx refs = resolveRefs(plan, shot, userId, old.workspaceId(), old.projectId(), approvedId);
             if (!refs.anchor().isBlank()) pos = pos + refs.anchor();
             payload.put("positive_prompt", pos);
-            payload.put("negative_prompt", styledNegative(st, shot.path("negative_prompt").asText("")));
+            payload.put("negative_prompt", negWithRefGuard(styledNegative(st, shot.path("negative_prompt").asText("")), refs));
             payload.put("duration_sec", shot.path("duration_sec").asDouble(3));
             payload.remove("referenceAssetIds");
             payload.remove("referenceKeys");
@@ -488,7 +488,7 @@ public class JobService {
             RefCtx refs = resolveRefs(plan, null, userId, old.workspaceId(), old.projectId(), approvedId);
             if (!refs.anchor().isBlank()) pos = pos + refs.anchor();
             payload.put("positive_prompt", pos);
-            payload.put("negative_prompt", styledNegative(st, plan.path("negative_prompt").asText("")));
+            payload.put("negative_prompt", negWithRefGuard(styledNegative(st, plan.path("negative_prompt").asText("")), refs));
             payload.remove("referenceAssetIds");
             payload.remove("referenceKeys");
             attachRefs(payload, refs);
@@ -679,8 +679,8 @@ public class JobService {
 
     // ---------- W4 一致性锚定 ----------
 
-    record RefCtx(List<String> ids, List<String> keys, String anchor) {
-        static RefCtx empty() { return new RefCtx(List.of(), List.of(), ""); }
+    record RefCtx(List<String> ids, List<String> keys, List<String> subjects, String anchor, String primarySubject) {
+        static RefCtx empty() { return new RefCtx(List.of(), List.of(), List.of(), "", ""); }
     }
 
     /**
@@ -703,7 +703,7 @@ public class JobService {
         RefCtx fromBrief = bindFrom(briefReferenceAssets(userId, workspaceId, projectId, revisionId), text, workspaceId);
         if (fromBrief != null) return fromBrief;
         RefCtx legacy = loadRefs(userId, workspaceId, projectId, revisionId);
-        return new RefCtx(legacy.ids(), legacy.keys(), "");
+        return new RefCtx(legacy.ids(), legacy.keys(), legacy.subjects(), "", legacy.primarySubject());
     }
 
     /** brief.constraints.referenceAssets（新流程：未出方案前就标注的主体绑定）。取不到/无则 null。 */
@@ -718,7 +718,8 @@ public class JobService {
         }
     }
 
-    /** 把 [{assetId, subject}] 按镜文本做主体过滤 → RefCtx；无有效绑定返回 null（交下一层）。 */
+    /** 把 [{assetId, subject}] 按镜文本做主体过滤 → RefCtx；无有效绑定返回 null（交下一层）。
+     *  顺序严格按用户标注顺序（不能按 DB 返回顺序，否则主体↔图 映射会错）。 */
     private RefCtx bindFrom(JsonNode arr, String text, UUID workspaceId) {
         if (arr == null || !arr.isArray() || arr.size() == 0) return null;
         String t = text == null ? "" : text;
@@ -738,21 +739,43 @@ public class JobService {
         for (JsonNode b : picked) {
             try { ids.add(UUID.fromString(b.path("assetId").asText())); } catch (IllegalArgumentException ignored) { }
         }
-        List<studio.weaveora.asset.domain.Asset> found = assetRepo.findByIdInAndWorkspaceId(ids, workspaceId);
-        List<String> keys = found.stream().map(studio.weaveora.asset.domain.Asset::storageKey).toList();
-        List<String> okIds = found.stream().map(a -> a.id().toString()).toList();
-        StringBuilder subj = new StringBuilder();
+        // 按标注顺序重建，保住“第 i 张图 = 哪个主体”
+        java.util.Map<String, studio.weaveora.asset.domain.Asset> byId = new java.util.HashMap<>();
+        for (studio.weaveora.asset.domain.Asset a : assetRepo.findByIdInAndWorkspaceId(ids, workspaceId)) {
+            byId.put(a.id().toString(), a);
+        }
+        List<String> okIds = new ArrayList<>();
+        List<String> keys = new ArrayList<>();
+        List<String> subjects = new ArrayList<>();
+        StringBuilder mapping = new StringBuilder();
+        String primary = "";
         for (JsonNode b : picked) {
-            String s = b.path("subject").asText("");
-            if (!s.isBlank() && subj.indexOf(s) < 0) {
-                if (subj.length() > 0) subj.append(", ");
-                subj.append(s);
+            String aid = b.path("assetId").asText();
+            studio.weaveora.asset.domain.Asset a = byId.get(aid);
+            if (a == null) continue;
+            String subject = b.path("subject").asText("");
+            okIds.add(aid);
+            keys.add(a.storageKey());
+            subjects.add(subject);
+            if (!subject.isBlank()) {
+                if (mapping.length() > 0) mapping.append("; ");
+                mapping.append(keys.size()).append(") ").append(subject);
+                if (primary.isBlank() && t.contains(subject)) primary = subject;
             }
         }
-        String anchor = okIds.isEmpty() ? "" : (subj.length() > 0
-                ? " The appearance of " + subj + " must strictly follow the provided reference image (identity, face and costume)."
-                : " The subject appearance must strictly follow the provided reference image.");
-        return new RefCtx(okIds, keys, anchor);
+        if (okIds.isEmpty()) return null;
+        if (primary.isBlank()) {
+            for (String s : subjects) { if (!s.isBlank()) { primary = s; break; } }
+        }
+        String anchor;
+        if (subjects.stream().anyMatch(s -> !s.isBlank())) {
+            anchor = " Reference images in order: " + mapping
+                    + ". Each character's identity, face and costume must strictly follow its own reference image;"
+                    + " keep the characters distinct and do not share, blend or swap their faces.";
+        } else {
+            anchor = " The subject appearance must strictly follow the provided reference image.";
+        }
+        return new RefCtx(okIds, keys, subjects, anchor, primary);
     }
 
     private RefCtx loadRefs(UUID userId, UUID workspaceId, UUID projectId, UUID revisionId) {
@@ -781,10 +804,19 @@ public class JobService {
                         .map(studio.weaveora.asset.domain.Asset::storageKey)
                         .toList();
             }
-            return new RefCtx(ids.stream().map(UUID::toString).toList(), keys, "");
+            return new RefCtx(ids.stream().map(UUID::toString).toList(), keys, List.of(), "", "");
         } catch (BizException e) {
             return RefCtx.empty(); // 引用缺失不阻塞出图（仅丢锚定）
         }
+    }
+
+    /** 多主体时追加“防串脸”负词。 */
+    private static String negWithRefGuard(String neg, RefCtx refs) {
+        if (refs == null) return neg;
+        long distinct = refs.subjects().stream().filter(s -> s != null && !s.isBlank()).distinct().count();
+        if (distinct <= 1) return neg;
+        String extra = "identical faces, face swap, same person repeated, mixed identities, cloned face";
+        return (neg == null || neg.isBlank()) ? extra : neg + ", " + extra;
     }
 
     private void attachRefs(ObjectNode payload, RefCtx refs) {
@@ -792,6 +824,11 @@ public class JobService {
         refs.ids().forEach(ids::add);
         com.fasterxml.jackson.databind.node.ArrayNode keys = payload.putArray("referenceKeys");
         refs.keys().forEach(keys::add);
+        com.fasterxml.jackson.databind.node.ArrayNode subjects = payload.putArray("referenceSubjects");
+        refs.subjects().forEach(subjects::add);
+        if (refs.primarySubject() != null && !refs.primarySubject().isBlank()) {
+            payload.put("primarySubject", refs.primarySubject());
+        }
     }
 
     /** 内部：按存储 key 读取参考图字节（worker 经 token 拉取，供 ComfyUI 上传/IP-Adapter）。 */
@@ -885,7 +922,7 @@ public class JobService {
         String pos = styledPositive(style, positiveRaw);
         if (refs != null && !refs.anchor().isBlank()) pos = pos + refs.anchor();
         payload.put("positive_prompt", pos);
-        payload.put("negative_prompt", styledNegative(style, shot.path("negative_prompt").asText("")));
+        payload.put("negative_prompt", negWithRefGuard(styledNegative(style, shot.path("negative_prompt").asText("")), refs));
         stampRevisionMeta(payload, revisionNo, pos);
         payload.put("duration_sec", shot.path("duration_sec").asDouble(3));
         payload.put("fps", plan.path("edit_plan").path("fps").asInt(30));

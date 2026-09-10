@@ -198,11 +198,23 @@ def generate(client_id, payload, progress_fn=None):
 
     ref_name = None
     ref_keys = payload.get("referenceKeys") or []
+    ref_subjects = payload.get("referenceSubjects") or []
+    primary = payload.get("primarySubject") or ""
     if ref_keys:
+        idx = 0
+        if len(ref_keys) > 1:
+            # IP-Adapter 单图：多主体时只用“该镜主主体”对应的那张，避免两张脸互相带偏
+            for i, s in enumerate(ref_subjects):
+                if primary and s == primary:
+                    idx = i
+                    break
+            print("[comfy] 多参考图 %d 张，仅用主主体 idx=%d subject=%s"
+                  % (len(ref_keys), idx, (ref_subjects[idx] if idx < len(ref_subjects) else "-")), flush=True)
+        key = ref_keys[idx]
         try:
-            data, ctype = fetch_reference_bytes(ref_keys[0])
+            data, ctype = fetch_reference_bytes(key)
             _, body = _comfy("POST", "/upload/image",
-                             files={"image": (ref_keys[0].split("/")[-1], data, ctype)})
+                             files={"image": (key.split("/")[-1], data, ctype)})
             ref_name = json.loads(body.decode()).get("name")
         except Exception:
             ref_name = None
