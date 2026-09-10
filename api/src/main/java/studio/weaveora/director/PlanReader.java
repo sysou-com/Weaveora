@@ -53,6 +53,13 @@ public class PlanReader {
     }
 
     @Transactional(readOnly = true)
+    public int revisionNo(UUID revisionId) {
+        return revisions.findById(revisionId)
+                .map(PromptRevision::revisionNo)
+                .orElse(0);
+    }
+
+    @Transactional(readOnly = true)
     public UUID revisionBriefId(UUID revisionId) {
         return revisions.findById(revisionId)
                 .map(PromptRevision::briefId)

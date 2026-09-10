@@ -481,6 +481,21 @@ function revOfJob(j: JobRecord): { no: number; stale: boolean } | null {
   if (!r) return null
   return { no: r.no, stale: approvedRev.value !== null && approvedRev.value.id !== j.revisionId }
 }
+/** 任务审计（P3）：悬停可查“用 vN 的哪句话 + prompt_md5” */
+function jobAuditTitle(j: JobRecord): string | undefined {
+  const p = j.payload
+  if (!p || !p.positive_prompt) return undefined
+  const r = revOfJob(j)
+  const no = p.revision_no ?? r?.no ?? '?'
+  const prompt = p.positive_prompt.length > 120 ? `${p.positive_prompt.slice(0, 120)}…` : p.positive_prompt
+  return `版本 v${no}${r?.stale ? '（旧版）' : ''} · md5 ${(p.prompt_md5 ?? '-').slice(0, 16)}\n提示词：${prompt}`
+}
+/** 资产库：由产物 jobId 反查生成版本（vN），便于区分旧版产物 */
+function galRevNo(jobId: string | null): number | null {
+  if (!jobId) return null
+  const j = (jobs.data.value ?? []).find((x) => x.id === jobId)
+  return j ? revOfJob(j)?.no ?? null : null
+}
 const eligibleAllSelected = computed(
   () => eligibleJobs.value.length > 0 && jobSel.value.length === eligibleJobs.value.length)
 function toggleEligibleAll(): void {
@@ -1096,7 +1111,7 @@ const shotTotal = computed(() => {
           </button>
         </div>
         <div v-if="(jobs.data.value ?? []).length" class="job-list">
-          <div v-for="j in visibleJobs" :key="j.id" class="job-row" :data-testid="'job-' + j.id.slice(0, 8)">
+          <div v-for="j in visibleJobs" :key="j.id" class="job-row" :data-testid="'job-' + j.id.slice(0, 8)" :title="jobAuditTitle(j)">
             <label v-if="isJobActionable(j)" class="row-check">
               <input type="checkbox" :checked="jobSel.includes(j.id)" @change="toggleJobSel(j.id)" />
             </label>
@@ -1213,7 +1228,7 @@ const shotTotal = computed(() => {
             <img v-else-if="galUrls[a.id]" :src="galUrls[a.id]" :alt="a.kind" loading="lazy" />
             <div v-else class="g-loading">…</div>
             <div class="g-meta">
-              <span class="g-kind font-mono">{{ a.kind }}<template v-if="a.width"> · {{ a.width }}×{{ a.height }}</template></span>
+              <span class="g-kind font-mono">{{ a.kind }}<template v-if="a.width"> · {{ a.width }}×{{ a.height }}</template><template v-if="galRevNo(a.jobId)"> · v{{ galRevNo(a.jobId) }}</template></span>
               <span class="g-actions">
                 <button v-if="galUrls[a.id]" type="button" class="g-max" title="沉浸预览/播放"
                         @click.stop="openImmersive(a.id, a.mime ?? '')">

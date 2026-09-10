@@ -89,6 +89,29 @@ public class JobService {
         return neg + sep + base;
     }
 
+    /** 任务可审计性：payload 内记录实际送入引擎的版本号与正词 MD5（P3：用 vN 的哪句话生成可查）。 */
+    private static String md5Hex(String s) {
+        try {
+            java.security.MessageDigest md = java.security.MessageDigest.getInstance("MD5");
+            byte[] d = md.digest((s == null ? "" : s).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            StringBuilder sb = new StringBuilder();
+            for (byte b : d) sb.append(String.format("%02x", b));
+            return sb.toString();
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
+    private static void stampRevisionMeta(ObjectNode payload, int revisionNo, String finalPositive) {
+        payload.put("revision_no", revisionNo);
+        payload.put("prompt_md5", md5Hex(finalPositive));
+    }
+
+    private StyleTemplate loadStyle(ProjectSnapshot project) {
+        if (project.styleTemplateId() == null) return null;
+        return styleRepo.findById(project.styleTemplateId()).orElse(null);
+    }
+
     private final GenerationJobRepository jobs;
     private final WorkerNodeRepository nodes;
     private final AssetService assets;
@@ -167,6 +190,7 @@ public class JobService {
         // 读取 revision plan（导演层产物）构造 payload
         JsonNode plan = planReader.revisionPlan(req.revisionId());
         String planMode = plan.path("mode").asText("image");
+        int revisionNo = planReader.revisionNo(req.revisionId());
         // 风格模板（W 项目风格：前缀/后缀/负面词注入出图与出视频）
         StyleTemplate style = null;
         if (project.styleTemplateId() != null) {
@@ -201,8 +225,10 @@ public class JobService {
                 payload.put("revisionId", req.revisionId().toString());
                 payload.put("shotId", shotId.toString());
                 payload.put("shot_no", shot.path("shot_no").asInt());
-                payload.put("positive_prompt", styledPositive(style, shot.path("positive_prompt").asText("")));
+                String pos = styledPositive(style, shot.path("positive_prompt").asText(""));
+                payload.put("positive_prompt", pos);
                 payload.put("negative_prompt", styledNegative(style, shot.path("negative_prompt").asText("")));
+                stampRevisionMeta(payload, revisionNo, pos);
                 payload.put("duration_sec", shot.path("duration_sec").asDouble(3));
                 payload.put("fps", plan.path("edit_plan").path("fps").asInt(30));
                 payload.put("seed", shot.path("seed").asLong(0) == 0 ? randomSeed() : shot.path("seed").asLong(0));
@@ -251,8 +277,10 @@ public class JobService {
                 payload.put("kind", "still");
                 payload.put("mode", "image");
                 payload.put("revisionId", req.revisionId().toString());
-                payload.put("positive_prompt", styledPositive(style, plan.path("positive_prompt").asText("")));
+                String pos = styledPositive(style, plan.path("positive_prompt").asText(""));
+                payload.put("positive_prompt", pos);
                 payload.put("negative_prompt", styledNegative(style, plan.path("negative_prompt").asText("")));
+                stampRevisionMeta(payload, revisionNo, pos);
                 JsonNode params = plan.path("params");
                 com.fasterxml.jackson.databind.node.ObjectNode pnode =
                         params != null && params.isObject()
@@ -423,15 +451,21 @@ public class JobService {
             }
             payload.put("revisionId", approvedId.toString());
             payload.put("shotId", shotId.toString());
-            payload.put("positive_prompt", shot.path("positive_prompt").asText(""));
-            payload.put("negative_prompt", shot.path("negative_prompt").asText(""));
+            StyleTemplate st = loadStyle(project);
+            String pos = styledPositive(st, shot.path("positive_prompt").asText(""));
+            payload.put("positive_prompt", pos);
+            payload.put("negative_prompt", styledNegative(st, shot.path("negative_prompt").asText("")));
             payload.put("duration_sec", shot.path("duration_sec").asDouble(3));
+            stampRevisionMeta(payload, planReader.revisionNo(approvedId), pos);
             return new Retarget(approvedId, shotId, payload);
         }
         if ("image".equals(planMode) && "still".equals(old.kind())) {
             payload.put("revisionId", approvedId.toString());
-            payload.put("positive_prompt", plan.path("positive_prompt").asText(""));
-            payload.put("negative_prompt", plan.path("negative_prompt").asText(""));
+            StyleTemplate st = loadStyle(project);
+            String pos = styledPositive(st, plan.path("positive_prompt").asText(""));
+            payload.put("positive_prompt", pos);
+            payload.put("negative_prompt", styledNegative(st, plan.path("negative_prompt").asText("")));
+            stampRevisionMeta(payload, planReader.revisionNo(approvedId), pos);
             return new Retarget(approvedId, old.shotId(), payload);
         }
         log.warn("job retry re-anchor: kind={} planMode={} 不支持自动改锚，沿用旧 payload（改镜后请重新发起生成）",

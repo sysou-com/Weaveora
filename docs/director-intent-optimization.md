@@ -48,9 +48,9 @@
 2. 图片导演 System Prompt 增加**机位-构图原子字段**（image schema 的 camera 扩展：`viewpoint`= behind/from-front/over-shoulder/profile、`foreground`= 前景遮挡物、`subject_axis`= 人物相对机位朝向、`focus_subject`），强制 LLM 填写，正/负词模板化拼接；仍在分镜文案里则无效。
 3. 参考图默认仅作**形象/画风锚定**，当 Brief/改镜意见出现“机位/景别/透视”类词时，UI 提示参考图可能拉扯构图，建议临时去勾或换无构图参考。
 
-**P3 让版本与取词过程可见可审计（0.5d）**
-1. `generation_jobs.payload` 增加 `revision_no` 与 `prompt_md5`；job 行、资产行（asset meta）携带版本号，历史资产可一键查“用 vN 的哪句话生成的”。
-2. 资产缩略图标注 `vN`，避免旧图被误当新效果讨论。
+**P3 让版本与取词过程可见可审计（0.5d）——✅ 2026-09-10 已实施并上线**
+1. `generation_jobs.payload` 在创建/重试重锚定时写入 `revision_no` 与 `prompt_md5`（对最终送引擎的正词取 MD5，含风格模板注入后文本）；`PlanReader.revisionNo()` 提供版本号查询。
+2. 前端：任务行悬停显示「版本 vN · md5 · 提示词预览」（旧版标红）；资产库缩略图标注 `vN`，旧图不再被误当新效果。
 
 ## 5. 验证清单
 1. 复现路径回归：确认 v7 后对旧 failed/succeeded 任务重试 → 新 job 的 payload 的 `positive_prompt` 与 v7 S1 一致（不再是“女王端坐”文案）。
