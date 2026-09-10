@@ -24,15 +24,19 @@ API = "https://api.replicate.com/v1"
 DELAY_MS = int(os.environ.get("WEAVEORA_CLOUD_DELAY_MS", "1500"))
 RETRIES = int(os.environ.get("WEAVEORA_CLOUD_RETRIES", "4"))
 
-# ---- §11.6 云 API 测试口径（2026-09-10 用户锁定）：仅 replicate.com；出图/视频固定测试模型 ----
-# 出图：SD 固定版本（width/height 需 64 倍数）
-DEFAULT_IMAGE_MODEL = os.environ.get(
-    "WEAVEORA_REPLICATE_IMAGE_MODEL",
-    "stability-ai/stable-diffusion:ac732df83cea7fff18b8472768c88ad041fa750ff7682a21affe81863cbe77e4")
-# 视频：prunaai/p-video，强制 draft=ON，分辨率 ≤720p
-DEFAULT_VIDEO_MODEL = os.environ.get("WEAVEORA_REPLICATE_VIDEO_MODEL", "prunaai/p-video")
-VIDEO_DRAFT = os.environ.get("WEAVEORA_REPLICATE_VIDEO_DRAFT", "1").lower() not in ("0", "false", "no")
-VIDEO_RESOLUTION = os.environ.get("WEAVEORA_REPLICATE_VIDEO_RESOLUTION", "720p")
+# ---- 云 API 模型默认（生产以用户引擎配置为准；测试模型需显式开启）----
+# §11.6 测试口径：仅当 WEAVEORA_REPLICATE_TEST_MODELS=1（或显式 env 指定模型）时生效。
+TEST_MODE = os.environ.get("WEAVEORA_REPLICATE_TEST_MODELS", "").lower() in ("1", "true", "yes", "on")
+TEST_IMAGE_MODEL = "stability-ai/stable-diffusion:ac732df83cea7fff18b8472768c88ad041fa750ff7682a21affe81863cbe77e4"
+TEST_VIDEO_MODEL = "prunaai/p-video"
+_env_img = os.environ.get("WEAVEORA_REPLICATE_IMAGE_MODEL")
+DEFAULT_IMAGE_MODEL = _env_img if _env_img is not None else (TEST_IMAGE_MODEL if TEST_MODE else "")
+_env_vid = os.environ.get("WEAVEORA_REPLICATE_VIDEO_MODEL")
+DEFAULT_VIDEO_MODEL = _env_vid if _env_vid is not None else (TEST_VIDEO_MODEL if TEST_MODE else "")
+_env_draft = os.environ.get("WEAVEORA_REPLICATE_VIDEO_DRAFT")
+VIDEO_DRAFT = (_env_draft.lower() not in ("0", "false", "no")) if _env_draft is not None else TEST_MODE
+env_res = os.environ.get("WEAVEORA_REPLICATE_VIDEO_RESOLUTION")
+VIDEO_RESOLUTION = env_res if env_res is not None else ("720p" if TEST_MODE else "")
 # 尾帧引导参数名（payload.tailKey）：p-video 无末帧参数，留空即忽略；Wan 系可设如 last_frame_image
 VIDEO_LAST_FRAME_PARAM = os.environ.get("WEAVEORA_VIDEO_LAST_FRAME_PARAM", "").strip()
 
@@ -180,6 +184,9 @@ def replicate_image(payload, token, model, progress_fn=None):
     if not token:
         raise CloudError("图片云未配置 API Key（Replicate）")
     model = model or DEFAULT_IMAGE_MODEL
+    if not model:
+        raise CloudError("图片云未配置模型（Replicate）：请在引擎设置中填写模型；"
+                         "调试可设 WEAVEORA_REPLICATE_TEST_MODELS=1 使用 §11.6 测试模型")
     positive = payload.get("positive_prompt", "")
     params = payload.get("params") or {}
     inp = {"prompt": positive}
@@ -331,9 +338,9 @@ def _video_input(model, positive, image_url):
 def generate_motion_via_replicate(payload, token, model, progress_fn=None):
     """云视频：参考帧上传 → 模型预测 → 轮询 → 下载 mp4。返回 [(bytes,'video/mp4',w,h,None)]。
 
-    §11.6 测试口径：model 为空 → prunaai/p-video，强制 draft=ON、resolution ≤720p；
-    payload.tailKey 在配置 WEAVEORA_VIDEO_LAST_FRAME_PARAM 时作为末帧上传（p-video 无此参数则忽略）。"""
-    model = model or DEFAULT_VIDEO_MODEL
+    §11.6 测试口径（仅 WEAVEORA_REPLICATE_TEST_MODELS=1 时生效）：model 为空 → prunaai/p-video，
+    强制 draft=ON、resolution ≤720p；payload.tailKey 在配置 WEAVEORA_VIDEO_LAST_FRAME_PARAM 时作为末帧上传。"""
+    model = model or DEFAULT_VIDEO_MODEL or "minimax/video-01"
     if progress_fn:
         progress_fn(15, "cloud_upload")
     key = payload.get("keyframeKey")
@@ -349,16 +356,22 @@ def generate_motion_via_replicate(payload, token, model, progress_fn=None):
     inp = _video_input(model, positive, img_url)
     ml = (model or "").lower()
     if "p-video" in ml:
-        # 测试档硬约束：draft ON + 分辨率 ≤720p
-        inp["draft"] = bool(VIDEO_DRAFT)
-        inp["resolution"] = VIDEO_RESOLUTION
         inp["fps"] = 24
         try:
             dur = int(round(float(payload.get("duration_sec") or 5)))
         except (TypeError, ValueError):
             dur = 5
         inp["duration"] = max(1, min(20, dur))
-        inp["prompt_upsample"] = False
+        # 测试档硬约束 draft ON + ≤720p；生产（TEST_MODE=0）仅在显式 env 指定时注入
+        if TEST_MODE:
+            inp["draft"] = True
+            inp["resolution"] = VIDEO_RESOLUTION or "720p"
+            inp["prompt_upsample"] = False
+        else:
+            if VIDEO_DRAFT:
+                inp["draft"] = True
+            if VIDEO_RESOLUTION:
+                inp["resolution"] = VIDEO_RESOLUTION
         ar = payload.get("aspect_ratio")
         if ar in ("16:9", "9:16", "1:1", "3:2", "2:3"):
             inp["aspect_ratio"] = ar

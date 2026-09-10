@@ -50,4 +50,4 @@ python worker/qa_acceptance.py --base https://sysou.com/weaveora --engine cloud
 - 修复（worker）：`stub_worker.py` 进程级 `socket.getaddrinfo` 强制 IPv4（失败回退默认）；`cloud_client.py` 新增 `_open_retry()`，对创建预测/轮询/下载做网络瞬断指数重试（HTTPError 不重试，避免误重试 4xx）。
 - 验证：worker 进程内 `socket.getaddrinfo('api.replicate.com',443)` 仅返回 `AF_INET`。
 - 旁证：该失败任务 payload 已是 `revision_no=7 + prompt_md5 + v7 正词`，确认版锚定修复生效（不再是旧版取词问题）。
-- 遗留：引擎设置里图片模型为 `black-forest-labs/flux-2-pro`；按 §11.6 测试口径应把模型留空，走默认 `stability-ai/stable-diffusion:ac732df8…`。
+- 口径澄清（2026-09-10 用户确认）：§11.6 的 SD/p-video 固定模型是** agent 调试用**，只在 `WEAVEORA_REPLICATE_TEST_MODELS=1` 时生效；**生产以用户引擎配置为准**。用户的 `black-forest-labs/flux-2-pro` 属正常用户配置，无需更改。
