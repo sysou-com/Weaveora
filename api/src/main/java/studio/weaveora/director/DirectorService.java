@@ -575,29 +575,30 @@ public class DirectorService {
         }
         if (prevPlan != null) {
             sb.append("\n\n上一版方案（作为本版基准）：\n").append(planSummary(prevPlan));
-            // P4：把上一版已标注主体的参考图清单告知导演（LLM 看不到图，但需知道“哪个主体有参考图”）
-            JsonNode ra = prevPlan.get("referenceAssets");
-            if (ra != null && ra.isArray() && ra.size() > 0) {
-                StringBuilder refs = new StringBuilder();
-                for (JsonNode b : ra) {
-                    String subject = b.path("subject").asText("");
-                    if (!subject.isBlank()) {
-                        if (refs.length() > 0) refs.append("、");
-                        refs.append(subject);
-                    }
-                }
-                if (refs.length() > 0) {
-                    sb.append("\n\n可用参考图主体：“").append(refs)
-                            .append("”。这些主体的形象（面容/服饰）已有参考图锚定；请在各镜 positive_prompt 里明确写出该主体形象以参考图为准")
-                            .append("（英文可写 character appearance strictly follows the provided reference image），")
-                            .append("并在 action 中保留主体名，便于系统为对应镜头绑定参考图。");
-                }
-            }
             sb.append("\n\n要求：基于上一版方案重导出新一版——镜头顺序与叙事保持连贯，")
                     .append("若无新需求则延续上一版结构/文案并做打磨精修；仅当用户 Brief 有新要求时才调整镜头内容与数量。");
         }
+        // P4：告知导演“哪些主体有参考图”（LLM 看不到图；plan 级 + brief 级合并去重）
+        java.util.LinkedHashSet<String> refSubjects = new java.util.LinkedHashSet<>();
+        collectRefSubjects(refSubjects, prevPlan == null ? null : prevPlan.get("referenceAssets"));
+        collectRefSubjects(refSubjects, brief.constraints() == null ? null : brief.constraints().get("referenceAssets"));
+        if (!refSubjects.isEmpty()) {
+            sb.append("\n\n可用参考图主体：”").append(String.join("、", refSubjects))
+                    .append("”。这些主体的形象（面容/服饰）已有参考图锚定；请在各镜 positive_prompt 里明确写出该主体形象以参考图为准")
+                    .append("（英文可写 character appearance strictly follows the provided reference image），")
+                    .append("并在 action 中保留主体名，便于系统为对应镜头绑定参考图。");
+        }
         sb.append("\n\n请按 System Prompt 的 JSON 结构输出。");
         return sb.toString();
+    }
+
+    /** 收集 referenceAssets[{assetId,subject}] 里的主体名（去重）。 */
+    private static void collectRefSubjects(java.util.Set<String> out, JsonNode arr) {
+        if (arr == null || !arr.isArray()) return;
+        for (JsonNode b : arr) {
+            String s = b.path("subject").asText("");
+            if (!s.isBlank()) out.add(s);
+        }
     }
 
     /** 最近一版同模式方案（供“再导演基于上一版”注入）。 */

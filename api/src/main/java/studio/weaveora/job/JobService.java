@@ -685,53 +685,74 @@ public class JobService {
 
     /**
      * 参考图解析（主体绑定）：
-     * ① 方案内 `referenceAssets=[{assetId, subject}]`（参考图面板标注主体后随方案保存）优先：
+     * ① 方案内 `referenceAssets=[{assetId, subject}]`（参考图面板标注后随方案保存）优先：
      *    - 带 subject 的仅当该镜文本（action/zh/positive_prompt）提到该主体时绑定；无 subject 的始终绑定；
      *    - 该镜什么都没提到则带回全部（避免空锚定）；
      *    - 生成 anchor 文案追加到正词（人物形象以参考图为准）。
-     * ② 否则退回 brief 显式挂图 / 项目最新参考图（旧行为）。
+     * ② 其次 brief 级 `referenceAssets`（未出方案前在参考图面板标注，随 Brief 提交）；规则同 ①。
+     * ③ 否则退回 brief 显式挂图 / 项目最新参考图（旧行为，无 anchor）。
      */
     private RefCtx resolveRefs(JsonNode plan, JsonNode shot, UUID userId, UUID workspaceId,
                                UUID projectId, UUID revisionId) {
-        JsonNode arr = plan == null ? null : plan.get("referenceAssets");
-        if (arr != null && arr.isArray() && arr.size() > 0) {
-            String text = (shot == null)
-                    ? plan.path("positive_prompt").asText("") + " " + plan.path("prompt_zh").asText("")
-                    : shot.path("action").asText("") + " " + shot.path("zh").asText("")
-                      + " " + shot.path("positive_prompt").asText("");
-            List<JsonNode> picked = new ArrayList<>();
-            for (JsonNode b : arr) {
-                if (b == null || !b.isObject() || b.path("assetId").asText("").isBlank()) continue;
-                String subject = b.path("subject").asText("");
-                if (subject.isBlank() || text.contains(subject)) picked.add(b);
-            }
-            if (picked.isEmpty()) {
-                for (JsonNode b : arr) {
-                    if (b != null && b.isObject() && !b.path("assetId").asText("").isBlank()) picked.add(b);
-                }
-            }
-            List<UUID> ids = new ArrayList<>();
-            for (JsonNode b : picked) {
-                try { ids.add(UUID.fromString(b.path("assetId").asText())); } catch (IllegalArgumentException ignored) { }
-            }
-            List<studio.weaveora.asset.domain.Asset> found = assetRepo.findByIdInAndWorkspaceId(ids, workspaceId);
-            List<String> keys = found.stream().map(studio.weaveora.asset.domain.Asset::storageKey).toList();
-            List<String> okIds = found.stream().map(a -> a.id().toString()).toList();
-            StringBuilder subj = new StringBuilder();
-            for (JsonNode b : picked) {
-                String s = b.path("subject").asText("");
-                if (!s.isBlank() && subj.indexOf(s) < 0) {
-                    if (subj.length() > 0) subj.append(", ");
-                    subj.append(s);
-                }
-            }
-            String anchor = okIds.isEmpty() ? "" : (subj.length() > 0
-                    ? " The appearance of " + subj + " must strictly follow the provided reference image (identity, face and costume)."
-                    : " The subject appearance must strictly follow the provided reference image.");
-            return new RefCtx(okIds, keys, anchor);
-        }
+        String text = (shot == null)
+                ? plan.path("positive_prompt").asText("") + " " + plan.path("prompt_zh").asText("")
+                : shot.path("action").asText("") + " " + shot.path("zh").asText("")
+                  + " " + shot.path("positive_prompt").asText("");
+        RefCtx fromPlan = bindFrom(plan == null ? null : plan.get("referenceAssets"), text, workspaceId);
+        if (fromPlan != null) return fromPlan;
+        RefCtx fromBrief = bindFrom(briefReferenceAssets(userId, workspaceId, projectId, revisionId), text, workspaceId);
+        if (fromBrief != null) return fromBrief;
         RefCtx legacy = loadRefs(userId, workspaceId, projectId, revisionId);
         return new RefCtx(legacy.ids(), legacy.keys(), "");
+    }
+
+    /** brief.constraints.referenceAssets（新流程：未出方案前就标注的主体绑定）。取不到/无则 null。 */
+    private JsonNode briefReferenceAssets(UUID userId, UUID workspaceId, UUID projectId, UUID revisionId) {
+        try {
+            UUID briefId = planReader.revisionBriefId(revisionId);
+            BriefSnapshot brief = projects.requireBrief(userId, workspaceId, projectId, briefId);
+            JsonNode ra = brief.constraints() == null ? null : brief.constraints().get("referenceAssets");
+            return (ra != null && ra.isArray() && ra.size() > 0) ? ra : null;
+        } catch (RuntimeException e) {
+            return null;
+        }
+    }
+
+    /** 把 [{assetId, subject}] 按镜文本做主体过滤 → RefCtx；无有效绑定返回 null（交下一层）。 */
+    private RefCtx bindFrom(JsonNode arr, String text, UUID workspaceId) {
+        if (arr == null || !arr.isArray() || arr.size() == 0) return null;
+        String t = text == null ? "" : text;
+        List<JsonNode> picked = new ArrayList<>();
+        for (JsonNode b : arr) {
+            if (b == null || !b.isObject() || b.path("assetId").asText("").isBlank()) continue;
+            String subject = b.path("subject").asText("");
+            if (subject.isBlank() || t.contains(subject)) picked.add(b);
+        }
+        if (picked.isEmpty()) {
+            for (JsonNode b : arr) {
+                if (b != null && b.isObject() && !b.path("assetId").asText("").isBlank()) picked.add(b);
+            }
+        }
+        if (picked.isEmpty()) return null;
+        List<UUID> ids = new ArrayList<>();
+        for (JsonNode b : picked) {
+            try { ids.add(UUID.fromString(b.path("assetId").asText())); } catch (IllegalArgumentException ignored) { }
+        }
+        List<studio.weaveora.asset.domain.Asset> found = assetRepo.findByIdInAndWorkspaceId(ids, workspaceId);
+        List<String> keys = found.stream().map(studio.weaveora.asset.domain.Asset::storageKey).toList();
+        List<String> okIds = found.stream().map(a -> a.id().toString()).toList();
+        StringBuilder subj = new StringBuilder();
+        for (JsonNode b : picked) {
+            String s = b.path("subject").asText("");
+            if (!s.isBlank() && subj.indexOf(s) < 0) {
+                if (subj.length() > 0) subj.append(", ");
+                subj.append(s);
+            }
+        }
+        String anchor = okIds.isEmpty() ? "" : (subj.length() > 0
+                ? " The appearance of " + subj + " must strictly follow the provided reference image (identity, face and costume)."
+                : " The subject appearance must strictly follow the provided reference image.");
+        return new RefCtx(okIds, keys, anchor);
     }
 
     private RefCtx loadRefs(UUID userId, UUID workspaceId, UUID projectId, UUID revisionId) {

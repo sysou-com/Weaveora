@@ -215,6 +215,15 @@ const assets = useQuery({
   enabled: computed(() => workspaceId.value !== '' && projectId.value !== ''),
 })
 const refAssets = computed(() => (assets.data.value ?? []).filter((a) => a.kind === 'reference'))
+/** 参考图按上传时间倒序（最新在前，防旧图排在前面看不清新上传） */
+const refAssetsSorted = computed(() =>
+  [...refAssets.value].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()),
+)
+function shortTime(iso: string): string {
+  const d = new Date(iso)
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
+}
 const refSelected = ref<string[]>([])
 
 /** P4 参考主体标注：assetId → 主体名（如 唐僧）；随方案 referenceAssets 落库，生成时按镜文本自动绑定 */
@@ -453,9 +462,16 @@ const latestJobs = computed(() => {
   if (!filterLatest.value) return all
   const newest = new Map<string, JobRecord>()
   for (const j of all) {
-    newest.set(`shot:${j.payload?.shot_no ?? 'x'}:${j.kind}:${j.payload?.keyframe_index ?? ''}`, j)
+    const key = `shot:${j.payload?.shot_no ?? 'x'}:${j.kind}:${j.payload?.keyframe_index ?? ''}`
+    const cur = newest.get(key)
+    // 取 createdAt 最大者（与列表返回顺序无关，防“留下最旧一条”导致全是 v1 旧任务）
+    if (!cur || new Date(j.createdAt).getTime() > new Date(cur.createdAt).getTime()) {
+      newest.set(key, j)
+    }
   }
-  return [...newest.values()]
+  return [...newest.values()].sort(
+    (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
+  )
 })
 const visibleJobs = computed(() => latestJobs.value.slice(0, jobLimit.value))
 function showMoreJobs(): void {
@@ -713,10 +729,17 @@ async function doRender(): Promise<void> {
 async function handleFirstBrief(payload: { rawText: string; dirMode: 'image' | 'video' }): Promise<void> {
   creating.value = true
   try {
+    // P4：参考图选择/主体标注一并写入 brief.constraints（未出方案前也能绑定与告知导演）
+    const refAssets = refSelected.value.map((id) => {
+      const s = (refSubjects.value[id] ?? '').trim()
+      return s ? { assetId: id, subject: s } : { assetId: id }
+    })
     const b = await createBrief(workspaceId.value, projectId.value, {
       rawText: payload.rawText,
       mode: payload.dirMode,
-      ...(refSelected.value.length ? { referenceAssetIds: [...refSelected.value] } : {}),
+      ...(refSelected.value.length
+        ? { referenceAssetIds: [...refSelected.value], constraints: { referenceAssets: refAssets } }
+        : {}),
     })
     await doGenerate(b.id, payload.dirMode)
   } catch (e) {
@@ -1035,7 +1058,7 @@ const shotTotal = computed(() => {
             </div>
             <div v-if="refAssets.length" class="refs-grid">
               <div
-                v-for="a in refAssets.slice(0, 8)"
+                v-for="a in refAssetsSorted.slice(0, 8)"
                 :key="a.id"
                 :class="['ref-thumb', { sel: refSelected.includes(a.id) }]"
                 :title="refSelected.includes(a.id) ? '点击取消' : '点击用作参考'"
@@ -1044,6 +1067,7 @@ const shotTotal = computed(() => {
                 <img v-if="thumbUrls[a.id]" :src="thumbUrls[a.id]" alt="参考图" loading="lazy" />
                 <span v-else class="ref-empty">…</span>
                 <i v-if="refSelected.includes(a.id)" class="ref-badge font-mono">REF</i>
+                <span class="ref-time font-mono">{{ shortTime(a.createdAt) }}</span>
               </div>
             </div>
             <div v-if="refSelected.length" class="ref-subjects">
@@ -1760,6 +1784,15 @@ const shotTotal = computed(() => {
   color: var(--wv-accent-text);
   font-size: 8px;
   letter-spacing: .08em;
+  padding: 1px 4px;
+  border-radius: 4px;
+}
+.ref-time {
+  position: absolute;
+  right: 4px; bottom: 4px;
+  background: rgba(11,11,10,.72);
+  color: var(--wv-text-4);
+  font-size: 8px;
   padding: 1px 4px;
   border-radius: 4px;
 }
