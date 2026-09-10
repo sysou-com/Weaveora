@@ -28,6 +28,10 @@ SAMPLE_RATE = 44100
 
 _lock = threading.Lock()
 _pipe = None
+# 预热：启动即后台加载模型（WEAVEORA_MUSIC_WARM_GEN=1 时再跑一次 5s 生成预热卷积核，较慢）
+PRELOAD = os.environ.get("WEAVEORA_MUSIC_PRELOAD", "1").lower() not in ("0", "false", "no")
+WARM_GEN = os.environ.get("WEAVEORA_MUSIC_WARM_GEN", "0").lower() in ("1", "true", "yes")
+_state = {"loaded": False, "warm": False}
 
 
 def _load():
@@ -105,13 +109,29 @@ def generate(prompt, duration_sec, seed):
     return wav, ms
 
 
+def _warm():
+    try:
+        _load()
+        if WARM_GEN:
+            try:
+                generate("calm ambient pad, soft", 5, 42)
+                _state["warm"] = True
+            except Exception as e:
+                print("[music] warm gen failed: %s" % e, flush=True)
+        _state["loaded"] = True
+        print("[music] preload done (warm=%s)" % _state["warm"], flush=True)
+    except Exception as e:
+        print("[music] preload failed, will lazy-load on first request: %s" % e, flush=True)
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
 
     def do_GET(self):
         if self.path.startswith("/health"):
-            body = json.dumps({"ok": True, "engine": ENGINE, "loaded": _pipe is not None}).encode()
+            body = json.dumps({"ok": True, "engine": ENGINE, "loaded": _pipe is not None,
+                               "preload": PRELOAD, "warm": _state["warm"]}).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
@@ -145,5 +165,7 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 8092
-    print("[music] listening on :%d engine=%s" % (port, ENGINE), flush=True)
+    print("[music] listening on :%d engine=%s preload=%s" % (port, ENGINE, PRELOAD), flush=True)
+    if PRELOAD:
+        threading.Thread(target=_warm, daemon=True).start()
     ThreadingHTTPServer(("0.0.0.0", port), Handler).serve_forever()

@@ -13,9 +13,11 @@ const props = defineProps<{
   /** 整版已确认：锁编辑 */
   disabled?: boolean
   busyShot?: number | null
+  /** 配音试听中 */
+  previewBusy?: boolean
 }>()
 
-const emit = defineEmits<{ approveShot: [shotNo: number]; aiPrompt: [shot: DirectorShot]; aiSyncAll: [] }>()
+const emit = defineEmits<{ approveShot: [shotNo: number]; aiPrompt: [shot: DirectorShot]; aiSyncAll: []; previewVoice: [shotNo?: number] }>()
 
 const hasAction = computed(() =>
   (props.plan.shots ?? []).some((s) => (s.action ?? '').trim().length > 0))
@@ -55,6 +57,23 @@ const transitions = ['cut', 'dissolve', 'fade', 'wipe'].map((v) => ({ label: v, 
           <span class="key">BGM 情绪 music_mood</span>
           <NInput v-model:value="props.plan.audio.music_mood" size="small" :disabled="disabled" />
         </label>
+        <label class="row">
+          <span class="key">配音音色 voice（内置名或参考音频路径）</span>
+          <NInput v-model:value="props.plan.audio.voice" size="small" :disabled="disabled" placeholder="中文女" />
+        </label>
+        <div class="zh-head">
+          <NButton
+            size="small"
+            secondary
+            :loading="previewBusy"
+            :disabled="!!disabled"
+            data-testid="btn-preview-voice"
+            @click="emit('previewVoice', undefined)"
+          >
+            试听配音（第一个有旁白的镜头）
+          </NButton>
+          <span class="text-secondary" style="font-size: 12px">换音色：改上面的 voice 后再试听；首次合成需加载模型</span>
+        </div>
       </template>
     </section>
 
@@ -83,7 +102,9 @@ const transitions = ['cut', 'dissolve', 'fade', 'wipe'].map((v) => ({ label: v, 
           :status="statusOf(shot.shot_no)"
           :disabled="!!disabled || approvedAll"
           :busy="busyShot === shot.shot_no"
+          :preview-busy="previewBusy"
           @approve="emit('approveShot', $event)"
+          @preview-voice="emit('previewVoice', $event)"
         />
       </div>
     </section>

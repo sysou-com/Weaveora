@@ -74,3 +74,17 @@ bash audio_standby.sh
 3. 点「生成配乐」→ 出现 `bgm`；
 4. 「渲染成片」→ 成片有配音，说话段 BGM 自动压低；
 5. 「导出成片包」→ `edit_list.json` audio 轨有 voice/bgm 条目且 zip 内有对应音频文件。
+
+## 7. 预热（首次任务不再等加载）
+两个服务默认**启动即在后台加载模型**（`/health` 返回 `loaded/preload/warm`）：
+```
+WEAVEORA_TTS_PRELOAD=1        # 默认开；加载后还会跑一次小样推理预热（warm=true）
+WEAVEORA_MUSIC_PRELOAD=1      # 默认开；只加载模型
+WEAVEORA_MUSIC_WARM_GEN=0     # =1 时再跑一次 5s 生成预热卷积核（更慢但首次生成更快）
+```
+查看：`curl -s localhost:8091/health` → `{"ok":true,"loaded":true,"warm":true,...}`。
+
+## 8. 配音试听 / 换音色（Web）
+- 分镜卡（有旁白时）出现 **「试听配音」**；视频方案音频区有 **「配音音色 voice」** 输入 + **「试听配音（第一个有旁白的镜头）」**；
+- 换音色：改 `voice`（内置名如 `中文女`/`中文男`，或 GPU 机器上的参考音频路径做 zero-shot 克隆）→ 再点试听；
+- 试听会创建一个一次性的 `voice` 任务，完成后在页面顶部出现播放条（可关闭）。

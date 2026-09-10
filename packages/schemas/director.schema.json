@@ -119,6 +119,7 @@
       "type": "object",
       "properties": {
         "music_mood": { "type": "string" },
+        "voice": { "type": "string", "description": "配音音色：内置名（如 中文女/中文男）或参考音频路径（zero-shot 克隆）" },
         "sfx": { "type": "array", "items": { "type": "string" } },
         "vo": { "type": "string" }
       }

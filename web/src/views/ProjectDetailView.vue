@@ -836,6 +836,79 @@ async function startVoice(): Promise<void> {
   }
 }
 
+/** P7.1 配音试听：为某镜（默认第一个有旁白的镜）创建一个 voice 任务，完成后本地播放 */
+const previewBusy = ref(false)
+const voicePreview = ref<{ url: string; label: string } | null>(null)
+
+function closeVoicePreview(): void {
+  if (voicePreview.value) URL.revokeObjectURL(voicePreview.value.url)
+  voicePreview.value = null
+}
+
+async function waitJobDone(jobId: string, timeoutMs: number): Promise<JobRecord> {
+  const t0 = Date.now()
+  for (;;) {
+    const list = await listJobs(workspaceId.value, projectId.value)
+    const j = list.find((x) => x.id === jobId)
+    if (j && ['succeeded', 'failed', 'cancelled'].includes(j.state)) return j
+    if (Date.now() - t0 > timeoutMs) throw new Error('试听超时（首次加载模型可能较久，稍后重试）')
+    await new Promise((r) => setTimeout(r, 4000))
+  }
+}
+
+async function previewVoice(shotNo?: number): Promise<void> {
+  const revId = genRevisionId()
+  if (!revId) return
+  if (dirty.value && !(await handleSave())) return
+  const plan = draft.value
+  const shots = plan && isVideoPlan(plan) ? plan.shots : []
+  if (!shots.length) {
+    message.warning('当前不是视频方案，无法试听配音')
+    return
+  }
+  const target = shotNo != null
+    ? shots.find((x) => x.shot_no === shotNo)
+    : shots.find((x) => (x.narration ?? '').trim())
+  if (!target) {
+    message.warning('没有可试听的旁白：请先在分镜里填写旁白（narration）')
+    return
+  }
+  if (!(target.narration ?? '').trim()) {
+    message.warning(`第 ${target.shot_no} 镜没有旁白，无法试听`)
+    return
+  }
+  const rec = (detail.data.value?.shots ?? []).find((r) => r.shotNo === target.shot_no)
+  previewBusy.value = true
+  try {
+    const created = await createJobs(workspaceId.value, projectId.value, {
+      revisionId: revId,
+      kind: 'voice',
+      ...(rec ? { shotId: rec.id } : {}),
+    })
+    const jobId = created[0]?.id
+    if (!jobId) throw new Error('未创建试听任务')
+    message.info(`第 ${target.shot_no} 镜配音合成中…（首次会加载模型）`)
+    const job = await waitJobDone(jobId, 300000)
+    if (job.state !== 'succeeded') throw new Error(job.errorMessage || `试听任务${job.state}`)
+    await queryClient.invalidateQueries({ queryKey: ['assets'] })
+    await queryClient.invalidateQueries({ queryKey: ['jobs'] })
+    const asset = (assets.data.value ?? []).find((a) => a.jobId === jobId)
+    if (!asset) throw new Error('未找到试听音频')
+    const blob = await fetchAssetBlob(workspaceId.value, asset.id)
+    if (!blob) throw new Error('试听音频读取失败')
+    closeVoicePreview()
+    voicePreview.value = {
+      url: URL.createObjectURL(blob),
+      label: `第 ${target.shot_no} 镜 · 音色 ${(draft.value && isVideoPlan(draft.value) ? draft.value.audio.voice : '') || '中文女'}`,
+    }
+    message.success('试听就绪')
+  } catch (e) {
+    message.error(e instanceof Error ? e.message : '试听失败')
+  } finally {
+    previewBusy.value = false
+  }
+}
+
 /** P7：整片配乐（自托管音乐生成） */
 async function startBgm(): Promise<void> {
   const revId = genRevisionId()
@@ -1419,9 +1492,11 @@ const shotTotal = computed(() => {
                   :records="detail.data.value?.shots ?? []"
                   :disabled="!canEdit"
                   :busy-shot="shotBusy"
+                  :preview-busy="previewBusy"
                   @approve-shot="handleApproveShot"
                   @ai-prompt="openAiRewrite"
                   @ai-sync-all="aiSyncAll"
+                  @preview-voice="previewVoice"
                 />
               </template>
             </section>
@@ -1448,6 +1523,13 @@ const shotTotal = computed(() => {
             </NAlert>
           </template>
         </main>
+      </div>
+
+      <!-- P7.1 配音试听播放条 -->
+      <div v-if="voicePreview" class="voice-preview" data-testid="voice-preview">
+        <span class="font-mono vp-label">试听 · {{ voicePreview.label }}</span>
+        <audio :src="voicePreview.url" class="vp-audio" controls autoplay preload="auto" />
+        <button type="button" class="op" @click="closeVoicePreview">关闭</button>
       </div>
 
       <!-- 任务区（W3）：确认后发起生成，展示状态/进度 -->
@@ -2298,6 +2380,14 @@ const shotTotal = computed(() => {
 }
 .g-kind { font-size: 10px; color: var(--wv-text-4); }
 .g-audio { width: 100%; height: 34px; display: block; }
+.voice-preview {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 10px 12px; margin-bottom: 12px;
+  background: var(--wv-surface); border: 1px solid var(--wv-accent);
+  border-radius: var(--wv-radius-m);
+}
+.vp-label { font-size: 11px; color: var(--wv-accent-text); flex: none; }
+.vp-audio { flex: 1 1 240px; min-width: 200px; height: 34px; }
 .g-actions { display: inline-flex; align-items: center; gap: 8px; }
 .g-actions a { color: var(--wv-accent-text); text-decoration: none; font-size: 14px; line-height: 1; }
 .g-ref {

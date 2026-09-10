@@ -13,11 +13,13 @@ const props = withDefaults(
     /** 已整版确认或生成中：锁编辑 */
     disabled?: boolean
     busy?: boolean
+    /** 配音试听中（父级统一 busy） */
+    previewBusy?: boolean
   }>(),
-  { status: 'draft', disabled: false, busy: false },
+  { status: 'draft', disabled: false, busy: false, previewBusy: false },
 )
 
-const emit = defineEmits<{ approve: [shotNo: number] }>()
+const emit = defineEmits<{ approve: [shotNo: number]; previewVoice: [shotNo: number] }>()
 
 const approved = computed(() => props.status === 'approved')
 
@@ -48,6 +50,17 @@ const sizeOptions = [
         <span class="dur">{{ Number(shot.duration_sec).toFixed(2) }}s</span>
         <span v-if="shot.keyframes && shot.keyframes.length" class="dur kf-hint">运镜 {{ shot.keyframes.length }} 帧</span>
       </div>
+      <NButton
+        v-if="(shot.narration ?? '').trim()"
+        size="tiny"
+        quaternary
+        :loading="previewBusy"
+        :data-testid="`shot-preview-voice-${shot.shot_no}`"
+        title="用本镜旁白试听配音（自托管 CosyVoice）"
+        @click="emit('previewVoice', shot.shot_no)"
+      >
+        试听配音
+      </NButton>
       <NButton
         v-if="!disabled && !approved"
         size="tiny"

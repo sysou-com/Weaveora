@@ -29,6 +29,9 @@ DEFAULT_VOICE = os.environ.get("WEAVEORA_TTS_DEFAULT_VOICE", "中文女")
 
 _lock = threading.Lock()
 _model = None
+# 预热：服务启动即在后台加载模型并跑一次小样推理，避免首个任务等 1-3 分钟
+PRELOAD = os.environ.get("WEAVEORA_TTS_PRELOAD", "1").lower() not in ("0", "false", "no")
+_state = {"loaded": False, "warm": False}
 
 
 def _load():
@@ -102,13 +105,28 @@ def synthesize(text, voice, speed, target_sec):
     return wav, ms
 
 
+def _warm():
+    try:
+        _load()
+        try:
+            synthesize("你好，织影已就绪。", DEFAULT_VOICE, 1.0, 0)
+            _state["warm"] = True
+        except Exception as e:
+            print("[tts] warm synth failed: %s" % e, flush=True)
+        _state["loaded"] = True
+        print("[tts] preload done (warm=%s)" % _state["warm"], flush=True)
+    except Exception as e:
+        print("[tts] preload failed, will lazy-load on first request: %s" % e, flush=True)
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
 
     def do_GET(self):
         if self.path.startswith("/health"):
-            body = json.dumps({"ok": True, "loaded": _model is not None}).encode()
+            body = json.dumps({"ok": True, "loaded": _model is not None,
+                               "preload": PRELOAD, "warm": _state["warm"]}).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
@@ -143,5 +161,7 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 8091
-    print("[tts] listening on :%d (model=%s)" % (port, MODEL_DIR), flush=True)
+    print("[tts] listening on :%d (model=%s preload=%s)" % (port, MODEL_DIR, PRELOAD), flush=True)
+    if PRELOAD:
+        threading.Thread(target=_warm, daemon=True).start()
     ThreadingHTTPServer(("0.0.0.0", port), Handler).serve_forever()

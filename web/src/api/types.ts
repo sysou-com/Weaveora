@@ -139,7 +139,7 @@ export interface VideoPlan extends BasePlan {
   aspect_ratio: string
   script: { theme: string; acts: Array<Record<string, unknown>> }
   shots: DirectorShot[]
-  audio: { music_mood: string; sfx: string[]; vo: string }
+  audio: { music_mood: string; voice?: string; sfx: string[]; vo: string }
   edit_plan: { fps: number; transition_default: string; subtitle: boolean }
 }
 
