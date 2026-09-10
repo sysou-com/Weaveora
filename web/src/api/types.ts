@@ -199,6 +199,8 @@ export interface AssetRef {
   projectId: string
   jobId: string | null
   shotId: string | null
+  /** P6 冗余镜号（shot_drafts 重建后仍能对应到镜） */
+  shotNo?: number | null
   kind: string
   mime: string
   width: number | null

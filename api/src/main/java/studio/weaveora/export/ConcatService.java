@@ -102,7 +102,7 @@ public class ConcatService {
         String aspect = plan.path("aspect_ratio").asText("");
         int[] canvas = canvasFor(aspect);
         List<UUID> shotIds = planReader.shotIds(revisionId);
-        List<MediaClip> clips = orderedMedia(workspaceId, plan, shotIds);
+        List<MediaClip> clips = orderedMedia(workspaceId, projectId, plan, shotIds);
         if (clips.isEmpty()) {
             throw new BizException(ErrorCode.EXPORT_EMPTY, "没有可用素材（先生成关键帧/运动）");
         }
@@ -145,7 +145,7 @@ public class ConcatService {
             try (InputStream in = new ByteArrayInputStream(bytes)) {
                 storage.put(key, in, bytes.length, "video/mp4");
             }
-            return toAssetResponse(assets.createOutput(workspaceId, projectId, null, null, "master",
+            return toAssetResponse(assets.createOutput(workspaceId, projectId, null, null, null, "master",
                     key, "video/mp4", null, null, null, null));
         } catch (IOException | InterruptedException e) {
             Thread.currentThread().interrupt();
@@ -353,14 +353,15 @@ public class ConcatService {
         return "ffprobe";
     }
 
-    private List<MediaClip> orderedMedia(UUID workspaceId, JsonNode plan, List<UUID> shotIds) {
+    private List<MediaClip> orderedMedia(UUID workspaceId, UUID projectId, JsonNode plan, List<UUID> shotIds) {
         List<MediaClip> out = new ArrayList<>();
         int order = 0;
         for (JsonNode shot : plan.path("shots")) {
             order++;
             double dur = shot.path("duration_sec").asDouble(3);
+            int shotNo = shot.path("shot_no").asInt(order);
             UUID shotId = order <= shotIds.size() ? shotIds.get(order - 1) : null;
-            Asset m = pickClipOrStill(workspaceId, shotId);
+            Asset m = pickClipOrStill(workspaceId, projectId, shotId, shotNo);
             if (m == null) continue;
             String nar = shot.path("narration").asText("");
             out.add(new MediaClip(m.storageKey(), isVideo(m), dur, nar.isBlank() ? null : nar));
@@ -368,11 +369,19 @@ public class ConcatService {
         return out;
     }
 
-    private Asset pickClipOrStill(UUID workspaceId, UUID shotId) {
-        if (shotId == null) return null;
-        List<Asset> clips = assetRepo.findByShotIdAndWorkspaceIdAndKindOrderByCreatedAtDesc(shotId, workspaceId, "clip");
+    private Asset pickClipOrStill(UUID workspaceId, UUID projectId, UUID shotId, int shotNo) {
+        // P6：优先 (project, shot_no)；退 shot_id
+        List<Asset> clips = assetRepo.findByProjectIdAndWorkspaceIdAndShotNoAndKindOrderByCreatedAtDesc(
+                projectId, workspaceId, shotNo, "clip");
+        if (clips.isEmpty() && shotId != null) {
+            clips = assetRepo.findByShotIdAndWorkspaceIdAndKindOrderByCreatedAtDesc(shotId, workspaceId, "clip");
+        }
         if (!clips.isEmpty()) return clips.get(0);
-        List<Asset> stills = assetRepo.findByShotIdAndWorkspaceIdAndKindOrderByCreatedAtDesc(shotId, workspaceId, "still");
+        List<Asset> stills = assetRepo.findByProjectIdAndWorkspaceIdAndShotNoAndKindOrderByCreatedAtDesc(
+                projectId, workspaceId, shotNo, "still");
+        if (stills.isEmpty() && shotId != null) {
+            stills = assetRepo.findByShotIdAndWorkspaceIdAndKindOrderByCreatedAtDesc(shotId, workspaceId, "still");
+        }
         return stills.isEmpty() ? null : stills.get(0);
     }
 
@@ -410,7 +419,7 @@ public class ConcatService {
     }
 
     private AssetResponse toAssetResponse(Asset a) {
-        return new AssetResponse(a.id(), a.projectId(), a.jobId(), a.shotId(), a.kind(), a.mime(),
+        return new AssetResponse(a.id(), a.projectId(), a.jobId(), a.shotId(), a.shotNo(), a.kind(), a.mime(),
                 a.width(), a.height(), a.createdAt());
     }
 

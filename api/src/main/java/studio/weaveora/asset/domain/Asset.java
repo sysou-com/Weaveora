@@ -34,6 +34,10 @@ public class Asset {
     @Column(name = "shot_id")
     private UUID shotId;
 
+    /** P6 冗余镜号：shot_drafts 重建后仍可按 (project, shot_no, kind) 找到素材 */
+    @Column(name = "shot_no")
+    private Integer shotNo;
+
     @Column(nullable = false)
     private String kind;              // reference | still | clip
 
@@ -85,14 +89,15 @@ public class Asset {
         return a;
     }
 
-    public static Asset output(UUID workspaceId, UUID projectId, UUID jobId, UUID shotId, String kind,
-                               String storageKey, String mime, Integer width, Integer height,
+    public static Asset output(UUID workspaceId, UUID projectId, UUID jobId, UUID shotId, Integer shotNo,
+                               String kind, String storageKey, String mime, Integer width, Integer height,
                                Long seed, Integer durationMs) {
         Asset a = new Asset();
         a.workspaceId = workspaceId;
         a.projectId = projectId;
         a.jobId = jobId;
         a.shotId = shotId;
+        a.shotNo = shotNo;
         a.kind = kind;
         a.storageKey = storageKey;
         a.mime = mime;
@@ -108,6 +113,7 @@ public class Asset {
     public UUID projectId() { return projectId; }
     public UUID jobId() { return jobId; }
     public UUID shotId() { return shotId; }
+    public Integer shotNo() { return shotNo; }
     public String kind() { return kind; }
     public String storageKey() { return storageKey; }
     public String thumbKey() { return thumbKey; }

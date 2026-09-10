@@ -8,6 +8,7 @@ public record AssetResponse(
         UUID projectId,
         UUID jobId,
         UUID shotId,
+        Integer shotNo,
         String kind,
         String mime,
         Integer width,

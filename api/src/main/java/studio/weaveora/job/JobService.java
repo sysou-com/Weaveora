@@ -260,11 +260,18 @@ public class JobService {
                     // W5 两段式闸门：motion 需要该镜的关键帧（still 产物）作首帧。
                     // P5.1：shot_drafts 每次 patch/确认都会重建（新 id），旧关键帧仍挂在旧 shot 行上
                     // → 当前镜无 still 时，按“同项目同镜号”回溯历史版本的关键帧（取最新）。
+                    int shotNoVal = shot.path("shot_no").asInt();
+                    // P6：优先按 (project, shot_no) 取（跨版本稳定）；再退当前 shot_id；最后跨版本 shot 行扫描
                     List<studio.weaveora.asset.domain.Asset> kfAssets = new ArrayList<>(
-                            assetRepo.findByShotIdAndWorkspaceIdAndKindOrderByCreatedAtDesc(shotId, workspaceId, "still"));
+                            assetRepo.findByProjectIdAndWorkspaceIdAndShotNoAndKindOrderByCreatedAtDesc(
+                                    projectId, workspaceId, shotNoVal, "still"));
                     boolean historical = false;
                     if (kfAssets.isEmpty()) {
-                        int no = shot.path("shot_no").asInt();
+                        kfAssets.addAll(assetRepo.findByShotIdAndWorkspaceIdAndKindOrderByCreatedAtDesc(
+                                shotId, workspaceId, "still"));
+                    }
+                    if (kfAssets.isEmpty()) {
+                        int no = shotNoVal;
                         for (UUID sid : planReader.shotIdsByProjectAndShotNo(projectId, workspaceId, no)) {
                             if (sid.equals(shotId)) continue;
                             kfAssets.addAll(assetRepo.findByShotIdAndWorkspaceIdAndKindOrderByCreatedAtDesc(
@@ -282,6 +289,7 @@ public class JobService {
                                 + " 镜尚无关键帧，请先生成 still（两段式 §11.3）");
                     }
                     studio.weaveora.asset.domain.Asset first = pickKeyframeAsset(kfAssets, 0);
+                    historical = historical || (first.shotId() != null && !first.shotId().equals(shotId));
                     payload.put("keyframeKey", first.storageKey());
                     if (historical) {
                         payload.put("keyframeHistorical", true);
@@ -666,9 +674,10 @@ public class JobService {
         jobs.save(job);
         metrics.jobSucceeded();
         String kind = "clip".equals(job.kind()) ? "clip" : "still";
+        Integer jobShotNo = job.shotId() == null ? null : planReader.shotNoOf(job.shotId());
         for (CompleteAsset a : items) {
             AssetResponse resp = toAssetResponse(assets.createOutput(
-                    job.workspaceId(), job.projectId(), job.id(), job.shotId(), kind,
+                    job.workspaceId(), job.projectId(), job.id(), job.shotId(), jobShotNo, kind,
                     a.key(), a.mime(), a.width(), a.height(), a.seed(), a.durationMs()));
             created.add(resp);
         }
@@ -1063,7 +1072,7 @@ public class JobService {
     }
 
     private AssetResponse toAssetResponse(studio.weaveora.asset.domain.Asset a) {
-        return new AssetResponse(a.id(), a.projectId(), a.jobId(), a.shotId(), a.kind(), a.mime(),
+        return new AssetResponse(a.id(), a.projectId(), a.jobId(), a.shotId(), a.shotNo(), a.kind(), a.mime(),
                 a.width(), a.height(), a.createdAt());
     }
 

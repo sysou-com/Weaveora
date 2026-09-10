@@ -112,10 +112,10 @@ public class AssetService {
 
     /** Job 产物（W3 complete）：job 模块调用，落同一 assets 表。 */
     @Transactional
-    public Asset createOutput(UUID workspaceId, UUID projectId, UUID jobId, UUID shotId, String kind,
-                              String storageKey, String mime, Integer width, Integer height, Long seed,
-                              Integer durationMs) {
-        return assets.save(Asset.output(workspaceId, projectId, jobId, shotId, kind,
+    public Asset createOutput(UUID workspaceId, UUID projectId, UUID jobId, UUID shotId, Integer shotNo,
+                              String kind, String storageKey, String mime, Integer width, Integer height,
+                              Long seed, Integer durationMs) {
+        return assets.save(Asset.output(workspaceId, projectId, jobId, shotId, shotNo, kind,
                 storageKey, mime, width, height, seed, durationMs));
     }
 
@@ -123,7 +123,7 @@ public class AssetService {
     }
 
     private AssetResponse toResponse(Asset a) {
-        return new AssetResponse(a.id(), a.projectId(), a.jobId(), a.shotId(), a.kind(), a.mime(),
+        return new AssetResponse(a.id(), a.projectId(), a.jobId(), a.shotId(), a.shotNo(), a.kind(), a.mime(),
                 a.width(), a.height(), a.createdAt());
     }
 

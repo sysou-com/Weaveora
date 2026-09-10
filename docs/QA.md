@@ -76,3 +76,10 @@ python worker/qa_acceptance.py --base https://sysou.com/weaveora --engine cloud
 - 根因：`shot_drafts` 每次 patch/确认都会 delete+recreate（**shot 行 id 变化**），而 still 资产永久挂在生成时的 shot id 上 → 当前确认版的同镜号新 id 查不到旧关键帧（实例：女儿国 v13 的第2/3镜仍无 still，v1 的第2/3镜关键帧资产还在）。
 - 修复：JobService clip 分支在“当前 shot 无 still”时，按**同项目 + 同镜号**回溯所有历史 revision 的 shot 行，取最新 still 作首帧；payload 标 `keyframeHistorical=true` / `keyframeHistoricalRevisionNo=vN`，任务行悬停可看到“沿用历史版本第N镜关键帧（vX）”。
 - 验证：女儿国（确认版 v13）点 motion → 不再报错，新 clip 任务 payload 的 keyframeKey 指向该镜历史关键帧，且带 keyframeHistorical 标记。
+
+## P6 assets.shot_no 冗余列（治 shot 行 id 漂移的根因，2026-09-10）
+- 根因：`shot_drafts` 每次 patch/approve delete+recreate（shot 行 id 变化）→ 资产按 shot_id 查不到（motion 误报无关键帧、导出/时间线丢素材）。
+- 迁移 `V9__asset_shot_no.sql`：assets 增 `shot_no` + 索引 `(project_id, shot_no, kind)` + 从 shot_drafts 回填（已执行，女儿国 still 回填为 1/2/3）。
+- 写入：`AssetService.createOutput` 增 `shotNo` 参数，`JobService.complete` 落库时写（来自 job.shotId → shotNo）。
+- 读取（优先 shot_no，退 shot_id）：motion 关键帧、ExportService 成片包、ConcatService 渲染、前端资产库「第N镜」与时间线「素材已就绪」。
+- 效果：换版/重确认后，同镜号素材自动被找到；不再依赖“历史版本回溯”（该兜底保留为最后一级）。

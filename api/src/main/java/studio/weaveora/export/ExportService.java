@@ -136,7 +136,7 @@ public class ExportService {
                 int shotNo = shot.path("shot_no").asInt(order);
                 double dur = shot.path("duration_sec").asDouble(3);
                 UUID shotId = order <= shotIds.size() ? shotIds.get(order - 1) : null;
-                Asset media = pick(workspaceId, shotId);
+                Asset media = pick(workspaceId, project.id(), shotId, shotNo);
                 prompts.append("## Shot ").append(shotNo).append(" (").append(round2(dur))
                         .append("s)\n")
                         .append("- camera: ").append(shot.path("camera_move").asText("")).append("\n")
@@ -183,11 +183,19 @@ public class ExportService {
         return new PackageData(list, zipBytes.toByteArray());
     }
 
-    private Asset pick(UUID workspaceId, UUID shotId) {
-        if (shotId == null) return null;
-        List<Asset> clips = assets.findByShotIdAndWorkspaceIdAndKindOrderByCreatedAtDesc(shotId, workspaceId, "clip");
+    private Asset pick(UUID workspaceId, UUID projectId, UUID shotId, int shotNo) {
+        // P6：优先 (project, shot_no)；退 shot_id（兼容未回填/手工数据）
+        List<Asset> clips = assets.findByProjectIdAndWorkspaceIdAndShotNoAndKindOrderByCreatedAtDesc(
+                projectId, workspaceId, shotNo, "clip");
+        if (clips.isEmpty() && shotId != null) {
+            clips = assets.findByShotIdAndWorkspaceIdAndKindOrderByCreatedAtDesc(shotId, workspaceId, "clip");
+        }
         if (!clips.isEmpty()) return clips.get(0);
-        List<Asset> stills = assets.findByShotIdAndWorkspaceIdAndKindOrderByCreatedAtDesc(shotId, workspaceId, "still");
+        List<Asset> stills = assets.findByProjectIdAndWorkspaceIdAndShotNoAndKindOrderByCreatedAtDesc(
+                projectId, workspaceId, shotNo, "still");
+        if (stills.isEmpty() && shotId != null) {
+            stills = assets.findByShotIdAndWorkspaceIdAndKindOrderByCreatedAtDesc(shotId, workspaceId, "still");
+        }
         return stills.isEmpty() ? null : stills.get(0);
     }
 

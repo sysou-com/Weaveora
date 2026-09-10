@@ -18,6 +18,10 @@ public interface AssetRepository extends JpaRepository<Asset, UUID> {
 
     List<Asset> findByShotIdAndWorkspaceIdAndKindOrderByCreatedAtDesc(UUID shotId, UUID workspaceId, String kind);
 
+    /** P6：按项目 + 镜号（跨版本稳定）取产物 */
+    List<Asset> findByProjectIdAndWorkspaceIdAndShotNoAndKindOrderByCreatedAtDesc(
+            UUID projectId, UUID workspaceId, Integer shotNo, String kind);
+
     /** 项目最新参考图（用户上传即作为参考，无需再手动关联 brief） */
     List<Asset> findByProjectIdAndWorkspaceIdAndKindOrderByCreatedAtDesc(UUID projectId, UUID workspaceId, String kind);
 

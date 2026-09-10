@@ -413,6 +413,7 @@ const shotNoById = computed<Record<string, number>>(() => {
   return m
 })
 function galShotNo(a: AssetRef): number | null {
+  if (a.shotNo != null) return a.shotNo
   if (a.shotId && shotNoById.value[a.shotId]) return shotNoById.value[a.shotId]
   const j = (jobs.data.value ?? []).find((x) => x.id === a.jobId)
   return j?.payload?.shot_no ?? null
@@ -851,7 +852,7 @@ const exportRows = computed(() => {
   const planShots = (draft.value && isVideoPlan(draft.value)) ? draft.value.shots : []
   return recs.map((rec, i) => {
     const dur = Number(planShots[i]?.duration_sec ?? 3)
-    const row = { rec, start: cursor, dur, hasMedia: as.some((a) => a.shotId === rec.id) }
+    const row = { rec, start: cursor, dur, hasMedia: as.some((a) => a.shotId === rec.id || (a.shotNo != null && a.shotNo === rec.shotNo)) }
     cursor += dur
     return row
   })
