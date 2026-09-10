@@ -214,7 +214,7 @@ export interface JobRecord {
   projectId: string
   revisionId: string | null
   shotId: string | null
-  kind: 'still' | 'clip'
+  kind: 'still' | 'clip' | 'voice' | 'bgm'
   state: string
   progress: number
   stage: string | null

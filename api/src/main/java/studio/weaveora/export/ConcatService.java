@@ -140,6 +140,11 @@ public class ConcatService {
                         list.toString(), "-c", "copy",
                         "-metadata", "title=" + plan.path("title").asText(""), master.toString());
             }
+            // P7：配音 + 配乐混音（静音轨 → voice(逐镜) + bgm(ducking)）
+            Path mixed = work.resolve("master_mix.mp4");
+            if (mixAudio(workspaceId, projectId, master, mixed, clips, work)) {
+                master = mixed;
+            }
             byte[] bytes = Files.readAllBytes(master);
             String key = workspaceId + "/" + projectId + "/master/" + UUID.randomUUID() + ".mp4";
             try (InputStream in = new ByteArrayInputStream(bytes)) {
@@ -162,6 +167,88 @@ public class ConcatService {
                 } catch (IOException ignored) {
                 }
             }
+        }
+    }
+
+    /**
+     * P7 混音：master 静音轨替换为 逐镜 voice（按镜起点 adelay）+ bgm（低音量，voice 侧链 ducking）。
+     * 无 voice/bgm 时返回 false（保持原静音轨）。sidechaincompress 不可用时退化为固定低音量 bgm。
+     */
+    private boolean mixAudio(UUID workspaceId, UUID projectId, Path in, Path out,
+                             List<MediaClip> clips, Path work) throws IOException, InterruptedException {
+        List<Asset> bgms = assetRepo.findByProjectIdAndWorkspaceIdAndKindOrderByCreatedAtDesc(
+                projectId, workspaceId, "bgm");
+        String bgmKey = bgms.isEmpty() ? null : bgms.get(0).storageKey();
+        boolean hasVoice = false;
+        for (MediaClip c : clips) if (c.voiceKey() != null) hasVoice = true;
+        if (bgmKey == null && !hasVoice) return false;
+
+        List<String> inputs = new ArrayList<>(List.of("-y", "-i", in.toString()));
+        List<String> parts = new ArrayList<>();
+        List<String> voiceLabels = new ArrayList<>();
+        int idx = 1;
+        double cursor = 0;
+        for (MediaClip c : clips) {
+            if (c.voiceKey() != null) {
+                Path vp = work.resolve("voice_" + idx + ".bin");
+                writeAsset(c.voiceKey(), vp);
+                inputs.addAll(List.of("-i", vp.toString()));
+                int ms = (int) Math.round(cursor * 1000);
+                parts.add("[" + idx + ":a]aresample=44100,aformat=sample_fmts=fltp:channel_layouts=stereo,"
+                        + "adelay=" + ms + "|" + ms + ",volume=1.0,apad[v" + idx + "]");
+                voiceLabels.add("[v" + idx + "]");
+                idx++;
+            }
+            cursor += c.durationSec();
+        }
+        int bgmIdx = -1;
+        if (bgmKey != null) {
+            Path bp = work.resolve("bgm.bin");
+            writeAsset(bgmKey, bp);
+            inputs.addAll(List.of("-i", bp.toString()));
+            bgmIdx = idx;
+            parts.add("[" + bgmIdx + ":a]aresample=44100,aformat=sample_fmts=fltp:channel_layouts=stereo,"
+                    + "volume=0.30,apad[bgmraw]");
+        }
+        if (!voiceLabels.isEmpty()) {
+            parts.add(String.join("", voiceLabels) + "amix=inputs=" + voiceLabels.size()
+                    + ":duration=longest:normalize=0[voice]");
+        }
+        String total = String.format("%.3f", cursor > 0 ? cursor : 30.0);
+        boolean duck = !voiceLabels.isEmpty() && bgmIdx > 0;
+
+        List<String> duckParts = new ArrayList<>(parts);
+        if (duck) {
+            duckParts.add("[voice]asplit=2[vmix][vsc]");
+            duckParts.add("[bgmraw][vsc]sidechaincompress=threshold=0.05:ratio=6:attack=20:release=400[bgmduck]");
+            duckParts.add("[vmix][bgmduck]amix=inputs=2:duration=longest:normalize=0[aout]");
+        } else if (!voiceLabels.isEmpty()) {
+            duckParts.add("[voice]acopy[aout]");
+        } else {
+            duckParts.add("[bgmraw]acopy[aout]");
+        }
+        if (runMix(inputs, duckParts, total, out)) return true;
+        if (!duck) return false;
+        log.warn("sidechaincompress 混音失败，退化为固定低音量 BGM");
+        List<String> simple = new ArrayList<>(parts);
+        simple.add("[bgmraw]volume=0.6[bgmduck]");
+        simple.add("[voice][bgmduck]amix=inputs=2:duration=longest:normalize=0[aout]");
+        return runMix(inputs, simple, total, out);
+    }
+
+    /** 执行一次混音（video copy + 新音轨）；失败返回 false（由调用方决定是否退化重试）。 */
+    private boolean runMix(List<String> inputs, List<String> parts, String total, Path out)
+            throws IOException, InterruptedException {
+        List<String> args = new ArrayList<>(inputs);
+        args.addAll(List.of("-filter_complex", String.join(";", parts),
+                "-map", "0:v:0", "-map", "[aout]", "-c:v", "copy", "-c:a", "aac", "-b:a", "160k",
+                "-t", total, "-movflags", "+faststart", out.toString()));
+        try {
+            run("ffmpeg-mix", args.toArray(new String[0]));
+            return true;
+        } catch (IllegalStateException e) {
+            log.warn("mix 失败: {}", e.getMessage());
+            return false;
         }
     }
 
@@ -364,7 +451,10 @@ public class ConcatService {
             Asset m = pickClipOrStill(workspaceId, projectId, shotId, shotNo);
             if (m == null) continue;
             String nar = shot.path("narration").asText("");
-            out.add(new MediaClip(m.storageKey(), isVideo(m), dur, nar.isBlank() ? null : nar));
+            List<Asset> vs = assetRepo.findByProjectIdAndWorkspaceIdAndShotNoAndKindOrderByCreatedAtDesc(
+                    projectId, workspaceId, shotNo, "voice");
+            out.add(new MediaClip(m.storageKey(), isVideo(m), dur, nar.isBlank() ? null : nar,
+                    vs.isEmpty() ? null : vs.get(0).storageKey()));
         }
         return out;
     }
@@ -423,6 +513,7 @@ public class ConcatService {
                 a.width(), a.height(), a.createdAt());
     }
 
-    private record MediaClip(String assetKey, boolean video, double durationSec, String narration) {
+    private record MediaClip(String assetKey, boolean video, double durationSec, String narration,
+                             String voiceKey) {
     }
 }

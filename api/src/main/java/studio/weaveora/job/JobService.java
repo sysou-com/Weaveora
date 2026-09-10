@@ -180,8 +180,8 @@ public class JobService {
     public List<JobView> create(UUID userId, UUID workspaceId, UUID projectId, CreateJobRequest req) {
         guard.requireMember(userId, workspaceId);
         ProjectSnapshot project = projects.require(userId, workspaceId, projectId);
-        if (req.kind() == null || !List.of("still", "clip").contains(req.kind())) {
-            throw new BizException(ErrorCode.VALIDATION, "kind 必须为 still|clip");
+        if (req.kind() == null || !List.of("still", "clip", "voice", "bgm").contains(req.kind())) {
+            throw new BizException(ErrorCode.VALIDATION, "kind 必须为 still|clip|voice|bgm");
         }
         if (project.approvedRevisionId() == null || !project.approvedRevisionId().equals(req.revisionId())) {
             throw new BizException(ErrorCode.REVISION_NOT_APPROVED, "请先确认该方案（未确认不可生成）");
@@ -197,8 +197,15 @@ public class JobService {
             style = styleRepo.findById(project.styleTemplateId()).orElse(null);
         }
         // W4 一致性锚定：逐镜解析（方案内标注主体的参考图优先，见 resolveRefs）
-        // 引擎路由（用户设置）：本批次按 kind 决定 gpu|cloud
-        String engineRoute = engineSettings.resolveEngine(userId, req.kind());
+        // 引擎路由（用户设置）：本批次按 kind 决定 gpu|cloud；配音/配乐为自托管服务，固定走 gpu 节点
+        boolean audioKind = "voice".equals(req.kind()) || "bgm".equals(req.kind());
+        String engineRoute = audioKind ? "gpu" : engineSettings.resolveEngine(userId, req.kind());
+
+        if (audioKind) {
+            List<GenerationJob> audio = createAudioJobs(workspaceId, projectId, req, plan, revisionNo, userId);
+            log.info("jobs created project={} count={} kind={}", projectId, audio.size(), req.kind());
+            return audio.stream().map(this::toView).toList();
+        }
 
         List<GenerationJob> created = new ArrayList<>();
         if ("video".equals(planMode)) {
@@ -348,6 +355,72 @@ public class JobService {
         }
         log.info("jobs created project={} count={} kind={}", projectId, created.size(), req.kind());
         return created.stream().map(this::toView).toList();
+    }
+
+    /**
+     * P7 自托管音频任务：
+     *  - voice（配音）：逐镜 narration → 一个 shot 一个任务（text/targetSec/voice/speed）
+     *  - bgm（配乐）：整片一个任务（prompt 来自 plan.audio.music_mood + duration_sec）
+     * 固定 engineRoute=gpu（自托管音频服务跑在 GPU 机器，云端节点不会认领）。
+     */
+    private List<GenerationJob> createAudioJobs(UUID workspaceId, UUID projectId, CreateJobRequest req,
+                                                JsonNode plan, int revisionNo, UUID userId) {
+        List<GenerationJob> out = new ArrayList<>();
+        if ("bgm".equals(req.kind())) {
+            ObjectNode payload = mapper().createObjectNode();
+            payload.put("kind", "bgm");
+            payload.put("mode", plan.path("mode").asText("video"));
+            payload.put("revisionId", req.revisionId().toString());
+            payload.put("revision_no", revisionNo);
+            String mood = plan.path("audio").path("music_mood").asText("").trim();
+            String prompt = mood.isBlank() ? "cinematic instrumental score, emotional, no vocals"
+                    : ("cinematic instrumental score, mood: " + mood + ", no vocals");
+            payload.put("prompt", prompt);
+            double dur = plan.path("duration_sec").asDouble(0);
+            if (dur <= 0) dur = 30;
+            payload.put("duration_sec", Math.min(Math.max(dur, 5), 180));
+            payload.put("seed", randomSeed());
+            stampRevisionMeta(payload, revisionNo, prompt);
+            out.add(createOne(workspaceId, projectId, req.revisionId(), null, PRESET_STILL, "bgm",
+                    payload, userId, "gpu"));
+            return out;
+        }
+        // voice：逐镜旁白
+        List<UUID> shotIds = resolveVideoShots(userId, workspaceId, projectId, req.revisionId(), req.shotId(), "still");
+        if (shotIds.isEmpty()) {
+            throw new BizException(ErrorCode.SHOT_NOT_APPROVED, "没有已确认的镜头可用于配音");
+        }
+        for (UUID shotId : shotIds) {
+            JsonNode shot = shotOf(plan, shotId);
+            if (shot == null) continue;
+            String text = shot.path("narration").asText("").trim();
+            if (text.isBlank()) continue;   // 没有旁白的镜头跳过
+            ObjectNode payload = mapper().createObjectNode();
+            payload.put("kind", "voice");
+            payload.put("mode", "video");
+            payload.put("revisionId", req.revisionId().toString());
+            payload.put("revision_no", revisionNo);
+            payload.put("shotId", shotId.toString());
+            payload.put("shot_no", shot.path("shot_no").asInt());
+            payload.put("text", text);
+            payload.put("voice", paramsVoice(plan));
+            payload.put("speed", 1.0);
+            payload.put("target_sec", shot.path("duration_sec").asDouble(3));
+            payload.put("seed", randomSeed());
+            stampRevisionMeta(payload, revisionNo, text);
+            out.add(createOne(workspaceId, projectId, req.revisionId(), shotId, PRESET_STILL, "voice",
+                    payload, userId, "gpu"));
+        }
+        if (out.isEmpty()) {
+            throw new BizException(ErrorCode.VALIDATION, "没有可配音的旁白：请先在分镜里填写旁白（narration）");
+        }
+        return out;
+    }
+
+    /** 配音音色：方案 audio.voice 优先，缺省中文女声（服务端可用音色见 deploy/audio/README）。 */
+    private static String paramsVoice(JsonNode plan) {
+        String v = plan.path("audio").path("voice").asText("");
+        return v.isBlank() ? "中文女" : v;
     }
 
     @Transactional(readOnly = true)

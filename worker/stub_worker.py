@@ -135,7 +135,10 @@ def _complete(jid, payload, media):
         return False
     data, mime, w, h, dur = media[0]
     ext = {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp",
-           "video/mp4": "mp4", "video/webm": "webm"}.get(mime, "bin")
+           "video/mp4": "mp4", "video/webm": "webm",
+           "audio/wav": "wav", "audio/x-wav": "wav", "audio/wave": "wav",
+           "audio/mpeg": "mp3", "audio/mp3": "mp3",
+           "audio/mp4": "m4a", "audio/aac": "m4a", "audio/ogg": "ogg"}.get(mime, "bin")
     seed = int(payload.get("seed") or random.randint(1, 2 ** 31))
     st, up = _req("POST", "/internal/jobs/%s/assets" % jid, files={
         "file": ("out_%s.%s" % (jid[:8], ext), data, mime)})
@@ -162,6 +165,22 @@ def execute_job(job):
     width = int(params.get("width") or 1024)
     height = int(params.get("height") or 1024)
     _req("POST", "/internal/jobs/%s/progress" % jid, {"progress": 15, "stage": "loading_model"})
+
+    # P7 自托管音频：配音(CosyVoice) / 配乐(音乐生成) —— 与 MODE 无关，走本机音频服务
+    if kind in ("voice", "bgm"):
+        import audio_client as audio
+        try:
+            if kind == "voice":
+                data, mime, dur_ms = audio.tts(payload)
+            else:
+                data, mime, dur_ms = audio.music(payload)
+            return _complete(jid, payload, [(data, mime, None, None, dur_ms)])
+        except Exception as e:
+            import traceback as _tb
+            _tb.print_exc()
+            _req("POST", "/internal/jobs/%s/fail" % jid,
+                 {"code": "AUDIO_ERROR", "message": str(e)[:500]})
+            return False
 
     if MODE == "cloud":
         import cloud_client as cloud
@@ -251,7 +270,8 @@ def register():
     engine = "cloud" if MODE == "cloud" else "gpu"
     caps = {"engine": engine, "gpu": MODE, "workflows": ["stub_txt2img", "stub_motion"]}
     if MODE == "comfy":
-        caps = {"engine": "gpu", "gpu": "comfy", "workflows": ["sdxl_txt2img", "wan_i2v", "ipadapter"]}
+        caps = {"engine": "gpu", "gpu": "comfy", "audio": True,
+                "workflows": ["sdxl_txt2img", "wan_i2v", "ipadapter", "cosyvoice_tts", "ace_step_music"]}
     st, body = _req("POST", "/internal/nodes/register", {
         "name": NAME,
         "workspaceId": WORKSPACE or None,

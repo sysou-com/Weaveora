@@ -9,7 +9,7 @@ export async function createJobs(
   input: {
     revisionId: string
     shotId?: string | null
-    kind: 'still' | 'clip'
+    kind: 'still' | 'clip' | 'voice' | 'bgm'
     count?: number
     frames?: number | null
   },

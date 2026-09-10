@@ -455,7 +455,7 @@ async function refreshThumbs(): Promise<void> {
 watch(() => [...refLibrary.value.map((a) => a.id)].join(','), () => { void refreshThumbs() }, { immediate: true })
 
 // ---------- W4 资产库 ----------
-const outputAssets = computed(() => (assets.data.value ?? []).filter((a) => ['still','clip','master'].includes(a.kind)))
+const outputAssets = computed(() => (assets.data.value ?? []).filter((a) => ['still','clip','master','voice','bgm'].includes(a.kind)))
 const galUrls = ref<Record<string, string>>({})
 async function refreshGallery(): Promise<void> {
   await Promise.all(outputAssets.value.map(async (a) => {
@@ -817,6 +817,42 @@ function confirmMotion(): void {
   motionOpen.value = false
   void startMotion(f)
 }
+const KIND_LABEL: Record<string, string> = { still: '关键帧', clip: '运动', voice: '配音', bgm: '配乐' }
+
+/** P7：逐镜配音（自托管 CosyVoice） */
+async function startVoice(): Promise<void> {
+  const revId = genRevisionId()
+  if (!revId) return
+  if (dirty.value && !(await handleSave())) return
+  genBusy.value = true
+  try {
+    const created = await createJobs(workspaceId.value, projectId.value, { revisionId: revId, kind: 'voice' })
+    await queryClient.invalidateQueries({ queryKey: ['jobs'] })
+    message.success(`已创建 ${created.length} 个配音任务（逐镜旁白）`)
+  } catch (e) {
+    message.error(e instanceof Error ? e.message : '创建配音任务失败')
+  } finally {
+    genBusy.value = false
+  }
+}
+
+/** P7：整片配乐（自托管音乐生成） */
+async function startBgm(): Promise<void> {
+  const revId = genRevisionId()
+  if (!revId) return
+  if (dirty.value && !(await handleSave())) return
+  genBusy.value = true
+  try {
+    const created = await createJobs(workspaceId.value, projectId.value, { revisionId: revId, kind: 'bgm' })
+    await queryClient.invalidateQueries({ queryKey: ['jobs'] })
+    message.success(`已创建 ${created.length} 个配乐任务（按 music_mood）`)
+  } catch (e) {
+    message.error(e instanceof Error ? e.message : '创建配乐任务失败')
+  } finally {
+    genBusy.value = false
+  }
+}
+
 async function startMotion(frames?: number): Promise<void> {
   const revId = genRevisionId()
   if (!revId) return
@@ -1436,6 +1472,14 @@ const shotTotal = computed(() => {
                        :disabled="!motionReady" title="先出关键帧(still)后可用（两段式 §11.3）" @click="openMotionModal">
                 运动(motion)
               </NButton>
+              <NButton v-if="isVideoNow && detApproved" size="small" secondary :loading="genBusy" data-testid="btn-voice-jobs"
+                       title="自托管 CosyVoice：逐镜旁白 → 配音" @click="startVoice">
+                生成配音(voice)
+              </NButton>
+              <NButton v-if="isVideoNow && detApproved" size="small" secondary :loading="genBusy" data-testid="btn-bgm-jobs"
+                       title="自托管音乐生成：按 music_mood 生成整片 BGM" @click="startBgm">
+                生成配乐(bgm)
+              </NButton>
               <NButton size="small" type="primary" :loading="genBusy" data-testid="btn-gen-jobs" @click="startGeneration">
                 {{ isVideoNow ? '生成关键帧(still)' : '开始生成' }}
               </NButton>
@@ -1465,7 +1509,7 @@ const shotTotal = computed(() => {
               <input type="checkbox" :checked="jobSel.includes(j.id)" @change="toggleJobSel(j.id)" />
             </label>
             <span v-else class="row-check" />
-            <span class="job-kind font-mono">[{{ j.kind === 'still' ? '关键帧' : '运动' }} · 第{{ j.payload?.shot_no ?? '—' }}镜<template v-if="j.payload?.frame_label"> · {{ j.payload.frame_label }}</template>]</span>
+            <span class="job-kind font-mono">[{{ KIND_LABEL[j.kind] ?? j.kind }}<template v-if="j.kind === 'still' || j.kind === 'clip' || j.kind === 'voice'"> · 第{{ j.payload?.shot_no ?? '—' }}镜</template><template v-if="j.payload?.frame_label"> · {{ j.payload.frame_label }}</template>]</span>
             <span
               v-if="revOfJob(j)"
               :class="['job-rev', 'font-mono', { stale: revOfJob(j)?.stale }]"
@@ -1564,8 +1608,15 @@ const shotTotal = computed(() => {
                     :title="'删除此' + a.kind" @click="removeAssetOne(a.id)">
               ×
             </button>
+            <audio
+              v-if="(a.mime ?? '').startsWith('audio/') && galUrls[a.id]"
+              :src="galUrls[a.id]"
+              class="g-audio"
+              controls
+              preload="metadata"
+            />
             <video
-              v-if="(a.kind === 'clip' || a.kind === 'master') && (a.mime ?? '').startsWith('video/') && galUrls[a.id]"
+              v-else-if="(a.kind === 'clip' || a.kind === 'master') && (a.mime ?? '').startsWith('video/') && galUrls[a.id]"
               :src="galUrls[a.id]"
               class="g-video"
               controls
@@ -2246,6 +2297,7 @@ const shotTotal = computed(() => {
   gap: 6px; padding: 6px 8px;
 }
 .g-kind { font-size: 10px; color: var(--wv-text-4); }
+.g-audio { width: 100%; height: 34px; display: block; }
 .g-actions { display: inline-flex; align-items: center; gap: 8px; }
 .g-actions a { color: var(--wv-accent-text); text-decoration: none; font-size: 14px; line-height: 1; }
 .g-ref {

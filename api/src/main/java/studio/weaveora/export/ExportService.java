@@ -116,7 +116,7 @@ public class ExportService {
 
         ArrayNode tracks = list.putArray("tracks");
         ArrayNode video = tracks.addObject().put("type", "video").putArray("clips");
-        tracks.addObject().put("type", "audio").putArray("clips");
+        ArrayNode audioTrack = tracks.addObject().put("type", "audio").putArray("clips");
         tracks.addObject().put("type", "caption").putArray("clips");
 
         StringBuilder prompts = new StringBuilder();
@@ -164,6 +164,47 @@ public class ExportService {
                 zip.write(file);
                 zip.closeEntry();
                 cursor += dur;
+            }
+            // P7：音轨（voice 逐镜 + bgm 整片，随包带音频文件）
+            double aCursor = 0;
+            int aOrder = 0;
+            for (JsonNode shot : shotsNode) {
+                aOrder++;
+                int shotNo = shot.path("shot_no").asInt(aOrder);
+                double dur = shot.path("duration_sec").asDouble(3);
+                List<Asset> vs = assets.findByProjectIdAndWorkspaceIdAndShotNoAndKindOrderByCreatedAtDesc(
+                        project.id(), workspaceId, shotNo, "voice");
+                if (!vs.isEmpty()) {
+                    Asset v = vs.get(0);
+                    String vsrc = "assets/voice_" + String.format("%02d", shotNo) + "." + extOf(v.mime());
+                    ObjectNode vc = audioTrack.addObject();
+                    vc.put("type", "voice");
+                    vc.put("shot_no", shotNo);
+                    vc.put("src", vsrc);
+                    vc.put("in_sec", 0);
+                    double vdur = v.durationMs() != null && v.durationMs() > 0 ? v.durationMs() / 1000.0 : dur;
+                    vc.put("out_sec", round2(vdur));
+                    vc.put("timeline_start_sec", round2(aCursor));
+                    zip.putNextEntry(new ZipEntry(vsrc));
+                    zip.write(readAsset(v));
+                    zip.closeEntry();
+                }
+                aCursor += dur;
+            }
+            List<Asset> bgms = assets.findByProjectIdAndWorkspaceIdAndKindOrderByCreatedAtDesc(
+                    project.id(), workspaceId, "bgm");
+            if (!bgms.isEmpty()) {
+                Asset b = bgms.get(0);
+                String bsrc = "assets/bgm." + extOf(b.mime());
+                ObjectNode bc = audioTrack.addObject();
+                bc.put("type", "bgm");
+                bc.put("src", bsrc);
+                bc.put("in_sec", 0);
+                bc.put("out_sec", round2(duration));
+                bc.put("timeline_start_sec", 0);
+                zip.putNextEntry(new ZipEntry(bsrc));
+                zip.write(readAsset(b));
+                zip.closeEntry();
             }
             list.put("width", width);
             list.put("height", height);
@@ -216,6 +257,10 @@ public class ExportService {
         if (mime.contains("mp4")) return "mp4";
         if (mime.contains("webm")) return "webm";
         if (mime.contains("png")) return "png";
+        if (mime.contains("wav")) return "wav";
+        if (mime.contains("mpeg") || mime.contains("mp3")) return "mp3";
+        if (mime.contains("aac") || mime.contains("m4a")) return "m4a";
+        if (mime.contains("ogg")) return "ogg";
         return "bin";
     }
 
