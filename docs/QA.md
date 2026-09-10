@@ -83,3 +83,20 @@ python worker/qa_acceptance.py --base https://sysou.com/weaveora --engine cloud
 - 写入：`AssetService.createOutput` 增 `shotNo` 参数，`JobService.complete` 落库时写（来自 job.shotId → shotNo）。
 - 读取（优先 shot_no，退 shot_id）：motion 关键帧、ExportService 成片包、ConcatService 渲染、前端资产库「第N镜」与时间线「素材已就绪」。
 - 效果：换版/重确认后，同镜号素材自动被找到；不再依赖“历史版本回溯”（该兜底保留为最后一级）。
+
+## P5 分区遮罩 IP-Adapter 实机验证（2026-09-10，经反向隧道跑 GPU 的 ComfyUI）
+- 方法：同一 seed/prompt/两张参考图（项目里的女王+唐僧），(A) 两主体各挂区域遮罩（左半/右半）vs (B) 仅单参考无遮罩；比 PSNR。
+- 结果：两张都成功出图；**PSNR ≈ 10.2 dB**（差异显著）→ 遮罩确实改变了结果，链路可用。
+- 对比图（临时放在 web 根，看完可删）：`https://sysou.com/weaveora/qa/p5_regional.png`、`https://sysou.com/weaveora/qa/p5_global.png`。
+- **实机暴露并已修的两个生产 bug**（原代码在真机会 400 `prompt_outputs_failed_validation`）：
+  1. `IPAdapterAdvanced` 不接受 `weight_type="standard"`（该机允许值：linear / ease in / … / composition precise）→ 现在从 `object_info` 读允许值，requested→fallback(linear)→首个；
+  2. `embeds_scaling` 是**必填**（V only / K+V / …）→ 现在同样按 `object_info` 解析，默认 `V only`（可用 `params.ipadapter_embeds_scaling` 覆盖）。
+  另：该机 `MaskBlur` 节点缺失（代码已兼容：没有则用硬边遮罩）；`IPAdapterAdvanced.attn_mask`、`ConditioningSetArea`、`IPAdapterMS` 均存在。
+
+## 僵尸任务（queued 永挂）根因与修复（2026-09-10）
+- 现象：3 条 09-08 的 clip 任务一直 `queued`（`cancel_requested=true`、engine_route=gpu），列表里长期残留。
+- 根因：早期"取消"只置 `cancel_requested`，终态依赖 worker 领取后回执；而此后长时间没有 gpu 节点在线 → 永远无人领；且**没有针对 queued 的回收器**（只有 running 的 15 分钟回收）。
+- 修复：
+  1. 新增 reaper：`queued + cancel_requested` → 直接 `cancelled`；`queued` 超过 `weaveora.job.queued-timeout-minutes`（默认 1440 分钟）且无取消 → `failed(STALE_QUEUED)`（可重试，提示检查节点在线）；
+  2. 领取查询本就排除 `cancel_requested=true`（确认过），僵尸不会被误跑；
+  3. 已清理存量 3 条（无资产引用，直接删除）：现库内 succeeded 317 / failed 47 / cancelled 6，无 queued/running 残留。

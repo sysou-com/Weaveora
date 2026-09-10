@@ -129,6 +129,7 @@ public class JobService {
     private final String adminEmail;
     private final int motionFramesMin;
     private final int motionFramesMax;
+    private final int queuedTimeoutMin;   // queued 超时回收阈值（分钟）
 
     public JobService(GenerationJobRepository jobs, WorkerNodeRepository nodes, AssetService assets,
                       StoragePort storage, ProjectContextPort projects, WorkspaceGuard guard, JobWsHandler ws,
@@ -142,7 +143,9 @@ public class JobService {
                       @org.springframework.beans.factory.annotation.Value(
                               "${weaveora.video.motion-frames-min:32}") int motionFramesMin,
                       @org.springframework.beans.factory.annotation.Value(
-                              "${weaveora.video.motion-frames-max:96}") int motionFramesMax) {
+                              "${weaveora.video.motion-frames-max:96}") int motionFramesMax,
+                      @org.springframework.beans.factory.annotation.Value(
+                              "${weaveora.job.queued-timeout-minutes:1440}") int queuedTimeoutMin) {
         this.jobs = jobs;
         this.nodes = nodes;
         this.assets = assets;
@@ -160,17 +163,28 @@ public class JobService {
         this.adminEmail = adminEmail == null ? "" : adminEmail;
         this.motionFramesMin = motionFramesMin;
         this.motionFramesMax = motionFramesMax;
+        this.queuedTimeoutMin = queuedTimeoutMin;
     }
 
     /** 回收卡死 running 任务（默认 30min 无完成即失败，可重试） */
     @Scheduled(fixedDelayString = "${weaveora.job.reaper-ms:300000}")
     @Transactional
     public void reapStaleRunning() {
-        java.time.OffsetDateTime cut = java.time.OffsetDateTime.now()
-                .minusMinutes(15);
-        int n = jobs.markStaleRunning(cut, java.time.OffsetDateTime.now());
+        java.time.OffsetDateTime now = java.time.OffsetDateTime.now();
+        int n = jobs.markStaleRunning(now.minusMinutes(15), now);
         if (n > 0) {
             log.warn("reaped {} stale running jobs", n);
+        }
+        // queued 但已请求取消（历史遗留/异步取消）→ 直接终态，避免僵尸行永挂列表
+        int c = jobs.markCancelledQueued(now);
+        if (c > 0) {
+            log.warn("finalized {} cancel-requested queued jobs as cancelled", c);
+        }
+        // queued 超时（长时间没有可用 worker，如 GPU 离线）→ failed(STALE_QUEUED)，用户可重试
+        int q = jobs.markStaleQueued(now.minusMinutes(queuedTimeoutMin), now,
+                "排队超时（无可用 worker）：请确认 GPU/云端节点在线后重试");
+        if (q > 0) {
+            log.warn("reaped {} stale queued jobs (>{} min)", q, queuedTimeoutMin);
         }
     }
 

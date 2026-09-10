@@ -115,6 +115,34 @@ def _has_input(info, name):
     return False
 
 
+def _node_input_options(class_type, name):
+    """从 object_info 取某输入的允许值列表（无则返回 []）。"""
+    info = _node_info(class_type)
+    if not info:
+        return []
+    node = next(iter(info.values())) if isinstance(info, dict) else None
+    if not node:
+        return []
+    ipt = node.get("input") or {}
+    for sec in ("required", "optional"):
+        v = (ipt.get(sec) or {}).get(name)
+        if isinstance(v, list) and v and isinstance(v[0], list):
+            return v[0]
+    return []
+
+
+def _pick_option(class_type, name, requested, fallback):
+    """在允许值里选：requested → fallback → 第一个；无约束则用 requested。"""
+    opts = _node_input_options(class_type, name)
+    if not opts:
+        return requested if requested else fallback
+    if requested in opts:
+        return requested
+    if fallback in opts:
+        return fallback
+    return opts[0]
+
+
 def _rect_mask_png(width, height, region):
     """按归一化区域 {x,y,w,h} 生成灰度 PNG 遮罩（白=区域，黑=其余），纯标准库。"""
     w, h = int(width), int(height)
@@ -207,7 +235,7 @@ def _prompt(client_id, positive, negative, params, seed, width=None, height=None
                                                                    "STANDARD (medium strength)"),
                                           "model": ["ckpt", 0]}}
         weight = float(params.get("ipadapter_weight", 0.85))
-        wtype = params.get("ipadapter_weight_type", "standard")
+        req_wtype = params.get("ipadapter_weight_type")
         adv = _node_info("IPAdapterAdvanced")
         adv_masked = _has_input(adv, "attn_mask")
         ms = _node_info("IPAdapterMS")
@@ -223,7 +251,8 @@ def _prompt(client_id, positive, negative, params, seed, width=None, height=None
         for i, r in enumerate(refs):
             nodes["load_ref_%d" % i] = {"class_type": "LoadImage", "inputs": {"image": r["name"]}}
             inp = {"model": prev_model, "ipadapter": ["ip_unified", 1], "image": ["load_ref_%d" % i, 0],
-                   "weight": weight, "start_at": 0.0, "end_at": 1.0, "weight_type": wtype}
+                   "weight": weight, "start_at": 0.0, "end_at": 1.0,
+                   "weight_type": _pick_option("IPAdapter", "weight_type", req_wtype, "standard")}
             region = r.get("region") or None
             cls = "IPAdapter"
             if regional_ok and region:
@@ -243,9 +272,15 @@ def _prompt(client_id, positive, negative, params, seed, width=None, height=None
                         mask_out = ["mask_blur_%d" % i, 0]
                     if adv_masked:
                         cls = "IPAdapterAdvanced"
+                        inp["weight_type"] = _pick_option("IPAdapterAdvanced", "weight_type", req_wtype, "linear")
+                        inp["embeds_scaling"] = _pick_option("IPAdapterAdvanced", "embeds_scaling",
+                                                             params.get("ipadapter_embeds_scaling"), "V only")
                         inp["attn_mask"] = mask_out
                     else:
                         cls = "IPAdapterMS"
+                        inp["weight_type"] = _pick_option("IPAdapterMS", "weight_type", req_wtype, "linear")
+                        inp["embeds_scaling"] = _pick_option("IPAdapterMS", "embeds_scaling",
+                                                             params.get("ipadapter_embeds_scaling"), "V only")
                         inp["mask"] = mask_out
                 except Exception as e:
                     print("[comfy] 区域遮罩构建失败，退化为全局 IP-Adapter: %s" % e, flush=True)

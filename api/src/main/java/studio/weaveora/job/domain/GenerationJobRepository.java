@@ -45,6 +45,20 @@ public interface GenerationJobRepository extends JpaRepository<GenerationJob, UU
     int markStaleRunning(@Param("cut") java.time.OffsetDateTime cut,
                          @Param("now") java.time.OffsetDateTime now);
 
+    /** 排队中但已请求取消（历史遗留/异步取消）→ 直接落 cancelled 终态，避免僵尸行。 */
+    @Modifying
+    @Query("update GenerationJob j set j.state='cancelled', j.finishedAt=:now " +
+            "where j.state='queued' and j.cancelRequested=true")
+    int markCancelledQueued(@Param("now") java.time.OffsetDateTime now);
+
+    /** 排队超时（长时间无可用 worker，如 GPU 长时间离线）→ failed(STALE_QUEUED)，可重试。 */
+    @Modifying
+    @Query("update GenerationJob j set j.state='failed', j.errorCode='STALE_QUEUED', j.errorMessage=:msg, " +
+            "j.finishedAt=:now where j.state='queued' and j.cancelRequested=false and j.createdAt < :cut")
+    int markStaleQueued(@Param("cut") java.time.OffsetDateTime cut,
+                        @Param("now") java.time.OffsetDateTime now,
+                        @Param("msg") String msg);
+
     long countByState(String state);
 
     List<GenerationJob> findByStateInOrderByCreatedAtAsc(List<String> states);
