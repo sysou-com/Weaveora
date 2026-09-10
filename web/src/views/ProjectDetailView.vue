@@ -28,7 +28,7 @@ import { shareProject } from '@/api/market'
 import { listAssets, uploadReference, fetchAssetBlob, deleteAssets } from '@/api/assets'
 import { createExport, fetchExportBlob, renderMaster, timecode } from '@/api/export'
 import { getProject, updateProjectDuration } from '@/api/projects'
-import type { DirectorPlan, DirectorShot, JobRecord } from '@/api/types'
+import type { AssetRef, DirectorPlan, DirectorShot, JobRecord } from '@/api/types'
 import BriefComposer from '@/components/director/BriefComposer.vue'
 import ImagePlanEditor from '@/components/director/ImagePlanEditor.vue'
 import RevisionRail from '@/components/director/RevisionRail.vue'
@@ -242,6 +242,24 @@ const refSubjects = ref<Record<string, string>>({})
 /** P5 区域遮罩：assetId → 百分比 x/y/w/h（0–100，可选；填全且合法才生效） */
 const refRegions = ref<Record<string, { x: string; y: string; w: string; h: string }>>({})
 
+/** 资产 id → 资产（任意 kind），用于把资产库选中的图显示到参考图卡片 */
+const assetById = computed<Record<string, AssetRef>>(() => {
+  const m: Record<string, AssetRef> = {}
+  for (const a of assets.data.value ?? []) m[a.id] = a
+  return m
+})
+/** 已选参考（含资产库来源的 still/clip/master），按选择顺序 */
+const selectedRefAssets = computed<AssetRef[]>(() =>
+  refSelected.value.map((id) => assetById.value[id]).filter((a): a is AssetRef => !!a),
+)
+/** 参考图卡片顶部图库：项目内 reference 类上传 + 已选但不在图库里的（资产库来源） */
+const refLibrary = computed<AssetRef[]>(() => {
+  const lib = [...refAssetsSorted.value]
+  const known = new Set(lib.map((a) => a.id))
+  for (const a of selectedRefAssets.value) if (!known.has(a.id)) lib.push(a)
+  return lib
+})
+
 function buildRefAssets(): Array<{
   assetId: string
   subject?: string
@@ -286,6 +304,120 @@ function onRefSubjectInput(id: string, e: Event): void {
   setRefSubject(id, (e.target as HTMLInputElement).value)
 }
 
+
+const POS_COLORS = ['#8FB9B4', '#C8A25E', '#C45C4A', '#7AA87A']
+function parseRegionPct(r?: { x: string; y: string; w: string; h: string } | null) {
+  if (!r) return null
+  const n = [r.x, r.y, r.w, r.h].map((v) => Number(String(v ?? '').trim()))
+  if (n.length !== 4 || n.some((v) => !Number.isFinite(v))) return null
+  const [x, y, w, h] = n
+  if (w <= 0 || h <= 0 || x < 0 || y < 0 || x + w > 100.001 || y + h > 100.001) return null
+  return { x, y, w, h }
+}
+function setRefRegionPct(id: string, region: { x: number; y: number; w: number; h: number }): void {
+  const r = (v: number) => String(Math.round(Math.max(0, Math.min(100, v)) * 10) / 10)
+  refRegions.value = { ...refRegions.value, [id]: { x: r(region.x), y: r(region.y), w: r(region.w), h: r(region.h) } }
+  syncReferenceAssets()
+}
+/** 位置预览数据：主体名 + 区域 + 配色 */
+const refPreviewItems = computed(() =>
+  selectedRefAssets.value.map((a, i) => ({
+    id: a.id,
+    label: (refSubjects.value[a.id] ?? '').trim() || `主体${i + 1}`,
+    region: parseRegionPct(refRegions.value[a.id]),
+    color: POS_COLORS[i % POS_COLORS.length],
+  })),
+)
+const posAspectCss = computed(() => {
+  const ar = project.data.value?.aspectRatio ?? '16:9'
+  const [w, h] = ar.split(':').map((n) => Number(n) || 0)
+  return w > 0 && h > 0 ? `${w} / ${h}` : '16 / 9'
+})
+/** 多主体自动均分（2 → 左右；3 → 三等分；4 → 2×2），帮助用户快速得到合理相对位置 */
+function autoLayoutRegions(): void {
+  const items = selectedRefAssets.value
+  const n = items.length
+  if (n < 2) return
+  const layouts: Array<{ x: number; y: number; w: number; h: number }> = []
+  if (n === 2) {
+    layouts.push({ x: 0, y: 0, w: 50, h: 100 }, { x: 50, y: 0, w: 50, h: 100 })
+  } else if (n === 3) {
+    layouts.push({ x: 0, y: 0, w: 34, h: 100 }, { x: 34, y: 0, w: 33, h: 100 }, { x: 67, y: 0, w: 33, h: 100 })
+  } else {
+    for (let i = 0; i < n; i++) {
+      layouts.push({ x: (i % 2) * 50, y: Math.floor(i / 2) * 50, w: 50, h: 50 })
+    }
+  }
+  items.forEach((a, i) => setRefRegionPct(a.id, layouts[i] ?? layouts[layouts.length - 1]))
+  message.success('已按主体顺序自动均分区域，可拖动或微调')
+}
+
+// 位置预览拖动（移动 / 右下角缩放）
+let posDragRect = { w: 1, h: 1 }
+let posDrag: { id: string; mode: 'move' | 'resize'; sx: number; sy: number; orig: { x: number; y: number; w: number; h: number } } | null = null
+function onBoxPointerDown(e: PointerEvent, item: { id: string; region: { x: number; y: number; w: number; h: number } | null }, mode: 'move' | 'resize'): void {
+  e.preventDefault()
+  e.stopPropagation()
+  const frame = (e.currentTarget as HTMLElement).closest('.pos-frame') as HTMLElement | null
+  if (!frame) return
+  const r = frame.getBoundingClientRect()
+  posDragRect = { w: r.width || 1, h: r.height || 1 }
+  posDrag = { id: item.id, mode, sx: e.clientX, sy: e.clientY, orig: item.region ?? { x: 0, y: 0, w: 40, h: 50 } }
+  ;(e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId)
+}
+function onBoxPointerMove(e: PointerEvent): void {
+  if (!posDrag) return
+  const dx = ((e.clientX - posDrag.sx) / posDragRect.w) * 100
+  const dy = ((e.clientY - posDrag.sy) / posDragRect.h) * 100
+  const o = posDrag.orig
+  if (posDrag.mode === 'move') {
+    setRefRegionPct(posDrag.id, {
+      x: Math.min(Math.max(0, o.x + dx), 100 - o.w),
+      y: Math.min(Math.max(0, o.y + dy), 100 - o.h),
+      w: o.w,
+      h: o.h,
+    })
+  } else {
+    setRefRegionPct(posDrag.id, {
+      x: o.x,
+      y: o.y,
+      w: Math.min(Math.max(5, o.w + dx), 100 - o.x),
+      h: Math.min(Math.max(5, o.h + dy), 100 - o.y),
+    })
+  }
+}
+function onBoxPointerUp(): void {
+  posDrag = null
+}
+
+/** 删除参考图（仅 reference 类可删；资产库产物请到资产库删除） */
+async function removeRefAsset(id: string): Promise<void> {
+  if (!window.confirm('删除这张参考图？不可恢复。')) return
+  try {
+    await deleteAssets(workspaceId.value, projectId.value, [id])
+    refSelected.value = refSelected.value.filter((x) => x !== id)
+    delete refSubjects.value[id]
+    delete refRegions.value[id]
+    syncReferenceAssets()
+    await queryClient.invalidateQueries({ queryKey: ['assets'] })
+    message.success('已删除参考图')
+  } catch (e) {
+    message.error(e instanceof Error ? e.message : '删除失败')
+  }
+}
+
+/** 资产库：still/clip 显示第几镜（优先按 shotId 映射，其次 job payload.shot_no） */
+const shotNoById = computed<Record<string, number>>(() => {
+  const m: Record<string, number> = {}
+  for (const sh of detail.data.value?.shots ?? []) m[sh.id] = sh.shotNo
+  return m
+})
+function galShotNo(a: AssetRef): number | null {
+  if (a.shotId && shotNoById.value[a.shotId]) return shotNoById.value[a.shotId]
+  const j = (jobs.data.value ?? []).find((x) => x.id === a.jobId)
+  return j?.payload?.shot_no ?? null
+}
+
 /** P2：检测「机位/背影/过肩」类构图诉求 + 已选参考图 → 提示参考图可能拉走构图 */
 const CAMERA_INTENT_RE = /(背影|背后|背面|过肩|机位|视角|俯视|仰视|穿过|透过|透视|behind|over[- ]the[- ]shoulder|from behind)/i
 const cameraIntentWithRefs = computed(() => {
@@ -307,10 +439,10 @@ const uploadingRef = ref(false)
 const thumbUrls = ref<Record<string, string>>({})
 
 async function refreshThumbs(): Promise<void> {
-  const picks = refAssets.value
+  const picks = refLibrary.value
   const next: Record<string, string> = {}
   await Promise.all(
-    picks.slice(0, 8).map(async (a) => {
+    picks.slice(0, 12).map(async (a) => {
       if (!thumbUrls.value[a.id]) {
         const blob = await fetchAssetBlob(workspaceId.value, a.id)
         if (blob) thumbUrls.value[a.id] = URL.createObjectURL(blob)
@@ -319,7 +451,7 @@ async function refreshThumbs(): Promise<void> {
     }),
   )
 }
-watch(() => refAssets.value.map((a) => a.id).join(','), () => { void refreshThumbs() }, { immediate: true })
+watch(() => [...refLibrary.value.map((a) => a.id)].join(','), () => { void refreshThumbs() }, { immediate: true })
 
 // ---------- W4 资产库 ----------
 const outputAssets = computed(() => (assets.data.value ?? []).filter((a) => ['still','clip','master'].includes(a.kind)))
@@ -418,7 +550,8 @@ function setRefFromAsset(id: string): void {
     return
   }
   refSelected.value.push(id)
-  message.success('已加入参考图（下次导演/生成生效）')
+  syncReferenceAssets()
+  message.success('已加入参考图（显示在左侧参考图卡片，可标主体/区域）')
 }
 
 function onPickFile(e: Event): void {
@@ -1061,8 +1194,8 @@ const shotTotal = computed(() => {
     <!-- 导演台：左 Brief / 中方案 / 底部版本条 -->
     <template v-else>
       <div class="studio-grid">
-        <!-- 左：Brief 常驻 -->
-        <aside class="col-brief">
+        <!-- ① BRIEF 单独一行 -->
+        <section class="brief-row">
           <div class="brief-panel">
             <div class="brief-head">
               <span class="font-mono eyebrow">BRIEF</span>
@@ -1082,11 +1215,13 @@ const shotTotal = computed(() => {
               <p class="brief-text">{{ shownBrief?.rawText }}</p>
             </template>
           </div>
-
           <div v-if="generating || creating" class="brief-spinner">
             <NButton size="small" loading :bordered="false" quaternary>导演层思考中…</NButton>
           </div>
+        </section>
 
+        <!-- ② 左：参考图卡片；右：位置预览卡片 -->
+        <div class="ref-row">
           <div class="refs-panel" data-testid="refs-panel">
             <div class="brief-head">
               <span class="font-mono eyebrow">参考图</span>
@@ -1096,9 +1231,9 @@ const shotTotal = computed(() => {
                 <span v-else>+ 上传</span>
               </label>
             </div>
-            <div v-if="refAssets.length" class="refs-grid">
+            <div v-if="refLibrary.length" class="refs-grid">
               <div
-                v-for="a in refAssetsSorted.slice(0, 8)"
+                v-for="a in refLibrary.slice(0, 8)"
                 :key="a.id"
                 :class="['ref-thumb', { sel: refSelected.includes(a.id) }]"
                 :title="refSelected.includes(a.id) ? '点击取消' : '点击用作参考'"
@@ -1108,20 +1243,40 @@ const shotTotal = computed(() => {
                 <span v-else class="ref-empty">…</span>
                 <i v-if="refSelected.includes(a.id)" class="ref-badge font-mono">REF</i>
                 <span class="ref-time font-mono">{{ shortTime(a.createdAt) }}</span>
+                <button
+                  v-if="a.kind === 'reference'"
+                  type="button"
+                  class="ref-del"
+                  title="删除该参考图"
+                  @click.stop="removeRefAsset(a.id)"
+                >
+                  ×
+                </button>
               </div>
             </div>
-            <div v-if="refSelected.length" class="ref-subjects">
-              <p class="ref-subjects-title font-mono">标注主体（生成时按镜头文案自动绑定）</p>
-              <div v-for="id in refSelected" :key="id" class="ref-subject-block">
+
+            <div v-if="selectedRefAssets.length" class="ref-subjects">
+              <p class="ref-subjects-title font-mono">已选（资产库点「参考」的图也会出现在这里）</p>
+              <div v-for="a in selectedRefAssets" :key="a.id" class="ref-subject-block">
                 <div class="ref-subject-row">
-                  <img v-if="thumbUrls[id]" :src="thumbUrls[id]" class="ref-subject-thumb" alt="" />
+                  <img v-if="thumbUrls[a.id]" :src="thumbUrls[a.id]" class="ref-subject-thumb" alt="" />
                   <input
                     class="text"
                     type="text"
-                    :value="refSubjects[id] ?? ''"
+                    :value="refSubjects[a.id] ?? ''"
                     placeholder="主体名，如 唐僧 / 女王"
-                    @input="onRefSubjectInput(id, $event)"
+                    @input="onRefSubjectInput(a.id, $event)"
                   />
+                  <button type="button" class="ref-op" title="取消选择" @click="toggleRef(a.id, false)">取消</button>
+                  <button
+                    v-if="a.kind === 'reference'"
+                    type="button"
+                    class="ref-op danger"
+                    title="删除该参考图"
+                    @click="removeRefAsset(a.id)"
+                  >
+                    删除
+                  </button>
                 </div>
                 <div class="ref-region-row">
                   <span class="ref-region-label font-mono">区域%</span>
@@ -1132,21 +1287,62 @@ const shotTotal = computed(() => {
                     type="text"
                     inputmode="numeric"
                     :placeholder="k"
-                    :value="refRegions[id]?.[k] ?? ''"
-                    @input="setRefRegion(id, k, ($event.target as HTMLInputElement).value)"
+                    :value="refRegions[a.id]?.[k] ?? ''"
+                    @input="setRefRegion(a.id, k, ($event.target as HTMLInputElement).value)"
                   />
                 </div>
               </div>
             </div>
             <p v-else class="ref-hint text-secondary">
-              上传参考图（png/jpg/webp ≤4 张）并勾选；给选中的图标上主体名（如「唐僧」）后，系统只会在文案提到该主体的镜头里使用该参考图，并把「形象以参考图为准」写入提示词；标注随方案保存（点「保存修改」或直接生成会自动保存）。
+              上传参考图（png/jpg/webp ≤4 张）或从下方资产库点「参考」；给选中的图标主体名（如「唐僧」）后，系统只会在文案提到该主体的镜头里使用它，并把「形象以参考图为准」写入提示词。
             </p>
             <p v-if="refSelected.length" class="ref-count font-mono">{{ refSelected.length }}/4 已选</p>
             <p v-if="cameraIntentWithRefs" class="ref-conflict">
               检测到「背影/过肩/机位」类构图诉求：参考图可能把构图拉回参考视角。建议先取消勾选参考图（仅需形象/画风锚定时再选），或把机位写进「视角/前景/主体朝向」字段。
             </p>
           </div>
-        </aside>
+
+          <div class="pos-panel" data-testid="pos-panel">
+            <div class="brief-head">
+              <span class="font-mono eyebrow">位置预览（相对位置 / 区域%）</span>
+              <button v-if="selectedRefAssets.length > 1" type="button" class="link-btn" @click="autoLayoutRegions">
+                自动均分
+              </button>
+            </div>
+            <div class="pos-frame" :style="{ aspectRatio: posAspectCss }">
+              <div class="pos-third pos-third-v1" /><div class="pos-third pos-third-v2" />
+              <div class="pos-third pos-third-h1" /><div class="pos-third pos-third-h2" />
+              <div
+                v-for="it in refPreviewItems.filter((i) => i.region)"
+                :key="it.id"
+                class="pos-box"
+                :style="{
+                  left: (it.region?.x ?? 0) + '%',
+                  top: (it.region?.y ?? 0) + '%',
+                  width: (it.region?.w ?? 100) + '%',
+                  height: (it.region?.h ?? 100) + '%',
+                  borderColor: it.color,
+                  background: it.color + '22',
+                }"
+                @pointerdown="onBoxPointerDown($event, it, 'move')"
+                @pointermove="onBoxPointerMove"
+                @pointerup="onBoxPointerUp"
+                @pointercancel="onBoxPointerUp"
+              >
+                <span class="pos-label font-mono" :style="{ color: it.color }">{{ it.label }}</span>
+                <span class="pos-resize" @pointerdown.stop="onBoxPointerDown($event, it, 'resize')" />
+              </div>
+              <p v-if="!refPreviewItems.some((i) => i.region)" class="pos-empty text-secondary">尚无区域：点「自动均分」或拖动下方未设区域的条目</p>
+            </div>
+            <p v-if="refPreviewItems.some((i) => !i.region)" class="pos-unset">
+              未设区域（整幅生效）：
+              <span v-for="it in refPreviewItems.filter((i) => !i.region)" :key="it.id" class="pos-chip font-mono">{{ it.label }}</span>
+            </p>
+            <p class="ref-hint text-secondary">
+              拖动色块移动、右下角拖动缩放；也可在上方「区域%」精确填写（x/y=左上角，w/h=宽高，0–100）。填了区域后，GPU(Comfy) 会按区域分别注入参考图（彻底解耦多角色）；云模型无遮罩能力，会把方位写进提示词。
+            </p>
+          </div>
+        </div>
 
         <!-- 中：方案编辑区 -->
         <main class="col-main">
@@ -1377,7 +1573,7 @@ const shotTotal = computed(() => {
             <img v-else-if="galUrls[a.id]" :src="galUrls[a.id]" :alt="a.kind" loading="lazy" />
             <div v-else class="g-loading">…</div>
             <div class="g-meta">
-              <span class="g-kind font-mono">{{ a.kind }}<template v-if="a.width"> · {{ a.width }}×{{ a.height }}</template><template v-if="galRevNo(a.jobId)"> · v{{ galRevNo(a.jobId) }}</template></span>
+              <span class="g-kind font-mono">{{ a.kind }}<template v-if="galShotNo(a)"> · 第{{ galShotNo(a) }}镜</template><template v-if="a.width"> · {{ a.width }}×{{ a.height }}</template><template v-if="galRevNo(a.jobId)"> · v{{ galRevNo(a.jobId) }}</template></span>
               <span class="g-actions">
                 <button v-if="galUrls[a.id]" type="button" class="g-max" title="沉浸预览/播放"
                         @click.stop="openImmersive(a.id, a.mime ?? '')">
@@ -1861,6 +2057,57 @@ const shotTotal = computed(() => {
 .ref-region-row { display: flex; align-items: center; gap: 6px; padding-left: 36px; }
 .ref-region-label { font-size: 9px; color: var(--wv-text-4); flex: none; }
 .ref-region-input { width: 52px; flex: none; text-align: center; }
+.ref-op {
+  appearance: none; flex: none; cursor: pointer; font-size: 11px;
+  color: var(--wv-text-3); background: var(--wv-surface-sunken);
+  border: 1px solid var(--wv-line); border-radius: 6px; padding: 3px 8px;
+}
+.ref-op:hover { border-color: var(--wv-accent); color: var(--wv-text); }
+.ref-op.danger:hover { border-color: var(--wv-danger); color: var(--wv-danger); }
+.ref-del {
+  position: absolute; right: 3px; top: 3px; width: 16px; height: 16px; line-height: 1;
+  border: none; border-radius: 50%; cursor: pointer; font-size: 12px; padding: 0;
+  background: rgba(11,11,10,.72); color: var(--wv-danger);
+}
+.ref-del:hover { background: var(--wv-danger); color: #fff; }
+
+/* 布局：BRIEF 一行；下方左参考图 / 右位置预览 */
+.brief-row { display: flex; flex-direction: column; gap: 8px; margin-bottom: 14px; }
+.ref-row { display: grid; grid-template-columns: minmax(0, 360px) minmax(0, 1fr); gap: 12px; margin-bottom: 16px; }
+.refs-panel { width: auto; }
+.pos-panel {
+  display: flex; flex-direction: column; gap: 8px; min-width: 0;
+  padding: 14px; background: var(--wv-surface);
+  border: 1px solid var(--wv-line); border-radius: var(--wv-radius-m);
+}
+.pos-frame {
+  position: relative; width: 100%; max-height: 340px; margin: 0 auto;
+  background: var(--wv-surface-sunken); border: 1px solid var(--wv-line-strong);
+  border-radius: 8px; overflow: hidden; touch-action: none;
+}
+.pos-third { position: absolute; background: var(--wv-line); opacity: .35; }
+.pos-third-v1 { left: 33.33%; top: 0; width: 1px; height: 100%; }
+.pos-third-v2 { left: 66.66%; top: 0; width: 1px; height: 100%; }
+.pos-third-h1 { top: 33.33%; left: 0; height: 1px; width: 100%; }
+.pos-third-h2 { top: 66.66%; left: 0; height: 1px; width: 100%; }
+.pos-box {
+  position: absolute; border: 1.5px dashed currentColor; border-radius: 6px;
+  display: flex; align-items: flex-start; cursor: move; touch-action: none;
+}
+.pos-label { font-size: 10px; padding: 2px 5px; letter-spacing: .06em; white-space: nowrap; }
+.pos-resize {
+  position: absolute; right: -5px; bottom: -5px; width: 12px; height: 12px;
+  border-radius: 3px; background: currentColor; cursor: nwse-resize; opacity: .85;
+}
+.pos-empty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; margin: 0; font-size: 12px; }
+.pos-unset { margin: 0; font-size: 11px; color: var(--wv-text-4); }
+.pos-chip {
+  display: inline-block; margin: 2px 4px 0 0; padding: 1px 6px; font-size: 10px;
+  border: 1px solid var(--wv-line); border-radius: 999px; color: var(--wv-text-3);
+}
+@media (max-width: 900px) {
+  .ref-row { grid-template-columns: 1fr; }
+}
 .ref-subject-thumb { width: 28px; height: 28px; object-fit: cover; border-radius: 6px; border: 1px solid var(--wv-line); flex: none; }
 .ref-subject-row .text { flex: 1 1 auto; min-width: 0; }
 .ref-conflict {
