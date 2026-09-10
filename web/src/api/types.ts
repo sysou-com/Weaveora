@@ -80,6 +80,60 @@ export interface Brief {
   createdAt: string
 }
 
+/** 镜内一段语音（P8）：旁白或角色台词 */
+export interface NarrationLine {
+  /** 该段在**镜内**的起始秒（相对镜头起点） */
+  at_sec: number
+  text: string
+  /** 缺省：有 subject 则为 dialogue，否则 narration */
+  kind?: 'narration' | 'dialogue' | null
+  /** 说话人（角色/主体），与 audio.voiceBindings[].subject 关联 */
+  subject?: string | null
+  /** 本段音色覆盖（优先于 voiceBindings 与 audio.voice） */
+  voice?: string | null
+  speed?: number | null
+}
+
+/** 角色 → 音色绑定（P8） */
+export interface VoiceBinding {
+  subject: string
+  voice: string
+  speed?: number | null
+}
+
+/** 配乐段落（P8）：可多段，各自控制起止/强弱/淡入淡出/循环/duck */
+export interface MusicCue {
+  id?: string
+  /** 全片时间轴上的起始秒 */
+  start_sec: number
+  /** 全片时间轴上的结束秒（须 > start_sec） */
+  end_sec: number
+  /** 缺省用 audio.music_mood */
+  mood?: string | null
+  /** 音量 dB，0=原始；默认 -10.5（≈线性 0.30，同 P7）；“一半”约 -16.5 */
+  gain_db?: number | null
+  fade_in_sec?: number | null
+  fade_out_sec?: number | null
+  /** 生成曲短于区间时循环填充（默认 true） */
+  loop?: boolean | null
+  /** 是否被旁白侧链压低（默认 true） */
+  duck?: boolean | null
+}
+
+/** BasicPlan 共用音频配置（P8 扩展，字段均向后兼容） */
+export interface PlanAudio {
+  /** 整片默认配乐情绪（无 music 段时铺满全片） */
+  music_mood: string
+  /** 默认配音音色 */
+  voice?: string
+  /** P8 角色→音色绑定 */
+  voiceBindings?: VoiceBinding[] | null
+  /** P8 配乐段落表 */
+  music?: MusicCue[] | null
+  sfx: string[]
+  vo: string
+}
+
 /** 导演方案（§10.2，前后端共享 packages/schemas/director.schema.json；key 为 snake_case） */
 export interface DirectorShot {
   shot_no: number
@@ -91,7 +145,10 @@ export interface DirectorShot {
   negative_prompt: string
   seed_lock: boolean
   ref_shot_no?: number | null
+  /** 兼容：单段旁白（= narrations[0] 的简写） */
   narration?: string
+  /** P8 镜内多段语音（存在时优先于 narration） */
+  narrations?: NarrationLine[] | null
   zh?: string
   en_synced?: boolean
   /** P2 运镜关键帧（穿越/从A到B看到C）：≥2 帧时生成按帧出图，motion 用首/尾帧 */
@@ -139,7 +196,7 @@ export interface VideoPlan extends BasePlan {
   aspect_ratio: string
   script: { theme: string; acts: Array<Record<string, unknown>> }
   shots: DirectorShot[]
-  audio: { music_mood: string; voice?: string; sfx: string[]; vo: string }
+  audio: PlanAudio
   edit_plan: { fps: number; transition_default: string; subtitle: boolean }
 }
 

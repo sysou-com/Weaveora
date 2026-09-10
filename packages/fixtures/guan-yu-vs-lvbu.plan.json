@@ -1,0 +1,135 @@
+{
+  "mode": "video",
+  "title": "虎牢关·关羽战吕布",
+  "logline": "虎牢关前，关羽提刀出阵，与吕布鏖战三十合，吕布心怯退走，关羽纵马追赶。",
+  "duration_sec": 24,
+  "aspect_ratio": "16:9",
+  "script": {
+    "theme": "三国·虎牢关之战",
+    "acts": [
+      { "name": "列阵", "start_sec": 0, "end_sec": 8, "purpose": "对峙与叫阵" },
+      { "name": "交锋", "start_sec": 8, "end_sec": 16, "purpose": "刀戟相击，吕布心怯" },
+      { "name": "追赶", "start_sec": 16, "end_sec": 24, "purpose": "吕布退走，关羽追击" }
+    ]
+  },
+  "shots": [
+    {
+      "shot_no": 1,
+      "duration_sec": 4,
+      "shot_size": "extreme-wide",
+      "camera_move": "slow push in",
+      "action": "两军列阵，尘土蔽日",
+      "positive_prompt": "ancient Chinese battlefield at Hulao Pass, two armies in formation, billowing yellow dust, distant war banners, epic wide establishing shot, cinematic, 35mm, golden dusk light",
+      "negative_prompt": "text, watermark, modern clothing, cars",
+      "seed_lock": true,
+      "narrations": [
+        { "at_sec": 0.2, "text": "虎牢关前，两军列阵，尘烟蔽日。", "kind": "narration" }
+      ]
+    },
+    {
+      "shot_no": 2,
+      "duration_sec": 4,
+      "shot_size": "medium",
+      "camera_move": "static",
+      "action": "吕布横戟立马，高声邀战",
+      "positive_prompt": "fierce ancient Chinese warrior general in ornate armor on a red horse, holding a long halberd, shouting defiance, dust swirling, medium shot, cinematic, dramatic backlight",
+      "negative_prompt": "text, watermark, modern clothing",
+      "seed_lock": true,
+      "narrations": [
+        { "at_sec": 0.0, "text": "吕布横戟立马，声震四野。", "kind": "narration" },
+        { "at_sec": 2.0, "text": "谁敢与我决一死战！", "kind": "dialogue", "subject": "吕布", "speed": 1.05 }
+      ]
+    },
+    {
+      "shot_no": 3,
+      "duration_sec": 4,
+      "shot_size": "close-up",
+      "camera_move": "dolly in",
+      "action": "关羽提刀出阵",
+      "positive_prompt": "ancient Chinese warrior with long black beard and green robe, holding a great curved blade, stepping forward out of the ranks, determined expression, close-up, cinematic, dust in the air",
+      "negative_prompt": "text, watermark, modern clothing",
+      "seed_lock": true,
+      "narrations": [
+        { "at_sec": 0.0, "text": "一将提刀出阵，丹凤眼，卧蚕眉。", "kind": "narration" },
+        { "at_sec": 2.0, "text": "关云长在此！", "kind": "dialogue", "subject": "关羽" }
+      ]
+    },
+    {
+      "shot_no": 4,
+      "duration_sec": 4,
+      "shot_size": "wide",
+      "camera_move": "whip pan",
+      "action": "刀戟相击，火星四溅",
+      "positive_prompt": "two ancient Chinese warriors clashing blade against halberd, sparks flying at the point of impact, horses rearing, dust and motion blur, dynamic wide action shot, cinematic",
+      "negative_prompt": "text, watermark, gore",
+      "seed_lock": true,
+      "narrations": [
+        { "at_sec": 0.0, "text": "刀戟相击，火星四溅。", "kind": "narration" },
+        { "at_sec": 2.0, "text": "看刀！", "kind": "dialogue", "subject": "关羽" }
+      ]
+    },
+    {
+      "shot_no": 5,
+      "duration_sec": 4,
+      "shot_size": "medium",
+      "camera_move": "handheld shake",
+      "action": "吕布心生怯意，拨马便走",
+      "positive_prompt": "ancient Chinese warrior general turning his horse away mid-battle, uneasy expression, pulling the reins, dust kicking up, medium handheld shot, cinematic, tense atmosphere",
+      "negative_prompt": "text, watermark, modern clothing",
+      "seed_lock": true,
+      "narrations": [
+        { "at_sec": 0.0, "text": "战至三十合，吕布心生怯意。", "kind": "narration" },
+        { "at_sec": 1.8, "text": "此人不可力敌！", "kind": "dialogue", "subject": "吕布", "speed": 1.15 }
+      ]
+    },
+    {
+      "shot_no": 6,
+      "duration_sec": 4,
+      "shot_size": "extreme-wide",
+      "camera_move": "tracking",
+      "action": "关羽纵马追赶，尘烟滚滚",
+      "positive_prompt": "ancient Chinese warrior galloping in pursuit across a dusty battlefield, long trailing dust cloud, horse at full stride, dramatic tracking shot, cinematic, urgent motion",
+      "negative_prompt": "text, watermark, modern clothing",
+      "seed_lock": true,
+      "narrations": [
+        { "at_sec": 0.0, "text": "关羽纵马追赶，尘烟滚滚。", "kind": "narration" },
+        { "at_sec": 2.0, "text": "休走！", "kind": "dialogue", "subject": "关羽", "speed": 1.2 }
+      ]
+    }
+  ],
+  "audio": {
+    "music_mood": "史诗磅礴",
+    "voice": "中文女",
+    "voiceBindings": [
+      { "subject": "关羽", "voice": "中文男", "speed": 1.0 },
+      { "subject": "吕布", "voice": "日语男", "speed": 1.0 }
+    ],
+    "music": [
+      {
+        "id": "open",
+        "start_sec": 0,
+        "end_sec": 16,
+        "mood": "史诗磅礴",
+        "gain_db": -16.5,
+        "fade_in_sec": 2.0,
+        "fade_out_sec": 1.0,
+        "loop": true,
+        "duck": true
+      },
+      {
+        "id": "chase",
+        "start_sec": 16,
+        "end_sec": 24,
+        "mood": "紧张悬疑",
+        "gain_db": -8.0,
+        "fade_in_sec": 0.5,
+        "fade_out_sec": 2.0,
+        "loop": true,
+        "duck": true
+      }
+    ],
+    "sfx": ["刀戟相击", "马蹄声"],
+    "vo": ""
+  },
+  "edit_plan": { "fps": 24, "transition_default": "cut", "subtitle": true }
+}
