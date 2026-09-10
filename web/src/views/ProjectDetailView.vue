@@ -735,7 +735,10 @@ function jobAuditTitle(j: JobRecord): string | undefined {
   const r = revOfJob(j)
   const no = p.revision_no ?? r?.no ?? '?'
   const prompt = p.positive_prompt.length > 120 ? `${p.positive_prompt.slice(0, 120)}…` : p.positive_prompt
-  return `版本 v${no}${r?.stale ? '（旧版）' : ''} · md5 ${(p.prompt_md5 ?? '-').slice(0, 16)}\n提示词：${prompt}`
+  const hist = p.keyframeHistorical
+    ? `\n关键帧：沿用历史版本第${p.shot_no ?? '?'}镜的关键帧${p.keyframeHistoricalRevisionNo ? `（v${p.keyframeHistoricalRevisionNo}）` : ''}`
+    : ''
+  return `版本 v${no}${r?.stale ? '（旧版）' : ''} · md5 ${(p.prompt_md5 ?? '-').slice(0, 16)}${hist}\n提示词：${prompt}`
 }
 /** 资产库：由产物 jobId 反查生成版本（vN），便于区分旧版产物 */
 function galRevNo(jobId: string | null): number | null {

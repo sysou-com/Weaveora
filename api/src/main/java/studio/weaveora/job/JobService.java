@@ -257,15 +257,37 @@ public class JobService {
                         }
                         payload.put("frames", f);
                     }
-                    // W5 两段式闸门：motion 需要该镜已确认的关键帧（still 产物）作首帧
-                    List<studio.weaveora.asset.domain.Asset> kfAssets =
-                            assetRepo.findByShotIdAndWorkspaceIdAndKindOrderByCreatedAtDesc(shotId, workspaceId, "still");
+                    // W5 两段式闸门：motion 需要该镜的关键帧（still 产物）作首帧。
+                    // P5.1：shot_drafts 每次 patch/确认都会重建（新 id），旧关键帧仍挂在旧 shot 行上
+                    // → 当前镜无 still 时，按“同项目同镜号”回溯历史版本的关键帧（取最新）。
+                    List<studio.weaveora.asset.domain.Asset> kfAssets = new ArrayList<>(
+                            assetRepo.findByShotIdAndWorkspaceIdAndKindOrderByCreatedAtDesc(shotId, workspaceId, "still"));
+                    boolean historical = false;
+                    if (kfAssets.isEmpty()) {
+                        int no = shot.path("shot_no").asInt();
+                        for (UUID sid : planReader.shotIdsByProjectAndShotNo(projectId, workspaceId, no)) {
+                            if (sid.equals(shotId)) continue;
+                            kfAssets.addAll(assetRepo.findByShotIdAndWorkspaceIdAndKindOrderByCreatedAtDesc(
+                                    sid, workspaceId, "still"));
+                        }
+                        if (!kfAssets.isEmpty()) {
+                            kfAssets.sort((a, b) -> b.createdAt().compareTo(a.createdAt()));
+                            historical = true;
+                            log.info("motion keyframe fallback: project={} shot_no={} -> {} historical still(s), latest={}",
+                                    projectId, no, kfAssets.size(), kfAssets.get(0).id());
+                        }
+                    }
                     if (kfAssets.isEmpty()) {
                         throw new BizException(ErrorCode.VALIDATION, "第 " + shot.path("shot_no").asInt()
                                 + " 镜尚无关键帧，请先生成 still（两段式 §11.3）");
                     }
                     studio.weaveora.asset.domain.Asset first = pickKeyframeAsset(kfAssets, 0);
                     payload.put("keyframeKey", first.storageKey());
+                    if (historical) {
+                        payload.put("keyframeHistorical", true);
+                        int kfRev = planReader.revisionNoOfShot(first.shotId());
+                        if (kfRev > 0) payload.put("keyframeHistoricalRevisionNo", kfRev);
+                    }
                     // P2：多关键帧镜头把末帧作为尾帧引导（引擎支持时生效）
                     if (frames.size() > 1) {
                         studio.weaveora.asset.domain.Asset last = pickKeyframeAsset(kfAssets, frames.size() - 1);

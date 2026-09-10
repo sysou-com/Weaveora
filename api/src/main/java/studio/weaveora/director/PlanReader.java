@@ -59,6 +59,31 @@ public class PlanReader {
                 .orElse(0);
     }
 
+    /** 同一项目、同一镜号在所有 revision 下的 shot 行 id（motion 取关键帧时回溯历史版本用）。 */
+    @Transactional(readOnly = true)
+    public List<UUID> shotIdsByProjectAndShotNo(UUID projectId, UUID workspaceId, int shotNo) {
+        List<UUID> out = new java.util.ArrayList<>();
+        for (PromptRevision r : revisions.findByProjectIdAndWorkspaceIdOrderByRevisionNoDesc(projectId, workspaceId)) {
+            for (ShotDraft d : shots.findByRevisionIdOrderByShotNo(r.id())) {
+                if (d.shotNo() == shotNo) out.add(d.id());
+            }
+        }
+        return out;
+    }
+
+    /** 某个 shot 行所属版本的版本号（0=未知）。 */
+    @Transactional(readOnly = true)
+    public int revisionNoOfShot(UUID shotId) {
+        try {
+            return shots.findById(shotId)
+                    .flatMap(d -> revisions.findById(d.revisionId()))
+                    .map(PromptRevision::revisionNo)
+                    .orElse(0);
+        } catch (RuntimeException e) {
+            return 0;
+        }
+    }
+
     @Transactional(readOnly = true)
     public UUID revisionBriefId(UUID revisionId) {
         return revisions.findById(revisionId)

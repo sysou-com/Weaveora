@@ -232,6 +232,8 @@ export interface JobRecord {
     frame_label?: string
     composition?: string
     tailKey?: string
+    keyframeHistorical?: boolean
+    keyframeHistoricalRevisionNo?: number
   } | null
 }
 

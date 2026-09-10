@@ -71,3 +71,8 @@ python worker/qa_acceptance.py --base https://sysou.com/weaveora --engine cloud
 - 云侧：无遮罩能力，改为在 prompt 追加 `Spatial layout: 女王 -> upper-left of frame; …` 方位描述 + 图序映射 + 防串脸负词。
 - 验证（GPU 唤醒后）：① 选两张参考图各填区域（如女王 x0 y0 w50 h100；唐僧 x50 y0 w50 h100）；② 确认方案后生成关键帧；③ 看 worker 日志 `[comfy] refs=2 regions=2 primary=…` 与节点类型（IPAdapterAdvanced/MS）；④ 出图两角色脸不互相污染。
 - 已知：平台自动睡眠导致当前未唤醒（用户后续处理）；本特性不影响云通道。
+
+## motion 报“第N镜尚无关键帧”但历史版本有关键帧（2026-09-10）
+- 根因：`shot_drafts` 每次 patch/确认都会 delete+recreate（**shot 行 id 变化**），而 still 资产永久挂在生成时的 shot id 上 → 当前确认版的同镜号新 id 查不到旧关键帧（实例：女儿国 v13 的第2/3镜仍无 still，v1 的第2/3镜关键帧资产还在）。
+- 修复：JobService clip 分支在“当前 shot 无 still”时，按**同项目 + 同镜号**回溯所有历史 revision 的 shot 行，取最新 still 作首帧；payload 标 `keyframeHistorical=true` / `keyframeHistoricalRevisionNo=vN`，任务行悬停可看到“沿用历史版本第N镜关键帧（vX）”。
+- 验证：女儿国（确认版 v13）点 motion → 不再报错，新 clip 任务 payload 的 keyframeKey 指向该镜历史关键帧，且带 keyframeHistorical 标记。
