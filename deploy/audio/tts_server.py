@@ -26,6 +26,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 COSY_DIR = os.environ.get("WEAVEORA_COSYVOICE_DIR", "/data/audio/CosyVoice")
 MODEL_DIR = os.environ.get("WEAVEORA_COSYVOICE_MODEL", "pretrained_models/CosyVoice2-0.5B")
 DEFAULT_VOICE = os.environ.get("WEAVEORA_TTS_DEFAULT_VOICE", "中文女")
+# CosyVoice2-0.5B 是 zero-shot 模型（无 spk2info/内置音色）。当请求的 voice 既不是
+# 内置 spk、也不是存在的参考音频路径时，回退到仓库自带的 prompt 音频做 zero-shot，
+# 否则 inference_sft 会直接 KeyError。要得到不同音色，请传参考音频的绝对路径。
+_FALLBACK_PROMPT_WAV = os.environ.get("WEAVEORA_TTS_PROMPT_WAV",
+                                      os.path.join(COSY_DIR, "asset", "zero_shot_prompt.wav"))
+_FALLBACK_PROMPT_TEXT = os.environ.get(
+    "WEAVEORA_TTS_PROMPT_TEXT", "希望你以后能够做的比我还好唷。")
 
 _lock = threading.Lock()
 _model = None
@@ -51,12 +58,21 @@ def _load():
 
 
 def _tensors_to_wav(chunks, sample_rate):
-    """把模型输出的 float tensor 列表写为 16bit PCM wav 字节。"""
+    """把模型输出的 float tensor 列表写为 16bit PCM wav 字节。
+
+    注意：CosyVoice 的 tts 生成器 yield 的是 dict（{'tts_speech': tensor}），
+    不是裸张量；旧版写法在 np.clip 时会报 "'>=' not supported between
+    instances of 'dict' and 'float'"。这里两种都兼容。
+    """
     import numpy as np
     pcm = []
     for ch in chunks:
+        if isinstance(ch, dict):
+            ch = ch.get("tts_speech")
+            if ch is None:
+                continue
         arr = ch.detach().cpu().numpy() if hasattr(ch, "detach") else ch
-        pcm.append(np.asarray(arr).reshape(-1))
+        pcm.append(np.asarray(arr, dtype=np.float32).reshape(-1))
     if not pcm:
         raise RuntimeError("TTS 无输出")
     audio = np.concatenate(pcm)
@@ -82,22 +98,23 @@ def synthesize(text, voice, speed, target_sec):
         spk_list = []
     if v in spk_list:
         spk = v
-    elif re.match(r"^[\w\u4e00-\u9fa5]{1,10}$", v) and ("中文" in v or "男" in v or "女" in v):
-        spk = v  # 尝试当内置音色
     spd = max(0.5, min(2.0, float(speed or 1.0)))
     t0 = time.time()
     if spk is not None:
         chunks = list(model.inference_sft(text, spk, stream=False, speed=spd))
     else:
-        if not os.path.exists(v):
-            raise RuntimeError("音色不存在：既不是内置音色，也不是参考音频路径（%s）" % v)
-        # zero-shot 克隆：以参考音频前 8s 作为 prompt
-        import torchaudio
-        prompt_speech, sr = torchaudio.load(v)
-        if sr != model.sample_rate:
-            prompt_speech = torchaudio.transforms.Resample(sr, model.sample_rate)(prompt_speech)
-        prompt_speech_16k = prompt_speech[:, : int(8 * model.sample_rate)]
-        chunks = list(model.inference_zero_shot(text, "", "", prompt_speech_16k, stream=False, speed=spd))
+        # 参考音频：优先用调用方给的路径，否则回退到仓库自带 prompt 音频
+        # 注意：CosyVoice 的 inference_zero_shot 第 3 个参数是 **wav 文件路径**（内部
+        # frontend_* → load_wav → torchaudio.load），传张量会报 "Invalid file: tensor(...)"。
+        if os.path.exists(v):
+            ref, prompt_text = v, ""
+        elif os.path.exists(_FALLBACK_PROMPT_WAV):
+            ref, prompt_text = _FALLBACK_PROMPT_WAV, _FALLBACK_PROMPT_TEXT
+            print("[tts] voice '%s' 非内置且非路径，回退参考音频 %s（如需不同音色请传参考 wav 绝对路径）"
+                  % (v, ref), flush=True)
+        else:
+            raise RuntimeError("音色不存在：既不是内置音色，也不是参考音频路径，且无回退 prompt（%s）" % v)
+        chunks = list(model.inference_zero_shot(text, prompt_text, ref, stream=False, speed=spd))
     wav = _tensors_to_wav(chunks, getattr(model, "sample_rate", 22050))
     ms = int(round((len(wav) - 44) / 2.0 / float(getattr(model, "sample_rate", 22050)) * 1000))
     print("[tts] text=%d字 voice=%s speed=%.2f target=%.1f -> %.1fs in %.1fs"

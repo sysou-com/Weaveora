@@ -118,6 +118,40 @@
 - `worker_win.ps1` 已置 `WEAVEORA_MUSIC_ENGINE=comfy` / `WEAVEORA_MUSIC_CKPT_NAME=...` / `WEAVEORA_TTS_URL=http://127.0.0.1:8091`。
 - 冒烟脚本：`worker/test_music_comfy.py`（`TEST_DUR` / `TEST_SEED` / `TEST_PROMPT` 可调）。
 
-### 配音（voice）仍未部署
-CosyVoice2 依赖 `pynini` + `onnxruntime-gpu`（**仅 Linux 轮子**）→ 只能走 WSL2，见 `D:\audio\WSL_RESTORE.md`。
-当前状态：WSL 内核已装、Ubuntu 应用包已装，但**分发版未注册**（重启卡在这一步），TTS `:8091` 未起。
+### 配音（voice）已落地：WSL2 + CosyVoice2-0.5B（2026-09-11）
+
+CosyVoice 依赖 Linux 专属轮子 → 只能走 WSL2。落地细节：
+
+| 项 | 值 |
+| --- | --- |
+| 发行版 | Ubuntu 26.04.1 LTS；备用 rootfs tarball 在 `D:\wsl\ubuntu-24.04-wsl.rootfs.tar.gz` |
+| Python | `/opt/miniconda/envs/cosy/bin/python` = 3.10.21（CosyVoice 要求 3.10） |
+| 代码 | `/data/audio/CosyVoice`（ghfast 代理拉 zip；**submodule `third_party/Matcha-TTS` 必须单独拉**，zip 里是空目录） |
+| 权重 | `/data/audio/CosyVoice/pretrained_models/CosyVoice2-0.5B`（12 文件 / 3.8G，ModelScope `iic/CosyVoice2-0.5B`） |
+| 服务 | `tts_server.py :8091`；Windows worker 经 WSL2 localhost 转发直连 `http://127.0.0.1:8091` |
+| 常驻 | Windows 计划任务 `ComfyTTS` + `ComfyTTSHeartbeat` → `wsl_tts_win.ps1` → `wsl_run_tts.sh`（pidfile 锁 + 崩溃重拉） |
+
+**实测**：9 字文本 → 2.7s 语音 / 耗时 2.6s（热）；Windows worker 侧 `audio_client.tts()` 端到端 3.1s 拿 3.7s wav。
+
+**踩坑（全部已修）**
+1. **pip 在大轮子上卡死**：`nvidia-cudnn-cu12` 731MB 下载 0 B/s 且不触发超时；同一 URL 用 `curl -r` 实测 36MB/s。
+   → `wsl_predownload_wheels.sh` 用 curl 并行预下 12 个 nvidia/triton 轮子到 `/data/audio/wheels`（1.9G / 29s），pip 加 `--find-links`。
+2. **`openai-whisper==20231117` 构建失败**：其 `setup.py` 顶层 `import pkg_resources`，setuptools>=81 已移除；
+   `PIP_CONSTRAINT` 对 build isolation **不生效** → 先装 `setuptools<81`，再 `pip install --no-build-isolation`。
+3. **不需要 pynini**：新版 CosyVoice 文本正则化用 `wetext`（纯 Python），旧文档的 conda `pynini` 已过时。
+4. **`inference_zero_shot` 第 3 参是 wav 文件路径，不是张量**：内部 `frontend_*` → `load_wav` → `torchaudio.load`，
+   传张量报 `Invalid file: tensor([...])`。原 `tts_server.py` 传了 4 个位置参数（把张量喂给 `zero_shot_spk_id`），已修正。
+5. **`_tensors_to_wav` 实际收到 dict**：CosyVoice 的 tts 生成器 yield `{'tts_speech': tensor}` 而非裸张量，
+   原写法在 `np.clip` 报 `'>=' not supported between instances of 'dict' and 'float'`，已兼容两种。
+6. **CosyVoice2-0.5B 是 zero-shot 模型（无 spk2info）**：`inference_sft('中文女')` 必然 KeyError。
+   现在非路径音色统一回退到仓库自带 `asset/zero_shot_prompt.wav` 做 zero-shot。
+   ⚠️ 因此 **UI 里的 7 个音色预设目前音色相同**；要真正多音色需给 `voice` 传参考 wav 绝对路径
+   （或用 CosyVoice-300M-SFT 那类带内置 spk 的模型，见"待办"）。
+7. onnxruntime 的 CUDA EP 因 `libcublasLt.so.11` 缺失（本机是 CUDA 12 系 .so.12）退回 CPU —— 功能正常，只是那几个
+   ONNX（campplus / speech tokenizer）在 CPU 上跑。
+
+### 待办（P7 收尾）
+- [ ] UI 音色预设：换成真正的多音色（CosyVoice-300M-SFT 内置 spk，或给每个预设配一个参考 wav）
+- [ ] WSL `.wslconfig` 限内存（`[wsl2] memory=10GB`），避免与 ComfyUI 抢 RAM
+- [ ] 验收：Web → 视频项目 → 分镜填旁白 → 生成配音 → 资产库可播放 → 渲染成片听混音 → 导出包查 edit_list.json
+- [ ] `deploy/audio/README.md` 里的 `music_server.py` 路线已被 ComfyUI 路线取代，择机精简
