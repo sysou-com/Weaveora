@@ -12,6 +12,8 @@ export async function createJobs(
     kind: 'still' | 'clip' | 'voice' | 'bgm'
     count?: number
     frames?: number | null
+    /** true=试听任务（配音/配乐试听） */
+    preview?: boolean
   },
 ): Promise<JobRecord[]> {
   return request<JobRecord[]>(`/api/v1/projects/${projectId}/jobs`, {

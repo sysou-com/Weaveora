@@ -455,7 +455,7 @@ async function refreshThumbs(): Promise<void> {
 watch(() => [...refLibrary.value.map((a) => a.id)].join(','), () => { void refreshThumbs() }, { immediate: true })
 
 // ---------- W4 资产库 ----------
-const outputAssets = computed(() => (assets.data.value ?? []).filter((a) => ['still','clip','master','voice','bgm'].includes(a.kind)))
+const outputAssets = computed(() => (assets.data.value ?? []).filter((a) => ['still','clip','master','voice','bgm','voice_preview','bgm_preview'].includes(a.kind)))
 const galUrls = ref<Record<string, string>>({})
 async function refreshGallery(): Promise<void> {
   await Promise.all(outputAssets.value.map(async (a) => {
@@ -838,11 +838,11 @@ async function startVoice(): Promise<void> {
 
 /** P7.1 配音试听：为某镜（默认第一个有旁白的镜）创建一个 voice 任务，完成后本地播放 */
 const previewBusy = ref(false)
-const voicePreview = ref<{ url: string; label: string } | null>(null)
+const audioPreview = ref<{ url: string; label: string; kind: 'voice' | 'bgm' } | null>(null)
 
-function closeVoicePreview(): void {
-  if (voicePreview.value) URL.revokeObjectURL(voicePreview.value.url)
-  voicePreview.value = null
+function closeAudioPreview(): void {
+  if (audioPreview.value) URL.revokeObjectURL(audioPreview.value.url)
+  audioPreview.value = null
 }
 
 async function waitJobDone(jobId: string, timeoutMs: number): Promise<JobRecord> {
@@ -883,6 +883,7 @@ async function previewVoice(shotNo?: number): Promise<void> {
     const created = await createJobs(workspaceId.value, projectId.value, {
       revisionId: revId,
       kind: 'voice',
+      preview: true,
       ...(rec ? { shotId: rec.id } : {}),
     })
     const jobId = created[0]?.id
@@ -896,14 +897,49 @@ async function previewVoice(shotNo?: number): Promise<void> {
     if (!asset) throw new Error('未找到试听音频')
     const blob = await fetchAssetBlob(workspaceId.value, asset.id)
     if (!blob) throw new Error('试听音频读取失败')
-    closeVoicePreview()
-    voicePreview.value = {
+    closeAudioPreview()
+    audioPreview.value = {
       url: URL.createObjectURL(blob),
-      label: `第 ${target.shot_no} 镜 · 音色 ${(draft.value && isVideoPlan(draft.value) ? draft.value.audio.voice : '') || '中文女'}`,
+      kind: 'voice',
+      label: `配音 · 第 ${target.shot_no} 镜 · 音色 ${(draft.value && isVideoPlan(draft.value) ? draft.value.audio.voice : '') || '中文女'}`,
     }
     message.success('试听就绪')
   } catch (e) {
     message.error(e instanceof Error ? e.message : '试听失败')
+  } finally {
+    previewBusy.value = false
+  }
+}
+
+/** P7.2 配乐试听：按当前 music_mood 生成一条试听（换情绪后重生成） */
+async function previewBgm(): Promise<void> {
+  const revId = genRevisionId()
+  if (!revId) return
+  if (dirty.value && !(await handleSave())) return
+  previewBusy.value = true
+  try {
+    const created = await createJobs(workspaceId.value, projectId.value, {
+      revisionId: revId,
+      kind: 'bgm',
+      preview: true,
+    })
+    const jobId = created[0]?.id
+    if (!jobId) throw new Error('未创建试听任务')
+    const mood = draft.value && isVideoPlan(draft.value) ? draft.value.audio.music_mood : ''
+    message.info(`配乐生成中…（情绪：${mood || '默认'}；首次会加载模型）`)
+    const job = await waitJobDone(jobId, 600000)
+    if (job.state !== 'succeeded') throw new Error(job.errorMessage || `试听任务${job.state}`)
+    await queryClient.invalidateQueries({ queryKey: ['assets'] })
+    await queryClient.invalidateQueries({ queryKey: ['jobs'] })
+    const asset = (assets.data.value ?? []).find((a) => a.jobId === jobId)
+    if (!asset) throw new Error('未找到试听音频')
+    const blob = await fetchAssetBlob(workspaceId.value, asset.id)
+    if (!blob) throw new Error('试听音频读取失败')
+    closeAudioPreview()
+    audioPreview.value = { url: URL.createObjectURL(blob), kind: 'bgm', label: `配乐 · 情绪 ${mood || '默认'}` }
+    message.success('配乐试听就绪')
+  } catch (e) {
+    message.error(e instanceof Error ? e.message : '配乐试听失败')
   } finally {
     previewBusy.value = false
   }
@@ -1497,6 +1533,7 @@ const shotTotal = computed(() => {
                   @ai-prompt="openAiRewrite"
                   @ai-sync-all="aiSyncAll"
                   @preview-voice="previewVoice"
+                  @preview-bgm="previewBgm"
                 />
               </template>
             </section>
@@ -1526,10 +1563,10 @@ const shotTotal = computed(() => {
       </div>
 
       <!-- P7.1 配音试听播放条 -->
-      <div v-if="voicePreview" class="voice-preview" data-testid="voice-preview">
-        <span class="font-mono vp-label">试听 · {{ voicePreview.label }}</span>
-        <audio :src="voicePreview.url" class="vp-audio" controls autoplay preload="auto" />
-        <button type="button" class="op" @click="closeVoicePreview">关闭</button>
+      <div v-if="audioPreview" class="voice-preview" data-testid="audio-preview">
+        <span class="font-mono vp-label">{{ audioPreview.kind === 'bgm' ? '🎵' : '🎙' }} 试听 · {{ audioPreview.label }}</span>
+        <audio :src="audioPreview.url" class="vp-audio" controls autoplay preload="auto" />
+        <button type="button" class="op" @click="closeAudioPreview">关闭</button>
       </div>
 
       <!-- 任务区（W3）：确认后发起生成，展示状态/进度 -->
@@ -1591,7 +1628,7 @@ const shotTotal = computed(() => {
               <input type="checkbox" :checked="jobSel.includes(j.id)" @change="toggleJobSel(j.id)" />
             </label>
             <span v-else class="row-check" />
-            <span class="job-kind font-mono">[{{ KIND_LABEL[j.kind] ?? j.kind }}<template v-if="j.kind === 'still' || j.kind === 'clip' || j.kind === 'voice'"> · 第{{ j.payload?.shot_no ?? '—' }}镜</template><template v-if="j.payload?.frame_label"> · {{ j.payload.frame_label }}</template>]</span>
+            <span class="job-kind font-mono">[{{ KIND_LABEL[j.kind] ?? j.kind }}{{ j.payload?.preview ? '·试听' : '' }}<template v-if="j.kind === 'still' || j.kind === 'clip' || j.kind === 'voice'"> · 第{{ j.payload?.shot_no ?? '—' }}镜</template><template v-if="j.payload?.frame_label"> · {{ j.payload.frame_label }}</template>]</span>
             <span
               v-if="revOfJob(j)"
               :class="['job-rev', 'font-mono', { stale: revOfJob(j)?.stale }]"

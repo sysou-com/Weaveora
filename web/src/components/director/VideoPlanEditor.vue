@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { Film } from 'lucide-vue-next'
-import { NButton, NIcon, NInput, NInputNumber, NSwitch } from 'naive-ui'
+import { NButton, NIcon, NInput, NInputNumber, NSelect, NSwitch } from 'naive-ui'
 import { computed, watch } from 'vue'
 
 import ShotCard from '@/components/director/ShotCard.vue'
 import type { DirectorShot, ShotRecord, VideoPlan } from '@/api/types'
+import { moodOptions, voiceOptions } from '@/utils/audio'
 
 const props = defineProps<{
   plan: VideoPlan
@@ -17,7 +18,13 @@ const props = defineProps<{
   previewBusy?: boolean
 }>()
 
-const emit = defineEmits<{ approveShot: [shotNo: number]; aiPrompt: [shot: DirectorShot]; aiSyncAll: []; previewVoice: [shotNo?: number] }>()
+const emit = defineEmits<{
+  approveShot: [shotNo: number]
+  aiPrompt: [shot: DirectorShot]
+  aiSyncAll: []
+  previewVoice: [shotNo?: number]
+  previewBgm: []
+}>()
 
 const hasAction = computed(() =>
   (props.plan.shots ?? []).some((s) => (s.action ?? '').trim().length > 0))
@@ -54,12 +61,28 @@ const transitions = ['cut', 'dissolve', 'fade', 'wipe'].map((v) => ({ label: v, 
       </template>
       <template v-if="props.plan.audio">
         <label class="row">
-          <span class="key">BGM 情绪 music_mood</span>
-          <NInput v-model:value="props.plan.audio.music_mood" size="small" :disabled="disabled" />
+          <span class="key">BGM 情绪 music_mood（可直接输入自定义）</span>
+          <NSelect
+            v-model:value="props.plan.audio.music_mood"
+            :options="moodOptions"
+            size="small"
+            filterable
+            tag
+            :disabled="disabled"
+            placeholder="如：浪漫柔情 / 史诗磅礴"
+          />
         </label>
         <label class="row">
-          <span class="key">配音音色 voice（内置名或参考音频路径）</span>
-          <NInput v-model:value="props.plan.audio.voice" size="small" :disabled="disabled" placeholder="中文女" />
+          <span class="key">配音音色 voice（预设或参考音频路径）</span>
+          <NSelect
+            v-model:value="props.plan.audio.voice"
+            :options="voiceOptions"
+            size="small"
+            filterable
+            tag
+            :disabled="disabled"
+            placeholder="中文女"
+          />
         </label>
         <div class="zh-head">
           <NButton
@@ -70,9 +93,21 @@ const transitions = ['cut', 'dissolve', 'fade', 'wipe'].map((v) => ({ label: v, 
             data-testid="btn-preview-voice"
             @click="emit('previewVoice', undefined)"
           >
-            试听配音（第一个有旁白的镜头）
+            试听配音
           </NButton>
-          <span class="text-secondary" style="font-size: 12px">换音色：改上面的 voice 后再试听；首次合成需加载模型</span>
+          <NButton
+            size="small"
+            secondary
+            :loading="previewBusy"
+            :disabled="!!disabled"
+            data-testid="btn-preview-bgm"
+            @click="emit('previewBgm')"
+          >
+            试听配乐
+          </NButton>
+          <span class="text-secondary" style="font-size: 12px">
+            换音色/情绪后点对应试听即可重生成一条试听；正式生成在下方任务区（生成配音/生成配乐）
+          </span>
         </div>
       </template>
     </section>

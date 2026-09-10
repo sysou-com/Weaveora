@@ -369,6 +369,7 @@ public class JobService {
         if ("bgm".equals(req.kind())) {
             ObjectNode payload = mapper().createObjectNode();
             payload.put("kind", "bgm");
+            payload.put("preview", Boolean.TRUE.equals(req.preview()));
             payload.put("mode", plan.path("mode").asText("video"));
             payload.put("revisionId", req.revisionId().toString());
             payload.put("revision_no", revisionNo);
@@ -397,6 +398,7 @@ public class JobService {
             if (text.isBlank()) continue;   // 没有旁白的镜头跳过
             ObjectNode payload = mapper().createObjectNode();
             payload.put("kind", "voice");
+            payload.put("preview", Boolean.TRUE.equals(req.preview()));
             payload.put("mode", "video");
             payload.put("revisionId", req.revisionId().toString());
             payload.put("revision_no", revisionNo);
@@ -746,7 +748,12 @@ public class JobService {
         job.succeed();
         jobs.save(job);
         metrics.jobSucceeded();
-        String kind = "clip".equals(job.kind()) ? "clip" : "still";
+        String kind = List.of("clip", "still", "voice", "bgm").contains(job.kind()) ? job.kind() : "still";
+        // 试听产物单独 kind（voice_preview/bgm_preview），避免被正式渲染/导出选中
+        boolean previewJob = job.payload() != null && job.payload().path("preview").asBoolean(false);
+        if (previewJob && ("voice".equals(kind) || "bgm".equals(kind))) {
+            kind = kind + "_preview";
+        }
         Integer jobShotNo = job.shotId() == null ? null : planReader.shotNoOf(job.shotId());
         for (CompleteAsset a : items) {
             AssetResponse resp = toAssetResponse(assets.createOutput(

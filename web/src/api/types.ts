@@ -236,6 +236,7 @@ export interface JobRecord {
     tailKey?: string
     keyframeHistorical?: boolean
     keyframeHistoricalRevisionNo?: number
+    preview?: boolean
   } | null
 }
 

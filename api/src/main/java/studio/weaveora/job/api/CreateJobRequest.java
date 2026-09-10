@@ -8,6 +8,7 @@ public record CreateJobRequest(
         UUID shotId,          // 可选：视频单镜
         String kind,          // still | clip
         Integer count,        // 图片张数 1/2/4（默认 1）
-        Integer frames        // motion(clip) 帧数：系统范围 32–96
+        Integer frames,       // motion(clip) 帧数：系统范围 32–96
+        Boolean preview       // true=试听任务（配音/配乐试听），不参与正式成片
 ) {
 }
