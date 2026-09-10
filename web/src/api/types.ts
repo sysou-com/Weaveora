@@ -94,6 +94,15 @@ export interface DirectorShot {
   narration?: string
   zh?: string
   en_synced?: boolean
+  /** P2 运镜关键帧（穿越/从A到B看到C）：≥2 帧时生成按帧出图，motion 用首/尾帧 */
+  keyframes?: Array<{
+    label?: string
+    t?: number | string
+    shot_size?: string
+    camera_move?: string
+    composition?: string
+    positive_prompt: string
+  }> | null
 }
 
 export interface BasePlan {
@@ -206,6 +215,11 @@ export interface JobRecord {
     prompt_md5?: string
     positive_prompt?: string
     seed?: number
+    keyframe_index?: number
+    keyframe_count?: number
+    frame_label?: string
+    composition?: string
+    tailKey?: string
   } | null
 }
 

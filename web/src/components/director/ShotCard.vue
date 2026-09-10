@@ -46,6 +46,7 @@ const sizeOptions = [
         <span class="dot" :class="{ on: approved }" />
         SHOT {{ shot.shot_no }}
         <span class="dur">{{ Number(shot.duration_sec).toFixed(2) }}s</span>
+        <span v-if="shot.keyframes && shot.keyframes.length" class="dur kf-hint">运镜 {{ shot.keyframes.length }} 帧</span>
       </div>
       <NButton
         v-if="!disabled && !approved"
@@ -120,6 +121,39 @@ const sizeOptions = [
           :disabled="disabled"
         />
       </label>
+      <!-- P2 运镜关键帧：穿越型镜头逐帧生成（同 seed），motion 用首/尾帧 -->
+      <div v-if="shot.keyframes && shot.keyframes.length" class="field wide kf-block">
+        <span class="fl">运镜关键帧（{{ shot.keyframes.length }} 帧 · 生成时逐帧出图，motion 用首/尾帧）</span>
+        <div class="kf-list">
+          <div v-for="(kf, i) in shot.keyframes" :key="i" class="kf-row">
+            <div class="kf-head">
+              <span class="kf-no font-mono">#{{ i + 1 }}</span>
+              <input
+                v-model="kf.label"
+                class="text kf-label"
+                type="text"
+                placeholder="起始帧/结束帧"
+                :disabled="disabled"
+              />
+              <input
+                v-if="kf.shot_size !== undefined"
+                v-model="kf.shot_size"
+                class="text kf-size"
+                type="text"
+                placeholder="shot_size"
+                :disabled="disabled"
+              />
+            </div>
+            <NInput
+              v-model:value="kf.positive_prompt"
+              type="textarea"
+              :autosize="{ minRows: 2, maxRows: 5 }"
+              :disabled="disabled"
+            />
+            <p v-if="kf.composition" class="kf-comp">{{ kf.composition }}</p>
+          </div>
+        </div>
+      </div>
     </div>
   </article>
 </template>
@@ -267,5 +301,61 @@ const sizeOptions = [
 .select:disabled,
 .text:disabled {
   opacity: 0.6;
+}
+
+/* P2 运镜关键帧 */
+.kf-hint {
+  color: var(--wv-accent-text);
+}
+.kf-block {
+  border-top: 1px dashed var(--wv-line);
+  padding-top: 10px;
+}
+.kf-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.kf-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  background: var(--wv-surface-sunken);
+  border: 1px solid var(--wv-line);
+  border-radius: 8px;
+}
+.kf-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.kf-no {
+  font-size: 10px;
+  color: var(--wv-accent-text);
+  background: var(--wv-accent-soft);
+  border-radius: 5px;
+  padding: 2px 7px;
+  flex: none;
+}
+.kf-label {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.kf-size {
+  flex: 0 0 130px;
+  min-width: 0;
+}
+.kf-comp {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--wv-text-4);
+  font-family: var(--wv-font-mono);
+}
+@media (max-width: 760px) {
+  .kf-size {
+    flex-basis: 96px;
+  }
 }
 </style>

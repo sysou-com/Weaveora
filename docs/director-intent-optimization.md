@@ -43,10 +43,11 @@
 1. 复用现成 `director_rewrite_shot.md`：加端点 `POST /director/shots/{shotId}/rewrite`（输入：自由文本意见），DirectorService 组装 = 当前确认稿全量 JSON + 目标镜 shot_no + 意见 + 约束 → LLM 只回该镜新 JSON → 校验后落为**新 revision（版本号+1）并自动 approve**？否——按 §0-3 确认闸门，落新版本但仍需人工“确认方案”后一键生成（P0 已保证从此确认稿生成）。前端 ShotCard 加“让导演改这一镜”文本区+按钮。
 2. `generate` 增加可选 `notes`/`basedOnRevisionId`：重导时把“上一版 + 用户补充”作为上下文一起给 LLM，而不是只给原始 Brief（`DirectorService.buildUserPrompt` 扩展）。
 
-**P2 表达穿越/运镜 = 关键帧拆分（治 R3 主）+ 构图词规范化（0.5–1.5d）**
-1. 分镜 schema 允许 `keyframes: [{t, shot_size, camera_move?, composition, positive_prompt}]`：凡是“穿越 / 从A到B看到C”类运镜，导演输出 2 帧关键帧（起始帧=背影前/过肩；结束帧=女王脸），still 按帧生成、motion 用双关键帧（首帧+尾帧引导）而不是只给 1 张。
-2. 图片导演 System Prompt 增加**机位-构图原子字段**（image schema 的 camera 扩展：`viewpoint`= behind/from-front/over-shoulder/profile、`foreground`= 前景遮挡物、`subject_axis`= 人物相对机位朝向、`focus_subject`），强制 LLM 填写，正/负词模板化拼接；仍在分镜文案里则无效。
-3. 参考图默认仅作**形象/画风锚定**，当 Brief/改镜意见出现“机位/景别/透视”类词时，UI 提示参考图可能拉扯构图，建议临时去勾或换无构图参考。
+**P2 表达穿越/运镜 = 关键帧拆分（治 R3 主）+ 构图词规范化（0.5–1.5d）——🟡 MVP 已实施并上线（2026-09-10）**
+1. ✅ 分镜 schema 支持 `keyframes: [{label, t, shot_size, camera_move?, composition, positive_prompt}]`（2–4 帧）；导演 System Prompt 强制「穿越/从A到B看到C」类运镜输出起始帧+结束帧（带 composition 机位/遮挡描述）；校验器新增关键帧规则；**无 DB 迁移**（keyframes 存 `prompt_revisions.schema_json`）。
+2. ✅ 生成路径：still 按帧一任务（payload 带 `keyframe_index/frame_label/composition`，同 seed、额度按帧计）；motion 取 `keyframe_index=0` 为首帧并额外传 `tailKey`（末帧）——引擎支持后即双关键帧引导。任务行显示「· 起始帧/结束帧」。
+3. ✅ 前端：分镜卡展开可查看/编辑各关键帧 label/景别/prompt（列出 composition）；`normalizePlan` 修复为保留 `keyframes/narration/zh/en_synced` 扩展字段（原实现会在保存时剥离）；client planProblems 增加关键帧长度校验。
+4. ⏳ 后续：图片导演的机位原子字段（viewpoint/foreground/subject_axis/focus_subject）与参考图-机位冲突提示；worker 消费 `tailKey` 做真正双关键帧引导。
 
 **P3 让版本与取词过程可见可审计（0.5d）——✅ 2026-09-10 已实施并上线**
 1. `generation_jobs.payload` 在创建/重试重锚定时写入 `revision_no` 与 `prompt_md5`（对最终送引擎的正词取 MD5，含风格模板注入后文本）；`PlanReader.revisionNo()` 提供版本号查询。

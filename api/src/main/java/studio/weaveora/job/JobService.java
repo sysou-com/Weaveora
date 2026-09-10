@@ -215,53 +215,68 @@ public class JobService {
                 }
                 quota.checkClipSeconds(userId, secs);
             } else {
-                quota.checkStills(userId, shotIds.size());
+                // P2：运镜镜头可能有多关键帧 → 按帧数计额度
+                int stills = 0;
+                for (UUID sid : shotIds) {
+                    stills += keyframeCount(shotOf(plan, sid));
+                }
+                quota.checkStills(userId, stills);
             }
             for (UUID shotId : shotIds) {
                 JsonNode shot = shotOf(plan, shotId);
-                ObjectNode payload = mapper().createObjectNode();
-                payload.put("kind", req.kind());
-                payload.put("mode", "video");
-                payload.put("revisionId", req.revisionId().toString());
-                payload.put("shotId", shotId.toString());
-                payload.put("shot_no", shot.path("shot_no").asInt());
-                String pos = styledPositive(style, shot.path("positive_prompt").asText(""));
-                payload.put("positive_prompt", pos);
-                payload.put("negative_prompt", styledNegative(style, shot.path("negative_prompt").asText("")));
-                stampRevisionMeta(payload, revisionNo, pos);
-                payload.put("duration_sec", shot.path("duration_sec").asDouble(3));
-                payload.put("fps", plan.path("edit_plan").path("fps").asInt(30));
-                payload.put("seed", shot.path("seed").asLong(0) == 0 ? randomSeed() : shot.path("seed").asLong(0));
-                // 画面比例：生成尺寸跟随 16:9 / 9:16 等（motion 亦按关键帧尺寸）
-                String aspect = plan.path("aspect_ratio").asText(project.aspectRatio());
-                payload.put("aspect_ratio", aspect);
-                int[] dd = dimsFor(aspect);
-                payload.set("params", mapper().createObjectNode()
-                        .put("width", dd[0]).put("height", dd[1]));
-                // motion 帧数：可显式指定（范围校验），缺省由引擎按时长算
-                if ("clip".equals(req.kind()) && req.frames() != null) {
-                    int f = req.frames();
-                    if (f < motionFramesMin || f > motionFramesMax) {
-                        throw new BizException(ErrorCode.VALIDATION,
-                                "运动帧数须在 " + motionFramesMin + "–" + motionFramesMax + " 之间");
+                if (shot == null) continue;
+                long seed = shot.path("seed").asLong(0) == 0 ? randomSeed() : shot.path("seed").asLong(0);
+                List<JsonNode> frames = keyframesOf(shot);
+                if ("still".equals(req.kind()) && frames.size() > 1) {
+                    // P2 运镜关键帧：每帧一个 still 任务（同 seed 保镜头内连贯）
+                    for (int fi = 0; fi < frames.size(); fi++) {
+                        JsonNode kf = frames.get(fi);
+                        String raw = kf.path("positive_prompt").asText(shot.path("positive_prompt").asText(""));
+                        ObjectNode payload = videoShotPayload("still", plan, shot, req.revisionId(), shotId,
+                                revisionNo, raw, seed, project, style, refs);
+                        payload.put("keyframe_index", fi);
+                        payload.put("keyframe_count", frames.size());
+                        payload.put("frame_label", frameLabel(kf, fi, frames.size()));
+                        if (kf.hasNonNull("shot_size")) payload.put("shot_size", kf.path("shot_size").asText());
+                        if (kf.hasNonNull("camera_move")) payload.put("camera_move", kf.path("camera_move").asText());
+                        if (kf.hasNonNull("composition")) payload.put("composition", kf.path("composition").asText());
+                        created.add(createOne(workspaceId, projectId, req.revisionId(), shotId,
+                                PRESET_STILL, "still", payload, userId, engineRoute));
                     }
-                    payload.put("frames", f);
+                    continue;
                 }
+                ObjectNode payload = videoShotPayload(req.kind(), plan, shot, req.revisionId(), shotId,
+                        revisionNo, shot.path("positive_prompt").asText(""), seed, project, style, refs);
                 if ("clip".equals(req.kind())) {
+                    // motion 帧数：可显式指定（范围校验）
+                    if (req.frames() != null) {
+                        int f = req.frames();
+                        if (f < motionFramesMin || f > motionFramesMax) {
+                            throw new BizException(ErrorCode.VALIDATION,
+                                    "运动帧数须在 " + motionFramesMin + "–" + motionFramesMax + " 之间");
+                        }
+                        payload.put("frames", f);
+                    }
                     // W5 两段式闸门：motion 需要该镜已确认的关键帧（still 产物）作首帧
-                    List<studio.weaveora.asset.domain.Asset> kf =
+                    List<studio.weaveora.asset.domain.Asset> kfAssets =
                             assetRepo.findByShotIdAndWorkspaceIdAndKindOrderByCreatedAtDesc(shotId, workspaceId, "still");
-                    if (kf.isEmpty()) {
+                    if (kfAssets.isEmpty()) {
                         throw new BizException(ErrorCode.VALIDATION, "第 " + shot.path("shot_no").asInt()
                                 + " 镜尚无关键帧，请先生成 still（两段式 §11.3）");
                     }
-                    payload.put("keyframeKey", kf.get(0).storageKey());
+                    studio.weaveora.asset.domain.Asset first = pickKeyframeAsset(kfAssets, 0);
+                    payload.put("keyframeKey", first.storageKey());
+                    // P2：多关键帧镜头把末帧作为尾帧引导（引擎支持时生效）
+                    if (frames.size() > 1) {
+                        studio.weaveora.asset.domain.Asset last = pickKeyframeAsset(kfAssets, frames.size() - 1);
+                        if (last != null && !last.id().equals(first.id())) {
+                            payload.put("tailKey", last.storageKey());
+                        }
+                    }
                 }
-                attachRefs(payload, refs);
-                GenerationJob job = createOne(workspaceId, projectId, req.revisionId(), shotId,
+                created.add(createOne(workspaceId, projectId, req.revisionId(), shotId,
                         "clip".equals(req.kind()) ? PRESET_CLIP : PRESET_STILL, req.kind(), payload, userId,
-                        engineRoute);
-                created.add(job);
+                        engineRoute));
             }
         } else {
             if ("clip".equals(req.kind())) {
@@ -745,6 +760,70 @@ public class JobService {
             }
         }
         return null;
+    }
+
+    /** P2：该镜关键帧数（无 keyframes 或非法则按 1 张单帧）。 */
+    private static int keyframeCount(JsonNode shot) {
+        List<JsonNode> fs = keyframesOf(shot);
+        return fs.size() > 1 ? fs.size() : 1;
+    }
+
+    private static List<JsonNode> keyframesOf(JsonNode shot) {
+        List<JsonNode> out = new ArrayList<>();
+        if (shot == null) return out;
+        JsonNode kfs = shot.get("keyframes");
+        if (kfs != null && kfs.isArray()) {
+            for (JsonNode kf : kfs) {
+                if (kf != null && kf.isObject()) out.add(kf);
+            }
+        }
+        return out;
+    }
+
+    private static String frameLabel(JsonNode kf, int index, int total) {
+        String label = kf.path("label").asText("");
+        if (!label.isBlank()) return label;
+        if (index == 0) return "起始帧";
+        if (index == total - 1) return "结束帧";
+        return "第" + (index + 1) + "帧";
+    }
+
+    /** 视频镜头 payload 公共构造（含 P3 的 revision_no/prompt_md5；正词可传关键帧词）。 */
+    private ObjectNode videoShotPayload(String kind, JsonNode plan, JsonNode shot, UUID revisionId, UUID shotId,
+                                        int revisionNo, String positiveRaw, long seed, ProjectSnapshot project,
+                                        StyleTemplate style, RefCtx refs) {
+        ObjectNode payload = mapper().createObjectNode();
+        payload.put("kind", kind);
+        payload.put("mode", "video");
+        payload.put("revisionId", revisionId.toString());
+        payload.put("shotId", shotId.toString());
+        payload.put("shot_no", shot.path("shot_no").asInt());
+        String pos = styledPositive(style, positiveRaw);
+        payload.put("positive_prompt", pos);
+        payload.put("negative_prompt", styledNegative(style, shot.path("negative_prompt").asText("")));
+        stampRevisionMeta(payload, revisionNo, pos);
+        payload.put("duration_sec", shot.path("duration_sec").asDouble(3));
+        payload.put("fps", plan.path("edit_plan").path("fps").asInt(30));
+        payload.put("seed", seed);
+        String aspect = plan.path("aspect_ratio").asText(project.aspectRatio());
+        payload.put("aspect_ratio", aspect);
+        int[] dd = dimsFor(aspect);
+        payload.set("params", mapper().createObjectNode().put("width", dd[0]).put("height", dd[1]));
+        attachRefs(payload, refs);
+        return payload;
+    }
+
+    /** P2：按关键帧序号选 still 产物（job payload.keyframe_index 标记帧号；无标记时首帧取最新、末帧取最早）。 */
+    private studio.weaveora.asset.domain.Asset pickKeyframeAsset(
+            List<studio.weaveora.asset.domain.Asset> candidates, int index) {
+        for (studio.weaveora.asset.domain.Asset a : candidates) {
+            if (a.jobId() == null) continue;
+            GenerationJob j = jobs.findById(a.jobId()).orElse(null);
+            if (j != null && j.payload() != null && j.payload().path("keyframe_index").asInt(-1) == index) {
+                return a;
+            }
+        }
+        return index == 0 ? candidates.get(0) : candidates.get(candidates.size() - 1);
     }
 
     private WorkerNode node(UUID nodeId) {

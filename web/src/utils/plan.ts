@@ -1,4 +1,4 @@
-import type { DirectorPlan, ImagePlan, VideoPlan } from '@/api/types'
+import type { DirectorPlan, DirectorShot, ImagePlan, VideoPlan } from '@/api/types'
 
 /** §10.2 方案类型守卫与编辑辅助（key 与后端/LLM 的 snake_case 一致）。 */
 
@@ -31,7 +31,21 @@ export function normalizePlan(raw: DirectorPlan): DirectorPlan {
     v.shots = Array.isArray(v.shots) ? v.shots : []
     v.shots = v.shots.map((s) => {
       const sh = s as unknown as Record<string, unknown>
+      // P2 关键帧归一化（保留合法帧；非法丢弃）
+      const kfs = Array.isArray(sh.keyframes)
+        ? (sh.keyframes as unknown[])
+            .filter((k): k is Record<string, unknown> => !!k && typeof k === 'object')
+            .map((k) => ({
+              label: str(k.label),
+              ...(typeof k.t === 'number' || typeof k.t === 'string' ? { t: k.t } : {}),
+              ...(k.shot_size === undefined ? {} : { shot_size: str(k.shot_size) }),
+              ...(k.camera_move === undefined ? {} : { camera_move: str(k.camera_move) }),
+              composition: str(k.composition),
+              positive_prompt: str(k.positive_prompt),
+            }))
+        : []
       return {
+        ...sh, // 保留 narration/zh/en_synced 等扩展字段，避免保存时丢失（原实现会剥离）
         shot_no: num(sh.shot_no, 0),
         duration_sec: num(sh.duration_sec, 1),
         shot_size: str(sh.shot_size, 'wide'),
@@ -41,7 +55,8 @@ export function normalizePlan(raw: DirectorPlan): DirectorPlan {
         negative_prompt: str(sh.negative_prompt),
         seed_lock: typeof sh.seed_lock === 'boolean' ? sh.seed_lock : true,
         ref_shot_no: sh.ref_shot_no == null ? null : num(sh.ref_shot_no, null),
-      }
+        ...(kfs.length ? { keyframes: kfs } : {}),
+      } as unknown as DirectorShot
     })
     return v
   }
@@ -86,6 +101,14 @@ export function planProblems(p: DirectorPlan): string[] {
     shots.forEach((s, i) => {
       const pos = s.positive_prompt?.trim() ?? ''
       if (pos.length < 20 || pos.length > 1200) out.push(`第 ${i + 1} 镜正向词长度需 20–1200（当前 ${pos.length}）`)
+      const kfs = Array.isArray(s.keyframes) ? s.keyframes : []
+      if (kfs.length === 1) out.push(`第 ${i + 1} 镜关键帧至少需 2 帧（当前 1）`)
+      kfs.forEach((kf, j) => {
+        const kp = kf.positive_prompt?.trim() ?? ''
+        if (kp.length < 20 || kp.length > 1200) {
+          out.push(`第 ${i + 1} 镜关键帧 #${j + 1} 正向词长度需 20–1200（当前 ${kp.length}）`)
+        }
+      })
       if (!s.negative_prompt?.trim()) out.push(`第 ${i + 1} 镜缺少负向提示词`)
       sum += Number(s.duration_sec) || 0
     })

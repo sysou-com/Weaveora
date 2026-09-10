@@ -20,6 +20,7 @@ import {
   listRevisions,
   patchRevision,
   rewritePromptFromZh,
+  type RewriteResult,
 } from '@/api/director'
 import { createBrief, listBriefs } from '@/api/briefs'
 import { createJobs, listJobs, cancelJob, rerunJob, retryJobs, deleteJobs, JOB_STATE_LABEL } from '@/api/jobs'
@@ -27,7 +28,7 @@ import { shareProject } from '@/api/market'
 import { listAssets, uploadReference, fetchAssetBlob, deleteAssets } from '@/api/assets'
 import { createExport, fetchExportBlob, renderMaster, timecode } from '@/api/export'
 import { getProject, updateProjectDuration } from '@/api/projects'
-import type { DirectorPlan, DirectorShot, JobRecord, RewriteResult } from '@/api/types'
+import type { DirectorPlan, DirectorShot, JobRecord } from '@/api/types'
 import BriefComposer from '@/components/director/BriefComposer.vue'
 import ImagePlanEditor from '@/components/director/ImagePlanEditor.vue'
 import RevisionRail from '@/components/director/RevisionRail.vue'
@@ -800,10 +801,8 @@ async function handleSave(): Promise<boolean> {
   try {
     // 视频：镜头总长变化 → 先同步项目时长（patch 与 approve 按项目时长校验镜头总长）
     if (draft.value.mode === 'video') {
-      const total = (draft.value.shots ?? []).reduce(
-        (a, s) => a + (Number(s.duration_sec) || 0),
-        0,
-      )
+      const shots = (draft.value.shots ?? []) as DirectorShot[]
+      const total = shots.reduce((a, s) => a + (Number(s.duration_sec) || 0), 0)
       if (total >= 1) {
         await updateProjectDuration(workspaceId.value, projectId.value, Math.round(total * 100) / 100)
         void queryClient.invalidateQueries({ queryKey: ['project'] })
@@ -1116,7 +1115,7 @@ const shotTotal = computed(() => {
               <input type="checkbox" :checked="jobSel.includes(j.id)" @change="toggleJobSel(j.id)" />
             </label>
             <span v-else class="row-check" />
-            <span class="job-kind font-mono">[{{ j.kind === 'still' ? '关键帧' : '运动' }} · 第{{ j.payload?.shot_no ?? '—' }}镜]</span>
+            <span class="job-kind font-mono">[{{ j.kind === 'still' ? '关键帧' : '运动' }} · 第{{ j.payload?.shot_no ?? '—' }}镜<template v-if="j.payload?.frame_label"> · {{ j.payload.frame_label }}</template>]</span>
             <span
               v-if="revOfJob(j)"
               :class="['job-rev', 'font-mono', { stale: revOfJob(j)?.stale }]"

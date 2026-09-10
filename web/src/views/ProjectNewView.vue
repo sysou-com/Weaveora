@@ -13,7 +13,7 @@ import { ASPECT_OPTIONS, DEFAULT_VIDEO_DURATION, VIDEO_DURATIONS, aspectNote } f
 
 /** 每镜时长选项（视频项目按 总时长/每镜 分镜；null=导演自动） */
 const SHOT_DURATIONS = [
-  { label: '自动（导演定镜）', value: null as number | null },
+  { label: '自动（导演定镜）', value: '' },
   { label: '每镜 2 秒', value: 2 },
   { label: '每镜 3 秒', value: 3 },
   { label: '每镜 5 秒', value: 5 },
@@ -30,7 +30,7 @@ const title = ref('')
 const mode = ref<ProjectMode>('image')
 const aspectRatio = ref('16:9')
 const durationSec = ref<number | null>(DEFAULT_VIDEO_DURATION)
-const shotDurationSec = ref<number | null>(null)
+const shotDurationSec = ref<number | ''>('')
 const styleTemplateId = ref<string | null>(null)
 
 const workspaceId = computed(() => auth.activeWorkspaceId ?? '')
@@ -92,7 +92,7 @@ const mutation = useMutation({
       mode: mode.value,
       aspectRatio: aspectRatio.value,
       durationSec: mode.value === 'video' ? durationSec.value : null,
-      shotDurationSec: mode.value === 'video' ? shotDurationSec.value : null,
+      shotDurationSec: mode.value === 'video' && shotDurationSec.value !== '' ? Number(shotDurationSec.value) : null,
       styleTemplateId: styleTemplateId.value ? styleTemplateId.value : null,
     }),
   onSuccess: (project) => {

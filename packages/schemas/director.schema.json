@@ -69,7 +69,25 @@
           "positive_prompt": { "type": "string", "minLength": 20, "maxLength": 1200 },
           "negative_prompt": { "type": "string" },
           "seed_lock": { "type": "boolean", "default": true },
-          "ref_shot_no": { "type": ["integer", "null"] }
+          "ref_shot_no": { "type": ["integer", "null"] },
+          "keyframes": {
+            "type": "array",
+            "description": "运镜关键帧（穿越/从A穿过看到B 类镜头）：2–4 帧；缺省则单帧（positive_prompt 即唯一帧）",
+            "minItems": 2,
+            "maxItems": 4,
+            "items": {
+              "type": "object",
+              "required": ["positive_prompt"],
+              "properties": {
+                "label": { "type": "string", "description": "起始帧 / 中段 / 结束帧" },
+                "t": { "type": ["number", "string"], "description": "该帧在镜内的时间点或语义标签" },
+                "shot_size": { "type": "string" },
+                "camera_move": { "type": "string" },
+                "composition": { "type": "string", "description": "机位/遮挡/前景关系（如 behind monk, over-the-shoulder）" },
+                "positive_prompt": { "type": "string", "minLength": 20, "maxLength": 1200 }
+              }
+            }
+          }
         }
       }
     },

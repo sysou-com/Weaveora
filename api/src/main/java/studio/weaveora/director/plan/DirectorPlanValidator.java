@@ -131,6 +131,30 @@ public final class DirectorPlanValidator {
             if (isBlank(text(shot, "negative_prompt"))) {
                 problems.add("shots[" + i + "] 缺少 negative_prompt");
             }
+            // P2：可选关键帧序列（穿越/运镜型镜头）——2–4 帧，每帧正词 20–1200
+            JsonNode kfs = shot.get("keyframes");
+            if (kfs != null && !kfs.isNull()) {
+                if (!kfs.isArray() || kfs.isEmpty()) {
+                    problems.add("shots[" + i + "].keyframes 必须为非空数组");
+                } else if (kfs.size() < 2 || kfs.size() > 4) {
+                    problems.add("shots[" + i + "].keyframes 帧数 " + kfs.size() + " 越界（2–4）");
+                } else {
+                    for (int j = 0; j < kfs.size(); j++) {
+                        JsonNode kf = kfs.get(j);
+                        if (kf == null || !kf.isObject()) {
+                            problems.add("shots[" + i + "].keyframes[" + j + "] 不是对象");
+                            continue;
+                        }
+                        String kp = text(kf, "positive_prompt");
+                        if (isBlank(kp)) {
+                            problems.add("shots[" + i + "].keyframes[" + j + "] 缺少 positive_prompt");
+                        } else if (kp.length() < SHOT_POSITIVE_MIN || kp.length() > SHOT_POSITIVE_MAX) {
+                            problems.add("shots[" + i + "].keyframes[" + j + "].positive_prompt 长度 "
+                                    + kp.length() + " 越界（" + SHOT_POSITIVE_MIN + "–" + SHOT_POSITIVE_MAX + "）");
+                        }
+                    }
+                }
+            }
         }
         if (planDuration != null && diff(sum, planDuration).compareTo(new BigDecimal("0.5")) > 0) {
             problems.add("镜头时长总和(" + sum + ")≠duration_sec(" + planDuration + ")，偏差 >0.5s");
