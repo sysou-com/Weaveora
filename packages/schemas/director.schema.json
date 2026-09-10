@@ -17,7 +17,12 @@
       "properties": {
         "focal_mm": { "type": "number" },
         "shot_size": { "type": "string", "enum": ["extreme-wide", "wide", "medium", "close-up", "extreme-close-up"] },
-        "angle": { "type": "string" }
+        "angle": { "type": "string" },
+        "viewpoint": { "type": "string", "description": "机位与主体关系：behind | from-front | over-shoulder | profile | three-quarter | top-down" },
+        "foreground": { "type": "string", "description": "前景遮挡（如 the monk's back fills the foreground, softly blurred）" },
+        "subject_axis": { "type": "string", "description": "主体朝向（如 the queen faces the camera / the monk's back to camera）" },
+        "focus_subject": { "type": "string", "description": "对焦主体（如 the queen's face）" },
+        "composition": { "type": "string", "description": "构图一句话（层次/遮挡/视线轴）" }
       }
     },
     "lighting": { "type": "string" },

@@ -97,6 +97,37 @@ const sizeOptions = ['extreme-wide', 'wide', 'medium', 'close-up', 'extreme-clos
           </select>
         </label>
       </div>
+      <!-- P2 机位原子字段：写明视角/遮挡/朝向/对焦，防“背影穿过看脸”类机位丢失 -->
+      <div class="grid2">
+        <label class="row">
+          <span class="key">视角 viewpoint</span>
+          <select v-model="props.plan.camera.viewpoint" class="select" :disabled="disabled">
+            <option value="">（未指定）</option>
+            <option value="behind">behind（在主体背后）</option>
+            <option value="from-front">from-front（正面）</option>
+            <option value="over-shoulder">over-shoulder（过肩）</option>
+            <option value="profile">profile（侧面）</option>
+            <option value="three-quarter">three-quarter（三四分）</option>
+            <option value="top-down">top-down（俯视）</option>
+          </select>
+        </label>
+        <label class="row">
+          <span class="key">对焦主体 focus_subject</span>
+          <NInput v-model:value="props.plan.camera.focus_subject" size="small" placeholder="the queen's face" :disabled="disabled" />
+        </label>
+        <label class="row">
+          <span class="key">前景遮挡 foreground</span>
+          <NInput v-model:value="props.plan.camera.foreground" size="small" placeholder="the monk's back fills the foreground, blurred" :disabled="disabled" />
+        </label>
+        <label class="row">
+          <span class="key">主体朝向 subject_axis</span>
+          <NInput v-model:value="props.plan.camera.subject_axis" size="small" placeholder="monk back to camera; queen faces camera" :disabled="disabled" />
+        </label>
+        <label class="row span2">
+          <span class="key">构图 composition</span>
+          <NInput v-model:value="props.plan.camera.composition" size="small" placeholder="over-the-shoulder framing past the monk toward the queen" :disabled="disabled" />
+        </label>
+      </div>
     </section>
   </div>
 </template>
@@ -132,6 +163,20 @@ const sizeOptions = ['extreme-wide', 'wide', 'medium', 'close-up', 'extreme-clos
   display: grid;
   grid-template-columns: repeat(3, 1fr);
   gap: 10px;
+}
+.grid2 {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 10px;
+}
+.grid2 .span2 {
+  grid-column: 1 / -1;
+}
+@media (max-width: 760px) {
+  .grid2 {
+    grid-template-columns: 1fr;
+  }
 }
 .select {
   background: var(--wv-surface-sunken);

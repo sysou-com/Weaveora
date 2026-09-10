@@ -65,6 +65,7 @@ export function normalizePlan(raw: DirectorPlan): DirectorPlan {
   img.positive_prompt = str(img.positive_prompt)
   img.negative_prompt = str(img.negative_prompt)
   img.camera = {
+    ...((img.camera as unknown as Record<string, unknown>) ?? {}),
     focal_mm: num((img.camera as Record<string, unknown> | undefined)?.focal_mm, 35),
     shot_size: str((img.camera as Record<string, unknown> | undefined)?.shot_size, 'wide'),
     angle: str((img.camera as Record<string, unknown> | undefined)?.angle, 'low'),

@@ -24,6 +24,18 @@ API = "https://api.replicate.com/v1"
 DELAY_MS = int(os.environ.get("WEAVEORA_CLOUD_DELAY_MS", "1500"))
 RETRIES = int(os.environ.get("WEAVEORA_CLOUD_RETRIES", "4"))
 
+# ---- §11.6 云 API 测试口径（2026-09-10 用户锁定）：仅 replicate.com；出图/视频固定测试模型 ----
+# 出图：SD 固定版本（width/height 需 64 倍数）
+DEFAULT_IMAGE_MODEL = os.environ.get(
+    "WEAVEORA_REPLICATE_IMAGE_MODEL",
+    "stability-ai/stable-diffusion:ac732df83cea7fff18b8472768c88ad041fa750ff7682a21affe81863cbe77e4")
+# 视频：prunaai/p-video，强制 draft=ON，分辨率 ≤720p
+DEFAULT_VIDEO_MODEL = os.environ.get("WEAVEORA_REPLICATE_VIDEO_MODEL", "prunaai/p-video")
+VIDEO_DRAFT = os.environ.get("WEAVEORA_REPLICATE_VIDEO_DRAFT", "1").lower() not in ("0", "false", "no")
+VIDEO_RESOLUTION = os.environ.get("WEAVEORA_REPLICATE_VIDEO_RESOLUTION", "720p")
+# 尾帧引导参数名（payload.tailKey）：p-video 无末帧参数，留空即忽略；Wan 系可设如 last_frame_image
+VIDEO_LAST_FRAME_PARAM = os.environ.get("WEAVEORA_VIDEO_LAST_FRAME_PARAM", "").strip()
+
 TRANSIENT = {429, 500, 502, 503, 504}
 
 
@@ -144,10 +156,13 @@ def generate_still(payload, progress_fn=None):
 # ---------- 云图片（Replicate 通道：模型如 black-forest-labs/flux-2-pro） ----------
 
 def replicate_image(payload, token, model, progress_fn=None):
-    """Replicate 通用 txt2img（model=owner/name 或 owner/name:version）。返回 [(bytes,'image/png',w,h,None)]。"""
+    """Replicate 通用 txt2img（model=owner/name 或 owner/name:version）。返回 [(bytes,'image/png',w,h,None)]。
+
+    §11.6：model 为空时用测试固定版本 stability-ai/stable-diffusion:ac732df8…；
+    SD 系需 width/height 为 64 倍数，并支持 steps/cfg → num_inference_steps/guidance_scale。"""
     if not token:
         raise CloudError("图片云未配置 API Key（Replicate）")
-    model = model or ""
+    model = model or DEFAULT_IMAGE_MODEL
     positive = payload.get("positive_prompt", "")
     params = payload.get("params") or {}
     inp = {"prompt": positive}
@@ -163,9 +178,18 @@ def replicate_image(payload, token, model, progress_fn=None):
         print("[cloud-image] ref attached model=%s url=%s" % (model, ref_url[:70]), flush=True)
     ar = payload.get("aspect_ratio")
     if (model or "").lower().startswith("stability-ai/") or "sdxl" in (model or "").lower():
-        # SDXL 类按 width/height 出图（aspect_ratio 不生效）
-        inp["width"] = int(params.get("width") or 1024)
-        inp["height"] = int(params.get("height") or 1024)
+        # SD 系按 width/height 出图（aspect_ratio 不生效；尺寸必须为 64 倍数）
+        inp["width"] = _round64(params.get("width") or 1024)
+        inp["height"] = _round64(params.get("height") or 1024)
+        inp["num_outputs"] = 1
+        steps = int(params.get("steps") or 30)
+        inp["num_inference_steps"] = max(10, min(100, steps))
+        cfg = params.get("cfg")
+        if isinstance(cfg, (int, float)):
+            inp["guidance_scale"] = float(cfg)
+        neg = payload.get("negative_prompt") or ""
+        if neg:
+            inp["negative_prompt"] = neg
     elif ar in ("16:9", "9:16", "1:1", "3:2", "2:3"):
         inp["aspect_ratio"] = ar
     body_in = {"input": inp}
@@ -272,16 +296,27 @@ def _upload_file(token, filename, data, ctype="image/png"):
     raise CloudError("replicate 文件上传失败: %s" % last)
 
 
+def _round64(v):
+    try:
+        n = int(v)
+    except (TypeError, ValueError):
+        n = 1024
+    return max(64, int(round(n / 64.0)) * 64)
+
+
 def _video_input(model, positive, image_url):
     ml = (model or "").lower()
     if "minimax" in ml:
         return {"prompt": positive}          # minimax/video-01 文生视频
-    return {"prompt": positive, "image": image_url}  # kling/其它 图生视频（默认）
+    return {"prompt": positive, "image": image_url}  # 图生视频（默认）
 
 
 def generate_motion_via_replicate(payload, token, model, progress_fn=None):
-    """云视频：参考帧上传 → 模型预测 → 轮询 → 下载 mp4。返回 [(bytes,'video/mp4',w,h,None)]。"""
-    model = model or "minimax/video-01"
+    """云视频：参考帧上传 → 模型预测 → 轮询 → 下载 mp4。返回 [(bytes,'video/mp4',w,h,None)]。
+
+    §11.6 测试口径：model 为空 → prunaai/p-video，强制 draft=ON、resolution ≤720p；
+    payload.tailKey 在配置 WEAVEORA_VIDEO_LAST_FRAME_PARAM 时作为末帧上传（p-video 无此参数则忽略）。"""
+    model = model or DEFAULT_VIDEO_MODEL
     if progress_fn:
         progress_fn(15, "cloud_upload")
     key = payload.get("keyframeKey")
@@ -296,7 +331,21 @@ def generate_motion_via_replicate(payload, token, model, progress_fn=None):
     positive = payload.get("positive_prompt", "")
     inp = _video_input(model, positive, img_url)
     ml = (model or "").lower()
-    if "minimax" not in ml and "wan" not in ml:
+    if "p-video" in ml:
+        # 测试档硬约束：draft ON + 分辨率 ≤720p
+        inp["draft"] = bool(VIDEO_DRAFT)
+        inp["resolution"] = VIDEO_RESOLUTION
+        inp["fps"] = 24
+        try:
+            dur = int(round(float(payload.get("duration_sec") or 5)))
+        except (TypeError, ValueError):
+            dur = 5
+        inp["duration"] = max(1, min(20, dur))
+        inp["prompt_upsample"] = False
+        ar = payload.get("aspect_ratio")
+        if ar in ("16:9", "9:16", "1:1", "3:2", "2:3"):
+            inp["aspect_ratio"] = ar
+    elif "minimax" not in ml and "wan" not in ml:
         # kling 等图生视频：画幅与负面词可选注入（wan 系不支持 aspect_ratio，随参考图比例）
         ar = payload.get("aspect_ratio")
         if ar in ("16:9", "9:16", "1:1", "3:2", "2:3"):
@@ -304,6 +353,19 @@ def generate_motion_via_replicate(payload, token, model, progress_fn=None):
         neg = payload.get("negative_prompt") or ""
         if neg:
             inp["negative_prompt"] = neg
+    # P2 尾帧引导（双关键帧）：按模型参数名可选注入
+    tail = payload.get("tailKey")
+    if tail and VIDEO_LAST_FRAME_PARAM:
+        try:
+            tdata = _fetch_asset(tail)
+            turl = _upload_file(token, tail.split("/")[-1] or "tail.png", tdata)
+            inp[VIDEO_LAST_FRAME_PARAM] = turl
+            print("[cloud-video] last frame attached param=%s" % VIDEO_LAST_FRAME_PARAM, flush=True)
+        except Exception as e:
+            print("[cloud-video] tailKey 上传失败，忽略: %s" % e, flush=True)
+    elif tail:
+        print("[cloud-video] 模型 %s 无末帧参数（tailKey 忽略；如需可设 WEAVEORA_VIDEO_LAST_FRAME_PARAM）"
+              % model, flush=True)
     # owner/name 或 owner/name:version
     body_in = {"input": inp}
     if ":" in model:

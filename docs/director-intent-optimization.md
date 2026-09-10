@@ -47,7 +47,10 @@
 1. ✅ 分镜 schema 支持 `keyframes: [{label, t, shot_size, camera_move?, composition, positive_prompt}]`（2–4 帧）；导演 System Prompt 强制「穿越/从A到B看到C」类运镜输出起始帧+结束帧（带 composition 机位/遮挡描述）；校验器新增关键帧规则；**无 DB 迁移**（keyframes 存 `prompt_revisions.schema_json`）。
 2. ✅ 生成路径：still 按帧一任务（payload 带 `keyframe_index/frame_label/composition`，同 seed、额度按帧计）；motion 取 `keyframe_index=0` 为首帧并额外传 `tailKey`（末帧）——引擎支持后即双关键帧引导。任务行显示「· 起始帧/结束帧」。
 3. ✅ 前端：分镜卡展开可查看/编辑各关键帧 label/景别/prompt（列出 composition）；`normalizePlan` 修复为保留 `keyframes/narration/zh/en_synced` 扩展字段（原实现会在保存时剥离）；client planProblems 增加关键帧长度校验。
-4. ⏳ 后续：图片导演的机位原子字段（viewpoint/foreground/subject_axis/focus_subject）与参考图-机位冲突提示；worker 消费 `tailKey` 做真正双关键帧引导。
+4. ✅ 图片导演机位原子字段：image schema `camera` 增 `viewpoint/foreground/subject_axis/focus_subject/composition`（含 enum 说明）；导演 System Prompt 强制填写并写进 positive_prompt；编辑器可查看/修改；`normalizePlan` 保留扩展字段。
+5. ✅ 参考图-机位冲突提示：分镜/Brief 文本命中「背影/过肩/机位/穿过」且已选参考图时，参考图面板提示「参考图可能拉回构图，建议临时取消勾选」。
+6. ✅ worker 消费 `tailKey`：`cloud_client.generate_motion_via_replicate` 在 `WEAVEORA_VIDEO_LAST_FRAME_PARAM` 配置时把末帧作为该参数上传；**p-video 无末帧参数，默认忽略并打日志**（未来 Wan 系/支持末帧的模型可直接开）。
+7. ✅ 云 API 测试口径写入 `Weaveora.md` §11.6 + §30 #27：仅 replicate.com；出图固定 `stability-ai/stable-diffusion:ac732df8…`；视频 `prunaai/p-video` 且 draft=ON、≤720p（worker 默认值已按此实现，可用 env 覆盖）。
 
 **P3 让版本与取词过程可见可审计（0.5d）——✅ 2026-09-10 已实施并上线**
 1. `generation_jobs.payload` 在创建/重试重锚定时写入 `revision_no` 与 `prompt_md5`（对最终送引擎的正词取 MD5，含风格模板注入后文本）；`PlanReader.revisionNo()` 提供版本号查询。

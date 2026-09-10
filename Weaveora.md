@@ -700,6 +700,13 @@ Job 派发：API 按 **Job.workspace_id → 该工作区可用节点** 派发；
 | 16:9 | 1344×768 | 1920×1080（生成可用 1280×720） |
 | 9:16 | 768×1344 | 1080×1920（生成可用 720×1280） |
 
+### 11.6 云 API 测试口径（2026-09-10 锁定，用户裁定）
+
+- **云 API 仅用于测试/验证时，只走 `replicate.com` 官方接口**（不自建网关、不接其它云商）；密钥只放 worker 环境变量，不进仓库/前端。
+- **出图测试模型**：`stability-ai/stable-diffusion:ac732df83cea7fff18b8472768c88ad041fa750ff7682a21affe81863cbe77e4`（SD 兼容档；`width`/`height` 须为 64 的倍数；输入字段 `prompt` / `negative_prompt` / `width` / `height` / `num_outputs` / `num_inference_steps` / `guidance_scale`）。
+- **视频测试模型**：`prunaai/p-video`，**必须 draft mode = ON（`draft: true`）**，**分辨率不得超过 720p（`resolution: "720p"`）**；输入按官方 schema（`prompt` / `image`(首帧) / `draft` / `resolution` / `fps` / `duration` / `aspect_ratio`）。
+- 该口径仅用于开发验证与 QA，**不代表生产模型矩阵**：生产仍按 §11.2 的 Model Preset 中立路由（§30 #26）。
+
 ---
 
 ## 12. 剪映 / CapCut 导出（v2.0：降为兼容可选项，非主卖点）
@@ -1834,6 +1841,7 @@ GPU/轨 1 未到位时用 stub 保持接口；轨 1 GPU 到位切 `WEAVEORA_WORK
 | 24 | 定位与卖点（v1.8 + v2.0） | **电影感 = 长期定位，MVP 验收可量化**：15s 内成片、2-4 镜拼接、单镜 ≤10s、主体跨镜一致、720-1080p「可商用中高质」。**主卖点（v2.0）= 批量一致素材工作流 + 资产/风格复用 + 可私有化 + 引擎中立（多模型路由，反字节/平台锁定）**；**剪映导出降为兼容可选项（字节剪映+即梦已原生打通）**。客群 = 两种降门槛入口（§22）。MVP 收窄：轨 2 安装包 / admin 完整集 / 观测面板移出主线 | v1.8 裁定 + v2.0 卖点修订 |
 | 25 | 视频物理上限与长成片路径 | 单次生成硬上限随版本放宽、**从 Model Preset 读当前值**（本地 Wan 2.6 ~15s；云端 Veo3.1 4/6/8s、Kling 3.0 / Seedance 2.5 / Wan 3.0 ~15-30s）；**长成片 = 分段 + 尾帧衔接 + 剪辑拼接**，由产品封装；本地 4090 = 成本档单镜素材生成器 | v1.8 + v1.9/v2.0 修订 |
 | 26 | 模型矩阵中立化与云 API 后置（v2.0） | **引擎矩阵跨国内外多引擎，不锁单一家**（§11.2 候选表：出图 FLUX 系默认 / 视频本地 Wan2.6 成本档 / 视频云 Runway·Kling·Veo·Seedance·Wan3.0 高阶档，实现期在 Model Preset 维护当前最优）；**Sora 2 禁选（已关停）**；**云 API 适配器在租用 GPU 服务器方案之后实现，服务高阶用户质量档**；试用验证期用 §11.2 矩阵跑样片定标 | v2.0 裁定（用户确认） |
+| 27 | 云 API 测试口径（2026-09-10） | 云 API **测试**只走 **replicate.com**；出图固定 `stability-ai/stable-diffusion:ac732df83cea7fff18b8472768c88ad041fa750ff7682a21affe81863cbe77e4`；视频固定 `prunaai/p-video` 且 **draft=ON、分辨率 ≤720p**；该口径仅测试档，生产按 §11.2/§30 #26 中立路由 | 用户裁定（§11.6） |
 
 补充裁定（随 4、5 条一起锁死；v2.0 更新）：
 

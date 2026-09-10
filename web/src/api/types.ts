@@ -116,7 +116,17 @@ export interface ImagePlan extends BasePlan {
   prompt_zh: string
   positive_prompt: string
   negative_prompt: string
-  camera: { focal_mm: number; shot_size: string; angle: string }
+  camera: {
+    focal_mm: number
+    shot_size: string
+    angle: string
+    /** P2 机位原子字段（可选，导演输出后写入 prompt） */
+    viewpoint?: string
+    foreground?: string
+    subject_axis?: string
+    focus_subject?: string
+    composition?: string
+  }
   lighting: string
   palette: string[]
   params: { width: number; height: number; steps: number; cfg: number; sampler: string; seed: number | null }

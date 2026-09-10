@@ -202,6 +202,24 @@ const assets = useQuery({
 })
 const refAssets = computed(() => (assets.data.value ?? []).filter((a) => a.kind === 'reference'))
 const refSelected = ref<string[]>([])
+
+/** P2：检测「机位/背影/过肩」类构图诉求 + 已选参考图 → 提示参考图可能拉走构图 */
+const CAMERA_INTENT_RE = /(背影|背后|背面|过肩|机位|视角|俯视|仰视|穿过|透过|透视|behind|over[- ]the[- ]shoulder|from behind)/i
+const cameraIntentWithRefs = computed(() => {
+  if (!refSelected.value.length || !draft.value) return false
+  let text = ''
+  if (draft.value.mode === 'image') {
+    const p = draft.value as ImagePlan
+    text = `${p.positive_prompt ?? ''} ${p.prompt_zh ?? ''}`
+  } else {
+    const v = draft.value as VideoPlan
+    for (const s of v.shots ?? []) {
+      text += ` ${s.action ?? ''} ${s.positive_prompt ?? ''}`
+      for (const kf of s.keyframes ?? []) text += ` ${kf.composition ?? ''} ${kf.positive_prompt ?? ''}`
+    }
+  }
+  return CAMERA_INTENT_RE.test(text)
+})
 const uploadingRef = ref(false)
 const thumbUrls = ref<Record<string, string>>({})
 
@@ -995,6 +1013,9 @@ const shotTotal = computed(() => {
               上传参考图（png/jpg/webp ≤4 张）做一致性锚定；选中的图会随下次 Brief 一并交给导演层。
             </p>
             <p v-if="refSelected.length" class="ref-count font-mono">{{ refSelected.length }}/4 已选</p>
+            <p v-if="cameraIntentWithRefs" class="ref-conflict">
+              检测到「背影/过肩/机位」类构图诉求：参考图可能把构图拉回参考视角。建议先取消勾选参考图（仅需形象/画风锚定时再选），或把机位写进「视角/前景/主体朝向」字段。
+            </p>
           </div>
         </aside>
 
@@ -1695,6 +1716,16 @@ const shotTotal = computed(() => {
 .ref-empty { color: var(--wv-text-4); display:flex; align-items:center; justify-content:center; height:100%; font-size: 12px; }
 .ref-hint { margin: 0; font-size: 11.5px; line-height: 1.7; }
 .ref-count { margin: 0; font-size: 10px; color: var(--wv-accent-text); letter-spacing: .12em; }
+.ref-conflict {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.7;
+  color: var(--wv-danger);
+  background: color-mix(in srgb, var(--wv-danger) 9%, var(--wv-surface));
+  border: 1px solid color-mix(in srgb, var(--wv-danger) 40%, var(--wv-line));
+  border-radius: 8px;
+  padding: 7px 9px;
+}
 
 /* ---------- W3 任务区 ---------- */
 .jobs-panel {
