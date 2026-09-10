@@ -196,8 +196,7 @@ public class JobService {
         if (project.styleTemplateId() != null) {
             style = styleRepo.findById(project.styleTemplateId()).orElse(null);
         }
-        // W4 一致性锚定：把项目 approved 方案的参考图(storage key)带给引擎
-        RefCtx refs = loadRefs(userId, workspaceId, projectId, req.revisionId());
+        // W4 一致性锚定：逐镜解析（方案内标注主体的参考图优先，见 resolveRefs）
         // 引擎路由（用户设置）：本批次按 kind 决定 gpu|cloud
         String engineRoute = engineSettings.resolveEngine(userId, req.kind());
 
@@ -225,6 +224,7 @@ public class JobService {
             for (UUID shotId : shotIds) {
                 JsonNode shot = shotOf(plan, shotId);
                 if (shot == null) continue;
+                RefCtx refs = resolveRefs(plan, shot, userId, workspaceId, projectId, req.revisionId());
                 long seed = shot.path("seed").asLong(0) == 0 ? randomSeed() : shot.path("seed").asLong(0);
                 List<JsonNode> frames = keyframesOf(shot);
                 if ("still".equals(req.kind()) && frames.size() > 1) {
@@ -287,12 +287,14 @@ public class JobService {
                 throw new BizException(ErrorCode.VALIDATION, "图片张数须为 1/2/4（§7.5）");
             }
             quota.checkStills(userId, count);
+            RefCtx refs = resolveRefs(plan, null, userId, workspaceId, projectId, req.revisionId());
             for (int i = 0; i < count; i++) {
                 ObjectNode payload = mapper().createObjectNode();
                 payload.put("kind", "still");
                 payload.put("mode", "image");
                 payload.put("revisionId", req.revisionId().toString());
                 String pos = styledPositive(style, plan.path("positive_prompt").asText(""));
+                if (!refs.anchor().isBlank()) pos = pos + refs.anchor();
                 payload.put("positive_prompt", pos);
                 payload.put("negative_prompt", styledNegative(style, plan.path("negative_prompt").asText("")));
                 stampRevisionMeta(payload, revisionNo, pos);
@@ -372,7 +374,7 @@ public class JobService {
             if (!List.of("failed", "cancelled").contains(old.state())) {
                 throw new BizException(ErrorCode.VALIDATION, "仅失败/已取消的任务可重试");
             }
-            Retarget t = repointToCurrentApproved(old, project);
+            Retarget t = repointToCurrentApproved(old, project, userId);
             GenerationJob neu = createOne(old.workspaceId(), old.projectId(), t.revisionId(), t.shotId(),
                     old.modelPresetId(), old.kind(), reshuffleSeed(t.payload()), userId, old.engineRoute());
             if (!t.revisionId().equals(old.revisionId())) {
@@ -398,7 +400,7 @@ public class JobService {
         }
         ProjectSnapshot project = projects.require(userId, workspaceId, old.projectId());
         String route = engineSettings.resolveEngine(userId, old.kind());
-        Retarget t = repointToCurrentApproved(old, project);
+        Retarget t = repointToCurrentApproved(old, project, userId);
         GenerationJob neu = createOne(old.workspaceId(), old.projectId(), t.revisionId(), t.shotId(),
                 old.modelPresetId(), old.kind(), reshuffleSeed(t.payload()), userId, route);
         if (!t.revisionId().equals(old.revisionId())) {
@@ -426,7 +428,7 @@ public class JobService {
      * 版本未前进 → 原样重试；确认稿已前进 → 按当前确认稿对应镜头重建 payload（video/still 与 image/still），
      * 重建失败则安全回退旧 payload 并告警（不阻塞重试）。clip 不自动改锚：motion 依赖该镜关键帧，改镜后应重新生成。
      */
-    private Retarget repointToCurrentApproved(GenerationJob old, ProjectSnapshot project) {
+    private Retarget repointToCurrentApproved(GenerationJob old, ProjectSnapshot project, UUID userId) {
         UUID approvedId = project.approvedRevisionId();
         if (approvedId == null || approvedId.equals(old.revisionId())) {
             return new Retarget(old.revisionId(), old.shotId(), old.payload());
@@ -468,9 +470,14 @@ public class JobService {
             payload.put("shotId", shotId.toString());
             StyleTemplate st = loadStyle(project);
             String pos = styledPositive(st, shot.path("positive_prompt").asText(""));
+            RefCtx refs = resolveRefs(plan, shot, userId, old.workspaceId(), old.projectId(), approvedId);
+            if (!refs.anchor().isBlank()) pos = pos + refs.anchor();
             payload.put("positive_prompt", pos);
             payload.put("negative_prompt", styledNegative(st, shot.path("negative_prompt").asText("")));
             payload.put("duration_sec", shot.path("duration_sec").asDouble(3));
+            payload.remove("referenceAssetIds");
+            payload.remove("referenceKeys");
+            attachRefs(payload, refs);
             stampRevisionMeta(payload, planReader.revisionNo(approvedId), pos);
             return new Retarget(approvedId, shotId, payload);
         }
@@ -478,8 +485,13 @@ public class JobService {
             payload.put("revisionId", approvedId.toString());
             StyleTemplate st = loadStyle(project);
             String pos = styledPositive(st, plan.path("positive_prompt").asText(""));
+            RefCtx refs = resolveRefs(plan, null, userId, old.workspaceId(), old.projectId(), approvedId);
+            if (!refs.anchor().isBlank()) pos = pos + refs.anchor();
             payload.put("positive_prompt", pos);
             payload.put("negative_prompt", styledNegative(st, plan.path("negative_prompt").asText("")));
+            payload.remove("referenceAssetIds");
+            payload.remove("referenceKeys");
+            attachRefs(payload, refs);
             stampRevisionMeta(payload, planReader.revisionNo(approvedId), pos);
             return new Retarget(approvedId, old.shotId(), payload);
         }
@@ -667,8 +679,59 @@ public class JobService {
 
     // ---------- W4 一致性锚定 ----------
 
-    record RefCtx(List<String> ids, List<String> keys) {
-        static RefCtx empty() { return new RefCtx(List.of(), List.of()); }
+    record RefCtx(List<String> ids, List<String> keys, String anchor) {
+        static RefCtx empty() { return new RefCtx(List.of(), List.of(), ""); }
+    }
+
+    /**
+     * 参考图解析（主体绑定）：
+     * ① 方案内 `referenceAssets=[{assetId, subject}]`（参考图面板标注主体后随方案保存）优先：
+     *    - 带 subject 的仅当该镜文本（action/zh/positive_prompt）提到该主体时绑定；无 subject 的始终绑定；
+     *    - 该镜什么都没提到则带回全部（避免空锚定）；
+     *    - 生成 anchor 文案追加到正词（人物形象以参考图为准）。
+     * ② 否则退回 brief 显式挂图 / 项目最新参考图（旧行为）。
+     */
+    private RefCtx resolveRefs(JsonNode plan, JsonNode shot, UUID userId, UUID workspaceId,
+                               UUID projectId, UUID revisionId) {
+        JsonNode arr = plan == null ? null : plan.get("referenceAssets");
+        if (arr != null && arr.isArray() && arr.size() > 0) {
+            String text = (shot == null)
+                    ? plan.path("positive_prompt").asText("") + " " + plan.path("prompt_zh").asText("")
+                    : shot.path("action").asText("") + " " + shot.path("zh").asText("")
+                      + " " + shot.path("positive_prompt").asText("");
+            List<JsonNode> picked = new ArrayList<>();
+            for (JsonNode b : arr) {
+                if (b == null || !b.isObject() || b.path("assetId").asText("").isBlank()) continue;
+                String subject = b.path("subject").asText("");
+                if (subject.isBlank() || text.contains(subject)) picked.add(b);
+            }
+            if (picked.isEmpty()) {
+                for (JsonNode b : arr) {
+                    if (b != null && b.isObject() && !b.path("assetId").asText("").isBlank()) picked.add(b);
+                }
+            }
+            List<UUID> ids = new ArrayList<>();
+            for (JsonNode b : picked) {
+                try { ids.add(UUID.fromString(b.path("assetId").asText())); } catch (IllegalArgumentException ignored) { }
+            }
+            List<studio.weaveora.asset.domain.Asset> found = assetRepo.findByIdInAndWorkspaceId(ids, workspaceId);
+            List<String> keys = found.stream().map(studio.weaveora.asset.domain.Asset::storageKey).toList();
+            List<String> okIds = found.stream().map(a -> a.id().toString()).toList();
+            StringBuilder subj = new StringBuilder();
+            for (JsonNode b : picked) {
+                String s = b.path("subject").asText("");
+                if (!s.isBlank() && subj.indexOf(s) < 0) {
+                    if (subj.length() > 0) subj.append(", ");
+                    subj.append(s);
+                }
+            }
+            String anchor = okIds.isEmpty() ? "" : (subj.length() > 0
+                    ? " The appearance of " + subj + " must strictly follow the provided reference image (identity, face and costume)."
+                    : " The subject appearance must strictly follow the provided reference image.");
+            return new RefCtx(okIds, keys, anchor);
+        }
+        RefCtx legacy = loadRefs(userId, workspaceId, projectId, revisionId);
+        return new RefCtx(legacy.ids(), legacy.keys(), "");
     }
 
     private RefCtx loadRefs(UUID userId, UUID workspaceId, UUID projectId, UUID revisionId) {
@@ -697,7 +760,7 @@ public class JobService {
                         .map(studio.weaveora.asset.domain.Asset::storageKey)
                         .toList();
             }
-            return new RefCtx(ids.stream().map(UUID::toString).toList(), keys);
+            return new RefCtx(ids.stream().map(UUID::toString).toList(), keys, "");
         } catch (BizException e) {
             return RefCtx.empty(); // 引用缺失不阻塞出图（仅丢锚定）
         }
@@ -799,6 +862,7 @@ public class JobService {
         payload.put("shotId", shotId.toString());
         payload.put("shot_no", shot.path("shot_no").asInt());
         String pos = styledPositive(style, positiveRaw);
+        if (refs != null && !refs.anchor().isBlank()) pos = pos + refs.anchor();
         payload.put("positive_prompt", pos);
         payload.put("negative_prompt", styledNegative(style, shot.path("negative_prompt").asText("")));
         stampRevisionMeta(payload, revisionNo, pos);

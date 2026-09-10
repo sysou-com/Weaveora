@@ -120,6 +120,20 @@ watch(
     if (initKey.value === key && draft.value) return
     initKey.value = key
     draft.value = normalizePlan(clonePlan(det.plan))
+    // P4：从方案回填参考图选择与主体标注（参考图随方案落库）
+    const ra = (draft.value as unknown as { referenceAssets?: Array<{ assetId?: string; subject?: string }> }).referenceAssets
+    const ids: string[] = []
+    const subjects: Record<string, string> = {}
+    if (Array.isArray(ra)) {
+      for (const b of ra) {
+        const aid = String(b?.assetId ?? '')
+        if (!aid) continue
+        ids.push(aid)
+        if (b?.subject) subjects[aid] = String(b.subject)
+      }
+    }
+    refSelected.value = ids
+    refSubjects.value = subjects
     pristineJson.value = JSON.stringify(draft.value)
     dirty.value = false
   },
@@ -202,6 +216,24 @@ const assets = useQuery({
 })
 const refAssets = computed(() => (assets.data.value ?? []).filter((a) => a.kind === 'reference'))
 const refSelected = ref<string[]>([])
+
+/** P4 参考主体标注：assetId → 主体名（如 唐僧）；随方案 referenceAssets 落库，生成时按镜文本自动绑定 */
+const refSubjects = ref<Record<string, string>>({})
+function syncReferenceAssets(): void {
+  if (!draft.value) return
+  const list = refSelected.value.map((id) => {
+    const s = (refSubjects.value[id] ?? '').trim()
+    return s ? { assetId: id, subject: s } : { assetId: id }
+  })
+  ;(draft.value as unknown as { referenceAssets?: unknown }).referenceAssets = list
+}
+function setRefSubject(id: string, v: string): void {
+  refSubjects.value[id] = v
+  syncReferenceAssets()
+}
+function onRefSubjectInput(id: string, e: Event): void {
+  setRefSubject(id, (e.target as HTMLInputElement).value)
+}
 
 /** P2：检测「机位/背影/过肩」类构图诉求 + 已选参考图 → 提示参考图可能拉走构图 */
 const CAMERA_INTENT_RE = /(背影|背后|背面|过肩|机位|视角|俯视|仰视|穿过|透过|透视|behind|over[- ]the[- ]shoulder|from behind)/i
@@ -366,7 +398,9 @@ function toggleRef(id: string, on: boolean): void {
     if (!refSelected.value.includes(id)) refSelected.value.push(id)
   } else {
     refSelected.value = refSelected.value.filter((x) => x !== id)
+    delete refSubjects.value[id]
   }
+  syncReferenceAssets()
 }
 
 // ---------- W3 任务 ----------
@@ -413,13 +447,13 @@ const cancelBusy = ref<string | null>(null)
 // 任务默认展示 10 条，点“查看更多”逐次再展示 10 条
 const jobLimit = ref(10)
 const filterLatest = ref(true)
-/** 只显示“每个分镜最近一条任务”（不分 still/clip）；重跑后旧记录默认隐藏 */
+/** 只显示“每个分镜每个类型最近一条任务”（still/clip 分开、关键帧按帧；不分状态，便于看重跑/重跑失败） */
 const latestJobs = computed(() => {
   const all = jobs.data.value ?? []
   if (!filterLatest.value) return all
   const newest = new Map<string, JobRecord>()
   for (const j of all) {
-    newest.set(`shot:${j.payload?.shot_no ?? 'x'}`, j)
+    newest.set(`shot:${j.payload?.shot_no ?? 'x'}:${j.kind}:${j.payload?.keyframe_index ?? ''}`, j)
   }
   return [...newest.values()]
 })
@@ -431,6 +465,8 @@ function showMoreJobs(): void {
 async function startGeneration(): Promise<void> {
   const revId = genRevisionId()
   if (!revId) return
+  // P4：先把当前草稿（含参考图/主体标注/提示词改动）落库，再发起生成
+  if (dirty.value && !(await handleSave())) return
   genBusy.value = true
   try {
     const isVideo = draft.value?.mode === 'video'
@@ -588,6 +624,7 @@ function confirmMotion(): void {
 async function startMotion(frames?: number): Promise<void> {
   const revId = genRevisionId()
   if (!revId) return
+  if (dirty.value && !(await handleSave())) return
   genBusy.value = true
   try {
     const created = await createJobs(workspaceId.value, projectId.value, {
@@ -1009,8 +1046,21 @@ const shotTotal = computed(() => {
                 <i v-if="refSelected.includes(a.id)" class="ref-badge font-mono">REF</i>
               </div>
             </div>
+            <div v-if="refSelected.length" class="ref-subjects">
+              <p class="ref-subjects-title font-mono">标注主体（生成时按镜头文案自动绑定）</p>
+              <div v-for="id in refSelected" :key="id" class="ref-subject-row">
+                <img v-if="thumbUrls[id]" :src="thumbUrls[id]" class="ref-subject-thumb" alt="" />
+                <input
+                  class="text"
+                  type="text"
+                  :value="refSubjects[id] ?? ''"
+                  placeholder="主体名，如 唐僧 / 女王"
+                  @input="onRefSubjectInput(id, $event)"
+                />
+              </div>
+            </div>
             <p v-else class="ref-hint text-secondary">
-              上传参考图（png/jpg/webp ≤4 张）做一致性锚定；选中的图会随下次 Brief 一并交给导演层。
+              上传参考图（png/jpg/webp ≤4 张）并勾选；给选中的图标上主体名（如「唐僧」）后，系统只会在文案提到该主体的镜头里使用该参考图，并把「形象以参考图为准」写入提示词；标注随方案保存（点「保存修改」或直接生成会自动保存）。
             </p>
             <p v-if="refSelected.length" class="ref-count font-mono">{{ refSelected.length }}/4 已选</p>
             <p v-if="cameraIntentWithRefs" class="ref-conflict">
@@ -1716,6 +1766,11 @@ const shotTotal = computed(() => {
 .ref-empty { color: var(--wv-text-4); display:flex; align-items:center; justify-content:center; height:100%; font-size: 12px; }
 .ref-hint { margin: 0; font-size: 11.5px; line-height: 1.7; }
 .ref-count { margin: 0; font-size: 10px; color: var(--wv-accent-text); letter-spacing: .12em; }
+.ref-subjects { display: flex; flex-direction: column; gap: 6px; }
+.ref-subjects-title { margin: 0; font-size: 10px; letter-spacing: .1em; color: var(--wv-text-4); }
+.ref-subject-row { display: flex; align-items: center; gap: 8px; }
+.ref-subject-thumb { width: 28px; height: 28px; object-fit: cover; border-radius: 6px; border: 1px solid var(--wv-line); flex: none; }
+.ref-subject-row .text { flex: 1 1 auto; min-width: 0; }
 .ref-conflict {
   margin: 0;
   font-size: 11px;

@@ -8,6 +8,7 @@
 - 每镜 positive_prompt 长度 20–1200（英文；主语+动作+光线+镜头+风格+质量，质量词 ≤3）。
 - 用户没要求文字 → negative 含 text, watermark, logo, subtitle；没要求真人 → 不发明可识别人脸。
 - 跨镜一致性：同一主体复用描述性锚点；seed_lock=true；下一镜 ref_shot_no 指向上镜（尾帧衔接，§30 #25）。
+- **参考图主体（P4）**：若 user 消息给了“可用参考图主体”清单，凡该主体出镜的镜头，positive_prompt 必须写明其形象（面容/服饰）以参考图为准（例：`character appearance strictly follows the provided reference image`），并在 action 保留主体名（供系统绑定参考图）。
 - **运镜关键帧（P2）**：凡用户要求「镜头穿过/从A到B看到C」「推过前景人物再看到脸」这类**一条相机路径**的镜头，禁止只写一句折中 prompt；必须给出 `keyframes` 2–4 帧（至少 起始帧 + 结束帧）：每帧写清 `composition`（机位/朝向/遮挡/前景关系，如 `camera behind the monk, his back in foreground`、`the queen's face front view past his shoulder`）与各自英文 `positive_prompt`；`positive_prompt` 仍填**结束帧**作为单帧兼容值。单帧能表达清楚的普通镜头不得滥用 keyframes。
 - 中文 Brief 可保留专有名词；prompt 字段用英文；script/audio 可用中文便于人审。
 

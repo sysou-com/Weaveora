@@ -51,3 +51,9 @@ python worker/qa_acceptance.py --base https://sysou.com/weaveora --engine cloud
 - 验证：worker 进程内 `socket.getaddrinfo('api.replicate.com',443)` 仅返回 `AF_INET`。
 - 旁证：该失败任务 payload 已是 `revision_no=7 + prompt_md5 + v7 正词`，确认版锚定修复生效（不再是旧版取词问题）。
 - 口径澄清（2026-09-10 用户确认）：§11.6 的 SD/p-video 固定模型是** agent 调试用**，只在 `WEAVEORA_REPLICATE_TEST_MODELS=1` 时生效；**生产以用户引擎配置为准**。用户的 `black-forest-labs/flux-2-pro` 属正常用户配置，无需更改。
+
+## 参考图绑定与重跑取图（2026-09-10）
+- 症状：v8 重跑 S1，任务 payload 的 `referenceAssetIds` 仍是旧图（23:17），生成形象不对；英文正词本身正确。
+- 根因：① 参考图选择只在新建 Brief 时随 constraints 落库，改方案时未持久化（`briefs.constraints={}`）；② 重试/重跑重锚只重建 prompt，未刷新 `referenceKeys/referenceAssetIds`；③ 无“主体↔参考图”绑定。
+- 修复：`plan.referenceAssets=[{assetId,subject}]` 随方案保存；JobService 逐镜按文案命中主体自动绑定并追加“形象以参考图为准”锚定词；重锚时重新解析 refs；前端参考图面板可标注主体、生成前自动保存草稿；任务「只看最近一轮」按 镜号+类型+帧号 取最新（不分状态）。
+- 复现验证：v8 勾选唐僧图 → 标注「唐僧」→ 保存/生成 → 新任务 payload 的 referenceAssetIds 应为新图且正词含 reference image 锚定句，`prompt_md5` 随之变化。

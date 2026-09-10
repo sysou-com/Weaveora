@@ -109,6 +109,8 @@ export interface BasePlan {
   mode: 'image' | 'video'
   title: string
   logline: string
+  /** P4 参考图与主体绑定（参考图面板标注后随方案保存；生成时按镜文案自动绑定） */
+  referenceAssets?: Array<{ assetId: string; subject?: string }>
   [k: string]: unknown
 }
 
