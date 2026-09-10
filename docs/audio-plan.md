@@ -144,14 +144,35 @@ CosyVoice 依赖 Linux 专属轮子 → 只能走 WSL2。落地细节：
 5. **`_tensors_to_wav` 实际收到 dict**：CosyVoice 的 tts 生成器 yield `{'tts_speech': tensor}` 而非裸张量，
    原写法在 `np.clip` 报 `'>=' not supported between instances of 'dict' and 'float'`，已兼容两种。
 6. **CosyVoice2-0.5B 是 zero-shot 模型（无 spk2info）**：`inference_sft('中文女')` 必然 KeyError。
-   现在非路径音色统一回退到仓库自带 `asset/zero_shot_prompt.wav` 做 zero-shot。
-   ⚠️ 因此 **UI 里的 7 个音色预设目前音色相同**；要真正多音色需给 `voice` 传参考 wav 绝对路径
-   （或用 CosyVoice-300M-SFT 那类带内置 spk 的模型，见"待办"）。
+   → 已通过引入 **CosyVoice-300M-SFT** 解决（见下节），它自带 7 个内置音色。
 7. onnxruntime 的 CUDA EP 因 `libcublasLt.so.11` 缺失（本机是 CUDA 12 系 .so.12）退回 CPU —— 功能正常，只是那几个
    ONNX（campplus / speech tokenizer）在 CPU 上跑。
 
+### 配音多音色：双模型路由（P7.5，2026-09-11）
+
+**问题**：CosyVoice2-0.5B 没有内置音色，UI 的 7 个预设会全部回退成同一个参考音色。
+
+**方案**：再部署 **CosyVoice-300M-SFT**（v1 结构，`spk2info.pt` 自带 7 个音色），
+`tts_server.py` 按 voice 路由；两模型在 8GB 卡上**同时只保留一个**（切换先卸载 + `empty_cache`）。
+
+| voice 取值 | 路由 | 模型 |
+| --- | --- | --- |
+| 存在的 wav 路径 | `inference_zero_shot` | CosyVoice2-0.5B（24kHz） |
+| 内置音色名（7 个） | `inference_sft` | CosyVoice-300M-SFT（22kHz） |
+| 其他 | 回退 `asset/zero_shot_prompt.wav` | CosyVoice2-0.5B |
+
+- **不加载模型就能判路由**：直接 `torch.load(spk2info.pt)`（7.7KB）读音色名，避免为判定白切一次模型。
+- 7 个内置音色（实测豆异，7/7 唯一 sha）：**中文女 / 中文男 / 英文女 / 英文男 / 日语男 / 韩语女 / 粤语女**
+  - ⚠️ 模型里是「**日语男**」，而旧 UI 预设写的「日语女」→ 已改 `web/src/utils/audio.ts`
+- 权重：`/data/audio/CosyVoice/pretrained_models/CosyVoice-300M-SFT`（7 文件 / 2.2G，字节级校验通过）
+- `/health` 新增 `kind` / `spks` / `sft_spks` 便于运维查看
+- **切换代价**：若同时用预设又用克隆路径，每次切模型约 20-40s（同项目 voice 单一值，实际不会频繁切）
+- 顺带实现了 **target_sec 时长对齐**（配音贴合镜头）：首次结果偏差 >25% 就按比例修语速重合成一次；
+  语速限幅 `[0.5, 2.0]`，所以 4s 的句子拉不到 10s（这是有意限制，避免失真）。
+
+实测（同一句文本）：中文女 1.87s/质心1900Hz、中文男 2.53s/1571Hz、英文男 2.33s/1081Hz、粤语女 2.95s/2216Hz —— 男女声差异明显。
+
 ### 待办（P7 收尾）
-- [ ] UI 音色预设：换成真正的多音色（CosyVoice-300M-SFT 内置 spk，或给每个预设配一个参考 wav）
-- [ ] WSL `.wslconfig` 限内存（`[wsl2] memory=10GB`），避免与 ComfyUI 抢 RAM
+- [ ] Web 端产出已构建（`web/dist`），但**部署到 sysou.com 的目标路径未在 175.12.60.225 的 nginx 配置里**，需确认后再发
 - [ ] 验收：Web → 视频项目 → 分镜填旁白 → 生成配音 → 资产库可播放 → 渲染成片听混音 → 导出包查 edit_list.json
-- [ ] `deploy/audio/README.md` 里的 `music_server.py` 路线已被 ComfyUI 路线取代，择机精简
+- [ ] `deploy/audio/README.md` 里的 `music_server.py` 路线已被 ComfyUI 路线取代；TTS 段落仍写着 CosyVoice 3 + pynini，待重写

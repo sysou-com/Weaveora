@@ -23,6 +23,7 @@ trap 'rm -f "$PIDFILE"' EXIT
 
 export WEAVEORA_COSYVOICE_DIR=/data/audio/CosyVoice
 export WEAVEORA_COSYVOICE_MODEL=pretrained_models/CosyVoice2-0.5B
+export WEAVEORA_COSYVOICE_SFT_MODEL=pretrained_models/CosyVoice-300M-SFT
 export WEAVEORA_TTS_PRELOAD=1
 export PYTHONUNBUFFERED=1
 
