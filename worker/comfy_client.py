@@ -553,6 +553,124 @@ def generate_motion(client_id, payload, progress_fn=None):
     return [{"bytes": mp4, "mime": "video/mp4", "width": int(w), "height": int(h)}]
 
 
+# ---- P7 配乐：ACE-Step 1.5（ComfyUI 原生节点，非 wrapper） ----
+# 模型：all-in-one checkpoint（含 unet + qwen3 文本编码器 + vae），CheckpointLoaderSimple 直接加载。
+# 生成配方对齐 ComfyUI 官方蓝图 blueprints/Text to Audio (ACE-Step 1.5).json：
+#   ModelSamplingAuraFlow(shift=3) + KSampler(euler/simple, steps=8, cfg=1, denoise=1)
+MUSIC_CKPT = os.environ.get("WEAVEORA_MUSIC_CKPT_NAME", "ace_step_1.5_turbo_aio.safetensors")
+MUSIC_SAVE_NODE = os.environ.get("WEAVEORA_MUSIC_SAVE_NODE", "SaveAudioMP3")
+MUSIC_QUALITY = os.environ.get("WEAVEORA_MUSIC_QUALITY", "320k")
+MUSIC_STEPS = int(os.environ.get("WEAVEORA_MUSIC_STEPS", "8"))
+MUSIC_CFG = float(os.environ.get("WEAVEORA_MUSIC_CFG", "1.0"))
+MUSIC_SHIFT = float(os.environ.get("WEAVEORA_MUSIC_SHIFT", "3.0"))
+MUSIC_SCHEDULER = os.environ.get("WEAVEORA_MUSIC_SCHEDULER", "simple")
+MUSIC_SAMPLER = os.environ.get("WEAVEORA_MUSIC_SAMPLER", "euler")
+MUSIC_TAGS_CFG = float(os.environ.get("WEAVEORA_MUSIC_TAGS_CFG", "2.0"))
+MUSIC_TEMPERATURE = float(os.environ.get("WEAVEORA_MUSIC_TEMPERATURE", "0.85"))
+MUSIC_BPM = int(os.environ.get("WEAVEORA_MUSIC_BPM", "120"))
+MUSIC_KEYSCALE = os.environ.get("WEAVEORA_MUSIC_KEYSCALE", "E minor")
+MUSIC_LANGUAGE = os.environ.get("WEAVEORA_MUSIC_LANGUAGE", "en")
+MUSIC_TIMESIG = os.environ.get("WEAVEORA_MUSIC_TIMESIG", "4")
+MUSIC_AUDIO_CODES = os.environ.get("WEAVEORA_MUSIC_AUDIO_CODES", "1") == "1"
+# 配乐单次生成上限（秒）：8GB 卡上 120s 潜在序列很长，必要时可下调
+MUSIC_MAX_SEC = float(os.environ.get("WEAVEORA_MUSIC_MAX_SEC", "180"))
+MUSIC_TIMEOUT = int(os.environ.get("WEAVEORA_MUSIC_TIMEOUT", "2400"))
+
+_AUDIO_MIME = {"mp3": "audio/mpeg", "flac": "audio/flac", "opus": "audio/ogg",
+               "wav": "audio/wav", "m4a": "audio/mp4", "ogg": "audio/ogg"}
+
+
+def _download_audio(rec, prefix):
+    """收集音频产物（SaveAudio* 落到 outputs[node].audio）。"""
+    outs = []
+    for node in (rec.get("outputs") or {}).values():
+        if not isinstance(node, dict):
+            continue
+        for it in list(node.get("audio") or []) + list(node.get("images") or []):
+            fname = it.get("filename", "")
+            if not fname.startswith(prefix):
+                continue
+            q = urllib.parse.urlencode({"filename": fname,
+                                        "subfolder": it.get("subfolder", ""),
+                                        "type": it.get("type", "output")})
+            _, body = _comfy("GET", "/view?" + q)
+            outs.append({"filename": fname, "bytes": body})
+    return outs
+
+
+def _music_graph(client_id, payload, prefix):
+    """ACE-Step 1.5 文生配乐图（ComfyUI 原生节点 + all-in-one checkpoint）。"""
+    tags = (payload.get("prompt") or "").strip() or \
+        "cinematic instrumental score, emotional, no vocals"
+    lyrics = (payload.get("lyrics") or "").strip()
+    try:
+        duration = float(payload.get("duration_sec") or 30)
+    except (TypeError, ValueError):
+        duration = 30.0
+    duration = max(5.0, min(MUSIC_MAX_SEC, duration))
+    seed = int(payload.get("seed") or 0)
+    save = {"audio": ["7", 0], "filename_prefix": prefix}
+    if MUSIC_SAVE_NODE == "SaveAudioMP3":
+        save["quality"] = MUSIC_QUALITY
+    elif MUSIC_SAVE_NODE == "SaveAudioAdvanced":
+        save["format"] = {"format": "mp3", "quality": MUSIC_QUALITY}
+    nodes = {
+        "1": {"class_type": "CheckpointLoaderSimple",
+              "inputs": {"ckpt_name": MUSIC_CKPT}},
+        "2": {"class_type": "ModelSamplingAuraFlow",
+              "inputs": {"model": ["1", 0], "shift": MUSIC_SHIFT}},
+        "3": {"class_type": "TextEncodeAceStepAudio1.5", "inputs": {
+            "clip": ["1", 1], "tags": tags, "lyrics": lyrics, "seed": seed,
+            "bpm": MUSIC_BPM, "duration": duration, "timesignature": MUSIC_TIMESIG,
+            "language": MUSIC_LANGUAGE, "keyscale": MUSIC_KEYSCALE,
+            "generate_audio_codes": MUSIC_AUDIO_CODES,
+            "cfg_scale": MUSIC_TAGS_CFG, "temperature": MUSIC_TEMPERATURE,
+            "top_p": 0.9, "top_k": 0, "min_p": 0.0}},
+        "4": {"class_type": "ConditioningZeroOut",
+              "inputs": {"conditioning": ["3", 0]}},
+        "5": {"class_type": "EmptyAceStep1.5LatentAudio",
+              "inputs": {"seconds": duration, "batch_size": 1}},
+        "6": {"class_type": "KSampler", "inputs": {
+            "model": ["2", 0], "positive": ["3", 0], "negative": ["4", 0],
+            "latent_image": ["5", 0], "seed": seed, "steps": MUSIC_STEPS,
+            "cfg": MUSIC_CFG, "sampler_name": MUSIC_SAMPLER,
+            "scheduler": MUSIC_SCHEDULER, "denoise": 1.0}},
+        "7": {"class_type": "VAEDecodeAudio",
+              "inputs": {"samples": ["6", 0], "vae": ["1", 2]}},
+        "8": {"class_type": MUSIC_SAVE_NODE, "inputs": save},
+    }
+    # ComfyUI 需要节点 id 为字符串键 + client_id
+    return {"prompt": nodes, "client_id": client_id}
+
+
+def generate_music(client_id, payload, progress_fn=None):
+    """ACE-Step 1.5 配乐（bgm 任务）。返回 [{bytes, mime, duration_ms}]。"""
+    import uuid as _uuid
+    if progress_fn:
+        progress_fn(20, "loading_model")
+    duration = float(payload.get("duration_sec") or 30)
+    duration = max(5.0, min(MUSIC_MAX_SEC, duration))
+    prefix = "weaveora_bgm_" + _uuid.uuid4().hex[:6]
+    prompt = _music_graph(client_id, payload, prefix)
+    pid = _post_prompt(prompt, client_id)
+    if progress_fn:
+        progress_fn(35, "sampling")
+    rec = _poll_history(client_id, pid, timeout=MUSIC_TIMEOUT)
+    outs = _download_audio(rec, prefix)
+    if not outs:
+        raise ComfyError("bgm 无输出音频（prefix=%s）" % prefix)
+    if progress_fn:
+        progress_fn(100, "done")
+    out = []
+    for o in outs:
+        ext = o["filename"].rsplit(".", 1)[-1].lower() if "." in o["filename"] else ""
+        out.append({"bytes": o["bytes"], "mime": _AUDIO_MIME.get(ext, "audio/mpeg"),
+                    "duration_ms": int(duration * 1000)})
+    return out
+
+
 if __name__ == "__main__":
     import sys
     print("comfy engine url=%s api=%s" % (COMFY, API))
+    print("music ckpt=%s node=%s steps=%d cfg=%s shift=%s"
+          % (MUSIC_CKPT, MUSIC_SAVE_NODE, MUSIC_STEPS, MUSIC_CFG, MUSIC_SHIFT))

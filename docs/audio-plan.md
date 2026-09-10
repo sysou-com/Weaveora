@@ -68,3 +68,56 @@
 - 前端：任务区新增「生成配音(voice)」「生成配乐(bgm)」；资产库支持 `voice/bgm` 展示与 **音频播放**；任务行类型标签含配音/配乐。
 
 **待验证（GPU 唤醒后）**：`audio_standby.sh` → 两个 `/health` → Web 生成配音/配乐 → 渲染成片听混音 → 导出包查 edit_list.json 与音频文件。
+
+---
+
+## 已实施（P7.3 配乐，2026-09-11 落地；Windows 3070 Ti 本机 ComfyUI）
+
+**决策：配乐改走 ComfyUI 原生节点，不再用 `deploy/audio/music_server.py`（该服务保留作可选兜底）。**
+
+### 为什么换
+| 维度 | ComfyUI 蓝图 ✅ | WSL + `pip install acestep` |
+| --- | --- | --- |
+| 前置 | 只需权重 | 需 WSL 分发版 + conda + Linux CUDA |
+| 链路复用 | 复用 `comfy_client` 的 workflow/轮询/取产物全套 | 新增 8092 服务 + 守护 |
+| 开机自启 | 白送（ComfyUI 计划任务已存在） | 需再写一套常驻 |
+| 8GB 显存 | 同进程串行 + ComfyUI 自带 offload | 两个 CUDA 上下文抢显存 |
+
+### 权重（all-in-one，单文件）
+- `D:\model\checkpoints\ace_step_1.5_turbo_aio.safetensors`，**9.34 GiB**；
+- 来源 ModelScope 镜像 `Comfy-Org/ace_step_1.5_ComfyUI_files`（官方蓝图指向 HF，国内不通）；
+- 该镜像另含分体版（`acestep_v1.5_turbo` 4.46G + `qwen_4b_ace15` 7.80G + `qwen_0.6b_ace15` 1.11G + `ace_1.5_vae` 0.31G ≈ 13.68G），蓝图原样需要这套；走 aio 图更简单。
+- 下载器：`deploy/windows/gpu_model_downloader.js` 的 10 路 Range 在 ModelScope CDN 上**前 ~60s 几乎不动**（疑似并发预热），随后爬到 15 MiB/s；单路 `curl -C -` 反而稳在 ~50 MiB/s。
+
+### 图谱（`worker/comfy_client.py::_music_graph`）
+`CheckpointLoaderSimple(aio)` → `ModelSamplingAuraFlow(shift=3)` → `TextEncodeAceStepAudio1.5` +
+`ConditioningZeroOut` → `EmptyAceStep1.5LatentAudio(seconds)` → `KSampler(euler/simple, steps=8, cfg=1, denoise=1)`
+→ `VAEDecodeAudio` → `SaveAudioMP3(320k)`。参数全部对齐官方蓝图 `blueprints/Text to Audio (ACE-Step 1.5).json`。
+
+### 踩坑：CUDA 13 内核 vs CUDA 12.7 驱动（关键）
+`comfy_kitchen/backends/cuda/_C.abi3.pyd` 链接 `cublasLt64_13`（按 **CUDA 13** 构建），本机驱动 566.36
+只到 CUDA 12.7 → 一启动 kernel 就 `CUDA driver version is insufficient for CUDA runtime version`。
+而 `flash_attention.is_available()` 只查「扩展是否导入成功」，**没查驱动**，于是返回 True 骗过了
+`llama.py::init_kv_cache()`，让 ACE-Step 的 Qwen3 AR 循环走 FixedKV → 崩在
+`generate_audio_codes=True`（蓝图默认、也是音质档）。
+- 绕过办法：`WEAVEORA_MUSIC_AUDIO_CODES=0`（关掉 LLM 音频码，有损音质，能出曲）。
+- **正式修复**：`deploy/windows/patch_comfy_kitchen_cuda13.py` —— 用 `cuDriverGetVersion` 让探针如实回答，
+  驱动 < 13.0 就返回 False → 自动退回普通 KV 缓存，**codes 保持开启、音质无损**。以后升级驱动/torch 自动放行。
+  幂等可重跑；`pip install -U comfy_kitchen` 会冲掉，需重跑。
+
+### 实测（RTX 3070 Ti 8GB，warm）
+| 时长 | 耗时 | 产物 |
+| --- | --- | --- |
+| 30s | **22.3s** | 1.20 MB mp3 320k / 48kHz 立体声 |
+| 120s | **62.6s** | 4.80 MB |
+
+（冷启动另加 ~25-30s 模型加载；ComfyUI 节点缓存会让相同 seed+参数的重复请求秒回。）
+
+### worker 接线
+- `stub_worker.py::_bgm_media()`：`WEAVEORA_MUSIC_ENGINE=comfy`（默认）走 ComfyUI；`=http` 退回 `music_server.py`。
+- `worker_win.ps1` 已置 `WEAVEORA_MUSIC_ENGINE=comfy` / `WEAVEORA_MUSIC_CKPT_NAME=...` / `WEAVEORA_TTS_URL=http://127.0.0.1:8091`。
+- 冒烟脚本：`worker/test_music_comfy.py`（`TEST_DUR` / `TEST_SEED` / `TEST_PROMPT` 可调）。
+
+### 配音（voice）仍未部署
+CosyVoice2 依赖 `pynini` + `onnxruntime-gpu`（**仅 Linux 轮子**）→ 只能走 WSL2，见 `D:\audio\WSL_RESTORE.md`。
+当前状态：WSL 内核已装、Ubuntu 应用包已装，但**分发版未注册**（重启卡在这一步），TTS `:8091` 未起。

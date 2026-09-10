@@ -128,6 +128,24 @@ def make_animated_webp(width, height, seed, frames=14, duration_ms=110):
                  duration=duration_ms, loop=0)
     return buf.getvalue()
 
+def _bgm_media(jid, payload):
+    """配乐生成：默认走 ComfyUI（ACE-Step 1.5 原生节点 + all-in-one 权重）；
+    WEAVEORA_MUSIC_ENGINE=http 时改走 deploy/audio/music_server.py（:8092）。
+    返回 _complete 需要的 media 列表 [(bytes, mime, w, h, dur_ms)]。"""
+    engine = os.environ.get("WEAVEORA_MUSIC_ENGINE", "comfy").strip().lower()
+    if engine in ("comfy", "comfyui") and MODE == "comfy":
+        import comfy_client as _c
+        outs = _c.generate_music(
+            "weaveora-stub-worker", payload,
+            progress_fn=lambda p, s: _req("POST", "/internal/jobs/%s/progress" % jid,
+                                          {"progress": p, "stage": s}))
+        return [(o["bytes"], o.get("mime") or "audio/mpeg", None, None,
+                 o.get("duration_ms")) for o in outs]
+    import audio_client as audio
+    data, mime, dur_ms = audio.music(payload)
+    return [(data, mime, None, None, dur_ms)]
+
+
 def _complete(jid, payload, media):
     """media: list[(bytes, mime, w, h, dur_ms)]；上传第一个产物并 complete。"""
     if not media:
@@ -138,6 +156,7 @@ def _complete(jid, payload, media):
            "video/mp4": "mp4", "video/webm": "webm",
            "audio/wav": "wav", "audio/x-wav": "wav", "audio/wave": "wav",
            "audio/mpeg": "mp3", "audio/mp3": "mp3",
+           "audio/flac": "flac", "audio/x-flac": "flac",
            "audio/mp4": "m4a", "audio/aac": "m4a", "audio/ogg": "ogg"}.get(mime, "bin")
     seed = int(payload.get("seed") or random.randint(1, 2 ** 31))
     st, up = _req("POST", "/internal/jobs/%s/assets" % jid, files={
@@ -166,15 +185,16 @@ def execute_job(job):
     height = int(params.get("height") or 1024)
     _req("POST", "/internal/jobs/%s/progress" % jid, {"progress": 15, "stage": "loading_model"})
 
-    # P7 自托管音频：配音(CosyVoice) / 配乐(音乐生成) —— 与 MODE 无关，走本机音频服务
+    # P7 自托管音频：配音(CosyVoice) / 配乐(ACE-Step 1.5) —— 与 MODE 无关，但 bgm 默认走本机 ComfyUI
     if kind in ("voice", "bgm"):
-        import audio_client as audio
         try:
             if kind == "voice":
+                import audio_client as audio
                 data, mime, dur_ms = audio.tts(payload)
+                media = [(data, mime, None, None, dur_ms)]
             else:
-                data, mime, dur_ms = audio.music(payload)
-            return _complete(jid, payload, [(data, mime, None, None, dur_ms)])
+                media = _bgm_media(jid, payload)
+            return _complete(jid, payload, media)
         except Exception as e:
             import traceback as _tb
             _tb.print_exc()
