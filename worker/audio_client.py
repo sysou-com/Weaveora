@@ -35,7 +35,11 @@ def _post(url, body, timeout):
 
 
 def tts(payload):
-    """配音：返回 (bytes, mime, duration_ms?)。payload: text/voice/speed/target_sec。"""
+    """配音：返回 (bytes, mime, duration_ms?)。payload: text/voice/speed/target_sec/seed。
+
+    seed 非空时服务端会 torch.manual_seed，同一文案输出可复现
+    （CosyVoice 是随机采样，不固定种子时同一句时长会在 1.9s~3.0s 间跳）。
+    """
     text = (payload.get("text") or "").strip()
     if not text:
         raise AudioError("voice 任务缺少 text")
@@ -45,6 +49,8 @@ def tts(payload):
         "speed": float(payload.get("speed") or 1.0),
         "target_sec": float(payload.get("target_sec") or 0),
     }
+    if payload.get("seed") is not None:
+        body["seed"] = int(payload["seed"])
     timeout = int(os.environ.get("WEAVEORA_TTS_TIMEOUT", "900"))
     return _post(TTS_URL + "/tts", body, timeout)
 

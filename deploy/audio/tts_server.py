@@ -18,7 +18,13 @@
     1. 存在的 wav 路径        → CosyVoice2 zero-shot 克隆
     2. SFT 模型的 spk2info 名 → CosyVoice-300M-SFT inference_sft（中文女/中文男/英文女/英文男/日语男/韩语女/粤语女）
     3. 其他                   → 回退仓库自带 asset/zero_shot_prompt.wav 做 zero-shot（并打日志）
-  target_sec>0 时按目标时长对齐：首次结果偏差 >25% 就按比例修语速重合成一次。
+  target_sec>0 时：
+    - 默认**完全不动语速**（ALIGN=0）—— 旁白多长就多长，短于镜头由混音的静音补齐，
+      长于镜头由混音阶段微调/让用户改文案。
+    - 置 WEAVEORA_TTS_ALIGN=1 才开启**单向**对齐：只允许加速（旁白太长），
+      最多允许 WEAVEORA_TTS_MAX_SLOWDOWN（默认 0.92）的轻微慢放；绝不慢放填镜头。
+  seed：可选。传了就 torch.manual_seed → 同一文案输出可复现（采样否则会随机，
+    同一句话时长能在 1.9s~3.0s 间跳，这会让任何"先量再调"的对齐都不准）。
 """
 import io
 import json
@@ -40,6 +46,12 @@ _FALLBACK_PROMPT_WAV = os.environ.get("WEAVEORA_TTS_PROMPT_WAV",
                                       os.path.join(COSY_DIR, "asset", "zero_shot_prompt.wav"))
 _FALLBACK_PROMPT_TEXT = os.environ.get(
     "WEAVEORA_TTS_PROMPT_TEXT", "希望你以后能够做的比我还好唷。")
+# 时长对齐：默认关闭（0）。1 才开启"只加速不慢放"的单向对齐
+ALIGN = os.environ.get("WEAVEORA_TTS_ALIGN", "0").lower() in ("1", "true", "yes")
+# 对齐时允许的最大慢放比（1.0 = 完全不允许慢放）
+MAX_SLOWDOWN = float(os.environ.get("WEAVEORA_TTS_MAX_SLOWDOWN", "0.92"))
+# 偏差在这个比例之内就不动语速（避免为几十毫秒反复重合成）
+ALIGN_TOLERANCE = float(os.environ.get("WEAVEORA_TTS_ALIGN_TOLERANCE", "0.10"))
 
 _lock = threading.Lock()
 # 8GB 卡：只保留一个模型实例。key: "v2"(zero-shot) / "sft"(内置音色)
@@ -132,8 +144,19 @@ def _tensors_to_wav(chunks, sample_rate):
     return buf.getvalue()
 
 
-def _render(text, v, spd):
-    """按 voice 路由跑一次推理 → (chunks, sample_rate, used_label)。"""
+def _render(text, v, spd, seed=None):
+    """按 voice 路由跑一次推理 → (chunks, sample_rate, used_label)。
+
+    seed 非空时先固定随机种子，保证同一文案可复现（否则采样随机）。
+    """
+    if seed is not None:
+        try:
+            import torch
+            torch.manual_seed(int(seed))
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed_all(int(seed))
+        except Exception:
+            pass
     if os.path.exists(v):
         # 1) 参考音频路径 → CosyVoice2 zero-shot 克隆
         #    注意：inference_zero_shot 第 3 参是 **wav 文件路径**（内部 frontend_* →
@@ -159,28 +182,39 @@ def _render(text, v, spd):
                        % ("/".join(spks) or "SFT 模型缺失"))
 
 
-def synthesize(text, voice, speed, target_sec):
+def synthesize(text, voice, speed, target_sec, seed=None):
     v = (voice or DEFAULT_VOICE).strip()
     spd = max(0.5, min(2.0, float(speed or 1.0)))
     tgt = float(target_sec or 0)
     t0 = time.time()
 
-    chunks, sr, used = _render(text, v, spd)
+    chunks, sr, used = _render(text, v, spd, seed)
     wav = _tensors_to_wav(chunks, sr)
     ms = int(round((len(wav) - 44) / 2.0 / float(sr) * 1000))
 
-    # 目标时长对齐（配音贴合镜头）：偏差 >25% 时按比例修语速重合成一次
-    if tgt > 1.0 and ms > 0:
+    # 目标时长对齐（默认关闭，见模块 docstring；开启后也只加速、不慢放）
+    if ALIGN and tgt > 1.0 and ms > 0:
         want = tgt * 1000.0
-        if ms < want * 0.75 or ms > want * 1.25:
-            spd2 = max(0.5, min(2.0, spd * (ms / want)))
+        ratio = ms / want
+        if abs(ratio - 1.0) > ALIGN_TOLERANCE:
+            spd2 = max(0.5, min(2.0, spd * ratio))
+            if ratio < 1.0:
+                spd2 = max(spd2, MAX_SLOWDOWN * spd)   # 只允许极轻微慢放
             if abs(spd2 - spd) > 0.02:
-                print("[tts] 时长对齐: %.2fs 目标 %.2fs，语速 %.2f -> %.2f 重合成"
-                      % (ms / 1000.0, tgt, spd, spd2), flush=True)
-                chunks, sr, used = _render(text, v, spd2)
+                print("[tts] 时长对齐: 实际 %.2fs / 目标 %.2fs (ratio=%.2f)，语速 %.2f -> %.2f 重合成"
+                      % (ms / 1000.0, tgt, ratio, spd, spd2), flush=True)
+                chunks, sr, used = _render(text, v, spd2, seed)
                 wav = _tensors_to_wav(chunks, sr)
                 ms = int(round((len(wav) - 44) / 2.0 / float(sr) * 1000))
                 spd = spd2
+    elif tgt > 1.0 and ms > 0:
+        # 只报告差值，供 UI 提醒文案过长/过短，不动音频
+        print("[tts] 时长比对(未对齐): 实际 %.2fs / 镜头 %.2fs" % (ms / 1000.0, tgt), flush=True)
+
+    print("[tts] text=%d字 voice=%s[%s] speed=%.2f target=%.1f seed=%s -> %.1fs in %.1fs"
+          % (len(text), v, used, spd, tgt, seed if seed is not None else "-", ms / 1000.0,
+             time.time() - t0), flush=True)
+    return wav, ms
 
     print("[tts] text=%d字 voice=%s[%s] speed=%.2f target=%.1f -> %.1fs in %.1fs"
           % (len(text), v, used, spd, tgt, ms / 1000.0, time.time() - t0), flush=True)
@@ -222,7 +256,8 @@ class Handler(BaseHTTPRequestHandler):
             n = int(self.headers.get("Content-Length") or 0)
             req = json.loads(self.rfile.read(n) or b"{}")
             wav, ms = synthesize(req.get("text", ""), req.get("voice", ""),
-                                 req.get("speed", 1.0), req.get("target_sec", 0))
+                                 req.get("speed", 1.0), req.get("target_sec", 0),
+                                 req.get("seed"))
             self.send_response(200)
             self.send_header("Content-Type", "audio/wav")
             self.send_header("X-Duration-Ms", str(ms))
