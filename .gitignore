@@ -10,6 +10,7 @@ web/.vite/
 
 # ---- Python / worker ----
 worker/__pycache__/
+**/__pycache__/
 worker/.venv/
 worker/**/*.pyc
 
