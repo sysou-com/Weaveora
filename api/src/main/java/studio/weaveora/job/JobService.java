@@ -310,12 +310,15 @@ public class JobService {
 
     /**
      * 重试（§20.2：failed → retry 生成<b>新</b> job，不改历史）：
-     * 复用原任务的 revision/shot/kind/payload 重新入队；仅 failed | cancelled 可重试。
+     * 仅 failed | cancelled 可重试。默认复用原任务 revision/shot/kind 重新入队；
+     * 但若项目“当前确认稿”已前进到更新版本（用户改镜并重新确认），新任务必须<b>重新锚定到当前
+     * 确认稿</b>的对应镜头并重建 payload（取最新 positive_prompt），而不是复制旧版本快照——
+     * 否则用户改的提示词永远到不了出图引擎（复现：女儿国项目 v2–v7 反复改镜后重跑仍出 v1 画面）。
      */
     @Transactional
     public List<JobView> retry(UUID userId, UUID workspaceId, UUID projectId, List<UUID> jobIds) {
         guard.requireMember(userId, workspaceId);
-        projects.require(userId, workspaceId, projectId);
+        ProjectSnapshot project = projects.require(userId, workspaceId, projectId);
         List<JobView> created = new ArrayList<>();
         for (UUID jobId : jobIds) {
             GenerationJob old = jobs.findByIdAndWorkspaceId(jobId, workspaceId)
@@ -326,15 +329,22 @@ public class JobService {
             if (!List.of("failed", "cancelled").contains(old.state())) {
                 throw new BizException(ErrorCode.VALIDATION, "仅失败/已取消的任务可重试");
             }
-            GenerationJob neu = createOne(old.workspaceId(), old.projectId(), old.revisionId(), old.shotId(),
-                    old.modelPresetId(), old.kind(), reshuffleSeed(old.payload()), userId, old.engineRoute());
+            Retarget t = repointToCurrentApproved(old, project);
+            GenerationJob neu = createOne(old.workspaceId(), old.projectId(), t.revisionId(), t.shotId(),
+                    old.modelPresetId(), old.kind(), reshuffleSeed(t.payload()), userId, old.engineRoute());
+            if (!t.revisionId().equals(old.revisionId())) {
+                log.info("job retry re-anchored job={} oldRevision={} -> approvedRevision={} shot={} kind={}",
+                        jobId, old.revisionId(), t.revisionId(), t.shotId(), old.kind());
+            }
             created.add(toView(neu));
         }
         log.info("jobs retried project={} count={}", projectId, created.size());
         return created;
     }
 
-    /** 任务重生成（含已成功的）：单条入队为新 job，随机新 seed；引擎按当前用户设置路由。 */
+    /** 任务重生成（含已成功的）：单条入队为新 job，随机新 seed；引擎按当前用户设置路由。
+     * 与 retry 同策略：若项目“当前确认稿”已前进到更新版本，则重新锚定到确认稿对应镜头取最新
+     * prompt（避免“改词后重跑仍出旧画面”——女儿国 v2–v7 复盘）。 */
     @Transactional
     public JobView rerun(UUID userId, UUID workspaceId, UUID jobId) {
         guard.requireMember(userId, workspaceId);
@@ -343,9 +353,15 @@ public class JobService {
         if (!TERMINAL.contains(old.state())) {
             throw new BizException(ErrorCode.VALIDATION, "任务运行中/排队，先取消再重生成");
         }
+        ProjectSnapshot project = projects.require(userId, workspaceId, old.projectId());
         String route = engineSettings.resolveEngine(userId, old.kind());
-        GenerationJob neu = createOne(old.workspaceId(), old.projectId(), old.revisionId(), old.shotId(),
-                old.modelPresetId(), old.kind(), reshuffleSeed(old.payload()), userId, route);
+        Retarget t = repointToCurrentApproved(old, project);
+        GenerationJob neu = createOne(old.workspaceId(), old.projectId(), t.revisionId(), t.shotId(),
+                old.modelPresetId(), old.kind(), reshuffleSeed(t.payload()), userId, route);
+        if (!t.revisionId().equals(old.revisionId())) {
+            log.info("job rerun re-anchored job={} oldRevision={} -> approvedRevision={} shot={} kind={}",
+                    jobId, old.revisionId(), t.revisionId(), t.shotId(), old.kind());
+        }
         log.info("job rerun id={} -> new {} route={}", old.id(), neu.id(), route);
         return toView(neu);
     }
@@ -357,6 +373,70 @@ public class JobService {
                 : (ObjectNode) payload.deepCopy();
         cp.put("seed", randomSeed());
         return cp;
+    }
+
+    /** 重试锚定结果：可能重指向“当前确认稿”的新 revision/shot 与重建后的 payload。 */
+    private record Retarget(UUID revisionId, UUID shotId, JsonNode payload) {
+    }
+
+    /**
+     * 版本未前进 → 原样重试；确认稿已前进 → 按当前确认稿对应镜头重建 payload（video/still 与 image/still），
+     * 重建失败则安全回退旧 payload 并告警（不阻塞重试）。clip 不自动改锚：motion 依赖该镜关键帧，改镜后应重新生成。
+     */
+    private Retarget repointToCurrentApproved(GenerationJob old, ProjectSnapshot project) {
+        UUID approvedId = project.approvedRevisionId();
+        if (approvedId == null || approvedId.equals(old.revisionId())) {
+            return new Retarget(old.revisionId(), old.shotId(), old.payload());
+        }
+        JsonNode plan;
+        try {
+            plan = planReader.revisionPlan(approvedId);
+        } catch (RuntimeException e) {
+            log.warn("job retry re-anchor: 读取确认稿 {} 失败，沿用旧任务 payload: {}", approvedId, e.getMessage());
+            return new Retarget(old.revisionId(), old.shotId(), old.payload());
+        }
+        String planMode = plan.path("mode").asText("image");
+        ObjectNode payload = old.payload() instanceof ObjectNode o ? o.deepCopy() : null;
+        if (payload == null) {
+            return new Retarget(old.revisionId(), old.shotId(), old.payload());
+        }
+        if ("video".equals(planMode) && "still".equals(old.kind())) {
+            int no = planReader.shotNoOf(old.shotId());
+            JsonNode shot = null;
+            for (JsonNode s : plan.path("shots")) {
+                if (s.path("shot_no").asInt() == no) {
+                    shot = s;
+                    break;
+                }
+            }
+            if (shot == null) {
+                log.warn("job retry re-anchor: 确认稿无 shot_no={}，沿用旧 payload", no);
+                return new Retarget(old.revisionId(), old.shotId(), old.payload());
+            }
+            // 定位确认稿上同 shot_no 且已确认的镜头行 id（沿用 keyframe/资产归属到新镜头）
+            UUID shotId = old.shotId();
+            for (UUID sid : planReader.approvedShotIds(approvedId)) {
+                if (planReader.shotNoOf(sid) == no) {
+                    shotId = sid;
+                    break;
+                }
+            }
+            payload.put("revisionId", approvedId.toString());
+            payload.put("shotId", shotId.toString());
+            payload.put("positive_prompt", shot.path("positive_prompt").asText(""));
+            payload.put("negative_prompt", shot.path("negative_prompt").asText(""));
+            payload.put("duration_sec", shot.path("duration_sec").asDouble(3));
+            return new Retarget(approvedId, shotId, payload);
+        }
+        if ("image".equals(planMode) && "still".equals(old.kind())) {
+            payload.put("revisionId", approvedId.toString());
+            payload.put("positive_prompt", plan.path("positive_prompt").asText(""));
+            payload.put("negative_prompt", plan.path("negative_prompt").asText(""));
+            return new Retarget(approvedId, old.shotId(), payload);
+        }
+        log.warn("job retry re-anchor: kind={} planMode={} 不支持自动改锚，沿用旧 payload（改镜后请重新发起生成）",
+                old.kind(), planMode);
+        return new Retarget(old.revisionId(), old.shotId(), old.payload());
     }
 
     /** 删除所选 failed/cancelled 任务记录（§20.2；级联清掉其孤儿资产再删行，避免 FK 冲突）。 */

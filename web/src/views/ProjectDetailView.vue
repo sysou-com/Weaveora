@@ -410,17 +410,18 @@ function showMoreJobs(): void {
 }
 
 async function startGeneration(): Promise<void> {
-  if (!selectedRevId.value) return
+  const revId = genRevisionId()
+  if (!revId) return
   genBusy.value = true
   try {
     const isVideo = draft.value?.mode === 'video'
     const created = await createJobs(workspaceId.value, projectId.value, {
-      revisionId: selectedRevId.value,
+      revisionId: revId,
       kind: 'still',
       count: isVideo ? undefined : imgCount.value,
     })
     await queryClient.invalidateQueries({ queryKey: ['jobs'] })
-    message.success(`已创建 ${created.length} 个任务（关键帧）`)
+    message.success(`已创建 ${created.length} 个任务（关键帧 · 基于确认稿 v${approvedRev.value?.revisionNo ?? '?'}）`)
   } catch (e) {
     message.error(e instanceof Error ? e.message : '创建任务失败')
   } finally {
@@ -462,6 +463,24 @@ const jobActionBusy = ref(false)
 function isJobActionable(j: JobRecord): boolean {
   return j.state === 'failed' || j.state === 'cancelled'
 }
+
+// ---------- 任务版本标注（防“旧版产物误导新版”操作）：任务按生成时的确认稿版本打标 ----------
+const revisionById = computed<Record<string, { no: number; approved: boolean }>>(() => {
+  const m: Record<string, { no: number; approved: boolean }> = {}
+  for (const r of revisions.data.value ?? []) m[r.id] = { no: r.revisionNo, approved: r.approved }
+  return m
+})
+const approvedRev = computed(() => (revisions.data.value ?? []).find((r) => r.approved) ?? null)
+/** 生成/运动始终以“当前确认稿”为准（服务端同样只认确认稿）；避免用户对着旧 tab/旧任务误生成 */
+function genRevisionId(): string | null {
+  return approvedRev.value?.id ?? selectedRevId.value
+}
+function revOfJob(j: JobRecord): { no: number; stale: boolean } | null {
+  if (!j.revisionId) return null
+  const r = revisionById.value[j.revisionId]
+  if (!r) return null
+  return { no: r.no, stale: approvedRev.value !== null && approvedRev.value.id !== j.revisionId }
+}
 const eligibleAllSelected = computed(
   () => eligibleJobs.value.length > 0 && jobSel.value.length === eligibleJobs.value.length)
 function toggleEligibleAll(): void {
@@ -481,7 +500,9 @@ async function retryJobsSel(): Promise<void> {
     const created = await retryJobs(workspaceId.value, projectId.value, ids)
     await queryClient.invalidateQueries({ queryKey: ['jobs'] })
     jobSel.value = []
-    message.success(`已重试 ${created.length} 条，新任务已入队（旧失败记录保留可再删）`)
+    message.success(
+      `已重试 ${created.length} 条：若确认稿已更新，将按当前确认稿 v${approvedRev.value?.revisionNo ?? '?'} 重新取词（旧失败记录保留可再删）`,
+    )
   } catch (e) {
     message.error(e instanceof Error ? e.message : '重试失败')
   } finally {
@@ -531,16 +552,17 @@ function confirmMotion(): void {
   void startMotion(f)
 }
 async function startMotion(frames?: number): Promise<void> {
-  if (!selectedRevId.value) return
+  const revId = genRevisionId()
+  if (!revId) return
   genBusy.value = true
   try {
     const created = await createJobs(workspaceId.value, projectId.value, {
-      revisionId: selectedRevId.value,
+      revisionId: revId,
       kind: 'clip',
       ...(frames ? { frames } : {}),
     })
     await queryClient.invalidateQueries({ queryKey: ['jobs'] })
-    message.success(`已创建 ${created.length} 个运动任务（关键帧→motion）`)
+    message.success(`已创建 ${created.length} 个运动任务（关键帧→motion · 基于确认稿 v${approvedRev.value?.revisionNo ?? '?'}）`)
   } catch (e) {
     message.error(e instanceof Error ? e.message : '创建运动任务失败')
   } finally {
@@ -1080,6 +1102,15 @@ const shotTotal = computed(() => {
             </label>
             <span v-else class="row-check" />
             <span class="job-kind font-mono">[{{ j.kind === 'still' ? '关键帧' : '运动' }} · 第{{ j.payload?.shot_no ?? '—' }}镜]</span>
+            <span
+              v-if="revOfJob(j)"
+              :class="['job-rev', 'font-mono', { stale: revOfJob(j)?.stale }]"
+              :title="revOfJob(j)?.stale
+                ? `此任务生成时锚定的是 v${revOfJob(j)?.no}（非当前确认稿）。改镜并重新确认后：新生成的/重试的任务会自动按当前确认稿取词`
+                : '基于当前确认稿生成'"
+            >
+              v{{ revOfJob(j)?.no }}{{ revOfJob(j)?.stale ? '·旧' : '' }}
+            </span>
             <span :class="['job-state', j.state]">
               {{ JOB_STATE_LABEL[j.state] ?? j.state }}{{ j.state === 'running' && j.stage ? ' · ' + j.stage : '' }}
             </span>
@@ -1587,6 +1618,14 @@ const shotTotal = computed(() => {
   z-index: 5;
 }
 
+/* 移动端：版本条不再吸底，避免锚定盖住正文/操作区；按钮由 RevisionRail 内部换行收起 */
+@media (max-width: 760px) {
+  .studio-rail {
+    position: static;
+    margin-top: 18px;
+  }
+}
+
 /* ---------- W2C 参考图 ---------- */
 .refs-panel {
   width: 330px;
@@ -1693,6 +1732,21 @@ const shotTotal = computed(() => {
   border-radius: 8px;
 }
 .job-kind { font-size: 10px; color: var(--wv-text-4); flex: none; width: 46px; }
+.job-rev {
+  font-size: 10px;
+  color: var(--wv-text-4);
+  background: var(--wv-surface-sunken);
+  border: 1px solid var(--wv-line);
+  border-radius: 999px;
+  padding: 1px 7px;
+  flex: none;
+}
+.job-rev.stale {
+  color: var(--wv-danger);
+  border-color: color-mix(in srgb, var(--wv-danger) 55%, var(--wv-line));
+  background: color-mix(in srgb, var(--wv-danger) 10%, var(--wv-surface));
+  cursor: help;
+}
 .job-state { font-size: 12px; color: var(--wv-text-2); flex: none; min-width: 84px; }
 .job-state.running { color: var(--wv-accent-text); }
 .job-state.failed { color: var(--wv-danger); }
