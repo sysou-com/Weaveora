@@ -25,6 +25,25 @@
         "composition": { "type": "string", "description": "构图一句话（层次/遮挡/视线轴）" }
       }
     },
+    "referenceAssets": {
+      "type": "array",
+      "description": "参考图↔主体绑定（参考图面板标注；region 为归一化 0–1 区域，用于 GPU 分区遮罩/IP-Adapter 解耦）",
+      "items": {
+        "type": "object",
+        "required": ["assetId"],
+        "properties": {
+          "assetId": { "type": "string" },
+          "subject": { "type": "string" },
+          "region": {
+            "type": "object",
+            "properties": {
+              "x": { "type": "number" }, "y": { "type": "number" },
+              "w": { "type": "number" }, "h": { "type": "number" }
+            }
+          }
+        }
+      }
+    },
     "lighting": { "type": "string" },
     "palette": { "type": "array", "items": { "type": "string" }, "minItems": 3, "maxItems": 5 },
     "params": {

@@ -124,16 +124,27 @@ watch(
     const ra = (draft.value as unknown as { referenceAssets?: Array<{ assetId?: string; subject?: string }> }).referenceAssets
     const ids: string[] = []
     const subjects: Record<string, string> = {}
+    const regions: Record<string, { x: string; y: string; w: string; h: string }> = {}
     if (Array.isArray(ra)) {
       for (const b of ra) {
         const aid = String(b?.assetId ?? '')
         if (!aid) continue
         ids.push(aid)
         if (b?.subject) subjects[aid] = String(b.subject)
+        const rg = (b as { region?: { x?: number; y?: number; w?: number; h?: number } })?.region
+        if (rg && Number.isFinite(Number(rg.w)) && Number(rg.w) > 0) {
+          regions[aid] = {
+            x: String(Math.round(Number(rg.x ?? 0) * 100)),
+            y: String(Math.round(Number(rg.y ?? 0) * 100)),
+            w: String(Math.round(Number(rg.w) * 100)),
+            h: String(Math.round(Number(rg.h ?? 0) * 100)),
+          }
+        }
       }
     }
     refSelected.value = ids
     refSubjects.value = subjects
+    refRegions.value = regions
     pristineJson.value = JSON.stringify(draft.value)
     dirty.value = false
   },
@@ -228,13 +239,44 @@ const refSelected = ref<string[]>([])
 
 /** P4 参考主体标注：assetId → 主体名（如 唐僧）；随方案 referenceAssets 落库，生成时按镜文本自动绑定 */
 const refSubjects = ref<Record<string, string>>({})
+/** P5 区域遮罩：assetId → 百分比 x/y/w/h（0–100，可选；填全且合法才生效） */
+const refRegions = ref<Record<string, { x: string; y: string; w: string; h: string }>>({})
+
+function buildRefAssets(): Array<{
+  assetId: string
+  subject?: string
+  region?: { x: number; y: number; w: number; h: number }
+}> {
+  return refSelected.value.map((id) => {
+    const s = (refSubjects.value[id] ?? '').trim()
+    const r = refRegions.value[id]
+    const nums = r ? [r.x, r.y, r.w, r.h].map((v) => Number(String(v ?? '').trim())) : []
+    const valid =
+      !!r &&
+      nums.length === 4 &&
+      nums.every((n) => Number.isFinite(n) && n >= 0 && n <= 100) &&
+      nums[2] > 0 &&
+      nums[3] > 0 &&
+      nums[0] + nums[2] <= 100 &&
+      nums[1] + nums[3] <= 100
+    const item: { assetId: string; subject?: string; region?: { x: number; y: number; w: number; h: number } } = {
+      assetId: id,
+    }
+    if (s) item.subject = s
+    if (valid) item.region = { x: nums[0] / 100, y: nums[1] / 100, w: nums[2] / 100, h: nums[3] / 100 }
+    return item
+  })
+}
+
 function syncReferenceAssets(): void {
   if (!draft.value) return
-  const list = refSelected.value.map((id) => {
-    const s = (refSubjects.value[id] ?? '').trim()
-    return s ? { assetId: id, subject: s } : { assetId: id }
-  })
-  ;(draft.value as unknown as { referenceAssets?: unknown }).referenceAssets = list
+  ;(draft.value as unknown as { referenceAssets?: unknown }).referenceAssets = buildRefAssets()
+}
+
+function setRefRegion(id: string, k: 'x' | 'y' | 'w' | 'h', v: string): void {
+  const cur = refRegions.value[id] ?? { x: '', y: '', w: '', h: '' }
+  refRegions.value = { ...refRegions.value, [id]: { ...cur, [k]: v } }
+  syncReferenceAssets()
 }
 function setRefSubject(id: string, v: string): void {
   refSubjects.value[id] = v
@@ -408,6 +450,7 @@ function toggleRef(id: string, on: boolean): void {
   } else {
     refSelected.value = refSelected.value.filter((x) => x !== id)
     delete refSubjects.value[id]
+    delete refRegions.value[id]
   }
   syncReferenceAssets()
 }
@@ -730,10 +773,7 @@ async function handleFirstBrief(payload: { rawText: string; dirMode: 'image' | '
   creating.value = true
   try {
     // P4：参考图选择/主体标注一并写入 brief.constraints（未出方案前也能绑定与告知导演）
-    const refAssets = refSelected.value.map((id) => {
-      const s = (refSubjects.value[id] ?? '').trim()
-      return s ? { assetId: id, subject: s } : { assetId: id }
-    })
+    const refAssets = buildRefAssets()
     const b = await createBrief(workspaceId.value, projectId.value, {
       rawText: payload.rawText,
       mode: payload.dirMode,
@@ -1072,15 +1112,30 @@ const shotTotal = computed(() => {
             </div>
             <div v-if="refSelected.length" class="ref-subjects">
               <p class="ref-subjects-title font-mono">标注主体（生成时按镜头文案自动绑定）</p>
-              <div v-for="id in refSelected" :key="id" class="ref-subject-row">
-                <img v-if="thumbUrls[id]" :src="thumbUrls[id]" class="ref-subject-thumb" alt="" />
-                <input
-                  class="text"
-                  type="text"
-                  :value="refSubjects[id] ?? ''"
-                  placeholder="主体名，如 唐僧 / 女王"
-                  @input="onRefSubjectInput(id, $event)"
-                />
+              <div v-for="id in refSelected" :key="id" class="ref-subject-block">
+                <div class="ref-subject-row">
+                  <img v-if="thumbUrls[id]" :src="thumbUrls[id]" class="ref-subject-thumb" alt="" />
+                  <input
+                    class="text"
+                    type="text"
+                    :value="refSubjects[id] ?? ''"
+                    placeholder="主体名，如 唐僧 / 女王"
+                    @input="onRefSubjectInput(id, $event)"
+                  />
+                </div>
+                <div class="ref-region-row">
+                  <span class="ref-region-label font-mono">区域%</span>
+                  <input
+                    v-for="k in (['x', 'y', 'w', 'h'] as const)"
+                    :key="k"
+                    class="text ref-region-input"
+                    type="text"
+                    inputmode="numeric"
+                    :placeholder="k"
+                    :value="refRegions[id]?.[k] ?? ''"
+                    @input="setRefRegion(id, k, ($event.target as HTMLInputElement).value)"
+                  />
+                </div>
               </div>
             </div>
             <p v-else class="ref-hint text-secondary">
@@ -1801,7 +1856,11 @@ const shotTotal = computed(() => {
 .ref-count { margin: 0; font-size: 10px; color: var(--wv-accent-text); letter-spacing: .12em; }
 .ref-subjects { display: flex; flex-direction: column; gap: 6px; }
 .ref-subjects-title { margin: 0; font-size: 10px; letter-spacing: .1em; color: var(--wv-text-4); }
+.ref-subject-block { display: flex; flex-direction: column; gap: 6px; }
 .ref-subject-row { display: flex; align-items: center; gap: 8px; }
+.ref-region-row { display: flex; align-items: center; gap: 6px; padding-left: 36px; }
+.ref-region-label { font-size: 9px; color: var(--wv-text-4); flex: none; }
+.ref-region-input { width: 52px; flex: none; text-align: center; }
 .ref-subject-thumb { width: 28px; height: 28px; object-fit: cover; border-radius: 6px; border: 1px solid var(--wv-line); flex: none; }
 .ref-subject-row .text { flex: 1 1 auto; min-width: 0; }
 .ref-conflict {

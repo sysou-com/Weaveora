@@ -679,8 +679,9 @@ public class JobService {
 
     // ---------- W4 一致性锚定 ----------
 
-    record RefCtx(List<String> ids, List<String> keys, List<String> subjects, String anchor, String primarySubject) {
-        static RefCtx empty() { return new RefCtx(List.of(), List.of(), List.of(), "", ""); }
+    record RefCtx(List<String> ids, List<String> keys, List<String> subjects, List<String> regions,
+                  String anchor, String primarySubject) {
+        static RefCtx empty() { return new RefCtx(List.of(), List.of(), List.of(), List.of(), "", ""); }
     }
 
     /**
@@ -703,7 +704,7 @@ public class JobService {
         RefCtx fromBrief = bindFrom(briefReferenceAssets(userId, workspaceId, projectId, revisionId), text, workspaceId);
         if (fromBrief != null) return fromBrief;
         RefCtx legacy = loadRefs(userId, workspaceId, projectId, revisionId);
-        return new RefCtx(legacy.ids(), legacy.keys(), legacy.subjects(), "", legacy.primarySubject());
+        return new RefCtx(legacy.ids(), legacy.keys(), legacy.subjects(), legacy.regions(), "", legacy.primarySubject());
     }
 
     /** brief.constraints.referenceAssets（新流程：未出方案前就标注的主体绑定）。取不到/无则 null。 */
@@ -747,7 +748,9 @@ public class JobService {
         List<String> okIds = new ArrayList<>();
         List<String> keys = new ArrayList<>();
         List<String> subjects = new ArrayList<>();
+        List<String> regions = new ArrayList<>();
         StringBuilder mapping = new StringBuilder();
+        StringBuilder layout = new StringBuilder();
         String primary = "";
         for (JsonNode b : picked) {
             String aid = b.path("assetId").asText();
@@ -757,10 +760,16 @@ public class JobService {
             okIds.add(aid);
             keys.add(a.storageKey());
             subjects.add(subject);
+            regions.add(regionCsv(b.path("region")));
             if (!subject.isBlank()) {
                 if (mapping.length() > 0) mapping.append("; ");
                 mapping.append(keys.size()).append(") ").append(subject);
                 if (primary.isBlank() && t.contains(subject)) primary = subject;
+                String reg = regionCsv(b.path("region"));
+                if (!reg.isBlank()) {
+                    if (layout.length() > 0) layout.append("; ");
+                    layout.append(subject).append(" -> ").append(regionHint(reg));
+                }
             }
         }
         if (okIds.isEmpty()) return null;
@@ -772,10 +781,37 @@ public class JobService {
             anchor = " Reference images in order: " + mapping
                     + ". Each character's identity, face and costume must strictly follow its own reference image;"
                     + " keep the characters distinct and do not share, blend or swap their faces.";
+            if (layout.length() > 0) {
+                anchor = anchor + " Spatial layout: " + layout + ".";
+            }
         } else {
             anchor = " The subject appearance must strictly follow the provided reference image.";
         }
-        return new RefCtx(okIds, keys, subjects, anchor, primary);
+        return new RefCtx(okIds, keys, subjects, regions, anchor, primary);
+    }
+
+    /** 归一化区域 {x,y,w,h}（0–1）→ "x,y,w,h"；非法返回 ""。 */
+    private static String regionCsv(JsonNode r) {
+        if (r == null || !r.isObject()) return "";
+        double x = r.path("x").asDouble(-1), y = r.path("y").asDouble(-1);
+        double w = r.path("w").asDouble(-1), h = r.path("h").asDouble(-1);
+        if (x < 0 || y < 0 || w <= 0 || h <= 0 || x > 1 || y > 1 || w > 1 || h > 1) return "";
+        if (x + w > 1.001 || y + h > 1.001) return "";
+        return String.format(java.util.Locale.ROOT, "%.3f,%.3f,%.3f,%.3f", x, y, w, h);
+    }
+
+    /** 区域 → 方位描述（供云模型提示词）。 */
+    private static String regionHint(String csv) {
+        try {
+            String[] p = csv.split(",");
+            double cx = Double.parseDouble(p[0]) + Double.parseDouble(p[2]) / 2;
+            double cy = Double.parseDouble(p[1]) + Double.parseDouble(p[3]) / 2;
+            String hz = cx < 0.34 ? "left" : (cx > 0.66 ? "right" : "center");
+            String vt = cy < 0.34 ? "upper" : (cy > 0.66 ? "lower" : "middle");
+            return vt + "-" + hz + " of frame";
+        } catch (Exception e) {
+            return "";
+        }
     }
 
     private RefCtx loadRefs(UUID userId, UUID workspaceId, UUID projectId, UUID revisionId) {
@@ -804,7 +840,7 @@ public class JobService {
                         .map(studio.weaveora.asset.domain.Asset::storageKey)
                         .toList();
             }
-            return new RefCtx(ids.stream().map(UUID::toString).toList(), keys, List.of(), "", "");
+            return new RefCtx(ids.stream().map(UUID::toString).toList(), keys, List.of(), List.of(), "", "");
         } catch (BizException e) {
             return RefCtx.empty(); // 引用缺失不阻塞出图（仅丢锚定）
         }
@@ -826,6 +862,17 @@ public class JobService {
         refs.keys().forEach(keys::add);
         com.fasterxml.jackson.databind.node.ArrayNode subjects = payload.putArray("referenceSubjects");
         refs.subjects().forEach(subjects::add);
+        com.fasterxml.jackson.databind.node.ArrayNode regions = payload.putArray("referenceRegions");
+        for (String csv : refs.regions()) {
+            if (csv == null || csv.isBlank()) {
+                regions.addNull();
+            } else {
+                String[] p = csv.split(",");
+                regions.addObject()
+                        .put("x", Double.parseDouble(p[0])).put("y", Double.parseDouble(p[1]))
+                        .put("w", Double.parseDouble(p[2])).put("h", Double.parseDouble(p[3]));
+            }
+        }
         if (refs.primarySubject() != null && !refs.primarySubject().isBlank()) {
             payload.put("primarySubject", refs.primarySubject());
         }

@@ -63,3 +63,11 @@ python worker/qa_acceptance.py --base https://sysou.com/weaveora --engine cloud
 - 根因：① worker `replicate_image` 只用 `referenceKeys[0]`，并以单张图作 `image`（img2img/编辑语义）→ 整图身份被这一张带偏；② 方案内主体↔图映射顺序被 DB 查询顺序打乱，且 payload 未下发 `referenceSubjects`；③ 提示词只有一句笼统 “must follow the provided reference image”，未说明“第几张图=谁”。
 - 修复：JobService 按标注顺序重建 ids/keys/subjects（新增 `referenceSubjects`/`primarySubject`），anchor 改为显式图序映射 + “各角色各随其图、禁止换脸/混脸”，多主体自动追加防串脸负词；worker 多图模型（flux/kontext/nano-banana）传全部 `input_images` 并把图序映射写进 prompt，单图/img2img 模型只用主主体那张（GPU IP-Adapter 同规则）。
 - 已知限制：单图 img2img 类模型无法真正按角色分别绑脸；同框多主体要稳定需用多参考模型或拆镜/分帧，或后续做 IP-Adapter 分区遮罩（GPU）。
+
+## P5 GPU 分区遮罩 IP-Adapter（代码就绪，待 GPU 唤醒验证）
+- 目的：同框多角色（女王+唐僧）按区域分别注入参考图，消除串脸。
+- 数据：`plan.referenceAssets=[{assetId, subject, region:{x,y,w,h}(0–1)}]`；前端参考图面板每个选中项可填「区域%」（x/y/w/h，0–100，填全且合法才生效）。job payload 下发 `referenceSubjects` + `referenceRegions`（与 keys 一一对应）+ `primarySubject`。
+- comfy 图：`IPAdapterAdvanced(attn_mask)` 优先、否则 `IPAdapterMS(mask)`；遮罩由 worker 生成的灰度 PNG（白=区域）经 LoadImage→(MaskBlur 可选)→attn_mask 注入；无遮罩能力或未标注区域时只用主主体一张（避免串脸）。
+- 云侧：无遮罩能力，改为在 prompt 追加 `Spatial layout: 女王 -> upper-left of frame; …` 方位描述 + 图序映射 + 防串脸负词。
+- 验证（GPU 唤醒后）：① 选两张参考图各填区域（如女王 x0 y0 w50 h100；唐僧 x50 y0 w50 h100）；② 确认方案后生成关键帧；③ 看 worker 日志 `[comfy] refs=2 regions=2 primary=…` 与节点类型（IPAdapterAdvanced/MS）；④ 出图两角色脸不互相污染。
+- 已知：平台自动睡眠导致当前未唤醒（用户后续处理）；本特性不影响云通道。

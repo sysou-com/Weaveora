@@ -9,11 +9,13 @@ import base64
 import io
 import json
 import os
+import struct
 import sys
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import zlib
 
 API = os.environ.get("WEAVEORA_API_BASE", "http://localhost:8080").rstrip("/")
 TOKEN = os.environ.get("WEAVEORA_WORKER_TOKEN", "dev-worker-token")
@@ -80,6 +82,70 @@ def fetch_reference_bytes(storage_key):
 
 
 _KS_INFO = None
+_NODE_INFO = None
+
+
+def _node_info(class_type):
+    """缓存式节点探测：返回 object_info 字典或 None（节点不存在）。"""
+    global _NODE_INFO
+    if _NODE_INFO is None:
+        _NODE_INFO = {}
+    if class_type in _NODE_INFO:
+        return _NODE_INFO[class_type]
+    try:
+        import urllib.request as _ur
+        with _ur.urlopen(COMFY + "/object_info/" + urllib.parse.quote(class_type), timeout=15) as r:
+            _NODE_INFO[class_type] = json.loads(r.read())
+    except Exception:
+        _NODE_INFO[class_type] = None
+    return _NODE_INFO[class_type]
+
+
+def _has_input(info, name):
+    """节点是否有某输入（required/optional 都算）。"""
+    if not info:
+        return False
+    node = next(iter(info.values())) if isinstance(info, dict) else None
+    if not node:
+        return False
+    ipt = node.get("input") or {}
+    for sec in ("required", "optional"):
+        if name in (ipt.get(sec) or {}):
+            return True
+    return False
+
+
+def _rect_mask_png(width, height, region):
+    """按归一化区域 {x,y,w,h} 生成灰度 PNG 遮罩（白=区域，黑=其余），纯标准库。"""
+    w, h = int(width), int(height)
+    x = int(round(float(region.get("x", 0)) * w))
+    y = int(round(float(region.get("y", 0)) * h))
+    rw = max(1, int(round(float(region.get("w", 0)) * w)))
+    rh = max(1, int(round(float(region.get("h", 0)) * h)))
+    rows = []
+    white = b"\xff" * rw
+    black_l = b"\x00" * max(0, x)
+    black_r = b"\x00" * max(0, w - x - rw)
+    empty_row = b"\x00" + b"\x00" * w
+    for j in range(h):
+        if y <= j < y + rh:
+            rows.append(b"\x00" + black_l + white + black_r)
+        else:
+            rows.append(empty_row)
+    raw = b"".join(rows)
+
+    def chunk(tag, data):
+        c = tag + data
+        return struct.pack(">I", len(data)) + c + struct.pack(">I", zlib.crc32(c) & 0xffffffff)
+
+    ihdr = struct.pack(">IIBBBBB", w, h, 8, 0, 0, 0, 0)
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr)
+            + chunk(b"IDAT", zlib.compress(raw, 6)) + chunk(b"IEND", b""))
+
+
+def _upload_image(data, filename, ctype="image/png"):
+    _, body = _comfy("POST", "/upload/image", files={"image": (filename, data, ctype)})
+    return json.loads(body.decode()).get("name")
 
 
 def _sampler_options(kind, fallback):
@@ -98,8 +164,13 @@ def _sampler_options(kind, fallback):
 
 
 def _prompt(client_id, positive, negative, params, seed, width=None, height=None,
-            reference_image_name=None, prefix="weaveora"):
-    """构造 ComfyUI prompt（txt2img；带参考图则加 IP-Adapter 分支）。"""
+            reference_image_name=None, references=None, prefix="weaveora"):
+    """构造 ComfyUI prompt（txt2img；带参考图则加 IP-Adapter 分支）。
+
+    P5：多参考图 + 归一化区域遮罩（分区 IP-Adapter，按角色解耦）：
+      references = [{"name": ..., "subject": "唐僧", "region": {x,y,w,h}|None}, ...]
+    策略（节点探测）：IPAdapterAdvanced(attn_mask) > IPAdapterMS(mask) > 单图回退（只用主主体）。
+    """
     cfg = float(params.get("cfg", 5.5))
     steps = int(params.get("steps", 30))
     requested = params.get("sampler", "dpmpp_2m")
@@ -126,24 +197,62 @@ def _prompt(client_id, positive, negative, params, seed, width=None, height=None
                  "inputs": {"images": ["vae", 0], "filename_prefix": prefix}},
     }
 
-    if reference_image_name:
-        # IP-Adapter（参考图 → 主体一致性，产品/物体/虚构人物；§30 #23）
-        # ComfyUI_IPAdapter_plus 真实拓扑：UnifiedLoader 预载 clip_vision+adapter，
-        # apply 节点(IPAdapter=IPAdapterSimple) 仅改 model（单 MODEL 输出），提示词仍走原 pos/neg。
-        nodes["load_ref"] = {"class_type": "LoadImage",
-                             "inputs": {"image": reference_image_name}}
+    refs = list(references or [])
+    if not refs and reference_image_name:
+        refs = [{"name": reference_image_name, "subject": "", "region": None}]
+    if refs:
+        # IP-Adapter（参考图 → 主体一致性；P5 多主体按区域遮罩解耦）
         nodes["ip_unified"] = {"class_type": "IPAdapterUnifiedLoader",
                                "inputs": {"preset": params.get("ipadapter_preset",
                                                                    "STANDARD (medium strength)"),
-                                           "model": ["ckpt", 0]}}
-        nodes["ip_apply"] = {"class_type": "IPAdapter",
-                             "inputs": {"model": ["ip_unified", 0],
-                                        "ipadapter": ["ip_unified", 1],
-                                        "image": ["load_ref", 0],
-                                        "weight": float(params.get("ipadapter_weight", 0.85)),
-                                        "start_at": 0.0, "end_at": 1.0,
-                                        "weight_type": params.get("ipadapter_weight_type", "standard")}}
-        nodes["ksampler"]["inputs"]["model"] = ["ip_apply", 0]
+                                          "model": ["ckpt", 0]}}
+        weight = float(params.get("ipadapter_weight", 0.85))
+        wtype = params.get("ipadapter_weight_type", "standard")
+        adv = _node_info("IPAdapterAdvanced")
+        adv_masked = _has_input(adv, "attn_mask")
+        ms = _node_info("IPAdapterMS")
+        ms_masked = (not adv_masked) and _has_input(ms, "mask")
+        regional_ok = bool(params.get("ipadapter_regional", True)) and (adv_masked or ms_masked)
+        has_region = any((r.get("region") or {}) for r in refs)
+        if len(refs) > 1 and not (regional_ok and has_region):
+            # 无遮罩能力/未标注区域：多图不能全挂（会串脸）→ 只用首张（generate 已把主主体排首位）
+            print("[comfy] 多参考图但无分区能力/未标注区域，仅用首张（%s）"
+                  % (refs[0].get("subject") or "-"), flush=True)
+            refs = [refs[0]]
+        prev_model = ["ip_unified", 0]
+        for i, r in enumerate(refs):
+            nodes["load_ref_%d" % i] = {"class_type": "LoadImage", "inputs": {"image": r["name"]}}
+            inp = {"model": prev_model, "ipadapter": ["ip_unified", 1], "image": ["load_ref_%d" % i, 0],
+                   "weight": weight, "start_at": 0.0, "end_at": 1.0, "weight_type": wtype}
+            region = r.get("region") or None
+            cls = "IPAdapter"
+            if regional_ok and region:
+                try:
+                    mask_name = _upload_image(
+                        _rect_mask_png(width, height, region),
+                        "wvmask_%d_%d.png" % (int(seed or 0), i))
+                    nodes["mask_%d" % i] = {"class_type": "LoadImage", "inputs": {"image": mask_name}}
+                    mask_out = ["mask_%d" % i, 1]  # LoadImage 的 MASK 输出
+                    blur = _node_info("MaskBlur")
+                    if blur is not None:
+                        nodes["mask_blur_%d" % i] = {
+                            "class_type": "MaskBlur",
+                            "inputs": {"mask": mask_out,
+                                       "blur_radius": int(params.get("ipadapter_mask_blur", 12)),
+                                       "sigma": float(params.get("ipadapter_mask_sigma", 8.0))}}
+                        mask_out = ["mask_blur_%d" % i, 0]
+                    if adv_masked:
+                        cls = "IPAdapterAdvanced"
+                        inp["attn_mask"] = mask_out
+                    else:
+                        cls = "IPAdapterMS"
+                        inp["mask"] = mask_out
+                except Exception as e:
+                    print("[comfy] 区域遮罩构建失败，退化为全局 IP-Adapter: %s" % e, flush=True)
+                    cls = "IPAdapter"
+            nodes["ip_%d" % i] = {"class_type": cls, "inputs": inp}
+            prev_model = ["ip_%d" % i, 0]
+        nodes["ksampler"]["inputs"]["model"] = prev_model
 
     # ComfyUI 需要节点 id 为字符串键 + client_id
     return {"prompt": nodes, "client_id": client_id}
@@ -196,42 +305,43 @@ def generate(client_id, payload, progress_fn=None):
     height = (params.get("height") if isinstance(params.get("height"), int) else None)
     prefix = "weaveora" + (("_" + str(payload.get("shot_no") or "")) if payload.get("kind") == "video" else "")
 
-    ref_name = None
+    refs = []
     ref_keys = payload.get("referenceKeys") or []
     ref_subjects = payload.get("referenceSubjects") or []
+    ref_regions = payload.get("referenceRegions") or []
     primary = payload.get("primarySubject") or ""
-    if ref_keys:
-        idx = 0
-        if len(ref_keys) > 1:
-            # IP-Adapter 单图：多主体时只用“该镜主主体”对应的那张，避免两张脸互相带偏
-            for i, s in enumerate(ref_subjects):
-                if primary and s == primary:
-                    idx = i
-                    break
-            print("[comfy] 多参考图 %d 张，仅用主主体 idx=%d subject=%s"
-                  % (len(ref_keys), idx, (ref_subjects[idx] if idx < len(ref_subjects) else "-")), flush=True)
-        key = ref_keys[idx]
+    for i, key in enumerate(ref_keys[:4]):
         try:
             data, ctype = fetch_reference_bytes(key)
-            _, body = _comfy("POST", "/upload/image",
-                             files={"image": (key.split("/")[-1], data, ctype)})
-            ref_name = json.loads(body.decode()).get("name")
-        except Exception:
-            ref_name = None
+            name = _upload_image(data, key.split("/")[-1] or ("ref_%d.png" % i), ctype or "image/png")
+            region = ref_regions[i] if i < len(ref_regions) else None
+            if not isinstance(region, dict):
+                region = None
+            subject = ref_subjects[i] if i < len(ref_subjects) else ""
+            if name:
+                refs.append({"name": name, "subject": subject, "region": region})
+        except Exception as e:
+            print("[comfy] ref#%d 上传失败，跳过: %s" % (i, e), flush=True)
+    # 主主体排首位（单图回退与权重聚焦都按首位）
+    if primary:
+        refs.sort(key=lambda r: 0 if r.get("subject") == primary else 1)
+    n_regions = sum(1 for r in refs if r.get("region"))
+    if refs:
+        print("[comfy] refs=%d regions=%d primary=%s" % (len(refs), n_regions, primary or "-"), flush=True)
 
     last_err = None
     try:
         prompt = _prompt(client_id, positive, negative, params, seed, width, height,
-                         reference_image_name=ref_name, prefix=prefix)
+                         references=refs, prefix=prefix)
         pid = _post_prompt(prompt, client_id)
         rec = _poll_history(client_id, pid)
         return _download_outputs(rec, prefix)
     except ComfyError as e:
         last_err = e
         # IP-Adapter 图未用上或节点缺失 → 降级纯 txt2img
-        if ref_name is not None and FALLBACK:
+        if refs and FALLBACK:
             prompt = _prompt(client_id, positive, negative, params, seed, width, height,
-                             reference_image_name=None, prefix=prefix)
+                             references=None, prefix=prefix)
             pid = _post_prompt(prompt, client_id)
             rec = _poll_history(client_id, pid)
             return _download_outputs(rec, prefix)
