@@ -115,8 +115,18 @@ public class AssetService {
     public Asset createOutput(UUID workspaceId, UUID projectId, UUID jobId, UUID shotId, Integer shotNo,
                               String kind, String storageKey, String mime, Integer width, Integer height,
                               Long seed, Integer durationMs) {
+        return createOutput(workspaceId, projectId, jobId, shotId, shotNo, kind, storageKey, mime,
+                width, height, seed, durationMs, null);
+    }
+
+    /** 同上，额外落 prompt_snapshot（产生该资产的 job payload；P8 用它承载配音在镜内的 at_sec/line_index）。 */
+    @Transactional
+    public Asset createOutput(UUID workspaceId, UUID projectId, UUID jobId, UUID shotId, Integer shotNo,
+                              String kind, String storageKey, String mime, Integer width, Integer height,
+                              Long seed, Integer durationMs,
+                              com.fasterxml.jackson.databind.JsonNode promptSnapshot) {
         return assets.save(Asset.output(workspaceId, projectId, jobId, shotId, shotNo, kind,
-                storageKey, mime, width, height, seed, durationMs));
+                storageKey, mime, width, height, seed, durationMs, promptSnapshot));
     }
 
     public record Download(Asset asset, InputStream stream, String contentType) {

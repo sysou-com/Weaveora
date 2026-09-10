@@ -92,6 +92,19 @@ public class Asset {
     public static Asset output(UUID workspaceId, UUID projectId, UUID jobId, UUID shotId, Integer shotNo,
                                String kind, String storageKey, String mime, Integer width, Integer height,
                                Long seed, Integer durationMs) {
+        return output(workspaceId, projectId, jobId, shotId, shotNo, kind, storageKey, mime,
+                width, height, seed, durationMs, null);
+    }
+
+    /**
+     * 与上一个重载相同，但额外落 {@code prompt_snapshot}（产生这个资产的 job payload）。
+     *
+     * <p>P8 用它承载「这段配音在镜内的位置」：{@code at_sec} / {@code line_index} / {@code subject} / {@code kind}。
+     * 资产完成顺序不确定（多任务并发），不能靠 createdAt 推断顺序，必须读这个快照。
+     */
+    public static Asset output(UUID workspaceId, UUID projectId, UUID jobId, UUID shotId, Integer shotNo,
+                               String kind, String storageKey, String mime, Integer width, Integer height,
+                               Long seed, Integer durationMs, com.fasterxml.jackson.databind.JsonNode promptSnapshot) {
         Asset a = new Asset();
         a.workspaceId = workspaceId;
         a.projectId = projectId;
@@ -105,6 +118,7 @@ public class Asset {
         a.height = height;
         a.seed = seed;
         a.durationMs = durationMs;
+        a.promptSnapshot = promptSnapshot;
         return a;
     }
 
@@ -122,6 +136,8 @@ public class Asset {
     public Integer height() { return height; }
     public Integer durationMs() { return durationMs; }
     public Long seed() { return seed; }
+    /** 产生该资产的 job payload 快照（P8 配音靠它取 at_sec / line_index）；老数据可能为 null。 */
+    public com.fasterxml.jackson.databind.JsonNode promptSnapshot() { return promptSnapshot; }
     public boolean nsfw() { return nsfw; }
     public OffsetDateTime createdAt() { return createdAt; }
 }

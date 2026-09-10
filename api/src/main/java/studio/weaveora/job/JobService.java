@@ -9,6 +9,7 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import studio.weaveora.asset.AssetService;
+import studio.weaveora.director.plan.AudioPlan;
 import studio.weaveora.billing.QuotaService;
 import studio.weaveora.infra.obs.Metrics;
 import studio.weaveora.asset.api.AssetResponse;
@@ -381,23 +382,34 @@ public class JobService {
                                                 JsonNode plan, int revisionNo, UUID userId) {
         List<GenerationJob> out = new ArrayList<>();
         if ("bgm".equals(req.kind())) {
-            ObjectNode payload = mapper().createObjectNode();
-            payload.put("kind", "bgm");
-            payload.put("preview", Boolean.TRUE.equals(req.preview()));
-            payload.put("mode", plan.path("mode").asText("video"));
-            payload.put("revisionId", req.revisionId().toString());
-            payload.put("revision_no", revisionNo);
-            String mood = plan.path("audio").path("music_mood").asText("").trim();
-            String prompt = mood.isBlank() ? "cinematic instrumental score, emotional, no vocals"
-                    : ("cinematic instrumental score, mood: " + mood + ", no vocals");
-            payload.put("prompt", prompt);
-            double dur = plan.path("duration_sec").asDouble(0);
-            if (dur <= 0) dur = 30;
-            payload.put("duration_sec", Math.min(Math.max(dur, 5), 180));
-            payload.put("seed", randomSeed());
-            stampRevisionMeta(payload, revisionNo, prompt);
-            out.add(createOne(workspaceId, projectId, req.revisionId(), null, PRESET_STILL, "bgm",
-                    payload, userId, "gpu"));
+            // P8：按配乐段落表取「需要生成的情绪」（同 mood 只生成一次，多段引用同一产物）
+            List<AudioPlan.MusicCue> cues = AudioPlan.musicCues(plan);
+            if (cues.isEmpty()) {
+                throw new BizException(ErrorCode.VALIDATION, "方案里没有配乐段落（audio.music / music_mood 均为空）");
+            }
+            double planDur = plan.path("duration_sec").asDouble(0);
+            for (String mood : AudioPlan.distinctMoods(cues)) {
+                double need = AudioPlan.generateDurationFor(cues, mood);
+                if (need <= 0) {
+                    need = planDur > 0 ? planDur : 30;
+                }
+                String prompt = (mood == null || mood.isBlank())
+                        ? "cinematic instrumental score, emotional, no vocals"
+                        : ("cinematic instrumental score, mood: " + mood + ", no vocals");
+                ObjectNode payload = mapper().createObjectNode();
+                payload.put("kind", "bgm");
+                payload.put("preview", Boolean.TRUE.equals(req.preview()));
+                payload.put("mode", plan.path("mode").asText("video"));
+                payload.put("revisionId", req.revisionId().toString());
+                payload.put("revision_no", revisionNo);
+                payload.put("mood", mood == null ? "" : mood);   // 混音靠它把段落和产物对应起来
+                payload.put("prompt", prompt);
+                payload.put("duration_sec", Math.min(Math.max(need, 5), 180));
+                payload.put("seed", randomSeed());
+                stampRevisionMeta(payload, revisionNo, prompt);
+                out.add(createOne(workspaceId, projectId, req.revisionId(), null, PRESET_STILL, "bgm",
+                        payload, userId, "gpu"));
+            }
             return out;
         }
         // voice：逐镜旁白
@@ -408,35 +420,45 @@ public class JobService {
         for (UUID shotId : shotIds) {
             JsonNode shot = shotOf(plan, shotId);
             if (shot == null) continue;
-            String text = shot.path("narration").asText("").trim();
-            if (text.isBlank()) continue;   // 没有旁白的镜头跳过
-            ObjectNode payload = mapper().createObjectNode();
-            payload.put("kind", "voice");
-            payload.put("preview", Boolean.TRUE.equals(req.preview()));
-            payload.put("mode", "video");
-            payload.put("revisionId", req.revisionId().toString());
-            payload.put("revision_no", revisionNo);
-            payload.put("shotId", shotId.toString());
-            payload.put("shot_no", shot.path("shot_no").asInt());
-            payload.put("text", text);
-            payload.put("voice", paramsVoice(plan));
-            payload.put("speed", 1.0);
-            payload.put("target_sec", shot.path("duration_sec").asDouble(3));
-            payload.put("seed", randomSeed());
-            stampRevisionMeta(payload, revisionNo, text);
-            out.add(createOne(workspaceId, projectId, req.revisionId(), shotId, PRESET_STILL, "voice",
-                    payload, userId, "gpu"));
+            // P8：一镜可多段语音（旁白 + 角色台词），每段一个 job；
+            //     音色用 AudioPlan.voiceFor 解析（narrations[].voice > voiceBindings[subject] > audio.voice > 默认）
+            List<AudioPlan.Line> lines = AudioPlan.lines(shot);
+            if (lines.isEmpty()) continue;   // 没有语音的镜头跳过
+            double shotDur = shot.path("duration_sec").asDouble(3);
+            for (int k = 0; k < lines.size(); k++) {
+                AudioPlan.Line line = lines.get(k);
+                // 本段可用时长 = 下一段起点（或镜头末尾）− 本段起点
+                double next = (k + 1 < lines.size()) ? lines.get(k + 1).atSec() : shotDur;
+                double window = Math.max(0.5, next - line.atSec());
+                ObjectNode payload = mapper().createObjectNode();
+                payload.put("kind", "voice");
+                payload.put("preview", Boolean.TRUE.equals(req.preview()));
+                payload.put("mode", "video");
+                payload.put("revisionId", req.revisionId().toString());
+                payload.put("revision_no", revisionNo);
+                payload.put("shotId", shotId.toString());
+                payload.put("shot_no", shot.path("shot_no").asInt());
+                payload.put("line_index", k);
+                payload.put("line_kind", line.kind());       // narration | dialogue
+                payload.put("at_sec", line.atSec());         // 镜内起点（混音靠它摆放）
+                if (line.subject() != null) {
+                    payload.put("subject", line.subject());
+                }
+                payload.put("text", line.text());
+                payload.put("voice", AudioPlan.voiceFor(plan, line.subject(), line.voice()));
+                payload.put("speed", AudioPlan.speedFor(plan, line.subject(), line.speed()));
+                payload.put("target_sec", window);
+                payload.put("seed", randomSeed());
+                stampRevisionMeta(payload, revisionNo, line.text());
+                out.add(createOne(workspaceId, projectId, req.revisionId(), shotId, PRESET_STILL, "voice",
+                        payload, userId, "gpu"));
+            }
         }
         if (out.isEmpty()) {
-            throw new BizException(ErrorCode.VALIDATION, "没有可配音的旁白：请先在分镜里填写旁白（narration）");
+            throw new BizException(ErrorCode.VALIDATION,
+                    "没有可配音的旁白/台词：请先在分镜里填写旁白（narration 或 narrations）");
         }
         return out;
-    }
-
-    /** 配音音色：方案 audio.voice 优先，缺省中文女声（服务端可用音色见 deploy/audio/README）。 */
-    private static String paramsVoice(JsonNode plan) {
-        String v = plan.path("audio").path("voice").asText("");
-        return v.isBlank() ? "中文女" : v;
     }
 
     @Transactional(readOnly = true)
@@ -772,7 +794,8 @@ public class JobService {
         for (CompleteAsset a : items) {
             AssetResponse resp = toAssetResponse(assets.createOutput(
                     job.workspaceId(), job.projectId(), job.id(), job.shotId(), jobShotNo, kind,
-                    a.key(), a.mime(), a.width(), a.height(), a.seed(), a.durationMs()));
+                    a.key(), a.mime(), a.width(), a.height(), a.seed(), a.durationMs(),
+                    job.payload()));   // P8：资产带 job payload 快照（混音要靠它取 at_sec/line_index）
             created.add(resp);
         }
         emit(job, Map.of("type", "job.succeeded", "assets", items.size()));

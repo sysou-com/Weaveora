@@ -11,6 +11,7 @@ import studio.weaveora.asset.api.AssetResponse;
 import studio.weaveora.asset.domain.Asset;
 import studio.weaveora.asset.domain.AssetRepository;
 import studio.weaveora.director.PlanReader;
+import studio.weaveora.director.plan.AudioPlan;
 import studio.weaveora.identity.api.WorkspaceGuard;
 import studio.weaveora.infra.storage.StoragePort;
 import studio.weaveora.project.api.ProjectContextPort;
@@ -26,7 +27,9 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
@@ -142,7 +145,7 @@ public class ConcatService {
             }
             // P7：配音 + 配乐混音（静音轨 → voice(逐镜) + bgm(ducking)）
             Path mixed = work.resolve("master_mix.mp4");
-            if (mixAudio(workspaceId, projectId, master, mixed, clips, work)) {
+            if (mixAudio(workspaceId, projectId, plan, master, mixed, clips, work)) {
                 master = mixed;
             }
             byte[] bytes = Files.readAllBytes(master);
@@ -174,14 +177,17 @@ public class ConcatService {
      * P7 混音：master 静音轨替换为 逐镜 voice（按镜起点 adelay）+ bgm（低音量，voice 侧链 ducking）。
      * 无 voice/bgm 时返回 false（保持原静音轨）。sidechaincompress 不可用时退化为固定低音量 bgm。
      */
-    private boolean mixAudio(UUID workspaceId, UUID projectId, Path in, Path out,
+    private boolean mixAudio(UUID workspaceId, UUID projectId, JsonNode plan, Path in, Path out,
                              List<MediaClip> clips, Path work) throws IOException, InterruptedException {
-        List<Asset> bgms = assetRepo.findByProjectIdAndWorkspaceIdAndKindOrderByCreatedAtDesc(
-                projectId, workspaceId, "bgm");
-        String bgmKey = bgms.isEmpty() ? null : bgms.get(0).storageKey();
         boolean hasVoice = false;
-        for (MediaClip c : clips) if (c.voiceKey() != null) hasVoice = true;
-        if (bgmKey == null && !hasVoice) return false;
+        for (MediaClip c : clips) {
+            if (!c.voices().isEmpty()) {
+                hasVoice = true;
+            }
+        }
+        List<AudioPlan.MusicCue> cues = AudioPlan.musicCues(plan);
+        Map<String, String> bgmByMood = latestBgmByMood(workspaceId, projectId);
+        if (bgmByMood.isEmpty() && !hasVoice) return false;
 
         List<String> inputs = new ArrayList<>(List.of("-y", "-i", in.toString()));
         List<String> parts = new ArrayList<>();
@@ -189,11 +195,12 @@ public class ConcatService {
         int idx = 1;
         double cursor = 0;
         for (MediaClip c : clips) {
-            if (c.voiceKey() != null) {
+            // P8：一镜可多段语音，各自摆到「镜头起点 + 镜内 at_sec」
+            for (VoiceCue v : c.voices()) {
                 Path vp = work.resolve("voice_" + idx + ".bin");
-                writeAsset(c.voiceKey(), vp);
+                writeAsset(v.assetKey(), vp);
                 inputs.addAll(List.of("-i", vp.toString()));
-                int ms = (int) Math.round(cursor * 1000);
+                int ms = (int) Math.round((cursor + v.atSec()) * 1000);
                 parts.add("[" + idx + ":a]aresample=44100,aformat=sample_fmts=fltp:channel_layouts=stereo,"
                         + "adelay=" + ms + "|" + ms + ",volume=1.0,apad[v" + idx + "]");
                 voiceLabels.add("[v" + idx + "]");
@@ -201,21 +208,42 @@ public class ConcatService {
             }
             cursor += c.durationSec();
         }
-        int bgmIdx = -1;
-        if (bgmKey != null) {
-            Path bp = work.resolve("bgm.bin");
-            writeAsset(bgmKey, bp);
-            inputs.addAll(List.of("-i", bp.toString()));
-            bgmIdx = idx;
-            parts.add("[" + bgmIdx + ":a]aresample=44100,aformat=sample_fmts=fltp:channel_layouts=stereo,"
-                    + "volume=0.30,apad[bgmraw]");
+
+        // P8：配乐按段落表铺（同 mood 只生成一次曲子，多段引用同一产物、各自套 gain/fade）
+        List<String> musicLabels = new ArrayList<>();
+        for (AudioPlan.MusicCue cue : cues) {
+            String mood = cue.mood() == null ? "" : cue.mood();
+            String key = bgmByMood.get(mood);
+            if (key == null) {
+                log.warn("配乐段 {} 找不到 mood={} 的产物（先点“生成配乐”），跳过", cue.id(), mood);
+                continue;
+            }
+            Path bp = work.resolve("bgm_" + idx + ".bin");
+            writeAsset(key, bp);
+            if (cue.loop()) {
+                inputs.addAll(List.of("-stream_loop", "-1", "-i", bp.toString()));
+            } else {
+                inputs.addAll(List.of("-i", bp.toString()));
+            }
+            int i = idx++;
+            parts.add(bgmCueFilter(i, cue));
+            musicLabels.add("[m" + i + "]");
+        }
+        if (!musicLabels.isEmpty()) {
+            if (musicLabels.size() == 1) {
+                parts.add(musicLabels.get(0) + "acopy[bgmraw]");
+            } else {
+                parts.add(String.join("", musicLabels) + "amix=inputs=" + musicLabels.size()
+                        + ":duration=longest:normalize=0[bgmraw]");
+            }
         }
         if (!voiceLabels.isEmpty()) {
             parts.add(String.join("", voiceLabels) + "amix=inputs=" + voiceLabels.size()
                     + ":duration=longest:normalize=0[voice]");
         }
         String total = String.format("%.3f", cursor > 0 ? cursor : 30.0);
-        boolean duck = !voiceLabels.isEmpty() && bgmIdx > 0;
+        boolean hasMusic = !musicLabels.isEmpty();
+        boolean duck = !voiceLabels.isEmpty() && hasMusic;
 
         List<String> duckParts = new ArrayList<>(parts);
         if (duck) {
@@ -224,16 +252,69 @@ public class ConcatService {
             duckParts.add("[vmix][bgmduck]amix=inputs=2:duration=longest:normalize=0[aout]");
         } else if (!voiceLabels.isEmpty()) {
             duckParts.add("[voice]acopy[aout]");
-        } else {
+        } else if (hasMusic) {
             duckParts.add("[bgmraw]acopy[aout]");
+        } else {
+            return false;
         }
         if (runMix(inputs, duckParts, total, out)) return true;
         if (!duck) return false;
         log.warn("sidechaincompress 混音失败，退化为固定低音量 BGM");
+        // 各段 gain_db 已经施加，这里只做整体轻微衰减 + 直接叠加
         List<String> simple = new ArrayList<>(parts);
-        simple.add("[bgmraw]volume=0.6[bgmduck]");
+        simple.add("[bgmraw]volume=0.8[bgmduck]");
         simple.add("[voice][bgmduck]amix=inputs=2:duration=longest:normalize=0[aout]");
         return runMix(inputs, simple, total, out);
+    }
+
+    /** dB → 线性增益。0dB=1.0；-10.5dB≈0.30（P7 默认）；-16.5dB≈0.15（“一半”）。 */
+    private static double dbToLinear(double db) {
+        return Math.pow(10.0, db / 20.0);
+    }
+
+    /**
+     * 单个配乐段的滤镜串（纯函数，便于单测）：
+     * 裁到区间 → 归零时间轴 → 施加 gain_db → 淡入/淡出 → adelay 摆到全片起点 → apad。
+     * 输入侧若设置 {@code -stream_loop -1} 则短曲子会自动循环填满区间。
+     */
+    static String bgmCueFilter(int inputIdx, AudioPlan.MusicCue cue) {
+        double dur = cue.durationSec();
+        StringBuilder f = new StringBuilder("[" + inputIdx + ":a]aresample=44100,"
+                + "aformat=sample_fmts=fltp:channel_layouts=stereo,");
+        f.append("atrim=0:").append(fmt3(dur)).append(",asetpts=PTS-STARTPTS,");
+        f.append("volume=").append(fmt3(dbToLinear(cue.gainDb()))).append(",");
+        if (cue.fadeInSec() > 0) {
+            f.append("afade=t=in:st=0:d=").append(fmt3(Math.min(cue.fadeInSec(), dur))).append(",");
+        }
+        if (cue.fadeOutSec() > 0) {
+            double fo = Math.min(cue.fadeOutSec(), dur);
+            f.append("afade=t=out:st=").append(fmt3(Math.max(0, dur - fo)))
+                    .append(":d=").append(fmt3(fo)).append(",");
+        }
+        int startMs = (int) Math.round(Math.max(0, cue.startSec()) * 1000);
+        f.append("adelay=").append(startMs).append("|").append(startMs).append(",apad")
+                .append("[m").append(inputIdx).append("]");
+        return f.toString();
+    }
+
+    private static String fmt3(double v) {
+        return String.format(java.util.Locale.ROOT, "%.3f", v);
+    }
+
+    /**
+     * bgm 产物按 mood 建索引（同一 mood 多次生成时取最新一条）。
+     * mood 从资产的 prompt_snapshot 里取（P8 起 job payload 带 mood）；老资产没有 snapshot→归到空 mood。
+     */
+    private Map<String, String> latestBgmByMood(UUID workspaceId, UUID projectId) {
+        List<Asset> bgms = assetRepo.findByProjectIdAndWorkspaceIdAndKindOrderByCreatedAtDesc(
+                projectId, workspaceId, "bgm");
+        Map<String, String> out = new LinkedHashMap<>();
+        for (Asset a : bgms) {                     // 已按 createdAt DESC，先遇到的即最新
+            JsonNode snap = a.promptSnapshot();
+            String mood = (snap != null && snap.hasNonNull("mood")) ? snap.path("mood").asText("").trim() : "";
+            out.putIfAbsent(mood, a.storageKey());
+        }
+        return out;
     }
 
     /** 执行一次混音（video copy + 新音轨）；失败返回 false（由调用方决定是否退化重试）。 */
@@ -450,13 +531,46 @@ public class ConcatService {
             UUID shotId = order <= shotIds.size() ? shotIds.get(order - 1) : null;
             Asset m = pickClipOrStill(workspaceId, projectId, shotId, shotNo);
             if (m == null) continue;
-            String nar = shot.path("narration").asText("");
-            List<Asset> vs = assetRepo.findByProjectIdAndWorkspaceIdAndShotNoAndKindOrderByCreatedAtDesc(
-                    projectId, workspaceId, shotNo, "voice");
-            out.add(new MediaClip(m.storageKey(), isVideo(m), dur, nar.isBlank() ? null : nar,
-                    vs.isEmpty() ? null : vs.get(0).storageKey()));
+            out.add(new MediaClip(m.storageKey(), isVideo(m), dur, subtitleText(shot),
+                    voiceCues(workspaceId, projectId, shotNo)));
         }
         return out;
+    }
+
+    /**
+     * 该镜的配音资产 → 带「镜内起点」的 cue 列表（按 at_sec 升序）。
+     *
+     * <p>关键点：多个配音任务并发完成，<b>资产完成顺序不确定</b>，所以不能用 createdAt 推断是哪一段，
+     * 必须读资产上的 {@code prompt_snapshot}（= 产生它的 job payload）里的 {@code at_sec} / {@code line_index}。
+     * 同一 line_index 重复生成时（用户点了两次「生成配音」）只取最新一条，避免叠音。
+     * 老资产没有 snapshot → line_index=0 / at_sec=0，退化为原来的「每镜一段」行为。
+     */
+    private List<VoiceCue> voiceCues(UUID workspaceId, UUID projectId, int shotNo) {
+        List<Asset> vs = assetRepo.findByProjectIdAndWorkspaceIdAndShotNoAndKindOrderByCreatedAtDesc(
+                projectId, workspaceId, shotNo, "voice");
+        Map<Integer, VoiceCue> latestPerLine = new LinkedHashMap<>();
+        for (Asset a : vs) {                       // 已按 createdAt DESC，先遇到的即最新
+            JsonNode snap = a.promptSnapshot();
+            int li = (snap != null && snap.hasNonNull("line_index")) ? snap.path("line_index").asInt(0) : 0;
+            if (latestPerLine.containsKey(li)) continue;
+            double at = 0;
+            if (snap != null && snap.hasNonNull("at_sec")) {
+                at = Math.max(0, snap.path("at_sec").asDouble(0));
+            }
+            latestPerLine.put(li, new VoiceCue(a.storageKey(), at, li));
+        }
+        List<VoiceCue> cues = new ArrayList<>(latestPerLine.values());
+        cues.sort(Comparator.comparingDouble(VoiceCue::atSec));
+        return cues;
+    }
+
+    /** 该镜的字幕文本：多段则拼接（P8.6 再做逐段字幕定时）。 */
+    private static String subtitleText(JsonNode shot) {
+        List<String> texts = new ArrayList<>();
+        for (AudioPlan.Line line : AudioPlan.lines(shot)) {
+            texts.add(line.text());
+        }
+        return texts.isEmpty() ? null : String.join("  ", texts);
     }
 
     private Asset pickClipOrStill(UUID workspaceId, UUID projectId, UUID shotId, int shotNo) {
@@ -513,7 +627,10 @@ public class ConcatService {
                 a.width(), a.height(), a.createdAt());
     }
 
+    private record VoiceCue(String assetKey, double atSec, int lineIndex) {
+    }
+
     private record MediaClip(String assetKey, boolean video, double durationSec, String narration,
-                             String voiceKey) {
+                             List<VoiceCue> voices) {
     }
 }
