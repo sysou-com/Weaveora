@@ -39,15 +39,19 @@ public class ExportService {
 
     private final EditPackageRepository packages;
     private final AssetRepository assets;
+    private final studio.weaveora.asset.AudioAssetLookup audioLookup;
     private final StoragePort storage;
     private final ProjectContextPort projects;
     private final WorkspaceGuard guard;
     private final PlanReader planReader;
 
-    public ExportService(EditPackageRepository packages, AssetRepository assets, StoragePort storage,
+    public ExportService(EditPackageRepository packages, AssetRepository assets,
+                         studio.weaveora.asset.AudioAssetLookup audioLookup,
+                         StoragePort storage,
                          ProjectContextPort projects, WorkspaceGuard guard, PlanReader planReader) {
         this.packages = packages;
         this.assets = assets;
+        this.audioLookup = audioLookup;
         this.storage = storage;
         this.projects = projects;
         this.guard = guard;
@@ -165,46 +169,78 @@ public class ExportService {
                 zip.closeEntry();
                 cursor += dur;
             }
-            // P7：音轨（voice 逐镜 + bgm 整片，随包带音频文件）
+            // P8：音轨（voice 逐镜逐段 + bgm 逐段，随包带音频文件）
+            //     与混音共用 AudioAssetLookup，保证"导出的段表"和"成片听到的"一致
             double aCursor = 0;
             int aOrder = 0;
             for (JsonNode shot : shotsNode) {
                 aOrder++;
                 int shotNo = shot.path("shot_no").asInt(aOrder);
                 double dur = shot.path("duration_sec").asDouble(3);
-                List<Asset> vs = assets.findByProjectIdAndWorkspaceIdAndShotNoAndKindOrderByCreatedAtDesc(
-                        project.id(), workspaceId, shotNo, "voice");
-                if (!vs.isEmpty()) {
-                    Asset v = vs.get(0);
-                    String vsrc = "assets/voice_" + String.format("%02d", shotNo) + "." + extOf(v.mime());
+                int lineSeq = 0;
+                for (studio.weaveora.asset.AudioAssetLookup.VoiceCue cue
+                        : audioLookup.voiceCues(workspaceId, project.id(), shotNo)) {
+                    Asset v = cue.asset();
+                    String vsrc = "assets/voice_" + String.format("%02d", shotNo)
+                            + "_" + cue.lineIndex() + "." + extOf(v.mime());
                     ObjectNode vc = audioTrack.addObject();
                     vc.put("type", "voice");
                     vc.put("shot_no", shotNo);
+                    vc.put("line_index", cue.lineIndex());
+                    vc.put("line_kind", cue.lineKind());
+                    if (cue.subject() != null) {
+                        vc.put("subject", cue.subject());
+                    }
+                    vc.put("at_sec", round2(cue.atSec()));          // 镜内起点
                     vc.put("src", vsrc);
                     vc.put("in_sec", 0);
                     double vdur = v.durationMs() != null && v.durationMs() > 0 ? v.durationMs() / 1000.0 : dur;
                     vc.put("out_sec", round2(vdur));
-                    vc.put("timeline_start_sec", round2(aCursor));
+                    // 全片时间轴起点 = 镜头起点 + 镜内起点
+                    vc.put("timeline_start_sec", round2(aCursor + cue.atSec()));
                     zip.putNextEntry(new ZipEntry(vsrc));
                     zip.write(readAsset(v));
                     zip.closeEntry();
+                    lineSeq++;
+                }
+                if (lineSeq == 0) {
+                    // 无配音的镜头不写条目（保持与旧行为一致）
                 }
                 aCursor += dur;
             }
-            List<Asset> bgms = assets.findByProjectIdAndWorkspaceIdAndKindOrderByCreatedAtDesc(
-                    project.id(), workspaceId, "bgm");
-            if (!bgms.isEmpty()) {
-                Asset b = bgms.get(0);
-                String bsrc = "assets/bgm." + extOf(b.mime());
+            // 配乐：逐个段落写条目（同一 mood 只带一份音频文件）
+            java.util.Map<String, Asset> bgmByMood = audioLookup.latestBgmByMood(workspaceId, project.id());
+            java.util.Set<String> bgmWritten = new java.util.HashSet<>();
+            for (studio.weaveora.director.plan.AudioPlan.MusicCue cue
+                    : studio.weaveora.director.plan.AudioPlan.musicCues(plan)) {
+                if (cue.durationSec() <= 0) {
+                    continue;
+                }
+                String mood = cue.mood() == null ? "" : cue.mood();
+                Asset b = bgmByMood.get(mood);
+                if (b == null) {
+                    continue;   // 该段找不到产物（未生成/已删）→ 不写条目
+                }
+                String bsrc = "assets/bgm_" + (mood.isBlank() ? "default" : safeName(mood))
+                        + "." + extOf(b.mime());
                 ObjectNode bc = audioTrack.addObject();
                 bc.put("type", "bgm");
+                bc.put("id", cue.id());
+                bc.put("mood", mood);
                 bc.put("src", bsrc);
                 bc.put("in_sec", 0);
-                bc.put("out_sec", round2(duration));
-                bc.put("timeline_start_sec", 0);
-                zip.putNextEntry(new ZipEntry(bsrc));
-                zip.write(readAsset(b));
-                zip.closeEntry();
+                bc.put("out_sec", round2(cue.durationSec()));
+                bc.put("timeline_start_sec", round2(cue.startSec()));
+                bc.put("gain_db", cue.gainDb());
+                bc.put("fade_in_sec", cue.fadeInSec());
+                bc.put("fade_out_sec", cue.fadeOutSec());
+                bc.put("loop", cue.loop());
+                bc.put("duck", cue.duck());
+                if (bgmWritten.add(bsrc)) {     // 同一 mood 多段共享一份文件
+                    zip.putNextEntry(new ZipEntry(bsrc));
+                    zip.write(readAsset(b));
+                    zip.closeEntry();
+                }
             }
             list.put("width", width);
             list.put("height", height);
@@ -266,6 +302,12 @@ public class ExportService {
 
     private static double round2(double d) {
         return Math.round(d * 100) / 100.0;
+    }
+
+    /** 文件名安全的 mood（中文保留，仅去掉路径分隔符与空白）。 */
+    private static String safeName(String s) {
+        String t = s == null ? "" : s.trim().replaceAll("[\\\\/:*?\"<>|\\s]+", "_");
+        return t.isEmpty() ? "default" : t;
     }
 
     private record PackageData(JsonNode editList, byte[] zip) {

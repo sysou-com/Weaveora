@@ -62,6 +62,7 @@ public class ConcatService {
 
     private final AssetService assets;
     private final AssetRepository assetRepo;
+    private final studio.weaveora.asset.AudioAssetLookup audioLookup;
     private final StoragePort storage;
     private final ProjectContextPort projects;
     private final WorkspaceGuard guard;
@@ -69,12 +70,15 @@ public class ConcatService {
     private final String ffmpeg;
     private final String subtitleFont;
 
-    public ConcatService(AssetService assets, AssetRepository assetRepo, StoragePort storage,
+    public ConcatService(AssetService assets, AssetRepository assetRepo,
+                         studio.weaveora.asset.AudioAssetLookup audioLookup,
+                         StoragePort storage,
                          ProjectContextPort projects, WorkspaceGuard guard, PlanReader planReader,
                          @Value("${weaveora.ffmpeg:ffmpeg}") String ffmpeg,
                          @Value("${weaveora.subtitle-font:}") String subtitleFont) {
         this.assets = assets;
         this.assetRepo = assetRepo;
+        this.audioLookup = audioLookup;
         this.storage = storage;
         this.projects = projects;
         this.guard = guard;
@@ -186,7 +190,9 @@ public class ConcatService {
             }
         }
         List<AudioPlan.MusicCue> cues = AudioPlan.musicCues(plan);
-        Map<String, String> bgmByMood = latestBgmByMood(workspaceId, projectId);
+        Map<String, studio.weaveora.asset.domain.Asset> bgmAssets = latestBgmByMood(workspaceId, projectId);
+        Map<String, String> bgmByMood = new LinkedHashMap<>();
+        bgmAssets.forEach((k, v) -> bgmByMood.put(k, v.storageKey()));
         if (bgmByMood.isEmpty() && !hasVoice) return false;
 
         List<String> inputs = new ArrayList<>(List.of("-y", "-i", in.toString()));
@@ -196,7 +202,7 @@ public class ConcatService {
         double cursor = 0;
         for (MediaClip c : clips) {
             // P8：一镜可多段语音，各自摆到「镜头起点 + 镜内 at_sec」
-            for (VoiceCue v : c.voices()) {
+            for (studio.weaveora.asset.AudioAssetLookup.VoiceCue v : c.voices()) {
                 Path vp = work.resolve("voice_" + idx + ".bin");
                 writeAsset(v.assetKey(), vp);
                 inputs.addAll(List.of("-i", vp.toString()));
@@ -302,19 +308,11 @@ public class ConcatService {
     }
 
     /**
-     * bgm 产物按 mood 建索引（同一 mood 多次生成时取最新一条）。
-     * mood 从资产的 prompt_snapshot 里取（P8 起 job payload 带 mood）；老资产没有 snapshot→归到空 mood。
+     * bgm 产物按 mood 建索引（同一 mood 取最新一条）。读取规则见
+     * {@link studio.weaveora.asset.AudioAssetLookup}（与导出共用）。
      */
-    private Map<String, String> latestBgmByMood(UUID workspaceId, UUID projectId) {
-        List<Asset> bgms = assetRepo.findByProjectIdAndWorkspaceIdAndKindOrderByCreatedAtDesc(
-                projectId, workspaceId, "bgm");
-        Map<String, String> out = new LinkedHashMap<>();
-        for (Asset a : bgms) {                     // 已按 createdAt DESC，先遇到的即最新
-            JsonNode snap = a.promptSnapshot();
-            String mood = (snap != null && snap.hasNonNull("mood")) ? snap.path("mood").asText("").trim() : "";
-            out.putIfAbsent(mood, a.storageKey());
-        }
-        return out;
+    private Map<String, studio.weaveora.asset.domain.Asset> latestBgmByMood(UUID workspaceId, UUID projectId) {
+        return audioLookup.latestBgmByMood(workspaceId, projectId);
     }
 
     /** 执行一次混音（video copy + 新音轨）；失败返回 false（由调用方决定是否退化重试）。 */
@@ -538,30 +536,12 @@ public class ConcatService {
     }
 
     /**
-     * 该镜的配音资产 → 带「镜内起点」的 cue 列表（按 at_sec 升序）。
-     *
-     * <p>关键点：多个配音任务并发完成，<b>资产完成顺序不确定</b>，所以不能用 createdAt 推断是哪一段，
-     * 必须读资产上的 {@code prompt_snapshot}（= 产生它的 job payload）里的 {@code at_sec} / {@code line_index}。
-     * 同一 line_index 重复生成时（用户点了两次「生成配音」）只取最新一条，避免叠音。
-     * 老资产没有 snapshot → line_index=0 / at_sec=0，退化为原来的「每镜一段」行为。
+     * 该镜的配音 cue（按镜内起点升序）。读取规则见
+     * {@link studio.weaveora.asset.AudioAssetLookup}（与导出共用同一口径，避免漂移）。
      */
-    private List<VoiceCue> voiceCues(UUID workspaceId, UUID projectId, int shotNo) {
-        List<Asset> vs = assetRepo.findByProjectIdAndWorkspaceIdAndShotNoAndKindOrderByCreatedAtDesc(
-                projectId, workspaceId, shotNo, "voice");
-        Map<Integer, VoiceCue> latestPerLine = new LinkedHashMap<>();
-        for (Asset a : vs) {                       // 已按 createdAt DESC，先遇到的即最新
-            JsonNode snap = a.promptSnapshot();
-            int li = (snap != null && snap.hasNonNull("line_index")) ? snap.path("line_index").asInt(0) : 0;
-            if (latestPerLine.containsKey(li)) continue;
-            double at = 0;
-            if (snap != null && snap.hasNonNull("at_sec")) {
-                at = Math.max(0, snap.path("at_sec").asDouble(0));
-            }
-            latestPerLine.put(li, new VoiceCue(a.storageKey(), at, li));
-        }
-        List<VoiceCue> cues = new ArrayList<>(latestPerLine.values());
-        cues.sort(Comparator.comparingDouble(VoiceCue::atSec));
-        return cues;
+    private List<studio.weaveora.asset.AudioAssetLookup.VoiceCue> voiceCues(
+            UUID workspaceId, UUID projectId, int shotNo) {
+        return audioLookup.voiceCues(workspaceId, projectId, shotNo);
     }
 
     /** 该镜的字幕文本：多段则拼接（P8.6 再做逐段字幕定时）。 */
@@ -627,10 +607,7 @@ public class ConcatService {
                 a.width(), a.height(), a.createdAt());
     }
 
-    private record VoiceCue(String assetKey, double atSec, int lineIndex) {
-    }
-
     private record MediaClip(String assetKey, boolean video, double durationSec, String narration,
-                             List<VoiceCue> voices) {
+                             List<studio.weaveora.asset.AudioAssetLookup.VoiceCue> voices) {
     }
 }
