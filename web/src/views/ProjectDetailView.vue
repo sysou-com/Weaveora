@@ -1228,6 +1228,79 @@ async function handleSave(): Promise<boolean> {
   }
 }
 
+/* ---------- P8：导入方案 JSON（把一份 plan 灌进当前草稿，复用保存链路） ---------- */
+const importOpen = ref(false)
+const importText = ref('')
+const importProblems = ref<string[]>([])
+const importBusy = ref(false)
+
+function openImport(): void {
+  importText.value = ''
+  importProblems.value = []
+  importOpen.value = true
+}
+
+/** 选文件读入文本框 */
+function onImportFile(ev: Event): void {
+  const f = (ev.target as HTMLInputElement)?.files?.[0]
+  if (!f) return
+  const reader = new FileReader()
+  reader.onload = () => {
+    importText.value = String(reader.result ?? '')
+    importProblems.value = []
+  }
+  reader.onerror = () => message.error('文件读取失败')
+  reader.readAsText(f)
+  ;(ev.target as HTMLInputElement).value = ''   // 允许重复选同一文件
+}
+
+/** 解析 + 归一化 + 预检；返回可用 plan（失败返回 null 并写入 importProblems） */
+function parseImport(): DirectorPlan | null {
+  const raw = importText.value.trim()
+  if (!raw) {
+    importProblems.value = ['请先选择文件或粘贴 JSON']
+    return null
+  }
+  let parsed: DirectorPlan
+  try {
+    parsed = JSON.parse(raw) as DirectorPlan
+  } catch (e) {
+    importProblems.value = ['JSON 解析失败：' + (e instanceof Error ? e.message : String(e))]
+    return null
+  }
+  if (!parsed || typeof parsed !== 'object') {
+    importProblems.value = ['不是合法的方案对象']
+    return null
+  }
+  const cur = draft.value
+  if (cur && parsed.mode && parsed.mode !== cur.mode) {
+    importProblems.value = [`模式不匹配：当前项目是 ${cur.mode}，导入的是 ${parsed.mode}`]
+    return null
+  }
+  const norm = normalizePlan(parsed)
+  importProblems.value = planProblems(norm)   // 与后端 §10.3 同口径的精简预检
+  return norm
+}
+
+async function doImport(save: boolean): Promise<void> {
+  const norm = parseImport()
+  if (!norm) return
+  draft.value = norm
+  importBusy.value = true
+  try {
+    if (save) {
+      const ok = await handleSave()
+      if (!ok) return
+      message.success('已导入并保存为手改版')
+    } else {
+      message.info('已载入草稿（未保存），确认无误后点「保存修改」')
+    }
+    importOpen.value = false
+  } finally {
+    importBusy.value = false
+  }
+}
+
 async function handleApprove(): Promise<void> {
   if (!selectedRevId.value) return
   // 有未保存改动：先保存草稿再确认（否则确认会用服务端旧方案，草稿丢失）
@@ -1807,6 +1880,43 @@ const shotTotal = computed(() => {
       </NModal>
 
       <!-- AI 批量同步（①：多镜中文→LLM 更新，可确认/取消/逐镜微调） -->
+      <NModal
+        v-model:show="importOpen"
+        preset="card"
+        title="导入方案 JSON"
+        style="max-width: 760px"
+        data-testid="import-plan-modal"
+      >
+        <p class="hint-line text-secondary" style="margin-top: 0">
+          把一份 plan JSON 灌入当前草稿（如
+          <span class="font-mono">packages/fixtures/guan-yu-vs-lvbu.plan.json</span>）。
+          导入前会先做客户端预检，再按需保存为手改版。
+        </p>
+        <div class="import-row">
+          <input type="file" accept=".json,application/json" data-testid="import-plan-file" @change="onImportFile" />
+          <NButton size="tiny" quaternary :disabled="!importText.trim()" @click="importText = ''">清空</NButton>
+        </div>
+        <NInput
+          v-model:value="importText"
+          type="textarea"
+          :autosize="{ minRows: 8, maxRows: 20 }"
+          placeholder='直接粘贴 JSON，或以 {"mode":"video",...} 开头的内容'
+          data-testid="import-plan-text"
+        />
+        <NAlert v-if="importProblems.length" type="warning" style="margin-top: 10px" :show-icon="true">
+          <p style="margin: 0 0 4px">预检发现 {{ importProblems.length }} 个问题（仍可先载入草稿再看）：</p>
+          <ul style="margin: 0; padding-left: 18px">
+            <li v-for="(p, i) in importProblems" :key="i">{{ p }}</li>
+          </ul>
+        </NAlert>
+        <div class="ai-actions">
+          <NButton size="small" :loading="importBusy" @click="doImport(false)">仅载入草稿</NButton>
+          <NButton size="small" type="primary" :loading="importBusy" data-testid="import-plan-save" @click="doImport(true)">
+            导入并保存
+          </NButton>
+        </div>
+      </NModal>
+
       <NModal v-model:show="aiBatchOpen" preset="card" title="AI 同步提示词（确认或取消）" style="max-width: 760px">
         <template v-if="aiBatchBusy">
           <div class="g-loading" style="padding: 24px 0">AI 批量生成中（逐镜进行）…</div>
@@ -1899,6 +2009,16 @@ const shotTotal = computed(() => {
             >
               <template #icon><NIcon><Save :size="14" /></NIcon></template>
               保存修改
+            </NButton>
+            <NButton
+              v-if="canEdit"
+              size="small"
+              quaternary
+              data-testid="btn-import-plan"
+              title="导入一份方案 JSON（导出包/样例文件）到当前草稿"
+              @click="openImport"
+            >
+              导入 JSON
             </NButton>
             <NButton
               v-if="draft && !detApproved && !problems.length"
@@ -2570,6 +2690,12 @@ const shotTotal = computed(() => {
 .im-img { width: auto; }
 .im-close {
   position: absolute; top: -6px; right: -6px; z-index: 2; font-size: 15px;
+}
+.import-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 8px 0;
 }
 
 </style>
