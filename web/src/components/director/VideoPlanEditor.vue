@@ -103,6 +103,29 @@ function commitRename(): void {
   emit('update:plan')
 }
 
+/** P12：当前“配音音色”下拉选中的是不是一个克隆音色（决定重录/改名/删除是否可用） */
+const selectedPreset = computed(() => {
+  const v = props.plan.audio?.voice ?? ''
+  if (!v.startsWith('clone:')) return undefined
+  const id = v.slice('clone:'.length)
+  return clonePresets.value.find((p) => p.id === id)
+})
+
+function rerecordSelected(): void {
+  const p = selectedPreset.value
+  if (p) emit('cloneVoice', { mode: 'preset', replaceId: p.id, name: p.name })
+}
+
+function renameSelected(): void {
+  const p = selectedPreset.value
+  if (p) startRename(p)
+}
+
+function deleteSelected(): void {
+  const p = selectedPreset.value
+  if (p) emit('removePreset', p.id)
+}
+
 /** 该音色被多少处引用（绑定 + 分镜行内覆盖），删除前提示用 */
 function presetUsage(id: string): { subjects: string[]; lines: number } {
   const v = `clone:${id}`
@@ -162,130 +185,6 @@ const transitions = ['cut', 'dissolve', 'fade', 'wipe'].map((v) => ({ label: v, 
           <span class="key">主题 theme（中文）</span>
           <NInput v-model:value="props.plan.script.theme" size="small" :disabled="disabled" />
         </label>
-      </template>
-      <template v-if="props.plan.audio">
-        <label class="row">
-          <span class="key">BGM 情绪 music_mood（可直接输入自定义）</span>
-          <NSelect
-            v-model:value="props.plan.audio.music_mood"
-            :options="moodOptions"
-            size="small"
-            filterable
-            tag
-            :disabled="disabled"
-            placeholder="如：浪漫柔情 / 史诗磅礴"
-          />
-        </label>
-        <label class="row">
-          <span class="key">配音音色 voice（预设 / 克隆音色 / 参考音频路径）</span>
-          <NSelect
-            v-model:value="props.plan.audio.voice"
-            :options="voiceChoices"
-            size="small"
-            filterable
-            tag
-            :disabled="disabled"
-            placeholder="中文女"
-          />
-        </label>
-        <div class="vc-entry">
-          <NButton
-            size="tiny"
-            secondary
-            :disabled="!!disabled"
-            data-testid="btn-clone-voice"
-            title="录一段声音或上传样本，处理成可复用的音色"
-            @click="emit('cloneVoice', { mode: 'preset' })"
-          >
-            🎙 克隆音色（录音 / 上传样本）
-          </NButton>
-          <span class="text-secondary" style="font-size: 12px">
-            录好的音色会出现在上面的下拉里（标「克隆」）
-          </span>
-        </div>
-
-        <!-- P9 音色库：重录 / 改名 / 删除（录多了可以删，也能重录换掉） -->
-        <div v-if="clonePresets.length" class="vc-lib" data-testid="voice-preset-list">
-          <div v-for="p in clonePresets" :key="p.id" class="vc-lib-row">
-            <span class="vc-lib-dot">🎙</span>
-            <template v-if="editingId === p.id">
-              <NInput
-                v-model:value="editingName"
-                size="tiny"
-                style="max-width: 160px"
-                @keyup.enter="commitRename"
-              />
-              <NButton size="tiny" type="primary" @click="commitRename">保存</NButton>
-              <NButton size="tiny" quaternary @click="editingId = ''">取消</NButton>
-            </template>
-            <template v-else>
-              <span class="vc-lib-name">{{ p.name }}</span>
-              <span class="text-secondary font-mono vc-lib-meta">
-                {{ Number(p.durationSec ?? 0).toFixed(1) }}s
-                <template v-if="presetUsage(p.id).subjects.length">
-                  · 用于 {{ presetUsage(p.id).subjects.join('、') }}
-                </template>
-                <template v-if="presetUsage(p.id).lines">
-                  · {{ presetUsage(p.id).lines }} 行
-                </template>
-              </span>
-              <NButton
-                size="tiny"
-                quaternary
-                :disabled="!!disabled"
-                :data-testid="`preset-rerecord-${p.id}`"
-                title="重新录一段替换这个音色"
-                @click="emit('cloneVoice', { mode: 'preset', replaceId: p.id, name: p.name })"
-              >
-                重录
-              </NButton>
-              <NButton size="tiny" quaternary :disabled="!!disabled" @click="startRename(p)">改名</NButton>
-              <NButton
-                size="tiny"
-                quaternary
-                type="error"
-                :disabled="!!disabled"
-                :data-testid="`preset-delete-${p.id}`"
-                @click="emit('removePreset', p.id)"
-              >
-                删除
-              </NButton>
-            </template>
-          </div>
-        </div>
-        <div class="zh-head">
-          <NButton
-            size="small"
-            secondary
-            :loading="previewBusy"
-            :disabled="!!disabled"
-            data-testid="btn-preview-voice"
-            @click="emit('previewVoice', undefined)"
-          >
-            试听配音
-          </NButton>
-          <NButton
-            size="small"
-            secondary
-            :loading="previewBusy"
-            :disabled="!!disabled"
-            data-testid="btn-preview-bgm"
-            @click="emit('previewBgm')"
-          >
-            试听配乐
-          </NButton>
-          <span class="text-secondary" style="font-size: 12px">
-            换音色/情绪后点对应试听即可重生成一条试听；正式生成在下方任务区（生成配音/生成配乐）
-          </span>
-        </div>
-        <!-- P8：试听播放条就放在试听按钮下方（原来在页面中部，离按钮太远） -->
-        <div v-if="props.audioPreview" class="voice-preview inline" data-testid="audio-preview">
-          <span class="font-mono vp-label">
-            {{ props.audioPreview.kind === 'bgm' ? '🎵' : '🎙' }} 试听 · {{ props.audioPreview.label }}
-          </span>
-          <audio :src="props.audioPreview.url" class="vp-audio" controls autoplay preload="auto" />
-          <NButton size="tiny" quaternary @click="emit('closePreview')">关闭</NButton>
-        </div>
       </template>
     </section>
 
@@ -348,66 +247,170 @@ const transitions = ['cut', 'dissolve', 'fade', 'wipe'].map((v) => ({ label: v, 
       <p class="hint-line text-secondary">
         逐镜调节时长后「保存方案」即生效；云端按镜头计费，短镜更省。留空镜将跳过字幕，时长需 ≥1s。
       </p>
-      <div
-        v-for="shot in props.plan.shots"
-        :key="shot.shot_no"
-        class="narration-row"
-      >
-        <span class="key narration-key">第 {{ shot.shot_no }} 镜</span>
-        <NInputNumber
-          v-model:value="shot.duration_sec"
-          :min="1"
-          :max="10"
-          :step="0.5"
-          size="small"
-          style="width: 120px"
-          :disabled="!!disabled"
-        />
-        <span class="hint-line text-secondary">秒</span>
+      <div class="dur-grid">
+        <label v-for="shot in props.plan.shots" :key="shot.shot_no" class="dur-cell">
+          <span class="key">第 {{ shot.shot_no }} 镜</span>
+          <NInputNumber
+            v-model:value="shot.duration_sec"
+            :min="1"
+            :max="10"
+            :step="0.5"
+            size="small"
+            style="width: 100%"
+            :disabled="!!disabled"
+          />
+          <span class="hint-line text-secondary">秒</span>
+        </label>
       </div>
     </section>
 
-    <section class="block">
-      <p class="block-label font-mono">角色音色绑定（按说话人自动关联）</p>
-      <VoiceBindingsTable
-        :plan="props.plan"
-        :disabled="disabled"
-        :voices="voiceChoices"
-        :known-subjects="knownSubjects"
-      />
-    </section>
+    <!-- P12：声音相关全部收进一张卡片，顺序=音色 → 绑定 → 配音 → 配乐 -->
+    <section class="block audio-card" data-testid="audio-card">
+      <p class="block-label font-mono">声音（音色 / 角色音色绑定 / 配音 / 配乐）</p>
 
-    <section class="block">
-      <p class="block-label font-mono">
-        配乐时间轴（可多段：起止 / 强弱 / 淡入淡出）
-      </p>
-      <div class="ai-bar">
-        <NButton
-          size="tiny"
-          secondary
-          :disabled="!!disabled"
-          data-testid="btn-ai-music"
-          title="让 AI 根据剧情把全片划分成 2~5 段配乐（含情绪与强弱）"
-          @click="emit('aiMusic')"
-        >
-          ✨ AI 一键配乐（按剧情分段）
-        </NButton>
-        <span class="text-secondary" style="font-size: 12px">
-          会覆盖现有的配乐段落；生成后点「生成配乐」按情绪渲染
+      <!-- 试听播放条固定在卡片顶部：点哪个试听都在这儿出现 -->
+      <div v-if="props.audioPreview" class="voice-preview inline" data-testid="audio-preview">
+        <span class="font-mono vp-label">
+          {{ props.audioPreview.kind === 'bgm' ? '🎵' : '🎙' }} 试听 · {{ props.audioPreview.label }}
         </span>
+        <audio :src="props.audioPreview.url" class="vp-audio" controls autoplay preload="auto" />
+        <NButton size="tiny" quaternary @click="emit('closePreview')">关闭</NButton>
       </div>
-      <p class="hint-line text-secondary">
-        成片总长 {{ totalDur.toFixed(2) }}s；每段独立音量，追赶/高潮段可调高并换情绪
-      </p>
-      <MusicTimeline
-        :plan="props.plan"
-        :disabled="disabled"
-        :moods="MUSIC_MOOD_PRESETS"
-      />
-    </section>
 
-    <section class="block">
-      <p class="block-label font-mono">旁白 / 台词（逐镜时间轴：可拖拽定位、一镜多段）</p>
+      <div class="sub-block">
+        <p class="sub-label">① 配音音色</p>
+        <div class="voice-row">
+          <span class="key">配音音色 voice（预设 / 克隆音色 / 参考音频路径）</span>
+          <NSelect
+            v-model:value="props.plan.audio.voice"
+            :options="voiceChoices"
+            size="small"
+            filterable
+            tag
+            :disabled="disabled"
+            placeholder="中文女"
+          />
+          <NButton
+            size="tiny"
+            secondary
+            :loading="previewBusy"
+            :disabled="!!disabled"
+            data-testid="btn-preview-voice"
+            title="用当前音色念一句试听"
+            @click="emit('previewVoice', undefined)"
+          >
+            音色试听
+          </NButton>
+          <NButton
+            size="tiny"
+            quaternary
+            :disabled="!!disabled || !selectedPreset"
+            :data-testid="`preset-rerecord-selected`"
+            title="重新录一段替换当前克隆音色"
+            @click="rerecordSelected"
+          >
+            重录
+          </NButton>
+          <NButton
+            size="tiny"
+            quaternary
+            :disabled="!!disabled || !selectedPreset"
+            @click="renameSelected"
+          >
+            改名
+          </NButton>
+          <NButton
+            size="tiny"
+            quaternary
+            type="error"
+            :disabled="!!disabled || !selectedPreset"
+            :data-testid="`preset-delete-selected`"
+            @click="deleteSelected"
+          >
+            删除
+          </NButton>
+        </div>
+        <p v-if="!selectedPreset" class="hint-line text-secondary">
+          上面选一个「克隆」音色后，重录 / 改名 / 删除才可用
+        </p>
+        <div class="vc-entry">
+          <NButton
+            size="tiny"
+            secondary
+            :disabled="!!disabled"
+            data-testid="btn-clone-voice"
+            title="录一段声音或上传样本，处理成可复用的音色"
+            @click="emit('cloneVoice', { mode: 'preset' })"
+          >
+            🎙 克隆音色（录音 / 上传样本）
+          </NButton>
+          <span class="text-secondary" style="font-size: 12px">
+            录好的音色会出现在上面的下拉里（标「克隆」）
+          </span>
+        </div>
+        <!-- P9 音色库：重录 / 改名 / 删除（录多了可以删，也能重录换掉） -->
+        <div v-if="clonePresets.length" class="vc-lib" data-testid="voice-preset-list">
+          <div v-for="p in clonePresets" :key="p.id" class="vc-lib-row">
+            <span class="vc-lib-dot">🎙</span>
+            <template v-if="editingId === p.id">
+              <NInput
+                v-model:value="editingName"
+                size="tiny"
+                style="max-width: 160px"
+                @keyup.enter="commitRename"
+              />
+              <NButton size="tiny" type="primary" @click="commitRename">保存</NButton>
+              <NButton size="tiny" quaternary @click="editingId = ''">取消</NButton>
+            </template>
+            <template v-else>
+              <span class="vc-lib-name">{{ p.name }}</span>
+              <span class="text-secondary font-mono vc-lib-meta">
+                {{ Number(p.durationSec ?? 0).toFixed(1) }}s
+                <template v-if="presetUsage(p.id).subjects.length">
+                  · 用于 {{ presetUsage(p.id).subjects.join('、') }}
+                </template>
+                <template v-if="presetUsage(p.id).lines">
+                  · {{ presetUsage(p.id).lines }} 行
+                </template>
+              </span>
+              <NButton
+                size="tiny"
+                quaternary
+                :disabled="!!disabled"
+                :data-testid="`preset-rerecord-${p.id}`"
+                title="重新录一段替换这个音色"
+                @click="emit('cloneVoice', { mode: 'preset', replaceId: p.id, name: p.name })"
+              >
+                重录
+              </NButton>
+              <NButton size="tiny" quaternary :disabled="!!disabled" @click="startRename(p)">改名</NButton>
+              <NButton
+                size="tiny"
+                quaternary
+                type="error"
+                :disabled="!!disabled"
+                :data-testid="`preset-delete-${p.id}`"
+                @click="emit('removePreset', p.id)"
+              >
+                删除
+              </NButton>
+            </template>
+          </div>
+        </div>
+      </div>
+
+      <div class="sub-block">
+        <p class="sub-label">② 角色音色绑定（按说话人自动关联）</p>
+        <VoiceBindingsTable
+          :plan="props.plan"
+          :disabled="disabled"
+          :voices="voiceChoices"
+          :known-subjects="knownSubjects"
+        />
+      </div>
+
+      <div class="sub-block">
+        <p class="sub-label">③ 配音（逐镜旁白 / 台词，可拖拽定位、一镜多段）</p>
       <p class="hint-line text-secondary">
         拖块改起点；旁白短于镜头就留白（不会为填满而慢放），长于镜头才建议加快语速
       </p>
@@ -431,6 +434,63 @@ const transitions = ['cut', 'dissolve', 'fade', 'wipe'].map((v) => ({ label: v, 
             @clone-line="(no, li, at, sub) => emit('cloneVoice', { mode: 'line', shotNo: no, lineIndex: li, atSec: at, subject: sub, name: sub })"
           />
         </div>
+      </div>
+      </div>
+
+      <div class="sub-block">
+        <p class="sub-label">④ 配乐（多段：起止 / 强弱 / 淡入淡出）</p>
+        <label class="row">
+          <span class="key">BGM 情绪 music_mood（可直接输入自定义）</span>
+          <NSelect
+            v-model:value="props.plan.audio.music_mood"
+            :options="moodOptions"
+            size="small"
+            filterable
+            tag
+            :disabled="disabled"
+            placeholder="如：浪漫柔情 / 史诗磅礴"
+          />
+        </label>
+        <div class="row">
+          <span class="key">配乐试听</span>
+          <NButton
+            size="tiny"
+            secondary
+            :loading="previewBusy"
+            :disabled="!!disabled"
+            data-testid="btn-preview-bgm"
+            title="按当前情绪生成一条试听"
+            @click="emit('previewBgm')"
+          >
+            试听配乐
+          </NButton>
+          <span class="text-secondary" style="font-size: 12px">
+            换情绪后点一次即重生成；正式生成在下方任务区「生成配乐」
+          </span>
+        </div>
+      <div class="ai-bar">
+        <NButton
+          size="tiny"
+          secondary
+          :disabled="!!disabled"
+          data-testid="btn-ai-music"
+          title="让 AI 根据剧情把全片划分成 2~5 段配乐（含情绪与强弱）"
+          @click="emit('aiMusic')"
+        >
+          ✨ AI 一键配乐（按剧情分段）
+        </NButton>
+        <span class="text-secondary" style="font-size: 12px">
+          会覆盖现有的配乐段落；生成后点「生成配乐」按情绪渲染
+        </span>
+      </div>
+      <p class="hint-line text-secondary">
+        成片总长 {{ totalDur.toFixed(2) }}s；每段独立音量，追赶/高潮段可调高并换情绪
+      </p>
+      <MusicTimeline
+        :plan="props.plan"
+        :disabled="disabled"
+        :moods="MUSIC_MOOD_PRESETS"
+      />
       </div>
     </section>
   </div>
@@ -564,7 +624,54 @@ const transitions = ['cut', 'dissolve', 'fade', 'wipe'].map((v) => ({ label: v, 
   align-items: center;
   gap: 10px;
   flex-wrap: wrap;
-  margin: -2px 0 8px;
+  margin: 8px 0;
+}
+/* P12：镜头时长自适应网格（桌面多列，手机 1~2 列） */
+.dur-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 8px;
+}
+.dur-cell {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+/* P12：声音卡片的分块 */
+.sub-block {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px dashed rgba(140, 160, 190, 0.18);
+}
+.sub-block:first-of-type {
+  border-top: none;
+  padding-top: 0;
+}
+.sub-label {
+  margin: 0 0 6px;
+  font-size: 12px;
+  font-weight: 600;
+  opacity: 0.9;
+}
+.voice-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.voice-row .n-select {
+  flex: 1 1 200px;
+  min-width: 160px;
+}
+/* P12：手机端适配 */
+@media (max-width: 640px) {
+  .dur-grid {
+    grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  }
+  .voice-row > * {
+    flex: 1 1 auto;
+  }
 }
 .vc-lib {
   display: flex;

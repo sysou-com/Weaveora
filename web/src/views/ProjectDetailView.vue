@@ -613,6 +613,21 @@ watch(() => [...refLibrary.value.map((a) => a.id)].join(','), () => { void refre
 
 // ---------- W4 资产库 ----------
 const outputAssets = computed(() => (assets.data.value ?? []).filter((a) => ['still','clip','master','voice','bgm','voice_preview','bgm_preview'].includes(a.kind)))
+
+/** P12：资产库也按类型分 Tab */
+const galTab = ref<AudioTab>('all')
+const galTabCounts = computed(() => {
+  const m: Record<string, number> = { all: 0 }
+  for (const a of outputAssets.value) {
+    m.all++
+    const t = kindTab(a.kind)
+    m[t] = (m[t] ?? 0) + 1
+  }
+  return m
+})
+const galleryForTab = computed(() =>
+  galTab.value === 'all' ? outputAssets.value : outputAssets.value.filter((a) => kindTab(a.kind) === galTab.value),
+)
 const galUrls = ref<Record<string, string>>({})
 async function refreshGallery(): Promise<void> {
   await Promise.all(outputAssets.value.map(async (a) => {
@@ -807,10 +822,43 @@ const latestJobs = computed(() => {
     (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
   )
 })
-const visibleJobs = computed(() => latestJobs.value.slice(0, jobLimit.value))
+const visibleJobs = computed(() => jobsForTab.value.slice(0, jobLimit.value))
 function showMoreJobs(): void {
   jobLimit.value += 10
 }
+
+/* ---------------- P12 任务 / 资产按类型分 Tab（避免一次刷一堆） ---------------- */
+type AudioTab = 'all' | 'voice' | 'bgm' | 'still' | 'clip' | 'master'
+const JOB_TABS: Array<{ key: AudioTab; label: string; kind?: string; hint: string }> = [
+  { key: 'all', label: '全部', hint: '全部任务 / 产物' },
+  { key: 'voice', label: '配音', kind: 'voice', hint: '含试听产物 voice_preview' },
+  { key: 'bgm', label: '配乐', kind: 'bgm', hint: '含试听产物 bgm_preview' },
+  { key: 'still', label: '关键帧', kind: 'still', hint: '首帧图片 still' },
+  { key: 'clip', label: 'motion', kind: 'clip', hint: '图生视频片段 clip' },
+  { key: 'master', label: '成片', kind: 'master', hint: '成片由「导出/合成」在资产库生成，任务区通常为空' },
+]
+/** 把 kind 归到 Tab（试听产物归入对应正式类型） */
+function kindTab(kind: string): AudioTab {
+  if (kind === 'voice' || kind === 'voice_preview') return 'voice'
+  if (kind === 'bgm' || kind === 'bgm_preview') return 'bgm'
+  if (kind === 'still') return 'still'
+  if (kind === 'clip') return 'clip'
+  if (kind === 'master') return 'master'
+  return 'all'
+}
+const jobTab = ref<AudioTab>('all')
+const jobTabCounts = computed(() => {
+  const m: Record<string, number> = { all: 0 }
+  for (const j of latestJobs.value) {
+    m.all++
+    const t = kindTab(j.kind)
+    m[t] = (m[t] ?? 0) + 1
+  }
+  return m
+})
+const jobsForTab = computed(() =>
+  jobTab.value === 'all' ? latestJobs.value : latestJobs.value.filter((j) => kindTab(j.kind) === jobTab.value),
+)
 
 async function startGeneration(): Promise<void> {
   const revId = genRevisionId()
@@ -860,7 +908,7 @@ async function rerunJobOne(jobId: string): Promise<void> {
 }
 
 // ---------- 失败/取消任务：勾选批量/单个 重试 或 删除 ----------
-const eligibleJobs = computed(() => (jobs.data.value ?? []).filter(
+const eligibleJobs = computed(() => jobsForTab.value.filter(
   (j) => j.state === 'failed' || j.state === 'cancelled'))
 const jobSel = ref<string[]>([])
 const jobActionBusy = ref(false)
@@ -2060,6 +2108,26 @@ const shotTotal = computed(() => {
             <input type="checkbox" v-model="filterLatest" />
             只看最近一轮
           </label>
+        </div>
+
+        <!-- P12：按类型分 Tab，避免一次铺太多 -->
+        <nav class="type-tabs" data-testid="job-tabs">
+          <button
+            v-for="t in JOB_TABS"
+            :key="t.key"
+            type="button"
+            :class="['type-tab', { on: jobTab === t.key, zero: !(jobTabCounts[t.key] ?? 0) }]"
+            :title="t.hint"
+            :data-testid="`job-tab-${t.key}`"
+            @click="jobTab = t.key; jobLimit = 10"
+          >
+            <span>{{ t.label }}</span>
+            <span v-if="t.kind" class="type-tab-k font-mono">{{ t.kind }}</span>
+            <span class="type-tab-n font-mono">{{ jobTabCounts[t.key] ?? 0 }}</span>
+          </button>
+        </nav>
+
+        <div class="jobs-head-actions">
           <div class="jobs-actions">
             <template v-if="!activeJobCount">
               <span v-if="!isVideoNow" class="count-inline">
@@ -2178,7 +2246,7 @@ const shotTotal = computed(() => {
       <div v-if="outputAssets.length || galManage" class="gallery-panel" data-testid="gallery-panel">
         <div class="jobs-head">
           <span class="font-mono eyebrow">资产库</span>
-          <span class="state-hint font-mono">{{ outputAssets.length }} 个产物</span>
+          <span class="state-hint font-mono">{{ galleryForTab.length }} / {{ outputAssets.length }} 个产物</span>
           <div class="jobs-actions">
             <template v-if="galManage">
               <label class="batch-check">
@@ -2201,8 +2269,26 @@ const shotTotal = computed(() => {
             </button>
           </div>
         </div>
+
+        <!-- P12：资产库同样按类型分 Tab -->
+        <nav class="type-tabs" data-testid="gallery-tabs">
+          <button
+            v-for="t in JOB_TABS"
+            :key="t.key"
+            type="button"
+            :class="['type-tab', { on: galTab === t.key, zero: !(galTabCounts[t.key] ?? 0) }]"
+            :title="t.hint"
+            :data-testid="`gallery-tab-${t.key}`"
+            @click="galTab = t.key"
+          >
+            <span>{{ t.label }}</span>
+            <span v-if="t.kind" class="type-tab-k font-mono">{{ t.kind }}</span>
+            <span class="type-tab-n font-mono">{{ galTabCounts[t.key] ?? 0 }}</span>
+          </button>
+        </nav>
+
         <div class="gallery-grid">
-          <div v-for="a in outputAssets" :key="a.id" :class="['g-item', { manage: galManage, sel: galSel.includes(a.id) }]">
+          <div v-for="a in galleryForTab" :key="a.id" :class="['g-item', { manage: galManage, sel: galSel.includes(a.id) }]">
             <label v-if="galManage" class="g-sel">
               <input type="checkbox" :checked="galSel.includes(a.id)" @change="toggleGalSel(a.id)" />
             </label>
@@ -3124,4 +3210,69 @@ const shotTotal = computed(() => {
   margin: 8px 0;
 }
 
+/* ---------------- P12：类型 Tab + 移动端适配 ---------------- */
+.type-tabs {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  padding: 2px 0 6px;
+}
+.type-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--wv-line);
+  background: transparent;
+  color: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  opacity: 0.75;
+}
+.type-tab:hover { opacity: 1; }
+.type-tab.on {
+  opacity: 1;
+  border-color: color-mix(in srgb, var(--wv-accent) 60%, var(--wv-line));
+  background: color-mix(in srgb, var(--wv-accent) 16%, transparent);
+}
+.type-tab-n { font-size: 10px; opacity: 0.7; }
+.type-tab-k {
+  font-size: 10px;
+  opacity: 0.5;
+}
+.type-tab.zero { opacity: 0.42; }
+.type-tab.zero.on { opacity: 0.9; }
+.jobs-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+/* 窄屏（手机）：卡片/操作区堆叠，Tab 收紧，缩略图换行 */
+@media (max-width: 720px) {
+  .jobs-head,
+  .jobs-head-actions {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .jobs-actions {
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .type-tab {
+    padding: 3px 8px;
+    font-size: 11.5px;
+  }
+  /* 窄屏省掉 kind 尾缀，只留中文名 + 计数 */
+  .type-tab-k { display: none; }
+  .gallery-grid { flex-wrap: wrap; }
+  /* 任务行窄屏换行，避免进度条/操作被挤出可视区 */
+  .job-row {
+    flex-wrap: wrap;
+    row-gap: 4px;
+  }
+  .job-bar { min-width: 70px; }
+}
 </style>
