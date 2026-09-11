@@ -322,6 +322,16 @@ export interface JobRecord {
     keyframe_index?: number
     keyframe_count?: number
     frame_label?: string
+    /** clip：运动帧数 */
+    frames?: number
+    /** voice：该镜内的第几段语音（0 基）—— 一镜多段配音靠它区分 */
+    line_index?: number
+    line_kind?: string
+    at_sec?: number
+    subject?: string
+    text?: string
+    /** bgm：情绪（同一情绪共用一个产物位） */
+    mood?: string
     composition?: string
     tailKey?: string
     keyframeHistorical?: boolean

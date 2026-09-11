@@ -916,13 +916,41 @@ const cancelBusy = ref<string | null>(null)
 // 任务默认展示 10 条，点“查看更多”逐次再展示 10 条
 const jobLimit = ref(10)
 const filterLatest = ref(true)
-/** 只显示“每个分镜每个类型最近一条任务”（still/clip 分开、关键帧按帧；不分状态，便于看重跑/重跑失败） */
+/**
+ * 一个任务对应的「产物位」：**同一位同类型的重复生成才互相覆盖**。
+ *  - still → 按关键帧序号（一镜多帧各自一行）
+ *  - clip  → 每镜一个
+ *  - voice → **按段号**（一镜多段配音各自一行，原来按“镜”去重 → 只看到最后一段）
+ *  - bgm   → 按情绪（不同情绪各一个产物）
+ */
+function jobSlotKey(j: JobRecord): string {
+  const p = j.payload ?? {}
+  const shot = p.shot_no ?? 'x'
+  switch (j.kind) {
+    case 'still':
+      return `shot:${shot}:still:${p.keyframe_index ?? ''}`
+    case 'clip':
+      return `shot:${shot}:clip`
+    case 'voice':
+      return `shot:${shot}:voice:${p.line_index ?? ''}`
+    case 'bgm':
+      return `bgm:${p.mood ?? ''}`
+    default:
+      return `shot:${shot}:${j.kind}`
+  }
+}
+
+/**
+ * 「只看最近一轮」= 每个产物位 × **每种状态** 各保留最新一条：
+ *  - 多段配音/多帧关键帧各自成行（不再互相覆盖）
+ *  - 失败/取消的不会被后来成功的同一位任务顶掉（否则没法「重试选中」）
+ */
 const latestJobs = computed(() => {
   const all = jobs.data.value ?? []
   if (!filterLatest.value) return all
   const newest = new Map<string, JobRecord>()
   for (const j of all) {
-    const key = `shot:${j.payload?.shot_no ?? 'x'}:${j.kind}:${j.payload?.keyframe_index ?? ''}`
+    const key = `${jobSlotKey(j)}|${j.state}`
     const cur = newest.get(key)
     // 取 createdAt 最大者（与列表返回顺序无关，防“留下最旧一条”导致全是 v1 旧任务）
     if (!cur || new Date(j.createdAt).getTime() > new Date(cur.createdAt).getTime()) {
@@ -1043,14 +1071,19 @@ function revOfJob(j: JobRecord): { no: number; stale: boolean } | null {
 /** 任务审计（P3）：悬停可查“用 vN 的哪句话 + prompt_md5” */
 function jobAuditTitle(j: JobRecord): string | undefined {
   const p = j.payload
-  if (!p || !p.positive_prompt) return undefined
+  if (!p) return undefined
+  // P12：配音任务把该段文本也带进悬停提示，方便区分一镜多段/多次重跑
+  const lineInfo = j.kind === 'voice' && p.text
+    ? `\n台词（第${(p.line_index ?? 0) + 1}段${p.subject ? ' · ' + p.subject : ''}）：${p.text}`
+    : ''
+  if (!p.positive_prompt) return lineInfo ? lineInfo.trim() : undefined
   const r = revOfJob(j)
   const no = p.revision_no ?? r?.no ?? '?'
   const prompt = p.positive_prompt.length > 120 ? `${p.positive_prompt.slice(0, 120)}…` : p.positive_prompt
   const hist = p.keyframeHistorical
     ? `\n关键帧：沿用历史版本第${p.shot_no ?? '?'}镜的关键帧${p.keyframeHistoricalRevisionNo ? `（v${p.keyframeHistoricalRevisionNo}）` : ''}`
     : ''
-  return `版本 v${no}${r?.stale ? '（旧版）' : ''} · md5 ${(p.prompt_md5 ?? '-').slice(0, 16)}${hist}\n提示词：${prompt}`
+  return `版本 v${no}${r?.stale ? '（旧版）' : ''} · md5 ${(p.prompt_md5 ?? '-').slice(0, 16)}${hist}\n提示词：${prompt}${lineInfo}`
 }
 /** 资产库：由产物 jobId 反查生成版本（vN），便于区分旧版产物 */
 function galRevNo(jobId: string | null): number | null {
@@ -2389,7 +2422,7 @@ const shotTotal = computed(() => {
               <input type="checkbox" :checked="jobSel.includes(j.id)" @change="toggleJobSel(j.id)" />
             </label>
             <span v-else class="row-check" />
-            <span class="job-kind font-mono">[{{ KIND_LABEL[j.kind] ?? j.kind }}{{ j.payload?.preview ? '·试听' : '' }}<template v-if="j.kind === 'still' || j.kind === 'clip' || j.kind === 'voice'"> · 第{{ j.payload?.shot_no ?? '—' }}镜</template><template v-if="j.payload?.frame_label"> · {{ j.payload.frame_label }}</template>]</span>
+            <span class="job-kind font-mono">[{{ KIND_LABEL[j.kind] ?? j.kind }}{{ j.payload?.preview ? '·试听' : '' }}<template v-if="j.kind === 'still' || j.kind === 'clip' || j.kind === 'voice'"> · 第{{ j.payload?.shot_no ?? '—' }}镜</template><template v-if="j.kind === 'voice' && j.payload?.line_index != null"> · 第{{ (j.payload.line_index ?? 0) + 1 }}段</template><template v-if="j.payload?.subject"> · {{ j.payload.subject }}</template><template v-if="j.kind === 'bgm' && j.payload?.mood"> · {{ j.payload.mood }}</template><template v-if="j.payload?.frame_label"> · {{ j.payload.frame_label }}</template>]</span>
             <span
               v-if="revOfJob(j)"
               :class="['job-rev', 'font-mono', { stale: revOfJob(j)?.stale }]"
