@@ -94,6 +94,11 @@ export interface NarrationLine {
   /** 本段音色覆盖（优先于 voiceBindings 与 audio.voice） */
   voice?: string | null
   speed?: number | null
+  /**
+   * P10：该段位置/结束点被**用户手动**改过。
+   * 自动铺排（避让、按实际时长对齐）只动 `manual !== true` 的段，避免把用户拖好的位置改掉。
+   */
+  manual?: boolean | null
 }
 
 /** 角色 → 音色绑定（P8） */
@@ -167,6 +172,12 @@ export interface DirectorShot {
   narration?: string
   /** P8 镜内多段语音（存在时优先于 narration） */
   narrations?: NarrationLine[] | null
+  /**
+   * P10：该镜允许配音时长超出镜头。
+   * 默认（不设）= 音频与字幕会自然溢到下一镜，但界面会提醒“配音总长超出镜头”；
+   * 置 true 表示用户已确认，不再提醒。
+   */
+  allowNarrationOverflow?: boolean | null
   zh?: string
   en_synced?: boolean
   /** P2 运镜关键帧（穿越/从A到B看到C）：≥2 帧时生成按帧出图，motion 用首/尾帧 */
@@ -280,6 +291,10 @@ export interface AssetRef {
   mime: string
   width: number | null
   height: number | null
+  /** P10：产物真实时长（毫秒）—— 配音靠它对齐字幕、判定超长 */
+  durationMs?: number | null
+  /** P10：配音在镜内的段号（null = 非配音产物） */
+  lineIndex?: number | null
   createdAt: string
 }
 

@@ -186,7 +186,16 @@ public class AssetService {
 
     private AssetResponse toResponse(Asset a) {
         return new AssetResponse(a.id(), a.projectId(), a.jobId(), a.shotId(), a.shotNo(), a.kind(), a.mime(),
-                a.width(), a.height(), a.createdAt());
+                a.width(), a.height(), a.durationMs(), lineIndexOf(a), a.createdAt());
+    }
+
+    /** P10：配音产物在镜内的段号（写产生它的 job payload 快照里）；非配音为空。 */
+    public static Integer lineIndexOf(Asset a) {
+        var snap = a.promptSnapshot();
+        if (snap == null || !snap.hasNonNull("line_index")) {
+            return null;
+        }
+        return snap.path("line_index").asInt(0);
     }
 
     private static String normalizeMime(String contentType, String filename) {

@@ -128,9 +128,14 @@
                 },
                 "subject": { "type": "string", "description": "说话人（角色/主体）。与 audio.voiceBindings[].subject 关联；旁白可留空" },
                 "voice": { "type": "string", "description": "本段音色覆盖（优先于 voiceBindings 与 audio.voice）" },
-                "speed": { "type": "number", "minimum": 0.5, "maximum": 2.0, "default": 1.0, "description": "本段语速" }
+                "speed": { "type": "number", "minimum": 0.5, "maximum": 2.0, "default": 1.0, "description": "本段语速" },
+                "manual": { "type": "boolean", "description": "P10：位置/结束点被用户手动改过；自动铺排（避让、按实际时长对齐）只动非 manual 的段" }
               }
             }
+          },
+          "allowNarrationOverflow": {
+            "type": "boolean",
+            "description": "P10：该镜允许配音时长超出镜头（不再提醒）。不设时音频与字幕仍会自然溢到下一镜，但界面会告警"
           }
         }
       }

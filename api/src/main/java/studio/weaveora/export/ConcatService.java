@@ -556,7 +556,10 @@ public class ConcatService {
     }
 
     private List<MediaClip> orderedMedia(UUID workspaceId, UUID projectId, JsonNode plan, List<UUID> shotIds) {
-        List<MediaClip> out = new ArrayList<>();
+        // ---- 第 1 遍：确定参与渲染的片段，并收集「全局时间轴上的台词区间」 ----
+        List<MediaClip> draft = new ArrayList<>();
+        List<JsonNode> shotsOfDraft = new ArrayList<>();
+        List<List<studio.weaveora.asset.AudioAssetLookup.VoiceCue>> voicesOfDraft = new ArrayList<>();
         int order = 0;
         for (JsonNode shot : plan.path("shots")) {
             order++;
@@ -564,11 +567,86 @@ public class ConcatService {
             int shotNo = shot.path("shot_no").asInt(order);
             UUID shotId = order <= shotIds.size() ? shotIds.get(order - 1) : null;
             Asset m = pickClipOrStill(workspaceId, projectId, shotId, shotNo);
-            if (m == null) continue;
-            out.add(new MediaClip(m.storageKey(), isVideo(m), dur,
-                    voiceCues(workspaceId, projectId, shotNo), subtitleCues(shot, dur)));
+            if (m == null) continue;   // 无素材的镜不入片（沿用旧行为，不占时间轴）
+            draft.add(new MediaClip(m.storageKey(), isVideo(m), dur, voiceCues(workspaceId, projectId, shotNo), List.of()));
+            shotsOfDraft.add(shot);
+            voicesOfDraft.add(draft.get(draft.size() - 1).voices());
+        }
+
+        // P10：字幕区间按**配音实际时长**定，而不是 plan 里的占位值；
+        //      并允许一条台词跨镜——这样“上一镜配音超过镜头时长”时字幕会自动跟到下一镜。
+        List<LineSpan> spans = new ArrayList<>();
+        double cursor = 0;
+        for (int i = 0; i < draft.size(); i++) {
+            JsonNode shot = shotsOfDraft.get(i);
+            double clipDur = draft.get(i).durationSec();
+            Map<Integer, Double> actualSec = new LinkedHashMap<>();
+            for (studio.weaveora.asset.AudioAssetLookup.VoiceCue v : voicesOfDraft.get(i)) {
+                Integer ms = v.asset().durationMs();
+                if (ms != null && ms > 0) {
+                    actualSec.put(v.lineIndex(), ms / 1000.0);
+                }
+            }
+            spans.addAll(lineSpans(shot, clipDur, cursor, actualSec));
+            cursor += clipDur;
+        }
+
+        // ---- 第 2 遍：把台词区间按镜切片，落到各镜的字幕上（跨镜的自续显） ----
+        List<MediaClip> out = new ArrayList<>();
+        cursor = 0;
+        for (MediaClip c : draft) {
+            double s0 = cursor;
+            double s1 = cursor + c.durationSec();
+            out.add(new MediaClip(c.assetKey(), c.video(), c.durationSec(), c.voices(),
+                    sliceSpans(spans, s0, s1)));
+            cursor = s1;
         }
         return out;
+    }
+
+    /** 一条台词在全片时间轴上的区间（字幕用）。 */
+    record LineSpan(double startSec, double endSec, String text) {
+    }
+
+    /**
+     * P10：把某镜的台词展开成全片时间轴上的区间（纯函数，便于单测）。
+     *
+     * 优先级：手动 end_sec &gt; 配音实际时长（actualSec）&gt; 下一段起点/镜尾（旧口径）。
+     */
+    static List<LineSpan> lineSpans(JsonNode shot, double clipDur, double cursor,
+                                    Map<Integer, Double> actualSec) {
+        List<LineSpan> out = new ArrayList<>();
+        List<AudioPlan.Line> lines = AudioPlan.lines(shot);
+        for (int k = 0; k < lines.size(); k++) {
+            AudioPlan.Line l = lines.get(k);
+            if (l.text().isBlank()) {
+                continue;
+            }
+            double start = cursor + Math.max(0, l.atSec());
+            double dur;
+            if (l.hasEnd()) {
+                dur = l.endSec() - l.atSec();
+            } else if (actualSec != null && actualSec.containsKey(k)) {
+                dur = actualSec.get(k);
+            } else {
+                Double nextAt = (k + 1 < lines.size()) ? lines.get(k + 1).atSec() : null;
+                dur = (nextAt != null ? nextAt : clipDur) - l.atSec();
+            }
+            out.add(new LineSpan(start, start + Math.max(0.4, dur), l.text().trim()));
+        }
+        return out;
+    }
+
+    /** P10：把全片区间的台词按某镜 [s0,s1) 切片（跨镜的自续显）。 */
+    static List<SubCue> sliceSpans(List<LineSpan> spans, double s0, double s1) {
+        List<SubCue> subs = new ArrayList<>();
+        for (LineSpan sp : spans) {
+            double a = Math.max(sp.startSec(), s0);
+            double b = Math.min(sp.endSec(), s1);
+            if (b - a < 0.05) continue;
+            subs.add(new SubCue(a - s0, b - s0, sp.text()));
+        }
+        return subs;
     }
 
     /**
@@ -585,6 +663,11 @@ public class ConcatService {
      * start = at_sec；end = 显式 end_sec，否则下一段起点，否则镜尾。
      * 每段各显示自己的文本，不再把整镜拼成一句话。
      */
+    /**
+     * @deprecated 已改为在 {@link #orderedMedia} 里按「配音实际时长 + 跨镜切片」统一计算，
+     *     本方法保留仅供对照。
+     */
+    @Deprecated
     private static List<SubCue> subtitleCues(JsonNode shot, double shotDur) {
         List<AudioPlan.Line> lines = AudioPlan.lines(shot);
         List<SubCue> out = new ArrayList<>();
@@ -663,11 +746,12 @@ public class ConcatService {
 
     private AssetResponse toAssetResponse(Asset a) {
         return new AssetResponse(a.id(), a.projectId(), a.jobId(), a.shotId(), a.shotNo(), a.kind(), a.mime(),
-                a.width(), a.height(), a.createdAt());
+                a.width(), a.height(), a.durationMs(),
+                studio.weaveora.asset.AssetService.lineIndexOf(a), a.createdAt());
     }
 
     /** 一个字幕段（镜内相对秒）。 */
-    private record SubCue(double startSec, double endSec, String text) {
+    record SubCue(double startSec, double endSec, String text) {
     }
 
     private record MediaClip(String assetKey, boolean video, double durationSec,

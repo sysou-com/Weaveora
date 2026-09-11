@@ -23,8 +23,10 @@ const props = withDefaults(
     voices?: { label: string; value: string }[]
     /** P9：角色绑定的语速（subject → speed），用于在行内提示“实际会用多快” */
     speedHints?: Record<string, number>
+    /** P10：各段配音的**实际时长**（毫秒），key = "镜号:段号" —— 用于对齐字幕与判定超长 */
+    durations?: Record<string, number>
   }>(),
-  { disabled: false, busy: false, subjects: () => [], voices: () => [], speedHints: () => ({}) },
+  { disabled: false, busy: false, subjects: () => [], voices: () => [], speedHints: () => ({}), durations: () => ({}) },
 )
 
 const emit = defineEmits<{
@@ -37,6 +39,8 @@ const emit = defineEmits<{
   importLine: [shotNo: number, lineIndex: number, file: File, atSec: number, subject: string]
   /** P9：打开克隆配音（录音/上传 → 处理 → 设为音色或直接用这段） */
   cloneLine: [shotNo: number, lineIndex: number, atSec: number, subject: string]
+  /** P10：一键调整本镜（延长镜头 / 允许溢出）—— 镜头时长与标记由父级回写 */
+  extendShot: [shotNo: number, patch: { duration_sec?: number; allowNarrationOverflow?: boolean }]
 }>()
 
 /** 中文配音大致语速（字/秒）——仅用于估算块宽与时长，不是真实合成结果 */
@@ -65,12 +69,67 @@ function estimateSec(text: string): number {
   return Math.max(0.8, n / CHARS_PER_SEC)
 }
 
-/** 该段占用的镜内区间（秒）：设了 end_sec 用 ends，否则用字数估算 */
-function spanOf(l: NarrationLine): { start: number; len: number; exact: boolean } {
+/** 该段配音的**实际时长**（秒）；未生成/未导入则为 null */
+function lineDurSec(i: number): number | null {
+  const ms = props.durations?.[`${props.shot.shot_no}:${i}`]
+  return ms && ms > 0 ? ms / 1000 : null
+}
+
+/** 该段占用的镜内区间（秒）：手动 end_sec > 配音实际时长 > 字数估算 */
+function spanOf(l: NarrationLine, i: number): { start: number; len: number; exact: boolean } {
   const start = Math.max(0, l.at_sec ?? 0)
   const end = Number(l.end_sec ?? 0)
   if (end > start) return { start, len: end - start, exact: true }
+  const actual = lineDurSec(i)
+  if (actual != null) {
+    return { start, len: Math.min(actual, Math.max(0.4, dur.value - start)), exact: true }
+  }
   return { start, len: Math.min(estimateSec(l.text), Math.max(0.4, dur.value - start)), exact: false }
+}
+
+/** 本镜配音总时长（秒）：有实际时长用实际，否则用窗口/估算 */
+const totalVoiceSec = computed(() =>
+  lines.value.reduce((s, l, i) => {
+    const actual = lineDurSec(i)
+    if (actual != null) return s + actual
+    const end = Number(l.end_sec ?? 0)
+    if (end > (l.at_sec ?? 0)) return s + (end - (l.at_sec ?? 0))
+    return s + estimateSec(l.text)
+  }, 0),
+)
+
+const overflowSec = computed(() => totalVoiceSec.value - dur.value)
+/** 超出镜头且未标记“允许溢出” → 需提醒 */
+const overflowWarn = computed(() => overflowSec.value > 0.05 && props.shot.allowNarrationOverflow !== true)
+
+/** 一键：把本镜语速提到刚好能装下（上限 2.0×） */
+const neededSpeed = computed(() => {
+  if (totalVoiceSec.value <= 0) return 1
+  return Math.min(2, Math.max(0.5, Math.round((totalVoiceSec.value / dur.value) * 100) / 100))
+})
+
+function applySpeedToFit(): void {
+  const spd = neededSpeed.value
+  for (const l of lines.value) l.speed = spd
+  commit()
+}
+
+/** 一键：把镜头延长到刚好装下（向上取 0.1s，留 0.2s 余量） */
+function extendShotToFit(): void {
+  const need = Math.round((totalVoiceSec.value + 0.2) * 10) / 10
+  emit('extendShot', props.shot.shot_no, { duration_sec: need })
+}
+
+/** P10：恢复自动 —— 清掉手动标记，之后重新生成/自动铺排会重新接管它的位置 */
+function restoreAuto(): void {
+  if (!cur.value) return
+  cur.value.manual = null
+  commit()
+}
+
+/** 一键：允许溢出（不再报警；音频与字幕会自动跨到下一镜） */
+function allowOverflow(): void {
+  emit('extendShot', props.shot.shot_no, { allowNarrationOverflow: true })
 }
 
 /** 按 at_sec 排序后的“显示索引”与真实数组索引一致（lines 已排序并写回前先规整） */
@@ -157,11 +216,12 @@ function onDragMove(i: number, ev: PointerEvent): void {
   const line = props.shot.narrations?.[i]
   if (!line) return
   const sec = secAtClientX(ev.clientX)
+  line.manual = true          // P10：手动拖过 → 自动铺排不再动它
   if (dragMode.value === 'resize') {
     // 结束点：至少比起点大 0.3s，不超过镜头
     line.end_sec = Math.max((line.at_sec ?? 0) + 0.3, Math.min(dur.value, Math.round(sec * 10) / 10))
   } else {
-    const span = spanOf(line)
+    const span = spanOf(line, i)
     const start = Math.max(0, Math.min(dur.value - Math.min(span.len, dur.value - 0.3), sec))
     line.at_sec = Math.round(start * 10) / 10
     // 跟着平移时同步平移结束点，保持时长不变
@@ -202,6 +262,7 @@ const r1 = (n: number) => Math.round(n * 10) / 10
 function onStartInput(v: number | null): void {
   const l = cur.value
   if (!l) return
+  l.manual = true             // P10：手动改过
   if (v == null || !Number.isFinite(v)) {
     l.at_sec = 0
   } else {
@@ -220,6 +281,7 @@ function onStartInput(v: number | null): void {
 function onEndInput(v: number | null): void {
   const l = cur.value
   if (!l) return
+  l.manual = true             // P10：手动改过
   if (v == null || !Number.isFinite(v) || v <= 0) {
     l.end_sec = null
     commit()
@@ -311,8 +373,8 @@ function pickVoiceFile(i: number): void {
         class="nt-block"
         :class="{ sel: selected === i, narration: (l.kind ?? 'narration') === 'narration', dialogue: l.kind === 'dialogue', dragging: dragging === i }"
         :style="{
-          left: (spanOf(l).start / dur) * 100 + '%',
-          width: Math.max(3, (spanOf(l).len / dur) * 100) + '%',
+          left: (spanOf(l, i).start / dur) * 100 + '%',
+          width: Math.max(3, (spanOf(l, i).len / dur) * 100) + '%',
         }"
         :title="`${l.at_sec ?? 0}s${Number(l.end_sec ?? 0) > 0 ? ' → ' + l.end_sec + 's（固定窗口）' : '（自然长度）'} · ${l.subject || '旁白'} · ${l.text || '(空)'}`"
         :data-testid="`narration-block-${shot.shot_no}-${i}`"
@@ -323,7 +385,12 @@ function pickVoiceFile(i: number): void {
       >
         <span class="nt-block-tag font-mono">{{ (l.kind ?? 'narration') === 'dialogue' ? (l.subject || '台词') : '旁白' }}</span>
         <span class="nt-block-text">{{ l.text || '（空）' }}</span>
-        <span class="nt-est font-mono">{{ spanOf(l).len.toFixed(1) }}{{ spanOf(l).exact ? '' : '~' }}s</span>
+        <span class="nt-est font-mono">
+          <template v-if="lineDurSec(i) != null">
+            <span class="nt-real">{{ lineDurSec(i)!.toFixed(1) }}s</span>
+          </template>
+          <template v-else>{{ spanOf(l, i).len.toFixed(1) }}{{ spanOf(l, i).exact ? '' : '~' }}s</template>
+        </span>
         <span
           v-if="effectiveSpeed(l) !== 1"
           class="nt-spd font-mono"
@@ -447,6 +514,17 @@ function pickVoiceFile(i: number): void {
       <NButton size="tiny" quaternary :disabled="disabled" @click="setEndFromEstimate">
         按估算设结束
       </NButton>
+      <NButton
+        v-if="cur.manual"
+        size="tiny"
+        quaternary
+        type="warning"
+        :disabled="disabled"
+        :title="'本段位置/结束点被手动改过，自动铺排不再动它；点此交回自动'"
+        @click="restoreAuto"
+      >
+        已手动 · 恢复自动
+      </NButton>
       <label class="nt-field narrow">
         <span class="fl">语速</span>
         <NTooltip>
@@ -514,9 +592,47 @@ function pickVoiceFile(i: number): void {
     </div>
 
     <p v-if="lines.length" class="nt-hint text-secondary">
-      语音总长 {{ lines.reduce((s, l) => s + spanOf(l).len, 0).toFixed(1) }}s /
-      镜头 {{ dur.toFixed(1) }}s（带 ~ 的是按字数估算，拖右缘可固定结束点）
+      配音总长 {{ totalVoiceSec.toFixed(1) }}s / 镜头 {{ dur.toFixed(1) }}s
+      <span v-if="totalVoiceSec <= dur + 0.05" class="nt-ok">✓ 装得下</span>
+      （带 ~ 的是按字数估算；有实际时长的显示为白色数字）
     </p>
+
+    <!-- P10：配音总长超出镜头时的提示 + 一键处理 -->
+    <div v-if="overflowWarn" class="nt-overflow" :data-testid="`narration-overflow-${shot.shot_no}`">
+      <span class="nt-ovf-text">
+        ⚠️ 本镜配音 <b>{{ totalVoiceSec.toFixed(1) }}s</b> 超出镜头 <b>{{ dur.toFixed(1) }}s</b>
+        共 <b>{{ overflowSec.toFixed(1) }}s</b>。
+        <span class="text-secondary">不处理也可以：音频与字幕会自动溢到下一镜。</span>
+      </span>
+      <NButton
+        size="tiny"
+        secondary
+        :disabled="disabled || neededSpeed >= 2"
+        :title="neededSpeed >= 2 ? '需要的倍速超过 2.0× 上限，请改用延长镜头或精简文案' : '把本镜所有段的语速提到刚好装得下'"
+        :data-testid="`narration-fit-speed-${shot.shot_no}`"
+        @click="applySpeedToFit"
+      >
+        提语速到 {{ neededSpeed.toFixed(2) }}×
+      </NButton>
+      <NButton
+        size="tiny"
+        secondary
+        :disabled="disabled"
+        :data-testid="`narration-fit-extend-${shot.shot_no}`"
+        @click="extendShotToFit"
+      >
+        延长镜头到 {{ (totalVoiceSec + 0.2).toFixed(1) }}s
+      </NButton>
+      <NButton
+        size="tiny"
+        quaternary
+        :disabled="disabled"
+        :data-testid="`narration-allow-overflow-${shot.shot_no}`"
+        @click="allowOverflow"
+      >
+        允许溢出到下一镜
+      </NButton>
+    </div>
   </div>
 </template>
 
@@ -665,6 +781,31 @@ function pickVoiceFile(i: number): void {
 .nt-hint {
   font-size: 11px;
   margin: 0;
+}
+.nt-real {
+  color: #fff;
+  font-weight: 600;
+}
+.nt-ok {
+  color: #7bc47f;
+}
+.nt-overflow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: rgba(244, 180, 96, 0.12);
+  border: 1px solid rgba(244, 180, 96, 0.45);
+}
+.nt-ovf-text {
+  font-size: 11.5px;
+  color: #f4b460;
+  flex: 1 1 320px;
+}
+.nt-ovf-text b {
+  color: #ffd08a;
 }
 .nt-sep {
   width: 1px;

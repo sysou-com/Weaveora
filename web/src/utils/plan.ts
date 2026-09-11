@@ -1,5 +1,47 @@
 import type { DirectorPlan, DirectorShot, ImagePlan, VideoPlan } from '@/api/types'
 
+/**
+ * P10：把某分镜的语音按**配音实际时长**铺到镜内时间轴上（只动没被手动改过的段）。
+ *
+ * 规则：
+ *  - `manual !== true` 的段才会被调整（用户手拖过的不碰）
+ *  - 有实际时长 → `end_sec = at_sec + 实际时长`
+ *  - 下一段若与上一段重叠 → 把下一段后移到上一段结束（仅当它非手动）
+ *
+ * @param durations key = `"镜号:段号"` → 毫秒
+ * @returns 是否有改动
+ */
+export function autoLayoutShot(shot: DirectorShot, durations: Record<string, number>): boolean {
+  const lines = [...(shot.narrations ?? [])].sort((a, b) => (a.at_sec ?? 0) - (b.at_sec ?? 0))
+  if (!lines.length) return false
+  let changed = false
+  let prevEnd: number | null = null
+  lines.forEach((l, i) => {
+    const ms = durations[`${shot.shot_no}:${i}`]
+    const actual = ms && ms > 0 ? ms / 1000 : null
+    if (l.manual !== true) {
+      let at = Math.max(0, l.at_sec ?? 0)
+      if (prevEnd != null && at < prevEnd - 0.05) {
+        at = Math.round(prevEnd * 10) / 10
+        if (at !== l.at_sec) {
+          l.at_sec = at
+          changed = true
+        }
+      }
+      if (actual != null) {
+        const end = Math.round((at + actual) * 10) / 10
+        if (Number(l.end_sec ?? 0) !== end) {
+          l.end_sec = end
+          changed = true
+        }
+      }
+    }
+    const end = Number(l.end_sec ?? 0)
+    if (end > (l.at_sec ?? 0)) prevEnd = end
+  })
+  return changed
+}
+
 /** §10.2 方案类型守卫与编辑辅助（key 与后端/LLM 的 snake_case 一致）。 */
 
 /**

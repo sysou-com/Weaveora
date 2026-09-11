@@ -38,6 +38,7 @@ import { useAuthStore } from '@/stores/auth'
 import { aspectNote, modeLabel } from '@/utils/format'
 import {
   SOURCE_LABEL,
+  autoLayoutShot,
   clonePlan,
   isVideoPlan,
   normalizePlan,
@@ -228,6 +229,56 @@ const assets = useQuery({
   enabled: computed(() => workspaceId.value !== '' && projectId.value !== ''),
 })
 const refAssets = computed(() => (assets.data.value ?? []).filter((a) => a.kind === 'reference'))
+
+/**
+ * P10：各段配音的**实际时长**（"镜号:段号" → 毫秒）。
+ * 资产列表按 createdAt DESC，所以同一段取先遇到的那条（即最新一次生成/导入）。
+ */
+function voiceDurations(): Record<string, number> {
+  const m: Record<string, number> = {}
+  for (const a of assets.data.value ?? []) {
+    if (a.kind !== 'voice' || a.shotNo == null || a.lineIndex == null) continue
+    const ms = a.durationMs
+    if (!ms || ms <= 0) continue
+    const k = `${a.shotNo}:${a.lineIndex}`
+    if (!(k in m)) m[k] = ms
+  }
+  return m
+}
+const durations = computed(() => voiceDurations())
+
+/**
+ * P10：生成完一条后，按实际时长自动铺排该镜（只动未被手动改过的段）：
+ *   - end_sec = at_sec + 实际时长
+ *   - 下一段若与上一段重叠 → 后移
+ * 需要先等 assets 查询刷新，否则拿不到刚生成的那条时长。
+ */
+async function autoLayoutAfterGen(shotNo: number): Promise<void> {
+  await queryClient.refetchQueries({ queryKey: ['assets'] })
+  const plan = draft.value
+  if (!plan || !isVideoPlan(plan)) return
+  const shot = (plan.shots ?? []).find((s) => s.shot_no === shotNo)
+  if (shot && autoLayoutShot(shot, voiceDurations())) {
+    message.info(`第 ${shotNo} 镜已按配音实际时长自动对齐（可拖拽细调）`, { duration: 4000 })
+  }
+}
+
+/** P10：分镜请求调整本镜（延长时长 / 允许溢出） */
+function onPatchShot(shotNo: number, patch: { duration_sec?: number; allowNarrationOverflow?: boolean }): void {
+  const plan = draft.value
+  if (!plan || !isVideoPlan(plan)) return
+  const shot = (plan.shots ?? []).find((s) => s.shot_no === shotNo)
+  if (!shot) return
+  if (patch.duration_sec != null) {
+    shot.duration_sec = patch.duration_sec
+    shot.allowNarrationOverflow = null
+    message.success(`第 ${shotNo} 镜时长已改为 ${patch.duration_sec.toFixed(1)}s`)
+  }
+  if (patch.allowNarrationOverflow) {
+    shot.allowNarrationOverflow = true
+    message.info(`第 ${shotNo} 镜已允许配音溢出到下一镜（不再提醒）`)
+  }
+}
 /** 参考图按上传时间倒序（最新在前，防旧图排在前面看不清新上传） */
 const refAssetsSorted = computed(() =>
   [...refAssets.value].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()),
@@ -938,6 +989,7 @@ async function genVoiceLine(shotNo: number, lineIndex: number): Promise<void> {
     if (job.state !== 'succeeded') throw new Error(job.errorMessage || `任务${job.state}`)
     await queryClient.invalidateQueries({ queryKey: ['assets'] })
     await queryClient.invalidateQueries({ queryKey: ['jobs'] })
+    await autoLayoutAfterGen(shotNo)
     message.success(`第 ${shotNo} 镜第 ${lineIndex + 1} 段配音已更新（渲染时会用最新一条）`)
   } catch (e) {
     message.error(e instanceof Error ? e.message : '重新生成失败')
@@ -1850,6 +1902,7 @@ const shotTotal = computed(() => {
                   :busy-shot="shotBusy"
                   :preview-busy="previewBusy"
                   :audio-preview="audioPreview"
+                  :durations="durations"
                   @approve-shot="handleApproveShot"
                   @ai-prompt="openAiRewrite"
                   @ai-sync-all="aiSyncAll"
@@ -1859,6 +1912,7 @@ const shotTotal = computed(() => {
                   @preview-line="previewVoiceLine"
                   @import-line="importVoiceLine"
                   @clone-voice="openCloneDialog"
+                  @patch-shot="onPatchShot"
                   @remove-preset="removeClonePreset"
                   @update:plan="() => {}"
                   @close-preview="closeAudioPreview"

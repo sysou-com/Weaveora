@@ -21,6 +21,8 @@ const props = defineProps<{
   previewBusy?: boolean
   /** 试听播放条（父级持有 URL，这里只负责靠按钮渲染） */
   audioPreview?: { url: string; label: string; kind: 'voice' | 'bgm' } | null
+  /** P10：各段配音实际时长（"镜号:段号" → 毫秒），用于字幕对齐提示与超长判定 */
+  durations?: Record<string, number>
 }>()
 
 const emit = defineEmits<{
@@ -35,6 +37,8 @@ const emit = defineEmits<{
   importLine: [shotNo: number, lineIndex: number, file: File, atSec: number, subject: string]
   /** P9：打开克隆配音弹窗（preset=设为角色音色；line=也可直接用这段当本行配音） */
   cloneVoice: [ctx: { mode: 'preset' | 'line'; name?: string; shotNo?: number; lineIndex?: number; atSec?: number; subject?: string; replaceId?: string }]
+  /** P10：分镜请求调整本镜（延长时长 / 允许溢出）—— 由父级回写以触发脏标记 */
+  patchShot: [shotNo: number, patch: { duration_sec?: number; allowNarrationOverflow?: boolean }]
   /** P9：删除音色（父级调 API + 清理引用） */
   removePreset: [id: string]
   /** 方案被就地修改（改名等），父级用于触发 dirty */
@@ -399,6 +403,8 @@ const transitions = ['cut', 'dissolve', 'fade', 'wipe'].map((v) => ({ label: v, 
             :subjects="knownSubjects"
             :voices="voiceChoices"
             :speed-hints="speedHints"
+            :durations="props.durations ?? {}"
+            @extend-shot="(no, patch) => emit('patchShot', no, patch)"
             @update:shot="onShotUpdate"
             @gen-line="(no, li) => emit('genLine', no, li)"
             @preview-line="(no, li) => emit('previewLine', no, li)"
