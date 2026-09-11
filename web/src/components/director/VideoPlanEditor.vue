@@ -3,9 +3,12 @@ import { Film } from 'lucide-vue-next'
 import { NButton, NIcon, NInput, NInputNumber, NSelect, NSwitch } from 'naive-ui'
 import { computed, watch } from 'vue'
 
+import MusicTimeline from '@/components/director/MusicTimeline.vue'
+import NarrationTimeline from '@/components/director/NarrationTimeline.vue'
 import ShotCard from '@/components/director/ShotCard.vue'
+import VoiceBindingsTable from '@/components/director/VoiceBindingsTable.vue'
 import type { DirectorShot, ShotRecord, VideoPlan } from '@/api/types'
-import { moodOptions, voiceOptions } from '@/utils/audio'
+import { MUSIC_MOOD_PRESETS, VOICE_PRESETS, moodOptions, voiceOptions } from '@/utils/audio'
 
 const props = defineProps<{
   plan: VideoPlan
@@ -28,8 +31,39 @@ const emit = defineEmits<{
 
 const hasAction = computed(() =>
   (props.plan.shots ?? []).some((s) => (s.action ?? '').trim().length > 0))
-const hasNarration = computed(() =>
-  (props.plan.shots ?? []).some((s) => (s.narration ?? '').trim().length > 0))
+
+/** P8：是否有任何语音内容（旁白或台词），用于渲染前景提示 */
+const hasNarration = computed(() => {
+  const anyLine = (props.plan.shots ?? []).some(
+    (s) => (s.narration ?? '').trim().length > 0
+      || (s.narrations ?? []).some((l) => (l.text ?? '').trim().length > 0),
+  )
+  return anyLine
+})
+void hasNarration   // 模板里作为提示用，保留导出给后续联动
+
+/** P8：已知角色名（角色音色绑定 ∪ 参考图主体 ∪ 分镜里的说话人）——给绑定表与分镜面板做下拉 */
+const knownSubjects = computed(() => {
+  const out = new Set<string>()
+  for (const b of props.plan.audio?.voiceBindings ?? []) {
+    if ((b.subject ?? '').trim()) out.add(b.subject.trim())
+  }
+  for (const r of props.plan.referenceAssets ?? []) {
+    if ((r.subject ?? '').trim()) out.add((r.subject as string).trim())
+  }
+  for (const sh of props.plan.shots ?? []) {
+    for (const l of sh.narrations ?? []) {
+      if ((l.subject ?? '').trim()) out.add((l.subject as string).trim())
+    }
+  }
+  return [...out]
+})
+
+/** P8：更新单个分镜（子组件拖拽后回写） */
+function onShotUpdate(shot: DirectorShot): void {
+  const i = (props.plan.shots ?? []).indexOf(shot)
+  if (i >= 0) props.plan.shots[i] = shot
+}
 
 /** 成片总时长 = 各镜时长之和；修改镜头时长后同步 plan.duration_sec。 */
 const totalDur = computed(() =>
@@ -190,22 +224,46 @@ const transitions = ['cut', 'dissolve', 'fade', 'wipe'].map((v) => ({ label: v, 
       </div>
     </section>
 
-    <section v-if="props.plan.edit_plan.subtitle || hasNarration" class="block">
-      <p class="block-label font-mono">旁白 / 字幕（有内容即可编辑；渲染烧录由“字幕”开关控制）</p>
-      <div
-        v-for="shot in props.plan.shots"
-        :key="shot.shot_no"
-        class="narration-row"
-      >
+    <section class="block">
+      <p class="block-label font-mono">角色音色绑定（按说话人自动关联）</p>
+      <VoiceBindingsTable
+        :plan="props.plan"
+        :disabled="disabled"
+        :voices="VOICE_PRESETS"
+        :known-subjects="knownSubjects"
+      />
+    </section>
+
+    <section class="block">
+      <p class="block-label font-mono">
+        配乐时间轴（可多段：起止 / 强弱 / 淡入淡出）
+      </p>
+      <p class="hint-line text-secondary">
+        成片总长 {{ totalDur.toFixed(2) }}s；每段独立音量，追赶/高潮段可调高并换情绪
+      </p>
+      <MusicTimeline
+        :plan="props.plan"
+        :disabled="disabled"
+        :moods="MUSIC_MOOD_PRESETS"
+      />
+    </section>
+
+    <section class="block">
+      <p class="block-label font-mono">旁白 / 台词（逐镜时间轴：可拖拽定位、一镜多段）</p>
+      <p class="hint-line text-secondary">
+        拖块改起点；旁白短于镜头就留白（不会为填满而慢放），长于镜头才建议加快语速
+      </p>
+      <div v-for="shot in props.plan.shots" :key="shot.shot_no" class="nt-row">
         <span class="key narration-key">第 {{ shot.shot_no }} 镜</span>
-        <NInput
-          v-model:value="shot.narration"
-          size="small"
-          :disabled="!!disabled"
-          maxlength="80"
-          show-count
-          placeholder="输入本镜旁白（留空则本镜不烧字幕）"
-        />
+        <div class="nt-slot">
+          <NarrationTimeline
+            :shot="shot"
+            :disabled="disabled"
+            :subjects="knownSubjects"
+            :voices="VOICE_PRESETS"
+            @update:shot="onShotUpdate"
+          />
+        </div>
       </div>
     </section>
   </div>
@@ -317,5 +375,21 @@ const transitions = ['cut', 'dissolve', 'fade', 'wipe'].map((v) => ({ label: v, 
 }
 .select:focus {
   border-color: color-mix(in srgb, var(--wv-accent) 55%, var(--wv-line));
+}
+/* P8 分镜语音时间轴行：与上方「镜头时长」行保持同一种左侧标签对齐 */
+.nt-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+.nt-row .narration-key {
+  flex: 0 0 auto;
+  padding-top: 4px;
+  min-width: 56px;
+}
+.nt-slot {
+  flex: 1 1 auto;
+  min-width: 0;
 }
 </style>
