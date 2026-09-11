@@ -111,6 +111,12 @@ public class AiAudioService {
         Set<String> boundSubjects = AudioPlan.subjects(plan);
         List<String> notes = new ArrayList<>();
         List<ShotLines> out = new ArrayList<>();
+        // P12：AI 台词只写角色对白 —— 一个角色都没绑定时不必白调 LLM
+        if (boundSubjects.isEmpty()) {
+            notes.add("本项目还没有绑定角色（在「角色音色绑定」里先加一行角色与音色）："
+                    + "AI 台词只写角色对白，因此本次未生成台词；旁白可手动新增一段。");
+            return new LinesResult(llm.source(), out, notes);
+        }
 
         String narrationVoice = AudioPlan.voiceFor(plan, null, null);
         List<JsonNode> shots = new ArrayList<>();
@@ -173,21 +179,19 @@ public class AiAudioService {
     private List<AiLine> askLines(ProjectContextPort.ProjectSnapshot project, JsonNode plan,
                                   JsonNode shot, Set<String> boundSubjects, String narrationVoice) {
         String system = """
-                你是竖屏短剧的编剧/对白指导。根据给定镜头的画面与项目人物，写 1~3 段台词。
+                你是竖屏短剧的编剧/对白指导。根据给定镜头的画面与项目人物，写 1~3 段**角色台词**。
                 硬性约束（必须满足，否则配音会念不完）：
                 1. 本镜「总字数上限」由用户消息给出：**所有段字数相加不得超过它**。
-                2. 旁白（narration）只在「台词写完后还有余额」时才写；没余额就不要写旁白，宁可只给台词。
-                3. 配音固定自然语速 1.0×（不会提速），所以宁少勿长。
-                4. 说话人只能从「可用人物」里选；旁白把 subject 留空。
-                5. 优先写「角色对白」（dialogue，口语化、贴合画面动作、符合人物身份与情绪），必要时才补旁白。
+                2. **只写角色对白**（kind 固定为 dialogue）：每段都必须有说话人，且说话人只能从「可用人物」里选。
+                3. **不要写旁白**（kind=narration / subject 留空）—— 旁白由用户手动新增，你写了会被丢掉。
+                4. 配音固定自然语速 1.0×（不会提速），所以宁少勿长。
+                5. 台词要口语化、贴合画面动作，符合人物身份与当下情绪；每段尽量简短（中文 8~25 字）。
                 6. 不要写画面描写、不要加引号外的解释。
                 只输出 JSON，形如：
                 {"lines":[{"kind":"dialogue","subject":"关羽","text":"来者何人！"},
-                          {"kind":"narration","subject":"","text":"刀光一闪。"}]}
+                          {"kind":"dialogue","subject":"吕布","text":"吾乃吕布。"}]}
                 """;
-        String characters = boundSubjects.isEmpty()
-                ? "（本项目还没有绑定角色；请只写旁白 narration，subject 留空）"
-                : String.join("、", boundSubjects);
+        String characters = String.join("、", boundSubjects);
         StringBuilder user = new StringBuilder();
         user.append("项目：").append(plan.path("title").asText("")).append('\n');
         user.append("主题：").append(plan.path("script").path("theme").asText("")).append('\n');
@@ -252,74 +256,55 @@ public class AiAudioService {
     /**
      * 把 AI 台词铺到镜头时间轴上（纯函数，便于单测）。
      *
-     * <p>P12 口径（默认不自动提速、不自动延长镜头）：
+     * <p>P12 口径：**AI 台词只写角色对白**（旁白由用户手动新增），所以：
      * <ol>
-     *   <li>说话人不在 {@code boundSubjects} 里 → 降级为旁白（subject 置空），避免指向不存在的角色。</li>
-     *   <li><b>台词优先</b>：台词按自然语速 {@link #NATURAL_SPEED} 从镜头发端顺铺，
-     *       超出镜头也**不提速** —— 允许溢出到下一镜（渲染层已支持）。</li>
-     *   <li><b>旁白只填剩余空档</b>：镜头里有台词时，旁白只在「剩余时长装得下整段」时才铺，
-     *       否则整段不铺（避免旁白拖着镜头走）；若本镜根本没有台词，旁白就是主体内容，照常铺（可溢出）。</li>
+     *   <li>没写说话人（= 旁白）或说话人不在 {@code boundSubjects} 里 → **丢弃**（旁白改由用户手动加）。</li>
+     *   <li>对白按自然语速 {@link #NATURAL_SPEED} 从镜头发端顺铺；超出镜头也**不提速、不缩短、不延长镜头**，
+     *       允许溢出到下一镜（渲染层已支持）。</li>
      * </ol>
      */
     static FitResult fitLinesDetailed(List<AiLine> ai, double shotDur, Set<String> boundSubjects) {
         List<String> notes = new ArrayList<>();
-        List<AiLine> dialogue = new ArrayList<>();
-        List<AiLine> narration = new ArrayList<>();
+        List<FittedLine> out = new ArrayList<>();
+        int droppedNarration = 0;
+        int droppedUnbound = 0;
         for (AiLine raw : ai) {
+            String text = raw.text() == null ? "" : raw.text().trim();
+            if (text.isEmpty()) {
+                continue;
+            }
             String subject = raw.subject() == null ? "" : raw.subject().trim();
-            if (!subject.isEmpty() && (boundSubjects == null || !boundSubjects.contains(subject))) {
-                subject = "";   // 不在已绑定角色里 → 降级为旁白
-            }
             if (subject.isEmpty()) {
-                narration.add(new AiLine(raw.text(), "narration", ""));
-            } else {
-                dialogue.add(new AiLine(raw.text(), "dialogue", subject));
+                droppedNarration++;      // AI 不该写旁白：旁白让用户“新增一段”自己加
+                continue;
             }
+            if (boundSubjects == null || !boundSubjects.contains(subject)) {
+                droppedUnbound++;        // 说话人不在已绑定角色里 → 不能指着不存在的角色说话
+                continue;
+            }
+            out.add(new FittedLine(0, 0, text, "dialogue", subject, NATURAL_SPEED));
         }
 
         double usable = Math.max(1.0, shotDur);
-        List<FittedLine> out = new ArrayList<>();
+        List<FittedLine> placed = new ArrayList<>();
         double cursor = 0;
-
-        // 1) 台词优先：自然语速顺铺（不缩短、不提速；超了就溢出，由渲染层跨到下一镜）
-        for (AiLine l : dialogue) {
+        for (FittedLine l : out) {
             double d = estimate(l.text());
-            out.add(new FittedLine(round1(cursor), round1(cursor + d), l.text(), "dialogue",
-                    l.subject(), NATURAL_SPEED));
+            placed.add(new FittedLine(round1(cursor), round1(cursor + d), l.text(), l.kind(), l.subject(), l.speed()));
             cursor = cursor + d + GAP_SEC;
         }
-        double dialogueEnd = out.isEmpty() ? 0 : out.get(out.size() - 1).endSec();
-
-        // 2) 旁白只填剩余空档：本镜有台词时，装不下就整段不铺
-        boolean mustFit = !dialogue.isEmpty();
-        int skipped = 0;
-        int skippedChars = 0;
-        for (AiLine l : narration) {
-            double at = cursor;
-            double d = estimate(l.text());
-            if (mustFit && at + d > usable + 1e-6) {
-                skipped++;
-                skippedChars += chars(l.text());
-                continue;
-            }
-            out.add(new FittedLine(round1(at), round1(at + d), l.text(), "narration", null, NATURAL_SPEED));
-            cursor = at + d + GAP_SEC;
+        if (droppedNarration > 0) {
+            notes.add("AI 多写了 " + droppedNarration + " 段旁白，已按默认口径丢开（需要旁白请在下方面配音时间轴上「新增一段」）");
         }
-
-        // 3) 提示：溢出与跳过的旁白都要说清楚（不静默丢内容）
-        double end = out.isEmpty() ? 0 : out.get(out.size() - 1).endSec();
-        if (dialogueEnd > usable + 0.05) {
-            notes.add("台词约 " + fmt(dialogueEnd) + "s 超出镜头 " + fmt(usable)
+        if (droppedUnbound > 0) {
+            notes.add("丢弃 " + droppedUnbound + " 段说话人未绑定的台词（名字不在「可用人物」里）");
+        }
+        double end = placed.isEmpty() ? 0 : placed.get(placed.size() - 1).endSec();
+        if (end > usable + 0.05) {
+            notes.add("台词约 " + fmt(end) + "s 超出镜头 " + fmt(usable)
                     + "s —— 已按自然语速 1.0× 铺排并允许溢出到下一镜（未自动提速、未延长镜头）");
-        } else if (end > usable + 0.05) {
-            notes.add("语音合计约 " + fmt(end) + "s 超出镜头 " + fmt(usable)
-                    + "s —— 已允许溢出到下一镜（未自动提速、未延长镜头）");
         }
-        if (skipped > 0) {
-            notes.add("台词已占用镜头时长，跳过 " + skipped + " 段旁白（共 " + skippedChars
-                    + " 字）—— 如需保留可手动缩短台词或延长镜头");
-        }
-        return new FitResult(out, notes);
+        return new FitResult(placed, notes);
     }
 
     /** 兼容旧调用：只要铺好的行。 */

@@ -151,13 +151,14 @@ function addLine(): void {
   // 所以先把还未迁移的旧单段旁白作为第一段（避免内容静默丢失）。
   const legacy = (props.shot.narration ?? '').trim()
   if (legacy && props.shot.narrations.length === 0) {
-    props.shot.narrations.push({ at_sec: 0, text: legacy, kind: 'narration' })
+    props.shot.narrations.push({ at_sec: 0, text: legacy, kind: 'narration', manual: true })
     props.shot.narration = ''
   }
   // 新段放在已有段之后，但不超出镜头
   const last = lines.value.length ? lines.value[lines.value.length - 1] : undefined
   const at = last ? Math.min(dur.value - 0.3, (last.at_sec ?? 0) + estimateSec(last.text) + 0.1) : 0
-  props.shot.narrations.push({ at_sec: Math.max(0, Number(at.toFixed(1))), text: '', kind: 'narration' })
+  // manual:true —— 用户手加的段落：P10 自动铺排不动它，AI「覆盖」也不会删它
+  props.shot.narrations.push({ at_sec: Math.max(0, Number(at.toFixed(1))), text: '', kind: 'narration', manual: true })
   commit()
   selected.value = props.shot.narrations.length - 1
 }

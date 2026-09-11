@@ -7,7 +7,6 @@ import java.util.List;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -25,11 +24,11 @@ class AiAudioServiceTest {
     // ------------------------------------------------------------ 台词铺排
 
     @Test
-    void laysOutLinesSequentiallyWithinShot() {
-        // 镜头 10s；两段共约 4.9s（22 字/4.5 ≈ 4.9）→ 不需要提速
+    void laysOutDialogueSequentiallyWithinShot() {
+        // 镜头 10s；两段对白共约 6.4s → 不需要提速
         var ai = List.of(line("dialogue", "关羽", "来者何人，报上名来！"),
-                line("narration", "", "刀光一闪，尘土飞扬。"));
-        var fitted = AiAudioService.fitLines(ai, 10, Set.of("关羽"));
+                line("dialogue", "吕布", "吾乃吕布，字奉先！"));
+        var fitted = AiAudioService.fitLines(ai, 10, Set.of("关羽", "吕布"));
 
         assertEquals(2, fitted.size());
         assertEquals(0.0, fitted.get(0).atSec(), 1e-9);
@@ -54,42 +53,34 @@ class AiAudioServiceTest {
     }
 
     @Test
-    void narrationSkippedWhenDialogueFillsShot() {
-        // 台词 15 字 ≈ 3.33s 已占满 5s 镜头（含间隙）→ 旁白装不下就整段不铺
-        var ai = List.of(line("dialogue", "关羽", "来者何人，报上名来，快快通名！"),
+    void aiNarrationIsDroppedByDefault() {
+        // P12：AI 台词只写对白 —— 它多写的旁白一律丢掉（旁白由用户手动新增）
+        var ai = List.of(line("dialogue", "关羽", "看刀！"),
                 line("narration", "", "刀光一闪，尘土飞扬，杀气瞬间笼罩了整个战场。"));
-        var fit = AiAudioService.fitLinesDetailed(ai, 5, Set.of("关羽"));
-        assertEquals(1, fit.lines().size(), "旁白放不下就不铺：" + fit.lines());
+        var fit = AiAudioService.fitLinesDetailed(ai, 10, Set.of("关羽"));
+        assertEquals(1, fit.lines().size(), "旁白要被丢掉：" + fit.lines());
         assertEquals("dialogue", fit.lines().get(0).kind());
-        assertTrue(fit.notes().stream().anyMatch(n -> n.contains("跳过") && n.contains("旁白")),
-                "要说明跳过了旁白：" + fit.notes());
+        assertTrue(fit.notes().stream().anyMatch(n -> n.contains("旁白") && n.contains("丢")),
+                "要说明丢了旁白：" + fit.notes());
     }
 
     @Test
-    void narrationFillsLeftoverWhenDialogueShort() {
-        var ai = List.of(line("dialogue", "关羽", "且慢"), line("narration", "", "风起。"));
-        var fit = AiAudioService.fitLinesDetailed(ai, 5, Set.of("关羽"));
-        assertEquals(2, fit.lines().size(), "台词短则旁白填空档");
-        assertEquals("narration", fit.lines().get(1).kind());
-        assertTrue(fit.lines().get(1).atSec() >= fit.lines().get(0).endSec(), "旁白接在台词之后");
-        assertTrue(fit.notes().isEmpty(), "装得下不该有提示：" + fit.notes());
-    }
-
-    @Test
-    void dialogueComesFirstEvenIfAiListedNarrationFirst() {
-        var ai = List.of(line("narration", "", "风起。"), line("dialogue", "关羽", "看刀！"));
-        var fitted = AiAudioService.fitLines(ai, 5, Set.of("关羽"));
-        assertEquals("dialogue", fitted.get(0).kind(), "台词优先占镜头发端");
-        assertEquals("narration", fitted.get(1).kind());
-    }
-
-    @Test
-    void narrationOnlyShotOverflowsInsteadOfBeingDropped() {
-        // 本镜根本没台词 → 旁白就是主体内容，不能因为装不下就被清空
+    void narrationOnlyResultIsEmptyWithNote() {
+        // 就算 AI 只给了旁白（例如它不听指令），也不能往镜头里塞旁白
         var ai = List.of(line("narration", "", "刀光一闪，尘土飞扬，杀气瞬间笼罩了整个战场。"));
         var fit = AiAudioService.fitLinesDetailed(ai, 3, Set.of());
-        assertEquals(1, fit.lines().size(), "纯旁白镜头不该被清空");
-        assertTrue(fit.lines().get(0).endSec() > 3, "允许溢出");
+        assertTrue(fit.lines().isEmpty(), "纯旁白结果应为空：" + fit.lines());
+        assertTrue(fit.notes().stream().anyMatch(n -> n.contains("旁白")), "要告知为何空：" + fit.notes());
+    }
+
+    @Test
+    void unboundSpeakerIsDroppedWithNote() {
+        var ai = List.of(line("dialogue", "张飞", "大哥！"), line("dialogue", "关羽", "看刀！"));
+        var fit = AiAudioService.fitLinesDetailed(ai, 5, Set.of("关羽"));
+        assertEquals(1, fit.lines().size(), "未绑定说话人的段落要丢掉：" + fit.lines());
+        assertEquals("关羽", fit.lines().get(0).subject());
+        assertTrue(fit.notes().stream().anyMatch(n -> n.contains("未绑定")),
+                "要说明丢了未绑定段落：" + fit.notes());
     }
 
     @Test
@@ -101,17 +92,8 @@ class AiAudioServiceTest {
 
     @Test
     void speedIsOneWhenItFits() {
-        var ai = List.of(line("narration", "", "风起。"));
-        assertEquals(1.0, AiAudioService.fitLines(ai, 8, Set.of()).get(0).speed(), 1e-9);
-    }
-
-    @Test
-    void speakerNotBoundDegradesToNarration() {
-        // AI 编了一个没绑定的角色 → 必须降级为旁白，否则会指向不存在的角色
-        var ai = List.of(line("dialogue", "张飞", "大哥！"));
-        var fitted = AiAudioService.fitLines(ai, 5, Set.of("关羽", "吕布"));
-        assertEquals("narration", fitted.get(0).kind());
-        assertNull(fitted.get(0).subject(), "未绑定的说话人要被清空");
+        var ai = List.of(line("dialogue", "关羽", "风起。"));
+        assertEquals(1.0, AiAudioService.fitLines(ai, 8, Set.of("关羽")).get(0).speed(), 1e-9);
     }
 
     @Test
@@ -128,15 +110,17 @@ class AiAudioServiceTest {
     }
 
     @Test
-    void emptyBoundSetMeansAllNarration() {
-        var fitted = AiAudioService.fitLines(List.of(line("dialogue", "关羽", "看刀！")), 5, Set.of());
-        assertEquals("narration", fitted.get(0).kind());
-        assertNull(fitted.get(0).subject());
+    void emptyBoundSetDropsEverything() {
+        // 没有绑定角色 = AI 没任何人可说 → 全部丢掉（上层会提前短路并提示去绑角色）
+        var fit = AiAudioService.fitLinesDetailed(List.of(line("dialogue", "关羽", "看刀！")), 5, Set.of());
+        assertTrue(fit.lines().isEmpty(), "无绑定角色时不该产出：" + fit.lines());
+        assertTrue(fit.notes().stream().anyMatch(n -> n.contains("未绑定")), "要告知原因：" + fit.notes());
     }
 
     @Test
     void everyLineHasPositiveWindowAndEndAfterStart() {
-        var ai = List.of(line("dialogue", "关羽", "一"), line("narration", "", "二"), line("dialogue", "吕布", "三"));
+        var ai = List.of(line("dialogue", "关羽", "一"), line("dialogue", "吕布", "二"),
+                line("dialogue", "关羽", "三"));
         for (var f : AiAudioService.fitLines(ai, 3, Set.of("关羽", "吕布"))) {
             assertTrue(f.endSec() > f.atSec(), "每段时长必须为正");
             assertTrue(f.endSec() - f.atSec() >= 0.8 - 1e-9, "单段不小于 0.8s");

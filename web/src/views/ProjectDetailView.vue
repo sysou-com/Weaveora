@@ -305,7 +305,28 @@ function applyAiLines(
     speed: l.speed,
     manual: false,
   }))
-  shot.narrations = replace ? mapped : [...(shot.narrations ?? []), ...mapped]
+  if (replace) {
+    // P12：AI 只写对白，“覆盖”只重写 AI 铺的台词，**不动手动新增的段**（旁白都是手加的）
+    const kept = (shot.narrations ?? []).filter((n) => n.manual === true)
+    if (kept.length) {
+      // 手加段落留在原位置，AI 台词整体顺延到其后，避免两段叠在同一时刻
+      const r1 = (v: number): number => Math.round(v * 10) / 10
+      const endOf = (n: { at_sec?: number | null; end_sec?: number | null; text?: string | null }): number => {
+        if (n.end_sec != null && Number(n.end_sec) > 0) return Number(n.end_sec)
+        const at = Number(n.at_sec ?? 0)
+        const chars = (n.text ?? '').replace(/\s/g, '').length
+        return at + Math.max(0.8, chars / 4.5)
+      }
+      const offset = r1(Math.max(...kept.map(endOf)) + 0.25)
+      const shifted = mapped.map((l) => ({ ...l, at_sec: r1(l.at_sec + offset), end_sec: r1(l.end_sec + offset) }))
+      shot.narrations = [...kept, ...shifted]
+      message.info(`保留了 ${kept.length} 段手动新增的语音，AI 台词已顺延到 ${offset}s 之后（可拖动调整）`)
+    } else {
+      shot.narrations = mapped
+    }
+  } else {
+    shot.narrations = [...(shot.narrations ?? []), ...mapped]
+  }
   message.success(`第 ${shotNo} 镜已写入 ${mapped.length} 段 AI 台词（记得保存方案）`)
 }
 
@@ -340,7 +361,7 @@ async function onAiLines(shotNo: number): Promise<void> {
   if (hasLines) {
     dialog.warning({
       title: `第 ${shotNo} 镜已有台词`,
-      content: 'AI 生成的台词是「追加」到后面，还是「覆盖」掉现有台词？',
+      content: 'AI 生成的台词是「追加」到后面，还是「覆盖」掉现有 AI 台词？（手动新增的语音两都不会删）',
       positiveText: '覆盖',
       negativeText: '追加',
       onPositiveClick: () => void run(true),
