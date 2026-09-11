@@ -295,6 +295,30 @@ async function useForLine(): Promise<void> {
 }
 
 const canSave = computed(() => !!result.value && !busy.value)
+
+/**
+ * 转写合理性提醒。
+ *
+ * 实际踩到：3.63s 的样本 whisper 只识别出一个“人”字（prompt_text 与音频严重不匹配），
+ * CosyVoice 的 LLM 会跑偏 —— 9 个字的句子生成了 8.8 秒（正常应 2-3 秒），听感上就不是这个音色了。
+ */
+const transcriptWarn = computed(() => {
+  const d = result.value?.durationSec ?? 0
+  if (!result.value || d <= 1) return ''
+  const n = transcript.value.trim().length
+  if (n === 0) {
+    return '没有转写文本。请手动填写样本里实际说的话 —— 文本与音频对得上，克隆重会明显更像。'
+  }
+  const cps = n / d
+  if (cps < 1.5) {
+    return `样本 ${d.toFixed(1)}s 只转写出 ${n} 个字（约 ${cps.toFixed(1)} 字/秒，正常说话 3~6）—— `
+      + '转写很可能不准。请手动填写样本里实际说的话；否则克隆重会跑偏（可能生成多余内容、音色也不像）。'
+  }
+  if (cps > 9) {
+    return `样本 ${d.toFixed(1)}s 转写出 ${n} 个字（约 ${cps.toFixed(1)} 字/秒，偏快）—— 请确认转写是否准确。`
+  }
+  return ''
+})
 </script>
 
 <template>
@@ -425,6 +449,10 @@ const canSave = computed(() => !!result.value && !busy.value)
           data-testid="clone-transcript"
         />
       </label>
+
+      <NAlert v-if="transcriptWarn" type="warning" :show-icon="true" style="margin-top: 8px" data-testid="clone-transcript-warn">
+        {{ transcriptWarn }}
+      </NAlert>
 
       <label class="vc-field">
         <span class="vc-fl">音色名称</span>
