@@ -172,6 +172,61 @@ CosyVoice 依赖 Linux 专属轮子 → 只能走 WSL2。落地细节：
 
 实测（同一句文本）：中文女 1.87s/质心1900Hz、中文男 2.53s/1571Hz、英文男 2.33s/1081Hz、粤语女 2.95s/2216Hz —— 男女声差异明显。
 
+### P8 音频时间轴与角色音色（2026-09-11）
+
+**问题**：只能全片 1 个音色 + 1 段配乐、强度硬编码；一镜只能段旁白。
+
+#### Schema 扩展（`packages/schemas/director.schema.json`，均可选、向后兼容）
+```jsonc
+// shots[]
+"narrations": [ { "at_sec": 0, "text": "…", "kind": "narration|dialogue",
+                 "subject": "关羽", "voice": "中文男", "speed": 1.0 } ]
+// audio
+"voiceBindings": [ { "subject": "关羽", "voice": "中文男", "speed": 1.0 } ]
+"music": [ { "id":"chase", "start_sec":16, "end_sec":24, "mood":"紧张悬疑",
+            "gain_db": -8, "fade_in_sec":0.5, "fade_out_sec":2, "loop":true, "duck":true } ]
+```
+- `gain_db`：**0dB=原始**；默认 **-10.5dB ≈ 线性 0.30**（与 P7 硬编码 `volume=0.30` 等价，老方案听感不变）；
+  **“一半” ≈ -16.5dB**（线性 0.15）
+- 解析口径：`narrations` 优先于 `narration`；`music[]` 优先于 `music_mood`（后者退化为整片一段）
+
+#### 后端
+| 位置 | 改动 |
+| --- | --- |
+| `AudioPlan`（新） | 纯函数解析层：lines / musicCues / voiceFor / speedFor / distinctMoods / generateDurationFor。**混音与导出共用，避免口径漂移** |
+| `JobService` | 逐语音段生成 voice 任务（payload 带 `at_sec`/`line_index`/`line_kind`/`subject`/`voice`/`speed`）；bgm 按 **mood 去重**生成，`duration`=该 mood 最长段 |
+| `Asset`/`AssetService` | `createOutput` 增 `prompt_snapshot` 参数（= 产生它的 job payload） |
+| `AudioAssetLookup`（新） | 资产→cue：读 `prompt_snapshot.at_sec/line_index`；同 `line_index` 只取最新（防重点生成叠音） |
+| `ConcatService` | 语音摆到 `镜头起点 + at_sec`；配乐逐段 `atrim→volume(gain_db)→afade→adelay`，`loop` 时 `-stream_loop -1` 填满区间；多段合为 `[bgmraw]` 后统一 ducking |
+| `ExportService` | `edit_list.json` 输出完整段表（voice 带 `line_index`/`at_sec`/`timeline_start_sec`；bgm 带 `id`/`mood`/`gain_db`/`fade_*`/`loop`/`duck`） |
+
+> **为何要 `prompt_snapshot`**：多个配音任务**并发完成、完成顺序不确定**，混音无法用 `createdAt` 推断“这是第几段”。
+
+#### 前端（方案 B：时间轴）
+- `NarrationTimeline.vue`：镜内时间轴，语音块**横向拖拽改 at_sec**（吸附 0.1s），选中可改文本/类型/说话人/音色/语速
+- `MusicTimeline.vue`：全局配乐时间轴，**拖块移动 / 拖右边缘改结束**；每段独立 mood / gain_db / 淡入淡出 / 循环 / duck
+- `VoiceBindingsTable.vue`：角色→音色→语速，角色名来自「绑定表 ∪ 参考图主体 ∪ 分镜说话人」
+- ⚠️ `npm run build` **只跑 vite、不做类型检查**；改前端必须单独跑 `npx vue-tsc --noEmit`
+
+#### 样例（`packages/fixtures/guan-yu-vs-lvbu.plan.json`，24s / 6 镜）
+旁白(中文女) + 关羽(中文男) + 吕布(日语男)，共 11 段；配乐 `open` 0-16s 史诗磅礴 **-16.5dB** →
+`chase` 16-24s 紧张悬疑 **-8dB**（追赶转急促，无缝衔接）。
+> 现实限制：内置音色只有 **2 个男声**（中文男 / 日语男），三个以上男角色需上参考音频零样本克隆。
+
+#### 验证
+- 单测 34 个全绿（`AudioPlanTest` 15 / `AudioPlanGuanYuFixtureTest` 5 / `ConcatMusicFilterTest` 4 / 原有 10）
+- `deploy/verify_mix_filter.sh` 真跑 ffmpeg：滤镜图 rc=0；成片 **24.00s**；
+  开场 9-15s=**-41.0dB** vs 追赶 17-21s=**-32.5dB**（差 8.5dB，与设计值一致）；语音准确落在 6.0s；
+  源曲 6s 循环铺满 16s 区间
+- JSON Schema 校验 0 错误；§10.3 运行时校验通过；前端 `vue-tsc` 零错
+- ⚠️ **界面手感未经人眼确认**（本机无浏览器），且本机无 PG/API，端到端未跑
+
+### 待办（P8 收尾）
+- [ ] 逐段字幕定时（现在同一镜的多段字幕是拼接后整镜显示）
+- [ ] 段落级重新生成（现在只能整镜/全片重生成）
+- [ ] Web 部署（`web/dist` 已构建，sysou.com 的 web 根目录待确认）
+- [ ] 验收：Web → 视频项目 → 拖拽语音/配乐 → 生成配音/配乐 → 渲染成片听混音 → 导出包查 edit_list.json
+
 ### 待办（P7 收尾）
 - [ ] Web 端产出已构建（`web/dist`），但**部署到 sysou.com 的目标路径未在 175.12.60.225 的 nginx 配置里**，需确认后再发
 - [ ] 验收：Web → 视频项目 → 分镜填旁白 → 生成配音 → 资产库可播放 → 渲染成片听混音 → 导出包查 edit_list.json

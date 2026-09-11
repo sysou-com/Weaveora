@@ -42,6 +42,7 @@ import {
   normalizePlan,
   planProblems,
   round2,
+  shotHasText,
 } from '@/utils/plan'
 import type { ImagePlan, VideoPlan } from '@/api/types'
 
@@ -868,13 +869,13 @@ async function previewVoice(shotNo?: number): Promise<void> {
   }
   const target = shotNo != null
     ? shots.find((x) => x.shot_no === shotNo)
-    : shots.find((x) => (x.narration ?? '').trim())
+    : shots.find((x) => shotHasText(x))
   if (!target) {
-    message.warning('没有可试听的旁白：请先在分镜里填写旁白（narration）')
+    message.warning('没有可试听的旁白/台词：请先在分镜里填写旁白（narration 或 narrations）')
     return
   }
-  if (!(target.narration ?? '').trim()) {
-    message.warning(`第 ${target.shot_no} 镜没有旁白，无法试听`)
+  if (!shotHasText(target)) {
+    message.warning(`第 ${target.shot_no} 镜没有旁白/台词，无法试听`)
     return
   }
   const rec = (detail.data.value?.shots ?? []).find((r) => r.shotNo === target.shot_no)

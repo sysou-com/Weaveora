@@ -4,6 +4,7 @@ import { NButton, NIcon, NInput } from 'naive-ui'
 import { computed, ref } from 'vue'
 
 import type { DirectorShot } from '@/api/types'
+import { shotHasText } from '@/utils/plan'
 
 const props = withDefaults(
   defineProps<{
@@ -51,7 +52,7 @@ const sizeOptions = [
         <span v-if="shot.keyframes && shot.keyframes.length" class="dur kf-hint">运镜 {{ shot.keyframes.length }} 帧</span>
       </div>
       <NButton
-        v-if="(shot.narration ?? '').trim()"
+        v-if="shotHasText(shot)"
         size="tiny"
         quaternary
         :loading="previewBusy"

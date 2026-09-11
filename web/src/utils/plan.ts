@@ -2,6 +2,17 @@ import type { DirectorPlan, DirectorShot, ImagePlan, VideoPlan } from '@/api/typ
 
 /** §10.2 方案类型守卫与编辑辅助（key 与后端/LLM 的 snake_case 一致）。 */
 
+/**
+ * P8：该镜是否有可配音文本。
+ *
+ * 优先看多段 narrations（后端也以它为准），兼容旧的单段 narration —— 两边判断必须一致，
+ * 否则会出现「有文本但试听按钮不出现」或反之。
+ */
+export function shotHasText(s: DirectorShot): boolean {
+  if ((s.narrations ?? []).some((l) => (l.text ?? '').trim().length > 0)) return true
+  return (s.narration ?? '').trim().length > 0
+}
+
 export function isImagePlan(p: DirectorPlan | null | undefined): p is ImagePlan {
   return !!p && p.mode === 'image'
 }
