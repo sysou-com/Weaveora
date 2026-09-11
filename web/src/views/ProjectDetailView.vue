@@ -636,7 +636,7 @@ watch(() => [...refLibrary.value.map((a) => a.id)].join(','), () => { void refre
 const outputAssets = computed(() => (assets.data.value ?? []).filter((a) => ['still','clip','master','voice','bgm','voice_preview','bgm_preview'].includes(a.kind)))
 
 /** P12：资产库也按类型分 Tab */
-const galTab = ref<AudioTab>('all')
+const galTab = ref<AudioTab>('master')
 const galTabCounts = computed(() => {
   const m: Record<string, number> = { all: 0 }
   for (const a of outputAssets.value) {
@@ -849,14 +849,18 @@ function showMoreJobs(): void {
 }
 
 /* ---------------- P12 任务 / 资产按类型分 Tab（避免一次刷一堆） ---------------- */
-type AudioTab = 'all' | 'voice' | 'bgm' | 'still' | 'clip' | 'master'
+type AudioTab = 'master' | 'voice' | 'bgm' | 'still' | 'clip' | 'all'
+/**
+ * P12：Tab 顺序 = 成片 → 配音 → 配乐 → 关键帧 → motion → 全部（“全部”放最后）。
+ * 默认停在「成片 master」：它最轻，页面打开不会因缩略图过多而卡。
+ */
 const JOB_TABS: Array<{ key: AudioTab; label: string; kind?: string; hint: string }> = [
-  { key: 'all', label: '全部', hint: '全部任务 / 产物' },
+  { key: 'master', label: '成片', kind: 'master', hint: '成片由「导出/合成」生成' },
   { key: 'voice', label: '配音', kind: 'voice', hint: '含试听产物 voice_preview' },
   { key: 'bgm', label: '配乐', kind: 'bgm', hint: '含试听产物 bgm_preview' },
   { key: 'still', label: '关键帧', kind: 'still', hint: '首帧图片 still' },
   { key: 'clip', label: 'motion', kind: 'clip', hint: '图生视频片段 clip' },
-  { key: 'master', label: '成片', kind: 'master', hint: '成片由「导出/合成」在资产库生成，任务区通常为空' },
+  { key: 'all', label: '全部', hint: '全部任务 / 产物（项多，缩略图按需懒加载）' },
 ]
 /** 把 kind 归到 Tab（试听产物归入对应正式类型） */
 function kindTab(kind: string): AudioTab {
@@ -867,7 +871,7 @@ function kindTab(kind: string): AudioTab {
   if (kind === 'master') return 'master'
   return 'all'
 }
-const jobTab = ref<AudioTab>('all')
+const jobTab = ref<AudioTab>('master')
 const jobTabCounts = computed(() => {
   const m: Record<string, number> = { all: 0 }
   for (const j of latestJobs.value) {
@@ -881,9 +885,30 @@ const jobsForTab = computed(() =>
   jobTab.value === 'all' ? latestJobs.value : latestJobs.value.filter((j) => kindTab(j.kind) === jobTab.value),
 )
 
+/* ---------------- P12：点 Tab 才真正渲染列表（避免首屏一次铺满缩略图/几百行） ---------------- */
+const jobBodyReady = ref(false)
+const galBodyReady = ref(false)
+
+/** 点 Tab：切过去并解锁该区内容 */
+function pickJobTab(t: AudioTab): void {
+  jobTab.value = t
+  jobLimit.value = 10
+  jobBodyReady.value = true
+}
+function pickGalTab(t: AudioTab): void {
+  galTab.value = t
+  galBodyReady.value = true
+}
+/** 生成任务时自动切到对应 Tab（顺手解锁），否则用户会看不到刚发起任务的进度 */
+function focusJobTab(t: AudioTab): void {
+  pickJobTab(t)
+}
+
 async function startGeneration(): Promise<void> {
   const revId = genRevisionId()
   if (!revId) return
+  // P12：生成后自动切到对应 Tab（顺手解锁），否则用户看不到刚发起任务的进度
+  focusJobTab('still')
   // P4：先把当前草稿（含参考图/主体标注/提示词改动）落库，再发起生成
   if (dirty.value && !(await handleSave())) return
   genBusy.value = true
@@ -1035,6 +1060,7 @@ function openMotionModal(): void {
   motionOpen.value = true
 }
 function confirmMotion(): void {
+  focusJobTab('clip')
   const f = Number(motionFrames.value)
   if (!Number.isInteger(f) || f < MOTION_MIN || f > MOTION_MAX) {
     message.warning(`运动帧数需在 ${MOTION_MIN}–${MOTION_MAX} 之间`)
@@ -1049,6 +1075,7 @@ const KIND_LABEL: Record<string, string> = { still: '关键帧', clip: '运动',
 async function startVoice(): Promise<void> {
   const revId = genRevisionId()
   if (!revId) return
+  focusJobTab('voice')
   if (dirty.value && !(await handleSave())) return
   genBusy.value = true
   try {
@@ -1064,7 +1091,18 @@ async function startVoice(): Promise<void> {
 
 /** P7.1 配音试听：为某镜（默认第一个有旁白的镜）创建一个 voice 任务，完成后本地播放 */
 const previewBusy = ref(false)
-const audioPreview = ref<{ url: string; label: string; kind: 'voice' | 'bgm' } | null>(null)
+/**
+ * 试听播放器状态。`slot` 决定它显示在哪块：
+ *  - 'voice' → ① 配音音色（音色试听，就在按钮下一行）
+ *  - 'line'  → ③ 配音（试听本镜 / 单条）
+ *  - 'music' → ④ 配乐（试听配乐，就在按钮下一行）
+ */
+const audioPreview = ref<{
+  url: string
+  label: string
+  kind: 'voice' | 'bgm'
+  slot: 'voice' | 'line' | 'music'
+} | null>(null)
 const dialog = useDialog()
 
 function closeAudioPreview(): void {
@@ -1108,6 +1146,7 @@ async function auditionVoice(): Promise<void> {
     audioPreview.value = {
       url: URL.createObjectURL(blob),
       kind: 'voice',
+      slot: 'voice',
       label: `音色试听 · ${name}${r.fromSample ? '（克隆样本）' : ''}${dur}`,
     }
     if (r.fromSample) {
@@ -1173,6 +1212,7 @@ async function previewVoice(shotNo?: number): Promise<void> {
     audioPreview.value = {
       url: URL.createObjectURL(blob),
       kind: 'voice',
+      slot: 'line',
       label: `配音 · 第 ${target.shot_no} 镜 · 音色 ${(draft.value && isVideoPlan(draft.value) ? draft.value.audio.voice : '') || '中文女'}`,
     }
     message.success('试听就绪')
@@ -1248,6 +1288,7 @@ async function previewVoiceLine(shotNo: number, lineIndex: number): Promise<void
     audioPreview.value = {
       url: URL.createObjectURL(blob),
       kind: 'voice',
+      slot: 'line',
       label: `配音 · 第 ${shotNo} 镜 · 第 ${lineIndex + 1} 段 · 音色 ${voice}`,
     }
     message.success('试听就绪')
@@ -1304,7 +1345,12 @@ async function previewBgm(): Promise<void> {
     const blob = await fetchAssetBlob(workspaceId.value, asset.id)
     if (!blob) throw new Error('试听音频读取失败')
     closeAudioPreview()
-    audioPreview.value = { url: URL.createObjectURL(blob), kind: 'bgm', label: `配乐 · 情绪 ${mood || '默认'}` }
+    audioPreview.value = {
+      url: URL.createObjectURL(blob),
+      kind: 'bgm',
+      slot: 'music',
+      label: `配乐 · 情绪 ${mood || '默认'}`,
+    }
     message.success('配乐试听就绪')
   } catch (e) {
     message.error(e instanceof Error ? e.message : '配乐试听失败')
@@ -1317,6 +1363,7 @@ async function previewBgm(): Promise<void> {
 async function startBgm(): Promise<void> {
   const revId = genRevisionId()
   if (!revId) return
+  focusJobTab('bgm')
   if (dirty.value && !(await handleSave())) return
   genBusy.value = true
   try {
@@ -1405,6 +1452,7 @@ async function doExport(): Promise<void> {
 const renderBusy = ref(false)
 async function doRender(): Promise<void> {
   if (!selectedRevId.value) return
+  focusJobTab('master')
   renderBusy.value = true
   try {
     const a = await renderMaster(workspaceId.value, projectId.value, selectedRevId.value, 'fade')
@@ -2185,7 +2233,7 @@ const shotTotal = computed(() => {
             :class="['type-tab', { on: jobTab === t.key, zero: !(jobTabCounts[t.key] ?? 0) }]"
             :title="t.hint"
             :data-testid="`job-tab-${t.key}`"
-            @click="jobTab = t.key; jobLimit = 10"
+            @click="pickJobTab(t.key)"
           >
             <span>{{ t.label }}</span>
             <span v-if="t.kind" class="type-tab-k font-mono">{{ t.kind }}</span>
@@ -2240,6 +2288,11 @@ const shotTotal = computed(() => {
           </button>
         </div>
         <div v-if="(jobs.data.value ?? []).length" class="job-list">
+          <p v-if="!jobBodyReady" class="job-empty text-secondary" data-testid="jobs-lazy-hint">
+            点上方 Tab 查看任务（默认停在「成片」，避免一次渲染太多拖慢页面）
+            <template v-if="activeJobCount"> · 当前有 {{ activeJobCount }} 个任务进行中</template>
+          </p>
+          <template v-else>
           <div v-for="j in visibleJobs" :key="j.id" class="job-row" :data-testid="'job-' + j.id.slice(0, 8)" :title="jobAuditTitle(j)">
             <label v-if="isJobActionable(j)" class="row-check">
               <input type="checkbox" :checked="jobSel.includes(j.id)" @change="toggleJobSel(j.id)" />
@@ -2302,6 +2355,7 @@ const shotTotal = computed(() => {
           >
             查看更多（余 {{ (jobs.data.value ?? []).length - jobLimit }} 条）
           </button>
+          </template>
         </div>
         <p v-else-if="detApproved" class="job-empty text-secondary">
           方案已确认 —— 点「{{ isVideoNow ? '生成关键帧(still)' : '开始生成' }}」发起（先出静帧关键帧，确认后再运动）。
@@ -2345,7 +2399,7 @@ const shotTotal = computed(() => {
             :class="['type-tab', { on: galTab === t.key, zero: !(galTabCounts[t.key] ?? 0) }]"
             :title="t.hint"
             :data-testid="`gallery-tab-${t.key}`"
-            @click="galTab = t.key"
+            @click="pickGalTab(t.key)"
           >
             <span>{{ t.label }}</span>
             <span v-if="t.kind" class="type-tab-k font-mono">{{ t.kind }}</span>
@@ -2353,7 +2407,10 @@ const shotTotal = computed(() => {
           </button>
         </nav>
 
-        <div class="gallery-grid">
+        <p v-if="!galBodyReady" class="job-empty text-secondary" data-testid="gallery-lazy-hint">
+          点上方 Tab 查看产物（默认停在「成片」，避免一次加载大量图/视频）
+        </p>
+        <div v-else class="gallery-grid">
           <div v-for="a in galleryForTab" :key="a.id" :class="['g-item', { manage: galManage, sel: galSel.includes(a.id) }]">
             <label v-if="galManage" class="g-sel">
               <input type="checkbox" :checked="galSel.includes(a.id)" @change="toggleGalSel(a.id)" />
@@ -2845,18 +2902,10 @@ const shotTotal = computed(() => {
   margin: 0;
 }
 
+/* P12：版本条固定在底部会遮住正文/操作区，改成普通流（就在页面底部），不吸底 */
 .studio-rail {
-  position: sticky;
-  bottom: 12px;
-  z-index: 5;
-}
-
-/* 移动端：版本条不再吸底，避免锚定盖住正文/操作区；按钮由 RevisionRail 内部换行收起 */
-@media (max-width: 760px) {
-  .studio-rail {
-    position: static;
-    margin-top: 18px;
-  }
+  position: static;
+  margin-top: 18px;
 }
 
 /* ---------- W2C 参考图 ---------- */
@@ -3116,14 +3165,7 @@ const shotTotal = computed(() => {
 }
 .g-kind { font-size: 10px; color: var(--wv-text-4); }
 .g-audio { width: 100%; height: 34px; display: block; }
-.voice-preview {
-  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
-  padding: 10px 12px; margin-bottom: 12px;
-  background: var(--wv-surface); border: 1px solid var(--wv-accent);
-  border-radius: var(--wv-radius-m);
-}
-.vp-label { font-size: 11px; color: var(--wv-accent-text); flex: none; }
-.vp-audio { flex: 1 1 240px; min-width: 200px; height: 34px; }
+/* 试听播放条的样式在 VideoPlanEditor.vue：本文件是 scoped，作用不到子组件内部 */
 .g-actions { display: inline-flex; align-items: center; gap: 8px; }
 .g-actions a { color: var(--wv-accent-text); text-decoration: none; font-size: 14px; line-height: 1; }
 .g-ref {

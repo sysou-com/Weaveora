@@ -19,8 +19,13 @@ const props = defineProps<{
   busyShot?: number | null
   /** 配音试听中 */
   previewBusy?: boolean
-  /** 试听播放条（父级持有 URL，这里只负责靠按钮渲染） */
-  audioPreview?: { url: string; label: string; kind: 'voice' | 'bgm' } | null
+  /** 试听播放条（父级持有 URL，这里按 slot 把它靠到对应按钮下一行） */
+  audioPreview?: {
+    url: string
+    label: string
+    kind: 'voice' | 'bgm'
+    slot?: 'voice' | 'line' | 'music'
+  } | null
   /** P10：各段配音实际时长（"镜号:段号" → 毫秒），用于字幕对齐提示与超长判定 */
   durations?: Record<string, number>
 }>()
@@ -270,15 +275,6 @@ const transitions = ['cut', 'dissolve', 'fade', 'wipe'].map((v) => ({ label: v, 
     <section class="block audio-card" data-testid="audio-card">
       <p class="block-label font-mono">声音（音色 / 角色音色绑定 / 配音 / 配乐）</p>
 
-      <!-- 试听播放条固定在卡片顶部：点哪个试听都在这儿出现 -->
-      <div v-if="props.audioPreview" class="voice-preview inline" data-testid="audio-preview">
-        <span class="font-mono vp-label">
-          {{ props.audioPreview.kind === 'bgm' ? '🎵' : '🎙' }} 试听 · {{ props.audioPreview.label }}
-        </span>
-        <audio :src="props.audioPreview.url" class="vp-audio" controls autoplay preload="auto" />
-        <NButton size="tiny" quaternary @click="emit('closePreview')">关闭</NButton>
-      </div>
-
       <div class="sub-block">
         <p class="sub-label">① 配音音色</p>
         <div class="voice-row">
@@ -331,6 +327,12 @@ const transitions = ['cut', 'dissolve', 'fade', 'wipe'].map((v) => ({ label: v, 
           >
             删除
           </NButton>
+        </div>
+        <!-- P12：音色试听的播放器就在「音色试听」按钮下一行 -->
+        <div v-if="props.audioPreview && props.audioPreview.slot === 'voice'" class="voice-preview inline" data-testid="audio-preview-voice">
+          <span class="font-mono vp-label">🎙 试听 · {{ props.audioPreview.label }}</span>
+          <audio :src="props.audioPreview.url" class="vp-audio" controls autoplay preload="auto" />
+          <NButton size="tiny" quaternary @click="emit('closePreview')">关闭</NButton>
         </div>
         <p v-if="!selectedPreset" class="hint-line text-secondary">
           上面选一个「克隆」音色后，重录 / 改名 / 删除才可用
@@ -413,6 +415,12 @@ const transitions = ['cut', 'dissolve', 'fade', 'wipe'].map((v) => ({ label: v, 
 
       <div class="sub-block">
         <p class="sub-label">③ 配音（逐镜旁白 / 台词，可拖拽定位、一镜多段）</p>
+      <!-- P12：单条/本镜试听的播放器就放在本条下面（只在该槽位时出现） -->
+      <div v-if="props.audioPreview && props.audioPreview.slot === 'line'" class="voice-preview inline" data-testid="audio-preview-line">
+        <span class="font-mono vp-label">🎙 试听 · {{ props.audioPreview.label }}</span>
+        <audio :src="props.audioPreview.url" class="vp-audio" controls autoplay preload="auto" />
+        <NButton size="tiny" quaternary @click="emit('closePreview')">关闭</NButton>
+      </div>
       <p class="hint-line text-secondary">
         拖块改起点；旁白短于镜头就留白（不会为填满而慢放），长于镜头才建议加快语速
       </p>
@@ -469,6 +477,12 @@ const transitions = ['cut', 'dissolve', 'fade', 'wipe'].map((v) => ({ label: v, 
           <span class="text-secondary" style="font-size: 12px">
             换情绪后点一次即重生成；正式生成在下方任务区「生成配乐」
           </span>
+        </div>
+        <!-- P12：配乐试听的播放器就在「试听配乐」按钮下一行 -->
+        <div v-if="props.audioPreview && props.audioPreview.slot === 'music'" class="voice-preview inline" data-testid="audio-preview-music">
+          <span class="font-mono vp-label">🎵 试听 · {{ props.audioPreview.label }}</span>
+          <audio :src="props.audioPreview.url" class="vp-audio" controls autoplay preload="auto" />
+          <NButton size="tiny" quaternary @click="emit('closePreview')">关闭</NButton>
         </div>
       <div class="ai-bar">
         <NButton
@@ -627,6 +641,35 @@ const transitions = ['cut', 'dissolve', 'fade', 'wipe'].map((v) => ({ label: v, 
   gap: 10px;
   flex-wrap: wrap;
   margin: 8px 0;
+}
+/* ---------- P12：试听播放器（就在触发它的按钮下一行） ---------- */
+.voice-preview {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 7px 10px;
+  margin: 6px 0 4px;
+  border: 1px solid var(--wv-line);
+  border-radius: 8px;
+  background: var(--wv-surface-sunken);
+}
+.voice-preview.inline { margin: 6px 0 2px; }
+.vp-label {
+  font-size: 11px;
+  color: var(--wv-text-3);
+  flex: none;
+}
+.vp-audio {
+  flex: 1 1 240px;
+  min-width: 180px;
+  height: 34px;
+}
+@media (max-width: 640px) {
+  .vp-audio {
+    flex: 1 1 100%;
+    min-width: 0;
+  }
 }
 /* P12：镜头时长自适应网格（桌面多列，手机 1~2 列） */
 .dur-grid {
