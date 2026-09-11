@@ -2291,6 +2291,64 @@ const shotTotal = computed(() => {
             <input type="checkbox" v-model="filterLatest" />
             只看最近一轮
           </label>
+
+          <!--
+            P12：所有生成按钮（含运动）固定在卡片右上角、横向一行。
+            注意：**不能用 v-if 按状态隐藏** —— 否则未确认方案/有进行中任务时按钮会“消失”，
+            用户找不到入口；改为常显 + :disabled + title 说明前置条件。
+          -->
+          <div class="jobs-actions" data-testid="job-gen-actions">
+            <span v-if="activeJobCount" class="state-hint font-mono gen-live" data-testid="job-live-hint">
+              {{ freshActiveCount || activeJobCount }} 个进行中…
+            </span>
+            <span v-if="!isVideoNow" class="count-inline">
+              张数
+              <select v-model="imgCount" class="mini-select">
+                <option :value="1">1</option>
+                <option :value="2">2</option>
+                <option :value="4">4</option>
+              </select>
+            </span>
+            <NButton
+              v-if="isVideoNow"
+              size="small"
+              secondary
+              :loading="genBusy"
+              data-testid="btn-motion-jobs"
+              :disabled="!motionReady"
+              :title="motionReady ? '把已确认的关键帧做成运动片段(motion)' : '先出关键帧(still)并确认后可用（两段式 §11.3）'"
+              @click="openMotionModal"
+            >
+              运动(motion)
+            </NButton>
+            <NButton
+              v-if="isVideoNow"
+              size="small"
+              secondary
+              :loading="genBusy"
+              data-testid="btn-voice-jobs"
+              :disabled="!detApproved"
+              :title="detApproved ? '自托管 CosyVoice：逐镜台词 → 配音' : '需先确认方案（右上角「确认」）后生成配音；未确认的镜头不能配音'"
+              @click="startVoice"
+            >
+              生成配音(voice)
+            </NButton>
+            <NButton
+              v-if="isVideoNow"
+              size="small"
+              secondary
+              :loading="genBusy"
+              data-testid="btn-bgm-jobs"
+              :disabled="!detApproved"
+              :title="detApproved ? '自托管音乐生成：按 music_mood 生成整片 BGM' : '需先确认方案（右上角「确认」）后生成配乐'"
+              @click="startBgm"
+            >
+              生成配乐(bgm)
+            </NButton>
+            <NButton size="small" type="primary" :loading="genBusy" data-testid="btn-gen-jobs" @click="startGeneration">
+              {{ isVideoNow ? '生成关键帧(still)' : '开始生成' }}
+            </NButton>
+          </div>
         </div>
 
         <!-- P12：按类型分 Tab（不含成片 master——任务区不产出成片） -->
@@ -2309,37 +2367,6 @@ const shotTotal = computed(() => {
             <span class="type-tab-n font-mono">{{ jobTabCounts[t.key] ?? 0 }}</span>
           </button>
         </nav>
-
-        <!-- P12：按钮单独成行（原来挤在右上角），左边给个小标题 -->
-        <div class="jobs-actions">
-          <span class="row-label font-mono">生成</span>
-          <template v-if="!activeJobCount">
-              <span v-if="!isVideoNow" class="count-inline">
-                张数
-                <select v-model="imgCount" class="mini-select">
-                  <option :value="1">1</option>
-                  <option :value="2">2</option>
-                  <option :value="4">4</option>
-                </select>
-              </span>
-              <NButton v-if="isVideoNow" size="small" secondary :loading="genBusy" data-testid="btn-motion-jobs"
-                       :disabled="!motionReady" title="先出关键帧(still)后可用（两段式 §11.3）" @click="openMotionModal">
-                运动(motion)
-              </NButton>
-              <NButton v-if="isVideoNow && detApproved" size="small" secondary :loading="genBusy" data-testid="btn-voice-jobs"
-                       title="自托管 CosyVoice：逐镜旁白 → 配音" @click="startVoice">
-                生成配音(voice)
-              </NButton>
-              <NButton v-if="isVideoNow && detApproved" size="small" secondary :loading="genBusy" data-testid="btn-bgm-jobs"
-                       title="自托管音乐生成：按 music_mood 生成整片 BGM" @click="startBgm">
-                生成配乐(bgm)
-              </NButton>
-              <NButton size="small" type="primary" :loading="genBusy" data-testid="btn-gen-jobs" @click="startGeneration">
-                {{ isVideoNow ? '生成关键帧(still)' : '开始生成' }}
-              </NButton>
-            </template>
-            <span v-else class="state-hint font-mono">{{ freshActiveCount || activeJobCount }} 个进行中，实时刷新…</span>
-        </div>
 
         <div v-if="eligibleJobs.length" class="batchbar" data-testid="job-batchbar">
           <label class="batch-check">
@@ -3121,13 +3148,6 @@ const shotTotal = computed(() => {
   gap: 12px;
   flex-wrap: wrap;
 }
-/* 按钮行的小标题（生成 / 批量…） */
-.row-label {
-  font-size: 11px;
-  color: var(--wv-text-4);
-  flex: none;
-  letter-spacing: 0.06em;
-}
 .filter-latest {
   display: inline-flex;
   align-items: center;
@@ -3420,10 +3440,22 @@ const shotTotal = computed(() => {
 }
 .type-tab.zero { opacity: 0.42; }
 .type-tab.zero.on { opacity: 0.9; }
-/* Tab 行与按钮行各自独立成行，不再与标题挤在一起 */
-.type-tabs + .jobs-actions {
+/* Tab 行紧跟按钮行，给一点呼吸 */
+.type-tabs {
   padding-top: 2px;
-  border-top: 1px dashed var(--wv-line);
+}
+/* P12：生成按钮（含运动）固定卡片右上角、横向一行、等距 */
+.jobs-head > .jobs-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.gen-live {
+  flex: none;
+  margin-right: 2px;
 }
 .jobs-head-actions {
   display: flex;
@@ -3437,6 +3469,12 @@ const shotTotal = computed(() => {
   .jobs-head-actions {
     flex-wrap: wrap;
     gap: 8px;
+  }
+  /* 窄屏：生成按钮不再右对齐，改为整行左起铺开 */
+  .jobs-head > .jobs-actions {
+    margin-left: 0;
+    justify-content: flex-start;
+    width: 100%;
   }
   .jobs-actions {
     flex-wrap: wrap;
