@@ -107,6 +107,23 @@ public class AudioProcessService {
         return String.join(",", f);
     }
 
+    /**
+     * 拼装处理命令（纯函数，供单测）。
+     *
+     * <p><b>第一个元素必须是 ffmpeg 可执行文件</b> —— 否则 ProcessBuilder 会把 {@code -y} 当成
+     * 程序名，报 {@code Cannot run program "-y": error: 2, No such file or directory}。
+     */
+    static List<String> buildArgs(String ffmpegBin, Path in, Path out, Options o, int outRate) {
+        List<String> args = new ArrayList<>();
+        args.add(ffmpegBin);
+        args.addAll(List.of("-y", "-hide_banner", "-loglevel", "error",
+                "-i", in.toString(),
+                "-af", filterChain(o, MAX_KEEP_SEC, outRate),
+                "-ac", "1", "-ar", String.valueOf(outRate),
+                "-c:a", "pcm_s16le", out.toString()));
+        return args;
+    }
+
     /** 处理一段音频；失败抛 IllegalStateException（调用方转成业务错误）。 */
     public Result process(byte[] src, String srcExt, Options opts) {
         Path dir = null;
@@ -115,12 +132,7 @@ public class AudioProcessService {
             Path in = dir.resolve("in." + (srcExt == null || srcExt.isBlank() ? "bin" : srcExt));
             Path out = dir.resolve("out.wav");
             Files.write(in, src);
-            List<String> args = new ArrayList<>(List.of("-y", "-hide_banner", "-loglevel", "error",
-                    "-i", in.toString(),
-                    "-af", filterChain(opts, MAX_KEEP_SEC, TARGET_SR),
-                    "-ac", "1", "-ar", String.valueOf(TARGET_SR),
-                    "-c:a", "pcm_s16le", out.toString()));
-            run(args);
+            run(buildArgs(ffmpeg, in, out, opts, TARGET_SR));
             if (!Files.exists(out)) {
                 throw new IllegalStateException("音频处理没有产出文件");
             }
@@ -176,7 +188,11 @@ public class AudioProcessService {
             }
         } catch (IOException | InterruptedException e) {
             Thread.currentThread().interrupt();
-            throw new IllegalStateException("ffmpeg 调用失败: " + e.getMessage(), e);
+            String hint = (e instanceof IOException && e.getMessage() != null
+                    && e.getMessage().contains("No such file"))
+                    ? "（找不到可执行文件，请确认服务器已安装 ffmpeg 且在 PATH 中，或用 weaveora.ffmpeg 指定绝对路径）"
+                    : "";
+            throw new IllegalStateException("调用 ffmpeg 失败 [" + ffmpeg + "]" + hint + ": " + e.getMessage(), e);
         }
     }
 

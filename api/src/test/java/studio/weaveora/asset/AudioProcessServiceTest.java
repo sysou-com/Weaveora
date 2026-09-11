@@ -2,6 +2,8 @@ package studio.weaveora.asset;
 
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -71,6 +73,24 @@ class AudioProcessServiceTest {
         assertTrue(AudioProcessService.warnings(0).stream().anyMatch(w -> w.contains("几乎没有声音")),
                 "无声音应提示");
         assertTrue(AudioProcessService.warnings(8).isEmpty(), "8s 是理想长度，不该有告警");
+    }
+
+    @Test
+    void commandStartsWithFfmpegBinary() {
+        // 回归：曾经漏掉可执行文件，导致 ProcessBuilder 把 "-y" 当程序名，
+        // 线上报 Cannot run program "-y": error: 2, No such file or directory
+        List<String> a = AudioProcessService.buildArgs(
+                "ffmpeg", java.nio.file.Path.of("in.webm"), java.nio.file.Path.of("out.wav"),
+                DEFAULTS, 24000);
+        assertEquals("ffmpeg", a.get(0), "第一个元素必须是 ffmpeg 可执行文件");
+        assertEquals(java.nio.file.Path.of("out.wav").toString(), a.get(a.size() - 1), "最后一个元素应为输出文件");
+        assertTrue(a.contains("-af"), a.toString());
+        assertTrue(a.contains("-i"), a.toString());
+        assertEquals(a.indexOf("-i") + 1, a.indexOf(java.nio.file.Path.of("in.webm").toString()),
+                "-i 后面应紧跟输入文件");
+        assertEquals("pcm_s16le", a.get(a.indexOf("-c:a") + 1));
+        assertEquals("1", a.get(a.indexOf("-ac") + 1), "必须转单声道");
+        assertEquals("24000", a.get(a.indexOf("-ar") + 1), "必须转 24kHz");
     }
 
     @Test
