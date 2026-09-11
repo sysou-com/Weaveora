@@ -90,6 +90,15 @@ const speedHints = computed(() => {
   return m
 })
 
+/** P9：角色绑定的音色（subject → voice），下发给分镜用于提示「本行音色盖掉了绑定」 */
+const bindingVoices = computed(() => {
+  const m: Record<string, string> = {}
+  for (const b of props.plan.audio?.voiceBindings ?? []) {
+    if (b.subject && b.voice) m[b.subject] = b.voice
+  }
+  return m
+})
+
 /** 成片总时长 = 各镜时长之和；修改镜头时长后同步 plan.duration_sec。 */
 const totalDur = computed(() =>
   (props.plan.shots ?? []).reduce((a, s) => a + (Number(s.duration_sec) || 0), 0))
@@ -313,6 +322,7 @@ const transitions = ['cut', 'dissolve', 'fade', 'wipe'].map((v) => ({ label: v, 
             :subjects="knownSubjects"
             :voices="voiceChoices"
             :speed-hints="speedHints"
+            :binding-voices="bindingVoices"
             @update:shot="onShotUpdate"
             @gen-line="(no, li) => emit('genLine', no, li)"
             @preview-line="(no, li) => emit('previewLine', no, li)"

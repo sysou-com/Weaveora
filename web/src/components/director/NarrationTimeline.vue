@@ -23,8 +23,10 @@ const props = withDefaults(
     voices?: { label: string; value: string }[]
     /** P9：角色绑定的语速（subject → speed），用于在行内提示“实际会用多快” */
     speedHints?: Record<string, number>
+    /** P9：角色绑定的音色（subject → voice），用于提示“本行音色覆盖了绑定” */
+    bindingVoices?: Record<string, string>
   }>(),
-  { disabled: false, busy: false, subjects: () => [], voices: () => [], speedHints: () => ({}) },
+  { disabled: false, busy: false, subjects: () => [], voices: () => [], speedHints: () => ({}), bindingVoices: () => ({}) },
 )
 
 const emit = defineEmits<{
@@ -279,6 +281,18 @@ function effectiveSpeedText(l: NarrationLine): string {
   return v === 1 ? '1.0' : `${v.toFixed(2)}×（跟随角色绑定）`
 }
 
+/**
+ * 本行音色是否盖掉了角色绑定（行内 voice 优先级最高）。
+ * 这是实际踩过的坑：配音色后没生效，因为本行还留着旧的「音色覆盖」。
+ */
+function voiceOverrideOf(l: NarrationLine): string {
+  const own = (l.voice ?? '').trim()
+  if (!own) return ''
+  const sub = (l.subject ?? '').trim()
+  const bound = sub ? (props.bindingVoices?.[sub] ?? '') : ''
+  return own === bound ? '' : own
+}
+
 /** 每条语音的隐藏 file input（导入配音） */
 function pickVoiceFile(i: number): void {
   if (props.disabled) return
@@ -330,6 +344,11 @@ function pickVoiceFile(i: number): void {
           :class="{ fast: effectiveSpeed(l) > 1.3, slow: effectiveSpeed(l) < 0.8 }"
           :title="`实际语速 ${effectiveSpeed(l)}×（来自角色音色绑定或本段设置）`"
         >{{ effectiveSpeed(l).toFixed(1) }}×</span>
+        <span
+          v-if="voiceOverrideOf(l)"
+          class="nt-ovr font-mono"
+          :title="`本行音色被显式指定为「${voiceOverrideOf(l)}」，会盖掉角色绑定；想用绑定的音色请把本行「音色覆盖」清空`"
+        >覆盖</span>
         <!-- 拖右缘 = 设结束点 -->
         <span
           class="nt-resize"
@@ -414,6 +433,13 @@ function pickVoiceFile(i: number): void {
           @update:value="commit"
         />
       </label>
+      <p v-if="voiceOverrideOf(cur)" class="nt-ovr-hint">
+        ⚠️ 本行音色被显式指定为「{{ voiceOverrideOf(cur) }}」，<b>会盖掉角色绑定</b>
+        <template v-if="bindingVoices[(cur.subject ?? '').trim()]">
+          （绑定的是「{{ bindingVoices[(cur.subject ?? '').trim()] }}」）
+        </template>
+        —— 想用绑定的音色，把这里的「音色覆盖」清空
+      </p>
       <label class="nt-field narrow">
         <span class="fl">起点(s)</span>
         <NInputNumber
@@ -596,6 +622,21 @@ function pickVoiceFile(i: number): void {
 .nt-spd.slow {
   background: rgba(96, 165, 250, 0.45);
   color: #fff;
+}
+.nt-ovr {
+  flex: 0 0 auto;
+  font-size: 10px;
+  padding: 0 3px;
+  border-radius: 3px;
+  background: rgba(244, 180, 96, 0.55);
+  color: #201a10;
+  font-weight: 700;
+}
+.nt-ovr-hint {
+  flex: 1 1 100%;
+  margin: 4px 0 0;
+  font-size: 11px;
+  color: #f4b460;
 }
 .nt-block.dragging {
   cursor: grabbing;
