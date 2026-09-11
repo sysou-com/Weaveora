@@ -885,21 +885,16 @@ const jobsForTab = computed(() =>
   jobTab.value === 'all' ? latestJobs.value : latestJobs.value.filter((j) => kindTab(j.kind) === jobTab.value),
 )
 
-/* ---------------- P12：点 Tab 才真正渲染列表（避免首屏一次铺满缩略图/几百行） ---------------- */
-const jobBodyReady = ref(false)
-const galBodyReady = ref(false)
-
-/** 点 Tab：切过去并解锁该区内容 */
+/* ---------------- P12：Tab 切换 ---------------- */
+/** 点 Tab：切过去（列表本身就只渲染当前 Tab 的项，所以默认 Tab 可直接预加载） */
 function pickJobTab(t: AudioTab): void {
   jobTab.value = t
   jobLimit.value = 10
-  jobBodyReady.value = true
 }
 function pickGalTab(t: AudioTab): void {
   galTab.value = t
-  galBodyReady.value = true
 }
-/** 生成任务时自动切到对应 Tab（顺手解锁），否则用户会看不到刚发起任务的进度 */
+/** 生成任务时自动切到对应 Tab，否则用户看不到刚发起任务的进度 */
 function focusJobTab(t: AudioTab): void {
   pickJobTab(t)
 }
@@ -2288,11 +2283,6 @@ const shotTotal = computed(() => {
           </button>
         </div>
         <div v-if="(jobs.data.value ?? []).length" class="job-list">
-          <p v-if="!jobBodyReady" class="job-empty text-secondary" data-testid="jobs-lazy-hint">
-            点上方 Tab 查看任务（默认停在「成片」，避免一次渲染太多拖慢页面）
-            <template v-if="activeJobCount"> · 当前有 {{ activeJobCount }} 个任务进行中</template>
-          </p>
-          <template v-else>
           <div v-for="j in visibleJobs" :key="j.id" class="job-row" :data-testid="'job-' + j.id.slice(0, 8)" :title="jobAuditTitle(j)">
             <label v-if="isJobActionable(j)" class="row-check">
               <input type="checkbox" :checked="jobSel.includes(j.id)" @change="toggleJobSel(j.id)" />
@@ -2355,7 +2345,6 @@ const shotTotal = computed(() => {
           >
             查看更多（余 {{ (jobs.data.value ?? []).length - jobLimit }} 条）
           </button>
-          </template>
         </div>
         <p v-else-if="detApproved" class="job-empty text-secondary">
           方案已确认 —— 点「{{ isVideoNow ? '生成关键帧(still)' : '开始生成' }}」发起（先出静帧关键帧，确认后再运动）。
@@ -2407,10 +2396,7 @@ const shotTotal = computed(() => {
           </button>
         </nav>
 
-        <p v-if="!galBodyReady" class="job-empty text-secondary" data-testid="gallery-lazy-hint">
-          点上方 Tab 查看产物（默认停在「成片」，避免一次加载大量图/视频）
-        </p>
-        <div v-else class="gallery-grid">
+        <div class="gallery-grid">
           <div v-for="a in galleryForTab" :key="a.id" :class="['g-item', { manage: galManage, sel: galSel.includes(a.id) }]">
             <label v-if="galManage" class="g-sel">
               <input type="checkbox" :checked="galSel.includes(a.id)" @change="toggleGalSel(a.id)" />
