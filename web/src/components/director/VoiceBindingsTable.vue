@@ -114,6 +114,7 @@ function usage(subject: string): number {
       <span class="text-secondary" style="font-size: 12px">
         角色名要和分镜里的「说话人」一致才会关联；未绑定的走默认音色
         <template v-if="plan.audio?.voice">（当前默认：{{ plan.audio.voice }}）</template>
+        ｜<b>语速会应用到该角色所有台词</b>，分镜块上会显示倍速标记
       </span>
     </div>
   </div>

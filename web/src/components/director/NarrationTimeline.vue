@@ -21,8 +21,10 @@ const props = withDefaults(
     subjects?: string[]
     /** 音色选项（内置名 + 克隆音色 clone:<id>） */
     voices?: { label: string; value: string }[]
+    /** P9：角色绑定的语速（subject → speed），用于在行内提示“实际会用多快” */
+    speedHints?: Record<string, number>
   }>(),
-  { disabled: false, busy: false, subjects: () => [], voices: () => [] },
+  { disabled: false, busy: false, subjects: () => [], voices: () => [], speedHints: () => ({}) },
 )
 
 const emit = defineEmits<{
@@ -191,6 +193,57 @@ function setEndFromEstimate(): void {
   commit()
 }
 
+const r1 = (n: number) => Math.round(n * 10) / 10
+
+/**
+ * 起点输入：**不交给组件的 min/max 去拒绝**（naive-ui 在输入中会直接丢弃越界值 → 输入框标红且写不进去）。
+ * 这里自己兜：夹到 [0, dur]，并把结束点一起推好。
+ */
+function onStartInput(v: number | null): void {
+  const l = cur.value
+  if (!l) return
+  if (v == null || !Number.isFinite(v)) {
+    l.at_sec = 0
+  } else {
+    l.at_sec = r1(Math.min(Math.max(0, v), Math.max(0, dur.value - 0.3)))
+  }
+  if (Number(l.end_sec ?? 0) > 0 && l.end_sec! < l.at_sec + 0.3) {
+    l.end_sec = r1(Math.min(dur.value, l.at_sec + 0.3))
+  }
+  commit()
+}
+
+/**
+ * 结束点输入：清空 = 恢复自然长度；填了则至少比起点晚 0.3s
+ * （不够就把**起点往前挪**，而不是拒绝输入 —— 用户填的结束时间是他的本意）。
+ */
+function onEndInput(v: number | null): void {
+  const l = cur.value
+  if (!l) return
+  if (v == null || !Number.isFinite(v) || v <= 0) {
+    l.end_sec = null
+    commit()
+    return
+  }
+  l.end_sec = r1(Math.min(Math.max(0.3, v), dur.value))
+  if ((l.at_sec ?? 0) > l.end_sec - 0.3) {
+    l.at_sec = r1(Math.max(0, l.end_sec - 0.3))
+  }
+  commit()
+}
+
+/** 语速输入：夹到 [0.5, 2.0]；清空 = 跟随角色绑定/默认 */
+function onSpeedInput(v: number | null): void {
+  const l = cur.value
+  if (!l) return
+  if (v == null || !Number.isFinite(v)) {
+    l.speed = null
+  } else {
+    l.speed = Math.max(0.5, Math.min(2, Math.round(v * 20) / 20))
+  }
+  commit()
+}
+
 const subjectOptions = computed(() =>
   (props.subjects ?? []).filter(Boolean).map((s) => ({ label: s, value: s })),
 )
@@ -205,6 +258,26 @@ const ticks = computed(() => {
 })
 
 const cur = computed(() => (selected.value >= 0 ? props.shot.narrations?.[selected.value] : undefined))
+
+/**
+ * 该行**实际会用**的语速：行内 speed > 角色绑定 speed > 1.0
+ * （与后端 AudioPlan.speedFor 同口径 —— 之前用户看不到角色的 2× 绑定，就疑惑“怎么这么快”）。
+ */
+function effectiveSpeed(l: NarrationLine): number {
+  const own = Number(l.speed ?? 0)
+  if (own >= 0.5 && own <= 2) return own
+  const sub = (l.subject ?? '').trim()
+  if (sub) {
+    const b = props.speedHints?.[sub]
+    if (typeof b === 'number' && b >= 0.5 && b <= 2) return b
+  }
+  return 1
+}
+
+function effectiveSpeedText(l: NarrationLine): string {
+  const v = effectiveSpeed(l)
+  return v === 1 ? '1.0' : `${v.toFixed(2)}×（跟随角色绑定）`
+}
 
 /** 每条语音的隐藏 file input（导入配音） */
 function pickVoiceFile(i: number): void {
@@ -251,6 +324,12 @@ function pickVoiceFile(i: number): void {
         <span class="nt-block-tag font-mono">{{ (l.kind ?? 'narration') === 'dialogue' ? (l.subject || '台词') : '旁白' }}</span>
         <span class="nt-block-text">{{ l.text || '（空）' }}</span>
         <span class="nt-est font-mono">{{ spanOf(l).len.toFixed(1) }}{{ spanOf(l).exact ? '' : '~' }}s</span>
+        <span
+          v-if="effectiveSpeed(l) !== 1"
+          class="nt-spd font-mono"
+          :class="{ fast: effectiveSpeed(l) > 1.3, slow: effectiveSpeed(l) < 0.8 }"
+          :title="`实际语速 ${effectiveSpeed(l)}×（来自角色音色绑定或本段设置）`"
+        >{{ effectiveSpeed(l).toFixed(1) }}×</span>
         <!-- 拖右缘 = 设结束点 -->
         <span
           class="nt-resize"
@@ -338,28 +417,28 @@ function pickVoiceFile(i: number): void {
       <label class="nt-field narrow">
         <span class="fl">起点(s)</span>
         <NInputNumber
-          v-model:value="cur.at_sec"
+          :value="cur.at_sec ?? 0"
           size="small"
           :min="0"
-          :max="dur - 0.3"
+          :max="dur"
           :step="0.1"
           :disabled="disabled"
-          @update:value="commit"
+          @update:value="onStartInput"
         />
       </label>
       <label class="nt-field narrow">
         <span class="fl">结束(s)</span>
         <NInputNumber
-          v-model:value="cur.end_sec"
+          :value="cur.end_sec ?? null"
           size="small"
-          :min="(cur.at_sec ?? 0) + 0.3"
+          :min="0"
           :max="dur"
           :step="0.1"
           clearable
           :disabled="disabled"
           placeholder="自然长"
           :data-testid="`narration-end-${shot.shot_no}`"
-          @update:value="commit"
+          @update:value="onEndInput"
         />
       </label>
       <NButton size="tiny" quaternary :disabled="disabled || !(Number(cur.end_sec ?? 0) > 0)" @click="clearEnd">
@@ -373,17 +452,18 @@ function pickVoiceFile(i: number): void {
         <NTooltip>
           <template #trigger>
             <NInputNumber
-              v-model:value="cur.speed"
+              :value="cur.speed ?? null"
               size="small"
               :min="0.5"
               :max="2.0"
               :step="0.05"
+              clearable
               :disabled="disabled"
-              placeholder="1.0"
-              @update:value="commit"
+              :placeholder="effectiveSpeedText(cur)"
+              @update:value="onSpeedInput"
             />
           </template>
-          1.0 为自然语速。留空则跟随角色绑定/默认
+          1.0 为自然语速；留空则跟随角色绑定/默认。当前实际会用 {{ effectiveSpeed(cur).toFixed(2) }}×
         </NTooltip>
       </label>
       <NButton size="tiny" quaternary type="error" :disabled="disabled" @click="removeLine(selected)">
@@ -501,6 +581,21 @@ function pickVoiceFile(i: number): void {
 .nt-est {
   opacity: 0.7;
   font-size: 10px;
+}
+.nt-spd {
+  flex: 0 0 auto;
+  font-size: 10px;
+  padding: 0 3px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.18);
+}
+.nt-spd.fast {
+  background: rgba(255, 92, 92, 0.45);
+  color: #fff;
+}
+.nt-spd.slow {
+  background: rgba(96, 165, 250, 0.45);
+  color: #fff;
 }
 .nt-block.dragging {
   cursor: grabbing;

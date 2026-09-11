@@ -81,6 +81,15 @@ const voiceChoices = computed(() => [
   ...clonePresets.value.map((p) => ({ label: `🎙 ${p.name}（克隆）`, value: `clone:${p.id}` })),
 ])
 
+/** P9：角色绑定的语速（subject → speed），下发给分镜用于提示“实际会用多快” */
+const speedHints = computed(() => {
+  const m: Record<string, number> = {}
+  for (const b of props.plan.audio?.voiceBindings ?? []) {
+    if (b.subject && typeof b.speed === 'number') m[b.subject] = b.speed
+  }
+  return m
+})
+
 /** 成片总时长 = 各镜时长之和；修改镜头时长后同步 plan.duration_sec。 */
 const totalDur = computed(() =>
   (props.plan.shots ?? []).reduce((a, s) => a + (Number(s.duration_sec) || 0), 0))
@@ -303,6 +312,7 @@ const transitions = ['cut', 'dissolve', 'fade', 'wipe'].map((v) => ({ label: v, 
             :busy="previewBusy"
             :subjects="knownSubjects"
             :voices="voiceChoices"
+            :speed-hints="speedHints"
             @update:shot="onShotUpdate"
             @gen-line="(no, li) => emit('genLine', no, li)"
             @preview-line="(no, li) => emit('previewLine', no, li)"
