@@ -4,7 +4,7 @@
  * 未绑定的角色回落到 plan.audio.voice（默认音色）。
  */
 import { Delete, Plus } from 'lucide-vue-next'
-import { NButton, NIcon, NInputNumber, NSelect } from 'naive-ui'
+import { NButton, NIcon, NInputNumber, NSelect, NTooltip } from 'naive-ui'
 import { computed } from 'vue'
 
 import type { VideoPlan, VoiceBinding } from '@/api/types'
@@ -61,6 +61,14 @@ function usage(subject: string): number {
 
 <template>
   <div class="vb">
+    <!-- 列头：之前这里完全没标签，用户把最后的数字误当成“角色出现次数” -->
+    <div v-if="rows.length" class="vb-head">
+      <span class="vb-h" style="width: 150px">角色（说话人）</span>
+      <span class="vb-h-arrow" />
+      <span class="vb-h" style="width: 150px">用哪个音色</span>
+      <span class="vb-h" style="width: 108px">语速倍率</span>
+      <span class="vb-h-usage" />
+    </div>
     <div v-for="(b, i) in rows" :key="i" class="vb-row">
       <NSelect
         v-model:value="b.subject"
@@ -87,17 +95,24 @@ function usage(subject: string): number {
         :data-testid="`binding-voice-${i}`"
         @update:value="commit"
       />
-      <NInputNumber
-        v-model:value="b.speed"
-        size="small"
-        :min="0.5"
-        :max="2"
-        :step="0.05"
-        :disabled="disabled"
-        placeholder="1.0"
-        style="width: 96px"
-        @update:value="commit"
-      />
+      <NTooltip>
+        <template #trigger>
+          <NInputNumber
+            v-model:value="b.speed"
+            size="small"
+            :min="0.5"
+            :max="2"
+            :step="0.05"
+            :disabled="disabled"
+            placeholder="1.0"
+            style="width: 108px"
+            @update:value="commit"
+          >
+            <template #suffix>×</template>
+          </NInputNumber>
+        </template>
+        语速倍率：1.0 为自然语速；2.0 为两倍速。会应用到该角色<b>所有</b>台词。
+      </NTooltip>
       <span class="usage text-secondary font-mono">
         {{ usage(b.subject) ? `用于 ${usage(b.subject)} 段台词` : '分镜里还没用到' }}
       </span>
@@ -112,9 +127,9 @@ function usage(subject: string): number {
         加一个角色
       </NButton>
       <span class="text-secondary" style="font-size: 12px">
-        角色名要和分镜里的「说话人」一致才会关联；未绑定的走默认音色
+        发音人要和分镜里的「说话人」一致才会关联；未绑定的走默认音色
         <template v-if="plan.audio?.voice">（当前默认：{{ plan.audio.voice }}）</template>
-        ｜<b>语速会应用到该角色所有台词</b>，分镜块上会显示倍速标记
+        ｜<b>语速倍率会应用到该角色所有台词</b>
       </span>
     </div>
   </div>
@@ -125,6 +140,21 @@ function usage(subject: string): number {
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+.vb-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: rgba(160, 175, 200, 0.8);
+  padding-bottom: 2px;
+  border-bottom: 1px dashed rgba(140, 160, 190, 0.18);
+}
+.vb-h-arrow {
+  width: 22px;
+}
+.vb-h-usage {
+  flex: 1 1 auto;
 }
 .vb-row {
   display: flex;
