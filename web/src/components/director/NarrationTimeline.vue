@@ -15,15 +15,25 @@ const props = withDefaults(
   defineProps<{
     shot: DirectorShot
     disabled?: boolean
+    /** 该镜有语音任务在跑（禁用按钮） */
+    busy?: boolean
     /** 角色建议列表（来自 voiceBindings + referenceAssets） */
     subjects?: string[]
     /** 音色预设 */
     voices?: string[]
   }>(),
-  { disabled: false, subjects: () => [], voices: () => [] },
+  { disabled: false, busy: false, subjects: () => [], voices: () => [] },
 )
 
-const emit = defineEmits<{ 'update:shot': [DirectorShot] }>()
+const emit = defineEmits<{
+  'update:shot': [DirectorShot]
+  /** 单条重新生成配音 */
+  genLine: [shotNo: number, lineIndex: number]
+  /** 试听某一条（本地导入的或已生成的） */
+  previewLine: [shotNo: number, lineIndex: number]
+  /** 导入自己配好的声音 */
+  importLine: [shotNo: number, lineIndex: number, file: File, atSec: number, subject: string]
+}>()
 
 /** 中文配音大致语速（字/秒）——仅用于估算块宽与时长，不是真实合成结果 */
 const CHARS_PER_SEC = 4.5
@@ -140,6 +150,23 @@ const ticks = computed(() => {
 })
 
 const cur = computed(() => (selected.value >= 0 ? props.shot.narrations?.[selected.value] : undefined))
+
+/** 每条语音的隐藏 file input（导入配音） */
+function pickVoiceFile(i: number): void {
+  if (props.disabled) return
+  const el = document.createElement('input')
+  el.type = 'file'
+  el.accept = 'audio/*,.mp3,.wav,.m4a,.aac,.ogg,.flac'
+  el.onchange = () => {
+    const f = el.files?.[0]
+    const l = props.shot.narrations?.[i]
+    if (!f || !l) return
+    emit('importLine', props.shot.shot_no, i, f, l.at_sec ?? 0, l.subject ?? '')
+  }
+  el.click()
+}
+
+
 </script>
 
 <template>
@@ -279,6 +306,37 @@ const cur = computed(() => (selected.value >= 0 ? props.shot.narrations?.[select
         <template #icon><NIcon><Delete :size="12" /></NIcon></template>
         删除本段
       </NButton>
+      <span class="nt-sep" />
+      <NButton
+        size="tiny"
+        secondary
+        :disabled="disabled || busy || !cur.text.trim()"
+        :data-testid="`line-gen-${shot.shot_no}-${selected}`"
+        title="只重新生成这一条配音（其余段落不受影响）"
+        @click="emit('genLine', shot.shot_no, selected)"
+      >
+        重新生成这条
+      </NButton>
+      <NButton
+        size="tiny"
+        secondary
+        :disabled="disabled || busy"
+        :data-testid="`line-import-${shot.shot_no}-${selected}`"
+        title="上传你自己配好的声音（mp3/wav/m4a/aac/ogg/flac）"
+        @click="pickVoiceFile(selected)"
+      >
+        导入配音
+      </NButton>
+      <NButton
+        size="tiny"
+        quaternary
+        :disabled="disabled || busy"
+        :data-testid="`line-preview-${shot.shot_no}-${selected}`"
+        title="试听这一条（需已生成或已导入）"
+        @click="emit('previewLine', shot.shot_no, selected)"
+      >
+        试听这条
+      </NButton>
     </div>
 
     <p v-if="lines.length" class="nt-hint text-secondary">
@@ -405,5 +463,11 @@ const cur = computed(() => (selected.value >= 0 ? props.shot.narrations?.[select
 .nt-hint {
   font-size: 11px;
   margin: 0;
+}
+.nt-sep {
+  width: 1px;
+  align-self: stretch;
+  background: rgba(140, 160, 190, 0.25);
+  margin: 0 2px;
 }
 </style>

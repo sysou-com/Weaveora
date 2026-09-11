@@ -46,6 +46,26 @@ public class AssetController {
                 uid(request), ws(workspaceId), projectId, file));
     }
 
+    /**
+     * P8：导入配音 —— 用户上传自己配好的那一段声音（mp3/wav/m4a/aac/ogg/flac）。
+     * 落的资产 kind=voice + shot_no，prompt_snapshot 带 line_index/at_sec/subject，
+     * 与生成产物同格式，混音/导出无需区分来源。
+     */
+    @PostMapping(value = "/projects/{projectId}/voice-lines", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    public ResponseEntity<AssetResponse> uploadVoiceLine(
+            HttpServletRequest request,
+            @RequestHeader(value = ProjectController.WORKSPACE_HEADER, required = false) String workspaceId,
+            @PathVariable UUID projectId,
+            @RequestParam("file") MultipartFile file,
+            @RequestParam("shotNo") Integer shotNo,
+            @RequestParam(value = "lineIndex", defaultValue = "0") Integer lineIndex,
+            @RequestParam(value = "atSec", defaultValue = "0") Double atSec,
+            @RequestParam(value = "subject", required = false) String subject) {
+        return ResponseEntity.ok(assetService.uploadVoiceLine(
+                uid(request), ws(workspaceId), projectId, shotNo,
+                lineIndex == null ? 0 : lineIndex, atSec == null ? 0 : atSec, subject, file));
+    }
+
     @GetMapping("/projects/{projectId}/assets")
     public ResponseEntity<List<AssetResponse>> list(
             HttpServletRequest request,

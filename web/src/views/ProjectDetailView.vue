@@ -25,7 +25,7 @@ import {
 import { createBrief, listBriefs } from '@/api/briefs'
 import { createJobs, listJobs, cancelJob, rerunJob, retryJobs, deleteJobs, JOB_STATE_LABEL } from '@/api/jobs'
 import { shareProject } from '@/api/market'
-import { listAssets, uploadReference, fetchAssetBlob, deleteAssets } from '@/api/assets'
+import { listAssets, uploadReference, fetchAssetBlob, deleteAssets, uploadVoiceLine } from '@/api/assets'
 import { createExport, fetchExportBlob, renderMaster, timecode } from '@/api/export'
 import { getProject, updateProjectDuration } from '@/api/projects'
 import type { AssetRef, DirectorPlan, DirectorShot, JobRecord } from '@/api/types'
@@ -912,6 +912,101 @@ async function previewVoice(shotNo?: number): Promise<void> {
   }
 }
 
+/**
+ * P8：单条重新生成配音 —— 只给「该镜第 lineIndex 段」建 voice 任务，
+ * 不去任务区点「生成配音」（那会把全片所有段落都重建一遍）。
+ */
+async function genVoiceLine(shotNo: number, lineIndex: number): Promise<void> {
+  const revId = genRevisionId()
+  if (!revId) return
+  if (dirty.value && !(await handleSave())) return     // 先落盘，否则服务端拿到的是旧段落
+  const rec = (detail.data.value?.shots ?? []).find((r) => r.shotNo === shotNo)
+  previewBusy.value = true
+  try {
+    const created = await createJobs(workspaceId.value, projectId.value, {
+      revisionId: revId,
+      kind: 'voice',
+      lineIndex,
+      ...(rec ? { shotId: rec.id } : {}),
+    })
+    const jobId = created[0]?.id
+    if (!jobId) throw new Error('未创建配音任务')
+    message.info(`第 ${shotNo} 镜第 ${lineIndex + 1} 段合成中…（首次会加载模型）`)
+    const job = await waitJobDone(jobId, 300000)
+    if (job.state !== 'succeeded') throw new Error(job.errorMessage || `任务${job.state}`)
+    await queryClient.invalidateQueries({ queryKey: ['assets'] })
+    await queryClient.invalidateQueries({ queryKey: ['jobs'] })
+    message.success(`第 ${shotNo} 镜第 ${lineIndex + 1} 段配音已更新（渲染时会用最新一条）`)
+  } catch (e) {
+    message.error(e instanceof Error ? e.message : '重新生成失败')
+  } finally {
+    previewBusy.value = false
+  }
+}
+
+/** P8：试听单条 —— 按该条现有的音色/文本起一个 preview 任务，完成后本地播放 */
+async function previewVoiceLine(shotNo: number, lineIndex: number): Promise<void> {
+  const revId = genRevisionId()
+  if (!revId) return
+  if (dirty.value && !(await handleSave())) return
+  const rec = (detail.data.value?.shots ?? []).find((r) => r.shotNo === shotNo)
+  previewBusy.value = true
+  try {
+    const created = await createJobs(workspaceId.value, projectId.value, {
+      revisionId: revId,
+      kind: 'voice',
+      lineIndex,
+      preview: true,
+      ...(rec ? { shotId: rec.id } : {}),
+    })
+    const jobId = created[0]?.id
+    if (!jobId) throw new Error('未创建试听任务')
+    message.info(`第 ${shotNo} 镜第 ${lineIndex + 1} 段试听合成中…`)
+    const job = await waitJobDone(jobId, 300000)
+    if (job.state !== 'succeeded') throw new Error(job.errorMessage || `试听任务${job.state}`)
+    await queryClient.invalidateQueries({ queryKey: ['assets'] })
+    await queryClient.invalidateQueries({ queryKey: ['jobs'] })
+    const asset = (assets.data.value ?? []).find((a) => a.jobId === jobId)
+    if (!asset) throw new Error('未找到试听音频')
+    const blob = await fetchAssetBlob(workspaceId.value, asset.id)
+    if (!blob) throw new Error('试听音频读取失败')
+    closeAudioPreview()
+    const p = draft.value
+    const voice = p && isVideoPlan(p) ? p.audio.voice || '中文女' : '中文女'
+    audioPreview.value = {
+      url: URL.createObjectURL(blob),
+      kind: 'voice',
+      label: `配音 · 第 ${shotNo} 镜 · 第 ${lineIndex + 1} 段 · 音色 ${voice}`,
+    }
+    message.success('试听就绪')
+  } catch (e) {
+    message.error(e instanceof Error ? e.message : '试听失败')
+  } finally {
+    previewBusy.value = false
+  }
+}
+
+/** P8：导入自己配好的声音（覆写该段配音资产） */
+async function importVoiceLine(
+  shotNo: number,
+  lineIndex: number,
+  file: File,
+  atSec: number,
+  subject: string,
+): Promise<void> {
+  if (dirty.value && !(await handleSave())) return
+  previewBusy.value = true
+  try {
+    await uploadVoiceLine(workspaceId.value, projectId.value, { file, shotNo, lineIndex, atSec, subject })
+    await queryClient.invalidateQueries({ queryKey: ['assets'] })
+    message.success(`已导入第 ${shotNo} 镜第 ${lineIndex + 1} 段的配音（渲染时优先用最新一条）`)
+  } catch (e) {
+    message.error(e instanceof Error ? e.message : '导入配音失败')
+  } finally {
+    previewBusy.value = false
+  }
+}
+
 /** P7.2 配乐试听：按当前 music_mood 生成一条试听（换情绪后重生成） */
 async function previewBgm(): Promise<void> {
   const revId = genRevisionId()
@@ -1603,11 +1698,16 @@ const shotTotal = computed(() => {
                   :disabled="!canEdit"
                   :busy-shot="shotBusy"
                   :preview-busy="previewBusy"
+                  :audio-preview="audioPreview"
                   @approve-shot="handleApproveShot"
                   @ai-prompt="openAiRewrite"
                   @ai-sync-all="aiSyncAll"
                   @preview-voice="previewVoice"
                   @preview-bgm="previewBgm"
+                  @gen-line="genVoiceLine"
+                  @preview-line="previewVoiceLine"
+                  @import-line="importVoiceLine"
+                  @close-preview="closeAudioPreview"
                 />
               </template>
             </section>
@@ -1636,12 +1736,7 @@ const shotTotal = computed(() => {
         </main>
       </div>
 
-      <!-- P7.1 配音试听播放条 -->
-      <div v-if="audioPreview" class="voice-preview" data-testid="audio-preview">
-        <span class="font-mono vp-label">{{ audioPreview.kind === 'bgm' ? '🎵' : '🎙' }} 试听 · {{ audioPreview.label }}</span>
-        <audio :src="audioPreview.url" class="vp-audio" controls autoplay preload="auto" />
-        <button type="button" class="op" @click="closeAudioPreview">关闭</button>
-      </div>
+      <!-- P8：试听播放条已上提到方案编辑器里（紧跟试听配音/试听配乐按钮） -->
 
       <!-- 任务区（W3）：确认后发起生成，展示状态/进度 -->
       <div v-if="detApproved || (jobs.data.value ?? []).length" class="jobs-panel" data-testid="jobs-panel">

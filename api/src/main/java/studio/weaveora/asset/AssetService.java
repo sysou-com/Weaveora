@@ -24,11 +24,19 @@ public class AssetService {
 
     private static final Set<String> ALLOWED_IMAGE = Set.of("image/png", "image/jpeg", "image/webp");
     private static final long MAX_UPLOAD = 20L * 1024 * 1024;
+    /** P8：导入配音允许的音频类型与大小上限 */
+    private static final Set<String> ALLOWED_AUDIO = Set.of(
+            "audio/mpeg", "audio/mp3", "audio/wav", "audio/x-wav", "audio/wave",
+            "audio/mp4", "audio/x-m4a", "audio/aac", "audio/ogg", "audio/flac", "audio/x-flac");
+    private static final long MAX_VOICE_UPLOAD = 50L * 1024 * 1024;
 
     private final AssetRepository assets;
     private final StoragePort storage;
     private final WorkspaceGuard guard;
     private final ProjectContextPort projects;
+    /** P8：构造配音快照（prompt_snapshot）用 */
+    private final com.fasterxml.jackson.databind.ObjectMapper mapper =
+            new com.fasterxml.jackson.databind.ObjectMapper();
 
     public AssetService(AssetRepository assets, StoragePort storage, WorkspaceGuard guard,
                         ProjectContextPort projects) {
@@ -60,6 +68,50 @@ public class AssetService {
             throw new IllegalStateException("参考图存储失败", e);
         }
         Asset a = Asset.reference(workspaceId, projectId, key, mime, null, null);
+        return toResponse(assets.save(a));
+    }
+
+    /**
+     * P8：用户上传「一段配音」（导入自己配好的声音）。
+     *
+     * <p>落的资产 kind=voice、shot_no 有值，并在 prompt_snapshot 里写
+     * {@code line_index / at_sec / subject / source=upload} —— 与生成产物同格式，
+     * 所以混音与导出完全不需要区分来源。
+     */
+    @Transactional
+    public AssetResponse uploadVoiceLine(UUID userId, UUID workspaceId, UUID projectId, int shotNo,
+                                        int lineIndex, double atSec, String subject, MultipartFile file) {
+        guard.requireMember(userId, workspaceId);
+        projects.require(userId, workspaceId, projectId);
+        if (file == null || file.isEmpty()) {
+            throw new BizException(ErrorCode.VALIDATION, "上传文件为空");
+        }
+        if (file.getSize() > MAX_VOICE_UPLOAD) {
+            throw new BizException(ErrorCode.UPLOAD_TOO_LARGE, "配音文件不能超过 50MB");
+        }
+        String mime = normalizeMime(file.getContentType(), file.getOriginalFilename());
+        if (!ALLOWED_AUDIO.contains(mime)) {
+            throw new BizException(ErrorCode.UPLOAD_TYPE_NOT_ALLOWED,
+                    "仅支持 mp3/wav/m4a/aac/ogg/flac 音频（当前 " + mime + "；如为其它格式请先转换）");
+        }
+        String ext = ext(mime);
+        String key = workspaceId + "/" + projectId + "/voice/" + UUID.randomUUID() + "." + ext;
+        try (InputStream in = file.getInputStream()) {
+            storage.put(key, in, file.getSize(), mime);
+        } catch (IOException e) {
+            throw new IllegalStateException("配音文件存储失败", e);
+        }
+        com.fasterxml.jackson.databind.node.ObjectNode snap = mapper.createObjectNode();
+        snap.put("kind", "voice");
+        snap.put("line_index", Math.max(0, lineIndex));
+        snap.put("at_sec", Math.max(0, atSec));
+        snap.put("line_kind", lineIndex == 0 && (subject == null || subject.isBlank()) ? "narration" : "dialogue");
+        if (subject != null && !subject.isBlank()) {
+            snap.put("subject", subject.trim());
+        }
+        snap.put("source", "upload");
+        Asset a = Asset.output(workspaceId, projectId, null, null, shotNo, "voice",
+                key, mime, null, null, null, null, snap);
         return toResponse(assets.save(a));
     }
 

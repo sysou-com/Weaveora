@@ -14,6 +14,8 @@ export async function createJobs(
     frames?: number | null
     /** true=试听任务（配音/配乐试听） */
     preview?: boolean
+    /** P8：voice 任务只重生成该镜的第 N 段语音（不传=全部段落） */
+    lineIndex?: number | null
   },
 ): Promise<JobRecord[]> {
   return request<JobRecord[]>(`/api/v1/projects/${projectId}/jobs`, {

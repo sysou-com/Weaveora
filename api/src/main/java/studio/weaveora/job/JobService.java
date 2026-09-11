@@ -422,10 +422,16 @@ public class JobService {
             if (shot == null) continue;
             // P8：一镜可多段语音（旁白 + 角色台词），每段一个 job；
             //     音色用 AudioPlan.voiceFor 解析（narrations[].voice > voiceBindings[subject] > audio.voice > 默认）
+            //     lineIndex 非空时只重建该段（供「单条重新生成」用），但 line_index 仍写原始下标
             List<AudioPlan.Line> lines = AudioPlan.lines(shot);
             if (lines.isEmpty()) continue;   // 没有语音的镜头跳过
+            if (req.lineIndex() != null && (req.lineIndex() < 0 || req.lineIndex() >= lines.size())) {
+                throw new BizException(ErrorCode.VALIDATION,
+                        "第 " + shot.path("shot_no").asInt() + " 镜没有第 " + req.lineIndex() + " 段语音");
+            }
             double shotDur = shot.path("duration_sec").asDouble(3);
             for (int k = 0; k < lines.size(); k++) {
+                if (req.lineIndex() != null && req.lineIndex() != k) continue;
                 AudioPlan.Line line = lines.get(k);
                 // 本段可用时长 = 下一段起点（或镜头末尾）− 本段起点
                 double next = (k + 1 < lines.size()) ? lines.get(k + 1).atSec() : shotDur;

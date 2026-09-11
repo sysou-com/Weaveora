@@ -36,6 +36,46 @@ export async function uploadReference(workspaceId: string, projectId: string, fi
   return (await resp.json()) as AssetRef
 }
 
+/**
+ * P8：导入配音 —— 上传用户自己配好的那一段声音。
+ *
+ * 服务端会落成 kind=voice 的资产，并写入 line_index/at_sec/subject 快照，
+ * 与生成产物同格式 —— 混音/导出无需区分来源，同一条语音也会被更新覆盖。
+ */
+export async function uploadVoiceLine(
+  workspaceId: string,
+  projectId: string,
+  params: { file: File; shotNo: number; lineIndex: number; atSec: number; subject?: string },
+): Promise<AssetRef> {
+  const { accessToken } = loadTokens()
+  const fd = new FormData()
+  fd.append('file', params.file)
+  fd.append('shotNo', String(params.shotNo))
+  fd.append('lineIndex', String(params.lineIndex))
+  fd.append('atSec', String(params.atSec))
+  if (params.subject) fd.append('subject', params.subject)
+  const resp = await fetch(`${API_BASE}/api/v1/projects/${projectId}/voice-lines`, {
+    method: 'POST',
+    headers: {
+      [WORKSPACE_HEADER]: workspaceId,
+      ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+    },
+    body: fd,
+  })
+  if (!resp.ok) {
+    if (resp.status === 401) onUnauthorized()
+    let msg = `上传失败（HTTP ${resp.status}）`
+    try {
+      const e = (await resp.json()) as { message?: string }
+      if (e.message) msg = e.message
+    } catch {
+      // ignore
+    }
+    throw new Error(msg)
+  }
+  return (await resp.json()) as AssetRef
+}
+
 /** 项目资产列表（含参考图与 Job 产物） */
 export async function listAssets(workspaceId: string, projectId: string): Promise<AssetRef[]> {
   return request<AssetRef[]>(`/api/v1/projects/${projectId}/assets`, {

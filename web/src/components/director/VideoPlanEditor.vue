@@ -19,6 +19,8 @@ const props = defineProps<{
   busyShot?: number | null
   /** 配音试听中 */
   previewBusy?: boolean
+  /** 试听播放条（父级持有 URL，这里只负责靠按钮渲染） */
+  audioPreview?: { url: string; label: string; kind: 'voice' | 'bgm' } | null
 }>()
 
 const emit = defineEmits<{
@@ -27,6 +29,11 @@ const emit = defineEmits<{
   aiSyncAll: []
   previewVoice: [shotNo?: number]
   previewBgm: []
+  /** P8：单条重生成 / 单条试听 / 单条导入配音 */
+  genLine: [shotNo: number, lineIndex: number]
+  previewLine: [shotNo: number, lineIndex: number]
+  importLine: [shotNo: number, lineIndex: number, file: File, atSec: number, subject: string]
+  closePreview: []
 }>()
 
 const hasAction = computed(() =>
@@ -142,6 +149,14 @@ const transitions = ['cut', 'dissolve', 'fade', 'wipe'].map((v) => ({ label: v, 
           <span class="text-secondary" style="font-size: 12px">
             换音色/情绪后点对应试听即可重生成一条试听；正式生成在下方任务区（生成配音/生成配乐）
           </span>
+        </div>
+        <!-- P8：试听播放条就放在试听按钮下方（原来在页面中部，离按钮太远） -->
+        <div v-if="props.audioPreview" class="voice-preview inline" data-testid="audio-preview">
+          <span class="font-mono vp-label">
+            {{ props.audioPreview.kind === 'bgm' ? '🎵' : '🎙' }} 试听 · {{ props.audioPreview.label }}
+          </span>
+          <audio :src="props.audioPreview.url" class="vp-audio" controls autoplay preload="auto" />
+          <NButton size="tiny" quaternary @click="emit('closePreview')">关闭</NButton>
         </div>
       </template>
     </section>
@@ -259,9 +274,13 @@ const transitions = ['cut', 'dissolve', 'fade', 'wipe'].map((v) => ({ label: v, 
           <NarrationTimeline
             :shot="shot"
             :disabled="disabled"
+            :busy="previewBusy"
             :subjects="knownSubjects"
             :voices="VOICE_PRESETS"
             @update:shot="onShotUpdate"
+            @gen-line="(no, li) => emit('genLine', no, li)"
+            @preview-line="(no, li) => emit('previewLine', no, li)"
+            @import-line="(no, li, f, at, sub) => emit('importLine', no, li, f, at, sub)"
           />
         </div>
       </div>
