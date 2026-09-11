@@ -166,6 +166,20 @@ export async function useSampleAsLineVoice(
   )
 }
 
+/** P9：删除音色（原件 + 处理后）。 */
+export async function deleteVoicePreset(
+  workspaceId: string,
+  projectId: string,
+  presetAssetId: string,
+  rawAssetId?: string | null,
+): Promise<void> {
+  const q = rawAssetId ? `?rawAssetId=${encodeURIComponent(rawAssetId)}` : ''
+  await request(`/api/v1/projects/${projectId}/voice-presets/${presetAssetId}/delete${q}`, {
+    method: 'POST',
+    headers: { [WORKSPACE_HEADER]: workspaceId },
+  })
+}
+
 /** 项目资产列表（含参考图与 Job 产物） */
 export async function listAssets(workspaceId: string, projectId: string): Promise<AssetRef[]> {
   return request<AssetRef[]>(`/api/v1/projects/${projectId}/assets`, {

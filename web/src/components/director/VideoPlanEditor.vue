@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { Film } from 'lucide-vue-next'
 import { NButton, NIcon, NInput, NInputNumber, NSelect, NSwitch } from 'naive-ui'
-import { computed, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 
 import MusicTimeline from '@/components/director/MusicTimeline.vue'
 import NarrationTimeline from '@/components/director/NarrationTimeline.vue'
@@ -34,7 +34,11 @@ const emit = defineEmits<{
   previewLine: [shotNo: number, lineIndex: number]
   importLine: [shotNo: number, lineIndex: number, file: File, atSec: number, subject: string]
   /** P9：打开克隆配音弹窗（preset=设为角色音色；line=也可直接用这段当本行配音） */
-  cloneVoice: [ctx: { mode: 'preset' | 'line'; name?: string; shotNo?: number; lineIndex?: number; atSec?: number; subject?: string }]
+  cloneVoice: [ctx: { mode: 'preset' | 'line'; name?: string; shotNo?: number; lineIndex?: number; atSec?: number; subject?: string; replaceId?: string }]
+  /** P9：删除音色（父级调 API + 清理引用） */
+  removePreset: [id: string]
+  /** 方案被就地修改（改名等），父级用于触发 dirty */
+  'update:plan': []
   closePreview: []
 }>()
 
@@ -74,7 +78,41 @@ function onShotUpdate(shot: DirectorShot): void {
   if (i >= 0) props.plan.shots[i] = shot
 }
 
-/** P9：音色选项 = 内置 7 个 + 本项目已录的克隆音色（clone:<id>） */
+/** P9：音色库操作（录音色 / 重录 / 删除都在父级做 API 调用） */
+
+const editingId = ref('')
+const editingName = ref('')
+
+function startRename(p: { id: string; name: string }): void {
+  editingId.value = p.id
+  editingName.value = p.name
+}
+
+function commitRename(): void {
+  const p = clonePresets.value.find((x) => x.id === editingId.value)
+  const nm = editingName.value.trim()
+  if (p && nm) p.name = nm
+  editingId.value = ''
+  emit('update:plan')
+}
+
+/** 该音色被多少处引用（绑定 + 分镜行内覆盖），删除前提示用 */
+function presetUsage(id: string): { subjects: string[]; lines: number } {
+  const v = `clone:${id}`
+  const subjects: string[] = []
+  for (const b of props.plan.audio?.voiceBindings ?? []) {
+    if (b.voice === v) subjects.push(b.subject || '(未命名角色)')
+  }
+  let lines = 0
+  for (const sh of props.plan.shots ?? []) {
+    for (const l of sh.narrations ?? []) {
+      if ((l.voice ?? '') === v) lines++
+    }
+  }
+  return { subjects, lines }
+}
+
+/** 音色选项 = 内置 7 个 + 本项目已录的克隆音色（clone:<id>） */
 const clonePresets = computed(() => props.plan.audio?.voicePresets ?? [])
 const voiceChoices = computed(() => [
   ...VOICE_PRESETS.map((v) => ({ label: v, value: v })),
@@ -155,10 +193,58 @@ const transitions = ['cut', 'dissolve', 'fade', 'wipe'].map((v) => ({ label: v, 
             🎙 克隆音色（录音 / 上传样本）
           </NButton>
           <span class="text-secondary" style="font-size: 12px">
-            已录 {{ clonePresets.length }} 个音色<template v-if="clonePresets.length">：
-              <span class="font-mono">{{ clonePresets.map((p) => p.name).join('、') }}</span>
-            </template>；录好的会出现在上面的下拉里（标「克隆」）
+            录好的音色会出现在上面的下拉里（标「克隆」）
           </span>
+        </div>
+
+        <!-- P9 音色库：重录 / 改名 / 删除（录多了可以删，也能重录换掉） -->
+        <div v-if="clonePresets.length" class="vc-lib" data-testid="voice-preset-list">
+          <div v-for="p in clonePresets" :key="p.id" class="vc-lib-row">
+            <span class="vc-lib-dot">🎙</span>
+            <template v-if="editingId === p.id">
+              <NInput
+                v-model:value="editingName"
+                size="tiny"
+                style="max-width: 160px"
+                @keyup.enter="commitRename"
+              />
+              <NButton size="tiny" type="primary" @click="commitRename">保存</NButton>
+              <NButton size="tiny" quaternary @click="editingId = ''">取消</NButton>
+            </template>
+            <template v-else>
+              <span class="vc-lib-name">{{ p.name }}</span>
+              <span class="text-secondary font-mono vc-lib-meta">
+                {{ Number(p.durationSec ?? 0).toFixed(1) }}s
+                <template v-if="presetUsage(p.id).subjects.length">
+                  · 用于 {{ presetUsage(p.id).subjects.join('、') }}
+                </template>
+                <template v-if="presetUsage(p.id).lines">
+                  · {{ presetUsage(p.id).lines }} 行
+                </template>
+              </span>
+              <NButton
+                size="tiny"
+                quaternary
+                :disabled="!!disabled"
+                :data-testid="`preset-rerecord-${p.id}`"
+                title="重新录一段替换这个音色"
+                @click="emit('cloneVoice', { mode: 'preset', replaceId: p.id, name: p.name })"
+              >
+                重录
+              </NButton>
+              <NButton size="tiny" quaternary :disabled="!!disabled" @click="startRename(p)">改名</NButton>
+              <NButton
+                size="tiny"
+                quaternary
+                type="error"
+                :disabled="!!disabled"
+                :data-testid="`preset-delete-${p.id}`"
+                @click="emit('removePreset', p.id)"
+              >
+                删除
+              </NButton>
+            </template>
+          </div>
         </div>
         <div class="zh-head">
           <NButton
@@ -454,5 +540,31 @@ const transitions = ['cut', 'dissolve', 'fade', 'wipe'].map((v) => ({ label: v, 
   gap: 10px;
   flex-wrap: wrap;
   margin: -2px 0 8px;
+}
+.vc-lib {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0 0 10px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: rgba(120, 140, 170, 0.08);
+  border: 1px solid rgba(140, 160, 190, 0.18);
+}
+.vc-lib-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.vc-lib-name {
+  font-size: 12px;
+  font-weight: 600;
+}
+.vc-lib-meta {
+  font-size: 11px;
+}
+.vc-lib-dot {
+  font-size: 12px;
 }
 </style>

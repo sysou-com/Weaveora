@@ -8,7 +8,7 @@ import {
   Save,
   WandSparkles,
 } from 'lucide-vue-next'
-import { NAlert, NButton, NIcon, NInputNumber, NModal, NSkeleton, NTag, useMessage } from 'naive-ui'
+import { NAlert, NButton, NIcon, NInputNumber, NModal, NSkeleton, NTag, useDialog, useMessage } from 'naive-ui'
 import { computed, onErrorCaptured, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
@@ -25,7 +25,7 @@ import {
 import { createBrief, listBriefs } from '@/api/briefs'
 import { createJobs, listJobs, cancelJob, rerunJob, retryJobs, deleteJobs, JOB_STATE_LABEL } from '@/api/jobs'
 import { shareProject } from '@/api/market'
-import { listAssets, uploadReference, fetchAssetBlob, deleteAssets, uploadVoiceLine, useSampleAsLineVoice } from '@/api/assets'
+import { listAssets, uploadReference, fetchAssetBlob, deleteAssets, uploadVoiceLine, useSampleAsLineVoice, deleteVoicePreset } from '@/api/assets'
 import { createExport, fetchExportBlob, renderMaster, timecode } from '@/api/export'
 import { getProject, updateProjectDuration } from '@/api/projects'
 import type { AssetRef, DirectorPlan, DirectorShot, JobRecord } from '@/api/types'
@@ -841,6 +841,7 @@ async function startVoice(): Promise<void> {
 /** P7.1 配音试听：为某镜（默认第一个有旁白的镜）创建一个 voice 任务，完成后本地播放 */
 const previewBusy = ref(false)
 const audioPreview = ref<{ url: string; label: string; kind: 'voice' | 'bgm' } | null>(null)
+const dialog = useDialog()
 
 function closeAudioPreview(): void {
   if (audioPreview.value) URL.revokeObjectURL(audioPreview.value.url)
@@ -1399,11 +1400,11 @@ async function doImport(save: boolean): Promise<void> {
 
 /** P9：克隆配音弹窗上下文 */
 const cloneOpen = ref(false)
-const cloneCtx = ref<{ mode: 'preset' | 'line'; name: string; shotNo: number; lineIndex: number; atSec: number; subject: string }>({
+const cloneCtx = ref<{ mode: 'preset' | 'line'; name: string; shotNo: number; lineIndex: number; atSec: number; subject: string; replaceId?: string }>({
   mode: 'preset', name: '', shotNo: 0, lineIndex: 0, atSec: 0, subject: '',
 })
 
-function openCloneDialog(ctx: { mode: 'preset' | 'line'; name?: string; shotNo?: number; lineIndex?: number; atSec?: number; subject?: string }): void {
+function openCloneDialog(ctx: { mode: 'preset' | 'line'; name?: string; shotNo?: number; lineIndex?: number; atSec?: number; subject?: string; replaceId?: string }): void {
   cloneCtx.value = {
     mode: ctx.mode,
     name: ctx.name ?? '',
@@ -1411,22 +1412,44 @@ function openCloneDialog(ctx: { mode: 'preset' | 'line'; name?: string; shotNo?:
     lineIndex: ctx.lineIndex ?? 0,
     atSec: ctx.atSec ?? 0,
     subject: ctx.subject ?? '',
+    replaceId: ctx.replaceId,
   }
   cloneOpen.value = true
 }
 
-/** 弹窗保存：写入音色库（A）；line 模式下 usedForLine 紧跟着触发 */
-function onCloneSaved(p: { id: string; name: string; presetAssetId: string; promptText: string; durationSec: number }): void {
+/** 删除一组音色资产（重录后清理旧文件 / 删除音色时用）；失败不阻断主流程 */
+async function cleanupPresetAssets(presetAssetId?: string | null, rawAssetId?: string | null): Promise<void> {
+  if (!presetAssetId) return
+  try {
+    await deleteVoicePreset(workspaceId.value, projectId.value, presetAssetId, rawAssetId)
+    void queryClient.invalidateQueries({ queryKey: ['assets'] })
+  } catch {
+    // 文件清理失败不影响方案（后续可手动清资产）
+  }
+}
+
+/** 弹窗保存：写入音色库（A）；replaceId 时是“重录替换”；line 模式下 usedForLine 紧跟着触发 */
+function onCloneSaved(p: {
+  id: string
+  name: string
+  presetAssetId: string
+  rawAssetId: string
+  promptText: string
+  durationSec: number
+}): void {
   lastCloneAssetId.value = p.presetAssetId
   const plan = draft.value
   if (!plan || !isVideoPlan(plan)) return
   const audio = plan.audio as unknown as Record<string, unknown>
   const list = Array.isArray(audio.voicePresets) ? (audio.voicePresets as Record<string, unknown>[]) : []
-  const idx = list.findIndex((x) => x && x.id === p.id)
+  const id = cloneCtx.value.replaceId || p.id
+  const idx = list.findIndex((x) => x && x.id === id)
+  const old = idx >= 0 ? list[idx] : undefined
   const entry = {
-    id: p.id,
+    id,
     name: p.name,
     assetId: p.presetAssetId,
+    rawAssetId: p.rawAssetId,
     promptText: p.promptText,
     durationSec: p.durationSec,
     processed: true,
@@ -1434,11 +1457,68 @@ function onCloneSaved(p: { id: string; name: string; presetAssetId: string; prom
   if (idx >= 0) list[idx] = entry
   else list.push(entry)
   audio.voicePresets = list
-  // 第一次录音色时顺手把全片默认音色指过去（用户可再改）
-  if (cloneCtx.value.mode === 'preset' && !(plan.audio.voice ?? '').trim()) {
+  if (!cloneCtx.value.replaceId && !(plan.audio.voice ?? '').trim()) {
     plan.audio.voice = `clone:${p.id}`
   }
-  message.success(`音色「${p.name}」已加入音色库（记得保存方案）`)
+  message.success(
+    cloneCtx.value.replaceId
+      ? `音色「${p.name}」已重录替换（记得保存方案）`
+      : `音色「${p.name}」已加入音色库（记得保存方案）`,
+  )
+  // 重录：旧的两份文件删掉，避免越积越多
+  if (old && old.assetId && old.assetId !== p.presetAssetId) {
+    void cleanupPresetAssets(String(old.assetId), (old.rawAssetId as string | undefined) ?? null)
+  }
+}
+
+/** 删除音色：先把引用情况摆给用户看，确认后清引用 + 删文件 */
+async function removeClonePreset(id: string): Promise<void> {
+  const plan = draft.value
+  if (!plan || !isVideoPlan(plan)) return
+  const audio = plan.audio as unknown as Record<string, unknown>
+  const list = Array.isArray(audio.voicePresets) ? (audio.voicePresets as Record<string, unknown>[]) : []
+  const idx = list.findIndex((x) => x && x.id === id)
+  if (idx < 0) return
+  const entry = list[idx]
+  const voice = `clone:${id}`
+  const subjects = (plan.audio.voiceBindings ?? []).filter((b) => b.voice === voice).map((b) => b.subject || '(未命名)')
+  let lines = 0
+  for (const sh of plan.shots ?? []) {
+    for (const l of sh.narrations ?? []) {
+      if ((l.voice ?? '') === voice) lines++
+    }
+  }
+  const refs = [
+    subjects.length ? `角色绑定（${subjects.join('、')}）` : '',
+    lines ? `${lines} 行台词的音色覆盖` : '',
+  ].filter(Boolean).join(' 和 ')
+
+  dialog.warning({
+    title: '删除音色',
+    content: refs
+      ? `音色「${entry.name}」正被${refs}引用。删除后这些引用会被清空（回落到默认音色）。确定删除？`
+      : `确定删除音色「${entry.name}」？`,
+    positiveText: '删除',
+    negativeText: '取消',
+    onPositiveClick: async () => {
+      // 1) 清引用（否则方案会指向不存在的音色，生成时报错）
+      if (Array.isArray(plan.audio.voiceBindings)) {
+        plan.audio.voiceBindings = plan.audio.voiceBindings.filter((b) => b.voice !== voice)
+      }
+      for (const sh of plan.shots ?? []) {
+        for (const l of sh.narrations ?? []) {
+          if ((l.voice ?? '') === voice) l.voice = null
+        }
+      }
+      // 2) 从音色库移除
+      list.splice(idx, 1)
+      audio.voicePresets = list
+      if ((plan.audio.voice ?? '') === voice) plan.audio.voice = ''
+      // 3) 删存储文件
+      await cleanupPresetAssets(String(entry.assetId ?? ''), (entry.rawAssetId as string | undefined) ?? null)
+      message.success(`音色「${entry.name}」已删除（记得保存方案）`)
+    },
+  })
 }
 
 /** B：把刚处理好的样本落成本行配音 */
@@ -1779,6 +1859,8 @@ const shotTotal = computed(() => {
                   @preview-line="previewVoiceLine"
                   @import-line="importVoiceLine"
                   @clone-voice="openCloneDialog"
+                  @remove-preset="removeClonePreset"
+                  @update:plan="() => {}"
                   @close-preview="closeAudioPreview"
                 />
               </template>
@@ -2164,6 +2246,7 @@ const shotTotal = computed(() => {
         v-model:show="cloneOpen"
         :mode="cloneCtx.mode"
         :default-name="cloneCtx.name"
+        :replace-id="cloneCtx.replaceId"
         :workspace-id="workspaceId"
         :project-id="projectId"
         :shot-no="cloneCtx.shotNo"

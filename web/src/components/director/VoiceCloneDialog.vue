@@ -27,6 +27,8 @@ const props = withDefaults(
     mode?: 'preset' | 'line'
     /** 默认音色名（一般传角色名/说话人） */
     defaultName?: string
+    /** 重录音色：传已有音色 id 时，保存是“替换”而不是新增 */
+    replaceId?: string
     workspaceId: string
     projectId: string
     /** line 模式下用 */
@@ -41,7 +43,14 @@ const props = withDefaults(
 const emit = defineEmits<{
   'update:show': [v: boolean]
   /** 保存成功：A 用途（写入 plan.audio.voicePresets） */
-  saved: [payload: { id: string; name: string; presetAssetId: string; promptText: string; durationSec: number }]
+  saved: [payload: {
+    id: string
+    name: string
+    presetAssetId: string
+    rawAssetId: string
+    promptText: string
+    durationSec: number
+  }]
   /** B 用途：已把样本落成本行配音 */
   usedForLine: []
 }>()
@@ -260,9 +269,10 @@ function mkId(n: string): string {
 function saveAsPreset(): void {
   if (!result.value) return
   emit('saved', {
-    id: mkId(name.value),
+    id: props.replaceId || mkId(name.value),
     name: (name.value || '音色').trim(),
     presetAssetId: result.value.presetAssetId,
+    rawAssetId: result.value.rawAssetId,
     promptText: transcript.value.trim(),
     durationSec: result.value.durationSec,
   })
@@ -273,9 +283,10 @@ async function useForLine(): Promise<void> {
   if (!result.value) return
   // 这里只把「处理后的样本」交给父级落成本行配音（A/B 里用户已经能听到差别）
   emit('saved', {
-    id: mkId(name.value || props.subject || 'voice'),
+    id: props.replaceId || mkId(name.value || props.subject || 'voice'),
     name: (name.value || props.subject || '音色').trim(),
     presetAssetId: result.value.presetAssetId,
+    rawAssetId: result.value.rawAssetId,
     promptText: transcript.value.trim(),
     durationSec: result.value.durationSec,
   })
@@ -290,7 +301,7 @@ const canSave = computed(() => !!result.value && !busy.value)
   <NModal
     :show="show"
     preset="card"
-    :title="mode === 'line' ? '克隆配音 / 录音配音' : '克隆音色'"
+    :title="mode === 'line' ? '克隆配音 / 录音配音' : (replaceId ? '重录音色（替换现有）' : '克隆音色')"
     style="max-width: 720px"
     data-testid="voice-clone-modal"
     @update:show="(v: boolean) => emit('update:show', v)"
@@ -431,7 +442,7 @@ const canSave = computed(() => !!result.value && !busy.value)
           data-testid="clone-save-preset"
           @click="saveAsPreset"
         >
-          设为角色音色
+          {{ replaceId ? '保存并替换该音色' : '设为角色音色' }}
         </NButton>
       </div>
       <p class="text-secondary" style="font-size: 11px; margin: 6px 0 0">

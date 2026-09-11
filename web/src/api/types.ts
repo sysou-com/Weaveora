@@ -128,6 +128,8 @@ export interface VoicePreset {
   name: string
   /** 处理后的参考音资产 id（24kHz 单声道） */
   assetId: string
+  /** 原声资产 id（用于 A/B 对比与“重录时清理旧文件”） */
+  rawAssetId?: string | null
   /** 样本说了什么（whisper 转写，可手改）——传给 CosyVoice 的 prompt_text */
   promptText?: string | null
   durationSec?: number | null
