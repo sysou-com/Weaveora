@@ -142,8 +142,12 @@ export async function auditionVoicePreset(
   workspaceId: string,
   projectId: string,
   voice: string,
+  /** 克隆音色要传**资产 id**（plan 里 clone:<id> 是音色名生成的 slug，不是 UUID） */
+  presetAssetId?: string | null,
 ): Promise<{ assetId: string; durationMs: number | null; cached: boolean; fromSample: boolean }> {
-  const q = new URLSearchParams({ voice })
+  const q = new URLSearchParams()
+  if (presetAssetId) q.set('assetId', presetAssetId)
+  if (voice) q.set('voice', voice)
   return request<{ assetId: string; durationMs: number | null; cached: boolean; fromSample: boolean }>(
     `/api/v1/projects/${projectId}/voice-presets/audition?${q}`,
     { method: 'POST', headers: { [WORKSPACE_HEADER]: workspaceId } },

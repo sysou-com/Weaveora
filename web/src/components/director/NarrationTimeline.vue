@@ -45,8 +45,10 @@ const emit = defineEmits<{
   aiLines: [shotNo: number]
 }>()
 
-/** 中文配音大致语速（字/秒）——仅用于估算块宽与时长，不是真实合成结果 */
+/** 配音大致语速（字/秒）——仅用于估算块宽与时长，不是真实合成结果 */
 const CHARS_PER_SEC = 4.5
+/** 英文（拉丁文本）语速：≈13 字符/秒。不分开算的话英文台词会被误判超长 */
+const LATIN_CHARS_PER_SEC = 13.0
 
 const lines = computed<NarrationLine[]>(() => {
   const ns = props.shot.narrations
@@ -67,8 +69,14 @@ const dur = computed(() => Math.max(1, Number(props.shot.duration_sec) || 3))
 const selected = ref(-1)
 
 function estimateSec(text: string): number {
-  const n = (text ?? '').replace(/\s/g, '').length
-  return Math.max(0.8, n / CHARS_PER_SEC)
+  const clean = (text ?? '').replace(/\s/g, '')
+  // 拉丁字母占比过半 → 当英文估算（与后端 AiAudioService.charsPerSec 同口径）
+  let letters = 0
+  for (const ch of clean) {
+    if ((ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z')) letters++
+  }
+  const rate = clean.length > 0 && letters * 2 > clean.length ? LATIN_CHARS_PER_SEC : CHARS_PER_SEC
+  return Math.max(0.8, clean.length / rate)
 }
 
 /** 该段配音的**实际时长**（秒）；未生成/未导入则为 null */

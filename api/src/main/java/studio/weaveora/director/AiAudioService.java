@@ -17,8 +17,10 @@ import studio.weaveora.shared.api.ErrorCode;
 
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 
@@ -47,6 +49,11 @@ public class AiAudioService {
 
     /** 中文朗读估算速度（字/秒）——与前端 NarrationTimeline 的估算保持一致 */
     public static final double CHARS_PER_SEC = 4.5;
+    /**
+     * 拉丁文本（英文）朗读速度（字符/秒，含空格）≈ 140 词/分。
+     * 不分开算的话，英文台词会被当成中文长度估 → 明明念得完却被判“超出镜头”。
+     */
+    public static final double LATIN_CHARS_PER_SEC = 13.0;
     /** 段间最小间隙（秒） */
     public static final double GAP_SEC = 0.25;
     /** 单段最短时长（秒） */
@@ -118,6 +125,10 @@ public class AiAudioService {
             return new LinesResult(llm.source(), out, notes);
         }
 
+        // P12：台词语言跟随角色绑定的音色（英文音色 / 用英文样本克隆的音色 → 写英文），
+        //      否则英文音色念中文会变形（听感上像在说粤语之类）。
+        Map<String, String> subjectLangs = subjectLanguages(plan, boundSubjects);
+
         String narrationVoice = AudioPlan.voiceFor(plan, null, null);
         List<JsonNode> shots = new ArrayList<>();
         for (JsonNode s : plan.path("shots")) {
@@ -140,7 +151,7 @@ public class AiAudioService {
             if (hasLines && !replace) {
                 notes.add("第 " + no + " 镜已有台词，按“追加”处理（如需覆盖请选覆盖）");
             }
-            List<AiLine> ai = askLines(project, plan, shot, boundSubjects, narrationVoice);
+            List<AiLine> ai = askLines(project, plan, shot, subjectLangs, narrationVoice);
             if (ai.isEmpty()) {
                 notes.add("第 " + no + " 镜：AI 没有给出可用台词（已跳过）");
                 continue;
@@ -175,35 +186,110 @@ public class AiAudioService {
         return new LinesResult(llm.source(), out, notes);
     }
 
-    /** 问 LLM 要台词（subject 限定在已绑定角色内）。 */
+    /**
+     * 角色 → 台词语言。由该角色绑定的音色推断：
+     * <ul>
+     *   <li>内置音色：英文女/英文男 → English；日语男 → 日本語；韩语女 → 한국어；粤语女/中文女 → 中文</li>
+     *   <li>克隆音色：看样本的转写文本（{@code promptText}）——拉丁字母为主 → English；
+     *       带假名 → 日本語；带谚文 → 한국어；否则看音色名/中文</li>
+     * </ul>
+     */
+    static Map<String, String> subjectLanguages(JsonNode plan, Set<String> subjects) {
+        Map<String, String> out = new LinkedHashMap<>();
+        for (String s : subjects) {
+            String voice = AudioPlan.voiceFor(plan, s, null);
+            out.put(s, languageOf(voice, plan));
+        }
+        return out;
+    }
+
+    /** 从一个音色标识推导台词语言（返回给 LLM 看的语言名）。 */
+    static String languageOf(String voice, JsonNode plan) {
+        String v = voice == null ? "" : voice.trim();
+        if (AudioPlan.isClone(v)) {
+            AudioPlan.VoicePreset p = AudioPlan.presetById(plan, AudioPlan.cloneId(v));
+            if (p != null) {
+                return languageOfSample(p.name(), p.promptText());
+            }
+            return "中文";
+        }
+        return languageOfName(v);
+    }
+
+    /** 内置音色名 → 语言。 */
+    static String languageOfName(String name) {
+        String n = name == null ? "" : name;
+        if (n.contains("英文") || n.toLowerCase().contains("english")) {
+            return "English";
+        }
+        if (n.contains("日语") || n.contains("日文")) {
+            return "日本語";
+        }
+        if (n.contains("韩语") || n.contains("韩文")) {
+            return "한국어";
+        }
+        return "中文";
+    }
+
+    /** 克隆样本（名字 + 转写文本）→ 语言。 */
+    static String languageOfSample(String name, String promptText) {
+        String nameLang = languageOfName(name);
+        if (!"中文".equals(nameLang)) {
+            return nameLang;                       // 名字里已经写了“英文/日语/韩语”
+        }
+        String t = promptText == null ? "" : promptText;
+        if (t.chars().anyMatch(c -> c >= 0x3040 && c <= 0x30FF)) {
+            return "日本語";
+        }
+        if (t.chars().anyMatch(c -> c >= 0xAC00 && c <= 0xD7AF)) {
+            return "한국어";
+        }
+        if (isLatinText(t)) {
+            return "English";
+        }
+        return "中文";
+    }
+
+    /** 问 LLM 要台词（subject 限定在已绑定角色内；每个角色用自己的台词语言）。 */
     private List<AiLine> askLines(ProjectContextPort.ProjectSnapshot project, JsonNode plan,
-                                  JsonNode shot, Set<String> boundSubjects, String narrationVoice) {
+                                  JsonNode shot, Map<String, String> subjectLangs, String narrationVoice) {
+        Set<String> boundSubjects = subjectLangs.keySet();
         String system = """
                 你是竖屏短剧的编剧/对白指导。根据给定镜头的画面与项目人物，写 1~3 段**角色台词**。
                 硬性约束（必须满足，否则配音会念不完）：
-                1. 本镜「总字数上限」由用户消息给出：**所有段字数相加不得超过它**。
+                1. 本镜「时长/字数上限」由用户消息给出：**所有段相加不得超过它**。
                 2. **只写角色对白**（kind 固定为 dialogue）：每段都必须有说话人，且说话人只能从「可用人物」里选。
                 3. **不要写旁白**（kind=narration / subject 留空）—— 旁白由用户手动新增，你写了会被丢掉。
-                4. 配音固定自然语速 1.0×（不会提速），所以宁少勿长。
-                5. 台词要口语化、贴合画面动作，符合人物身份与当下情绪；每段尽量简短（中文 8~25 字）。
-                6. 不要写画面描写、不要加引号外的解释。
+                4. **台词语言跟随该角色的括号标注**（如“B21（English）”就用英文写，“关羽（中文）”就用中文写）；
+                   不同角色可以不同语言，**不要互相翻译、不要写拼音/音译**。
+                5. 配音固定自然语速 1.0×（不会提速），所以宁少勿长。
+                6. 台词要口语化、贴合画面动作，符合人物身份与当下情绪；每段尽量简短（中文 8~25 字 / 英文 6~18 词）。
+                7. 不要写画面描写、不要加引号外的解释。
                 只输出 JSON，形如：
                 {"lines":[{"kind":"dialogue","subject":"关羽","text":"来者何人！"},
-                          {"kind":"dialogue","subject":"吕布","text":"吾乃吕布。"}]}
+                          {"kind":"dialogue","subject":"B21","text":"Target locked."}]}
                 """;
-        String characters = String.join("、", boundSubjects);
         StringBuilder user = new StringBuilder();
         user.append("项目：").append(plan.path("title").asText("")).append('\n');
         user.append("主题：").append(plan.path("script").path("theme").asText("")).append('\n');
         user.append("一句话概要：").append(plan.path("logline").asText("")).append('\n');
-        user.append("可用人物（仅可选这些作为对白说话人）：").append(characters).append('\n');
-        user.append("旁白音色：").append(narrationVoice).append('\n');
-        user.append("本镜：第 ").append(shot.path("shot_no").asInt()).append(" 镜");
+        // 括号里标出每个角色的台词语言（P12：英文音色/英文样本克隆出来的音色 → 写英文）
+        user.append("可用人物（仅可选这些作为对白说话人；括号内是该角色的台词语言）：")
+                .append(boundSubjects.stream()
+                        .map(s -> s + "（" + subjectLangs.get(s) + "）")
+                        .collect(java.util.stream.Collectors.joining("、")))
+                .append('\n');
         double dur = shot.path("duration_sec").asDouble(3);
+        user.append("本镜：第 ").append(shot.path("shot_no").asInt()).append(" 镜");
         user.append("，时长 ").append(String.format(java.util.Locale.ROOT, "%.1f", dur)).append("s\n");
-        user.append("字数上限：台词+旁白合计不超过 ").append(charBudget(dur))
-                .append(" 字（按 ").append(String.format(java.util.Locale.ROOT, "%.1f", CHARS_PER_SEC))
-                .append(" 字/秒、自然语速 1.0× 估算；超出会溢出到下一镜）\n");
+        user.append("时长上限：台词合计不超过 ")
+                .append(String.format(java.util.Locale.ROOT, "%.1f", secBudget(dur))).append("s")
+                .append("（中文 ≈ ").append(String.format(java.util.Locale.ROOT, "%.1f", CHARS_PER_SEC)).append(" 字/秒，")
+                .append("即最多约 ").append(charBudget(dur)).append(" 字；英文 ≈ ")
+                .append(String.format(java.util.Locale.ROOT, "%.1f", LATIN_CHARS_PER_SEC)).append(" 字符/秒，")
+                .append("即最多约 ").append(charBudget(dur, true)).append(" 字符）")
+                .append("；超出会溢出到下一镜\n");
+        user.append("旁白音色：").append(narrationVoice).append('\n');
         user.append("景别：").append(shot.path("shot_size").asText("")).append('\n');
         user.append("运镜：").append(shot.path("camera_move").asText("")).append('\n');
         user.append("画面动作：").append(shot.path("action").asText("")).append('\n');
@@ -317,18 +403,54 @@ public class AiAudioService {
         return text == null ? 0 : text.replaceAll("\\s", "").length();
     }
 
-    /** 铺给 AI 的字数预算：镜头时长能读完的字数 ×{@link #BUDGET_RATIO}。 */
+    /** 铺给 AI 的字数预算：镜头时长能读完的字数 ×{@link #BUDGET_RATIO}（中文口径）。 */
     static int charBudget(double shotDur) {
-        return Math.max(0, (int) Math.floor(Math.max(0, shotDur) * CHARS_PER_SEC * BUDGET_RATIO));
+        return charBudget(shotDur, false);
+    }
+
+    /** 铺给 AI 的字数预算（latin=true 用英文速度）。 */
+    static int charBudget(double shotDur, boolean latin) {
+        double rate = latin ? LATIN_CHARS_PER_SEC : CHARS_PER_SEC;
+        return Math.max(0, (int) Math.floor(Math.max(0, shotDur) * rate * BUDGET_RATIO));
+    }
+
+    /** 可用时长预算（秒）：镜头时长 × 安全系数。 */
+    static double secBudget(double shotDur) {
+        return Math.max(0, shotDur) * BUDGET_RATIO;
     }
 
     private static String fmt(double v) {
         return String.format(java.util.Locale.ROOT, "%.1f", v);
     }
 
-    /** 中文朗读时长估算（秒）。 */
+    /** 中文朗读时长估算（秒）——按文本语种选速度（中文 4.5 字/秒；英文 13 字符/秒）。 */
     static double estimate(String text) {
-        return Math.max(MIN_LINE_SEC, chars(text) / CHARS_PER_SEC);
+        return Math.max(MIN_LINE_SEC, chars(text) / charsPerSec(text));
+    }
+
+    /** 该文本的朗读速度（字符/秒）。 */
+    static double charsPerSec(String text) {
+        return isLatinText(text) ? LATIN_CHARS_PER_SEC : CHARS_PER_SEC;
+    }
+
+    /** 拉丁字母占比过半 → 当英文处理（中文/日文/韩文都走 {@link #CHARS_PER_SEC}）。 */
+    static boolean isLatinText(String text) {
+        if (text == null) {
+            return false;
+        }
+        int letters = 0;
+        int total = 0;
+        for (int i = 0; i < text.length(); i++) {
+            char c = text.charAt(i);
+            if (Character.isWhitespace(c) || c == '，' || c == '。' || c == '、' || c == '！' || c == '？') {
+                continue;
+            }
+            total++;
+            if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')) {
+                letters++;
+            }
+        }
+        return total > 0 && letters * 2 > total;
     }
 
     private static double round1(double v) {

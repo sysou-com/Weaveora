@@ -632,11 +632,93 @@ async function refreshThumbs(): Promise<void> {
 }
 watch(() => [...refLibrary.value.map((a) => a.id)].join(','), () => { void refreshThumbs() }, { immediate: true })
 
+/* ---------------- P12 任务 / 资产按类型分 Tab（避免一次刷一堆） ---------------- */
+type AudioTab = 'master' | 'voice' | 'bgm' | 'still' | 'clip' | 'all'
+/**
+ * 任务卡片的 Tab：**不含成片 master**（任务区不会产出 master，成片是导出/合成的产物，只在资产库）。
+ * “全部”放最后。
+ */
+const JOB_TABS: Array<{ key: AudioTab; label: string; kind?: string; hint: string }> = [
+  { key: 'voice', label: '配音', kind: 'voice', hint: '含试听产物 voice_preview' },
+  { key: 'bgm', label: '配乐', kind: 'bgm', hint: '含试听产物 bgm_preview' },
+  { key: 'still', label: '关键帧', kind: 'still', hint: '首帧图片 still' },
+  { key: 'clip', label: 'motion', kind: 'clip', hint: '图生视频片段 clip' },
+  { key: 'all', label: '全部', hint: '全部任务（项多，缩略图按需懒加载）' },
+]
+/** 资产库 Tab：保留成片 master（导出/合成产物在这里） */
+const GAL_TABS: Array<{ key: AudioTab; label: string; kind?: string; hint: string }> = [
+  { key: 'master', label: '成片', kind: 'master', hint: '导出/合成出的成片 master' },
+  { key: 'voice', label: '配音', kind: 'voice', hint: '含试听产物 voice_preview' },
+  { key: 'bgm', label: '配乐', kind: 'bgm', hint: '含试听产物 bgm_preview' },
+  { key: 'still', label: '关键帧', kind: 'still', hint: '首帧图片 still' },
+  { key: 'clip', label: 'motion', kind: 'clip', hint: '图生视频片段 clip' },
+  { key: 'all', label: '全部', hint: '全部产物（项多，缩略图按需懒加载）' },
+]
+/** 把 kind 归到 Tab（试听产物归入对应正式类型） */
+function kindTab(kind: string): AudioTab {
+  if (kind === 'voice' || kind === 'voice_preview') return 'voice'
+  if (kind === 'bgm' || kind === 'bgm_preview') return 'bgm'
+  if (kind === 'still') return 'still'
+  if (kind === 'clip') return 'clip'
+  if (kind === 'master') return 'master'
+  return 'all'
+}
+
+/* ---------------- P12：Tab 选择记忆 + 默认停在「最近有更新」的一类 ---------------- */
+const JOB_TAB_KEY = 'weaveora.jobTab'
+const GAL_TAB_KEY = 'weaveora.galTab'
+
+function savedTab(key: string, tabs: Array<{ key: AudioTab }>): AudioTab | null {
+  try {
+    const v = localStorage.getItem(key)
+    return v && tabs.some((t) => t.key === v) ? (v as AudioTab) : null
+  } catch {
+    return null
+  }
+}
+function rememberTab(key: string, t: AudioTab): void {
+  try {
+    localStorage.setItem(key, t)
+  } catch {
+    // 隐私模式等写不了就算了，不影响功能
+  }
+}
+
+/** 上次点过的 Tab（没有则 null）；用 pinned 区分「用户/数据定过」与「还没定」 */
+const jobTabPinned = ref(savedTab(JOB_TAB_KEY, JOB_TABS) != null)
+const galTabPinned = ref(savedTab(GAL_TAB_KEY, GAL_TABS) != null)
+const jobTab = ref<AudioTab>(savedTab(JOB_TAB_KEY, JOB_TABS) ?? 'still')
+const galTab = ref<AudioTab>(savedTab(GAL_TAB_KEY, GAL_TABS) ?? 'master')
+
+/** 点 Tab：切过去（列表只渲染当前 Tab 的项），并记住选择 */
+function pickJobTab(t: AudioTab): void {
+  jobTab.value = t
+  jobTabPinned.value = true
+  jobLimit.value = 10
+  rememberTab(JOB_TAB_KEY, t)
+}
+function pickGalTab(t: AudioTab): void {
+  galTab.value = t
+  galTabPinned.value = true
+  rememberTab(GAL_TAB_KEY, t)
+}
+/** 生成任务时自动切到对应 Tab，否则用户看不到刚发起任务的进度 */
+function focusJobTab(t: AudioTab): void {
+  pickJobTab(t)
+}
+
+function newestStamp<T extends { createdAt: string }>(list: T[]): T | undefined {
+  let best: T | undefined
+  for (const x of list) {
+    if (!best || new Date(x.createdAt).getTime() > new Date(best.createdAt).getTime()) best = x
+  }
+  return best
+}
+
 // ---------- W4 资产库 ----------
 const outputAssets = computed(() => (assets.data.value ?? []).filter((a) => ['still','clip','master','voice','bgm','voice_preview','bgm_preview'].includes(a.kind)))
 
 /** P12：资产库也按类型分 Tab */
-const galTab = ref<AudioTab>('master')
 const galTabCounts = computed(() => {
   const m: Record<string, number> = { all: 0 }
   for (const a of outputAssets.value) {
@@ -649,6 +731,14 @@ const galTabCounts = computed(() => {
 const galleryForTab = computed(() =>
   galTab.value === 'all' ? outputAssets.value : outputAssets.value.filter((a) => kindTab(a.kind) === galTab.value),
 )
+// 默认 Tab：没记录过就用「最新一条产物」那一类
+watch(outputAssets, (list) => {
+  if (galTabPinned.value) return
+  const newest = newestStamp(list as unknown as Array<{ createdAt: string }>)
+  if (!newest) return
+  galTab.value = kindTab((newest as unknown as { kind: string }).kind)
+  galTabPinned.value = true
+})
 const galUrls = ref<Record<string, string>>({})
 async function refreshGallery(): Promise<void> {
   await Promise.all(outputAssets.value.map(async (a) => {
@@ -848,30 +938,7 @@ function showMoreJobs(): void {
   jobLimit.value += 10
 }
 
-/* ---------------- P12 任务 / 资产按类型分 Tab（避免一次刷一堆） ---------------- */
-type AudioTab = 'master' | 'voice' | 'bgm' | 'still' | 'clip' | 'all'
-/**
- * P12：Tab 顺序 = 成片 → 配音 → 配乐 → 关键帧 → motion → 全部（“全部”放最后）。
- * 默认停在「成片 master」：它最轻，页面打开不会因缩略图过多而卡。
- */
-const JOB_TABS: Array<{ key: AudioTab; label: string; kind?: string; hint: string }> = [
-  { key: 'master', label: '成片', kind: 'master', hint: '成片由「导出/合成」生成' },
-  { key: 'voice', label: '配音', kind: 'voice', hint: '含试听产物 voice_preview' },
-  { key: 'bgm', label: '配乐', kind: 'bgm', hint: '含试听产物 bgm_preview' },
-  { key: 'still', label: '关键帧', kind: 'still', hint: '首帧图片 still' },
-  { key: 'clip', label: 'motion', kind: 'clip', hint: '图生视频片段 clip' },
-  { key: 'all', label: '全部', hint: '全部任务 / 产物（项多，缩略图按需懒加载）' },
-]
-/** 把 kind 归到 Tab（试听产物归入对应正式类型） */
-function kindTab(kind: string): AudioTab {
-  if (kind === 'voice' || kind === 'voice_preview') return 'voice'
-  if (kind === 'bgm' || kind === 'bgm_preview') return 'bgm'
-  if (kind === 'still') return 'still'
-  if (kind === 'clip') return 'clip'
-  if (kind === 'master') return 'master'
-  return 'all'
-}
-const jobTab = ref<AudioTab>('master')
+/* ---------------- P12：任务列表按类型分 Tab（定义在上文 W4 之前，这里只用） ---------------- */
 const jobTabCounts = computed(() => {
   const m: Record<string, number> = { all: 0 }
   for (const j of latestJobs.value) {
@@ -885,19 +952,17 @@ const jobsForTab = computed(() =>
   jobTab.value === 'all' ? latestJobs.value : latestJobs.value.filter((j) => kindTab(j.kind) === jobTab.value),
 )
 
-/* ---------------- P12：Tab 切换 ---------------- */
-/** 点 Tab：切过去（列表本身就只渲染当前 Tab 的项，所以默认 Tab 可直接预加载） */
-function pickJobTab(t: AudioTab): void {
-  jobTab.value = t
-  jobLimit.value = 10
-}
-function pickGalTab(t: AudioTab): void {
-  galTab.value = t
-}
-/** 生成任务时自动切到对应 Tab，否则用户看不到刚发起任务的进度 */
-function focusJobTab(t: AudioTab): void {
-  pickJobTab(t)
-}
+// 默认 Tab：没记录过就用「最新一条任务」那一类（最近有更新的一类）
+watch(
+  () => latestJobs.value,
+  (list) => {
+    if (jobTabPinned.value) return
+    const newest = newestStamp(list)
+    if (!newest) return
+    jobTab.value = kindTab(newest.kind)
+    jobTabPinned.value = true
+  },
+)
 
 async function startGeneration(): Promise<void> {
   const revId = genRevisionId()
@@ -1128,14 +1193,23 @@ async function auditionVoice(): Promise<void> {
     return
   }
   const voice = (plan.audio.voice || '').trim() || '中文女'
+  const isClone = voice.startsWith('clone:')
+  const preset = isClone ? (plan.audio.voicePresets ?? []).find((p) => `clone:${p.id}` === voice) : undefined
+  if (isClone && !preset?.assetId) {
+    message.warning('这个克隆音色在方案里找不到对应的音频资产（可能已被删除），请重新选择或重新克隆')
+    return
+  }
   previewBusy.value = true
   try {
-    const r = await auditionVoicePreset(workspaceId.value, projectId.value, voice)
+    const r = await auditionVoicePreset(
+      workspaceId.value,
+      projectId.value,
+      isClone ? '' : voice,
+      preset?.assetId ?? null,
+    )
     const blob = await fetchAssetBlob(workspaceId.value, r.assetId)
     if (!blob) throw new Error('试听音频读取失败')
-    const name = voice.startsWith('clone:')
-      ? ((plan.audio.voicePresets ?? []).find((p) => `clone:${p.id}` === voice)?.name || '克隆音色')
-      : voice
+    const name = preset?.name || voice
     const dur = r.durationMs ? ` · ${(r.durationMs / 1000).toFixed(1)}s` : ''
     closeAudioPreview()
     audioPreview.value = {
@@ -2213,13 +2287,13 @@ const shotTotal = computed(() => {
       <div v-if="detApproved || (jobs.data.value ?? []).length" class="jobs-panel" data-testid="jobs-panel">
         <div class="jobs-head">
           <span class="font-mono eyebrow">任务 / 生成</span>
-          <label class="filter-latest">
+          <label class="filter-latest" title="只看每个分镜每类最新一条（隐藏历史版本）">
             <input type="checkbox" v-model="filterLatest" />
             只看最近一轮
           </label>
         </div>
 
-        <!-- P12：按类型分 Tab，避免一次铺太多 -->
+        <!-- P12：按类型分 Tab（不含成片 master——任务区不产出成片） -->
         <nav class="type-tabs" data-testid="job-tabs">
           <button
             v-for="t in JOB_TABS"
@@ -2236,9 +2310,10 @@ const shotTotal = computed(() => {
           </button>
         </nav>
 
-        <div class="jobs-head-actions">
-          <div class="jobs-actions">
-            <template v-if="!activeJobCount">
+        <!-- P12：按钮单独成行（原来挤在右上角），左边给个小标题 -->
+        <div class="jobs-actions">
+          <span class="row-label font-mono">生成</span>
+          <template v-if="!activeJobCount">
               <span v-if="!isVideoNow" class="count-inline">
                 张数
                 <select v-model="imgCount" class="mini-select">
@@ -2264,7 +2339,6 @@ const shotTotal = computed(() => {
               </NButton>
             </template>
             <span v-else class="state-hint font-mono">{{ freshActiveCount || activeJobCount }} 个进行中，实时刷新…</span>
-          </div>
         </div>
 
         <div v-if="eligibleJobs.length" class="batchbar" data-testid="job-batchbar">
@@ -2382,7 +2456,7 @@ const shotTotal = computed(() => {
         <!-- P12：资产库同样按类型分 Tab -->
         <nav class="type-tabs" data-testid="gallery-tabs">
           <button
-            v-for="t in JOB_TABS"
+            v-for="t in GAL_TABS"
             :key="t.key"
             type="button"
             :class="['type-tab', { on: galTab === t.key, zero: !(galTabCounts[t.key] ?? 0) }]"
@@ -3042,9 +3116,17 @@ const shotTotal = computed(() => {
 .jobs-head {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  /* P12：勾选紧跟标题（原来是 space-between，勾选被推到右上角） */
+  justify-content: flex-start;
   gap: 12px;
   flex-wrap: wrap;
+}
+/* 按钮行的小标题（生成 / 批量…） */
+.row-label {
+  font-size: 11px;
+  color: var(--wv-text-4);
+  flex: none;
+  letter-spacing: 0.06em;
 }
 .filter-latest {
   display: inline-flex;
@@ -3058,7 +3140,7 @@ const shotTotal = computed(() => {
 .filter-latest input {
   accent-color: var(--wv-accent, #d0a24e);
 }
-.jobs-actions { display: flex; align-items: center; gap: 8px; }
+.jobs-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .count-inline { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--wv-text-3); }
 .mini-select {
   background: var(--wv-surface-sunken);
@@ -3338,6 +3420,11 @@ const shotTotal = computed(() => {
 }
 .type-tab.zero { opacity: 0.42; }
 .type-tab.zero.on { opacity: 0.9; }
+/* Tab 行与按钮行各自独立成行，不再与标题挤在一起 */
+.type-tabs + .jobs-actions {
+  padding-top: 2px;
+  border-top: 1px dashed var(--wv-line);
+}
 .jobs-head-actions {
   display: flex;
   align-items: center;

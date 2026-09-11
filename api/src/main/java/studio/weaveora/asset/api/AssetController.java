@@ -89,8 +89,9 @@ public class AssetController {
             HttpServletRequest request,
             @RequestHeader(value = ProjectController.WORKSPACE_HEADER, required = false) String workspaceId,
             @PathVariable UUID projectId,
-            @RequestParam(value = "voice", required = false) String voice) {
-        var a = voicePresetService.audition(uid(request), ws(workspaceId), projectId, voice);
+            @RequestParam(value = "voice", required = false) String voice,
+            @RequestParam(value = "assetId", required = false) String assetId) {
+        var a = voicePresetService.audition(uid(request), ws(workspaceId), projectId, voice, assetId);
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("assetId", a.assetId().toString());
         body.put("durationMs", a.durationMs());

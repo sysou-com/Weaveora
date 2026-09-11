@@ -88,6 +88,60 @@ class AiAudioServiceTest {
         assertEquals(0, AiAudioService.charBudget(0));
         assertEquals(20, AiAudioService.charBudget(5), "5s × 4.5 字/秒 × 0.9 = 20 字");
         assertTrue(AiAudioService.charBudget(4) < 4 * AiAudioService.CHARS_PER_SEC, "预算必须小于理论上限");
+        // 英文：5s × 13 字符/秒 × 0.9 = 58.5 → 58
+        assertEquals(58, AiAudioService.charBudget(5, true));
+        assertEquals(4.5, AiAudioService.secBudget(5), 1e-9);
+    }
+
+    // ------------------------------------------- 台词语言（跟随绑定音色）
+
+    @Test
+    void languageFollowsBuiltinVoiceName() {
+        assertEquals("中文", AiAudioService.languageOfName("中文女"));
+        assertEquals("中文", AiAudioService.languageOfName("粤语女"), "粤语用中文字幕");
+        assertEquals("English", AiAudioService.languageOfName("英文男"));
+        assertEquals("日本語", AiAudioService.languageOfName("日语男"));
+        assertEquals("한국어", AiAudioService.languageOfName("韩语女"));
+    }
+
+    @Test
+    void languageFollowsCloneSampleText() {
+        // 音色名叫 B21、样本是英文 → 该角色说英文（就是“英文音色却念中文”那个问题）
+        assertEquals("English", AiAudioService.languageOfSample("B21", "Target locked, missile away."));
+        assertEquals("日本語", AiAudioService.languageOfSample("ナレーター", "こんにちは、テストです。"));
+        assertEquals("한국어", AiAudioService.languageOfSample("보이스", "안녕하세요 테스트입니다"));
+        assertEquals("中文", AiAudioService.languageOfSample("小雨", "你好，这是试音。"));
+        // 名字里已写“英文” → 直接采用，不看样本
+        assertEquals("English", AiAudioService.languageOfSample("英文小雨", "你好"));
+    }
+
+    @Test
+    void subjectLanguagesReadsPlanBindingsAndPresets() throws Exception {
+        var mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+        var plan = (com.fasterxml.jackson.databind.node.ObjectNode) mapper.readTree("""
+                {"audio":{
+                  "voice":"中文女",
+                  "voiceBindings":[{"subject":"关羽","voice":"中文男"},
+                                    {"subject":"B21","voice":"clone:b21-en"}],
+                  "voicePresets":[{"id":"b21-en","name":"B21","assetId":"11111111-1111-1111-1111-111111111111",
+                                    "promptText":"Target locked, missile away.","durationSec":5.0}]
+                }}""");
+        var langs = AiAudioService.subjectLanguages(plan,
+                new java.util.LinkedHashSet<>(List.of("关羽", "B21")));
+        assertEquals("中文", langs.get("关羽"));
+        assertEquals("English", langs.get("B21"), "英文样本克隆出来的音色 → 写英文台词");
+    }
+
+    @Test
+    void latinTextUsesEnglishRate() {
+        assertTrue(AiAudioService.isLatinText("Target locked."));
+        assertTrue(!AiAudioService.isLatinText("目标已锁定。"));
+        assertEquals(13.0, AiAudioService.charsPerSec("Target locked."), 1e-9);
+        assertEquals(4.5, AiAudioService.charsPerSec("目标已锁定"), 1e-9);
+        // 英文用 13 字符/秒（若错按中文 4.5 字/秒算，这句会被当成 5.8s → 误判超长）
+        String en = "Target locked, missile away.";
+        assertEquals(AiAudioService.chars(en) / 13.0, AiAudioService.estimate(en), 1e-9);
+        assertEquals(en.length() - 3, AiAudioService.chars(en), "空格不计入");
     }
 
     @Test

@@ -291,26 +291,47 @@ public class VoicePresetService {
     public record Audition(UUID assetId, Integer durationMs, boolean cached, boolean fromSample) {
     }
 
-    /** 音色试听：拿到「该音色的样本资产」（必要时生成并缓存模板）。 */
+    /**
+     * 音色试听：拿到「该音色的样本资产」（必要时生成并缓存模板）。
+     *
+     * @param voice         内置音色名（中文女…）；克隆音色时可不传
+     * @param presetAssetId 克隆音色的**资产 id**（声音库里的 {@code voice_prest}）。
+     *                      注意：plan 里的 {@code clone:<id>} 是音色名生成的 slug，**不是** UUID，
+     *                      前面错把它当资产 id 用，前端点了就报「音色标识非法」。
+     */
     @Transactional
-    public Audition audition(UUID userId, UUID workspaceId, UUID projectId, String voice) {
+    public Audition audition(UUID userId, UUID workspaceId, UUID projectId, String voice, String presetAssetId) {
         guard.requireMember(userId, workspaceId);
         projects.require(userId, workspaceId, projectId);
-        String v = voice == null || voice.isBlank() ? AudioPlan.DEFAULT_VOICE : voice.trim();
+        String v = voice == null ? "" : voice.trim();
 
         // 1) 克隆音色：克隆时录入/处理好的那份就是最真实的试听样本，直接用
-        if (AudioPlan.isClone(v)) {
+        String cloneAssetId = presetAssetId == null ? "" : presetAssetId.trim();
+        if (cloneAssetId.isEmpty() && AudioPlan.isClone(v)) {
+            // 兼容老调用：clone:<uuid> 也接（但 plan 里通常是 slug，所以前端必须传 assetId）
+            String tail = AudioPlan.cloneId(v);
+            if (isUuid(tail)) {
+                cloneAssetId = tail;
+            } else {
+                throw new BizException(ErrorCode.VALIDATION, "克隆音色试听要传 assetId="
+                        + "，「" + v + "」里的 " + tail + " 是音色标识而不是资产 id");
+            }
+        }
+        if (!cloneAssetId.isEmpty()) {
             UUID presetId;
             try {
-                presetId = UUID.fromString(AudioPlan.cloneId(v));
+                presetId = UUID.fromString(cloneAssetId);
             } catch (IllegalArgumentException e) {
-                throw new BizException(ErrorCode.VALIDATION, "音色标识非法：" + v);
+                throw new BizException(ErrorCode.VALIDATION, "音色资产 id 非法：" + cloneAssetId);
             }
             Asset a = assets.findByIdAndWorkspaceId(presetId, workspaceId)
                     .orElseThrow(() -> new BizException(ErrorCode.NOT_FOUND,
                             "该克隆音色已不存在（可能被删除），请重新选择音色"));
             if (!projectId.equals(a.projectId())) {
                 throw new BizException(ErrorCode.NOT_FOUND, "该克隆音色不属于本项目");
+            }
+            if (!"voice_preset".equals(a.kind()) && !"voice_preset_src".equals(a.kind())) {
+                throw new BizException(ErrorCode.VALIDATION, "资产 " + a.kind() + " 不是音色样本（kind 应为 voice_preset）");
             }
             if (storage.get(a.storageKey()) == null) {
                 throw new BizException(ErrorCode.NOT_FOUND, "音色文件已丢失，请重新录制该音色");
@@ -319,6 +340,9 @@ public class VoicePresetService {
         }
 
         // 2) 内置音色：先找项目内缓存的模板（同音色只生成一次）
+        if (v.isEmpty()) {
+            v = AudioPlan.DEFAULT_VOICE;
+        }
         if (!AudioPlan.BUILTIN_VOICES.contains(v)) {
             throw new BizException(ErrorCode.VALIDATION, "「" + v
                     + "」不是内置音色（" + String.join("/", AudioPlan.BUILTIN_VOICES)
@@ -384,6 +408,19 @@ public class VoicePresetService {
             throw new BizException(ErrorCode.TTS_UNAVAILABLE,
                     "配音服务暂时不可用（" + ttsUrl + "）：" + e.getMessage()
                             + "；确认 GPU 机器与隧道（ComfyTTS / 18091）是否在运行");
+        }
+    }
+
+    /** 是否是合法 UUID（用于容错解析 clone:<uuid>）。 */
+    private static boolean isUuid(String s) {
+        if (s == null || s.length() != 36) {
+            return false;
+        }
+        try {
+            java.util.UUID.fromString(s);
+            return true;
+        } catch (IllegalArgumentException e) {
+            return false;
         }
     }
 
