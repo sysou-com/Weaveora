@@ -119,6 +119,8 @@ public class DirectorService {
         }
         // 新一版保留上一版同镜的中文描述与旁白（zh/narration 是用户编辑字段，LLM 不自带）
         mergePrevMeta(plan, prev);
+        // P8/P9：音频设置（音色/克隆音色/角色绑定/配乐段）LLM 永远不会产出，必须继承
+        mergePrevAudio(plan, prev);
         ensureShotSyncedDefault(plan);
 
         int revisionNo = nextRevisionNo(projectId);
@@ -667,13 +669,19 @@ public class DirectorService {
     }
 
     /** 把上一版每镜的用户字段（zh/narration/en_synced）迁移到新一版对应镜位。 */
-    private static void mergePrevMeta(JsonNode plan, JsonNode prev) {
+    /**
+     * 继承上一版的用户编辑字段（按 shot_no 对齐，退化到下标）。
+     *
+     * <p>LLM 新出的镜头里没有这些字段，若不继承，用户填的旁白/多段语音会凭空消失。
+     * P8 的 {@code narrations}（含说话人/起点/结束点/音色覆盖/语速）也在这一步保留。
+     */
+    static void mergePrevMeta(JsonNode plan, JsonNode prev) {
         if (prev == null || !prev.has("shots") || !plan.has("shots")) return;
         JsonNode ps = prev.path("shots");
         int i = 0;
         for (JsonNode ns : plan.path("shots")) {
             if (!ns.isObject()) continue;
-            JsonNode p = i < ps.size() ? ps.get(i) : null;
+            JsonNode p = findPrevShot(ps, ns, i);
             i++;
             if (p == null || !p.isObject()) continue;
             ObjectNode o = (ObjectNode) ns;
@@ -683,10 +691,57 @@ public class DirectorService {
                     o.put(f, p.path(f).asText(""));
                 }
             }
+            // P8：镜内多段语音（旁白+台词）——LLM 不产出，新镜没有就整体继承
+            JsonNode pn = p.get("narrations");
+            JsonNode cn = o.get("narrations");
+            boolean currEmpty = cn == null || !cn.isArray() || cn.isEmpty();
+            if (currEmpty && pn != null && pn.isArray() && !pn.isEmpty()) {
+                o.set("narrations", pn.deepCopy());
+            }
             if (p.has("en_synced") && !o.has("en_synced")) {
                 o.put("en_synced", p.path("en_synced").asBoolean(true));
             }
         }
+    }
+
+    /** 优先按 shot_no 找上一版同镜（镜头数变了也能对上），否则按下标。 */
+    private static JsonNode findPrevShot(JsonNode prevShots, JsonNode newShot, int index) {
+        int no = newShot.path("shot_no").asInt(0);
+        if (no > 0) {
+            for (JsonNode p : prevShots) {
+                if (p.path("shot_no").asInt(-1) == no) return p;
+            }
+        }
+        return index < prevShots.size() ? prevShots.get(index) : null;
+    }
+
+    /**
+     * P8/P9：继承上一版的**用户专属音频设置**。
+     *
+     * <p>{@code voice / voiceBindings / voicePresets / music} 这四个字段 LLM 永远写不出来，
+     * 全是用户在界面上配的。导演新一版时如果不继承，用户录好的音色和配好的配乐段就凭空消失了
+     * （实际踩到：用户问“怎么把角色音色绑定搞没了”）。
+     *
+     * <p>只在新方案对应字段为空时覆盖；{@code music_mood} 不动（LLM 可能会给，且用户可改）。
+     */
+    static void mergePrevAudio(JsonNode plan, JsonNode prev) {
+        if (prev == null || !(plan instanceof ObjectNode po)) return;
+        JsonNode pa = prev.path("audio");
+        if (!pa.isObject()) return;
+        ObjectNode a = po.path("audio").isObject()
+                ? (ObjectNode) po.get("audio") : po.putObject("audio");
+        for (String f : new String[]{"voice", "voicePresets", "voiceBindings", "music"}) {
+            JsonNode v = pa.get(f);
+            if (blank(v)) continue;
+            if (!blank(a.get(f))) continue;   // 新方案已有值（罕见）则不覆盖
+            a.set(f, v.deepCopy());
+        }
+    }
+
+    private static boolean blank(JsonNode v) {
+        return v == null || v.isNull()
+                || (v.isArray() && v.isEmpty())
+                || (v.isTextual() && v.asText().isBlank());
     }
 
     /** 新导出的镜头若无同步标记，视为已同步（LLM 自带 EN）；用户改动作后由前端置 false。 */
