@@ -41,6 +41,8 @@ const emit = defineEmits<{
   cloneLine: [shotNo: number, lineIndex: number, atSec: number, subject: string]
   /** P10：一键调整本镜（延长镜头 / 允许溢出）—— 镜头时长与标记由父级回写 */
   extendShot: [shotNo: number, patch: { duration_sec?: number; allowNarrationOverflow?: boolean }]
+  /** P11：AI 一键生成台词（本镜） */
+  aiLines: [shotNo: number]
 }>()
 
 /** 中文配音大致语速（字/秒）——仅用于估算块宽与时长，不是真实合成结果 */
@@ -419,6 +421,16 @@ function pickVoiceFile(i: number): void {
       <NButton size="tiny" secondary :disabled="disabled" :data-testid="`narration-add-${shot.shot_no}`" @click="addLine">
         <template #icon><NIcon><Plus :size="12" /></NIcon></template>
         加一段
+      </NButton>
+      <NButton
+        size="tiny"
+        secondary
+        :disabled="disabled || busy"
+        :data-testid="`narration-ai-${shot.shot_no}`"
+        title="让 AI 分析本镜画面与人物，写 1~3 段台词（可按角色音色分说话人）"
+        @click="emit('aiLines', shot.shot_no)"
+      >
+        ✨ AI 台词
       </NButton>
       <span class="text-secondary" style="font-size: 12px">
         拖块改起点（吸附 0.1s）、拖<span class="hl">右缘</span>设结束点；不设结束点就用配音自然长度，旁白短于镜头就留白

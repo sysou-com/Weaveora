@@ -27,6 +27,7 @@ import { createJobs, listJobs, cancelJob, rerunJob, retryJobs, deleteJobs, JOB_S
 import { shareProject } from '@/api/market'
 import { listAssets, uploadReference, fetchAssetBlob, deleteAssets, uploadVoiceLine, useSampleAsLineVoice, deleteVoicePreset } from '@/api/assets'
 import { createExport, fetchExportBlob, renderMaster, timecode } from '@/api/export'
+import { aiGenerateLines, aiGenerateMusic } from '@/api/director'
 import { getProject, updateProjectDuration } from '@/api/projects'
 import type { AssetRef, DirectorPlan, DirectorShot, JobRecord } from '@/api/types'
 import BriefComposer from '@/components/director/BriefComposer.vue'
@@ -277,6 +278,109 @@ function onPatchShot(shotNo: number, patch: { duration_sec?: number; allowNarrat
   if (patch.allowNarrationOverflow) {
     shot.allowNarrationOverflow = true
     message.info(`第 ${shotNo} 镜已允许配音溢出到下一镜（不再提醒）`)
+  }
+}
+
+/* ---------------- P11 AI 音频助手 ---------------- */
+const aiAudioBusy = ref(false)
+
+/** 把 AI 铺好的台词写进该镜（replace=true 覆盖，false 追加） */
+function applyAiLines(
+  shotNo: number,
+  lines: Array<{ at_sec: number; end_sec: number; text: string; kind: string; subject?: string | null; speed: number }>,
+  replace: boolean,
+): void {
+  const plan = draft.value
+  if (!plan || !isVideoPlan(plan)) return
+  const shot = (plan.shots ?? []).find((s) => s.shot_no === shotNo)
+  if (!shot) return
+  const mapped = lines.map((l) => ({
+    at_sec: l.at_sec,
+    end_sec: l.end_sec,
+    text: l.text,
+    kind: (l.kind === 'dialogue' ? 'dialogue' : 'narration') as 'narration' | 'dialogue',
+    subject: l.subject ?? null,
+    // 不写死 voice：由角色绑定解析，避免“改了绑定但旧台词仍用老音色”
+    voice: null,
+    speed: l.speed,
+    manual: false,
+  }))
+  shot.narrations = replace ? mapped : [...(shot.narrations ?? []), ...mapped]
+  message.success(`第 ${shotNo} 镜已写入 ${mapped.length} 段 AI 台词（记得保存方案）`)
+}
+
+/** AI 一键生成台词（本镜）；已有台词时询问追加还是覆盖 */
+async function onAiLines(shotNo: number): Promise<void> {
+  const revId = genRevisionId()
+  if (!revId) return
+  const plan = draft.value
+  if (!plan || !isVideoPlan(plan)) return
+  const shot = (plan.shots ?? []).find((s) => s.shot_no === shotNo)
+  if (!shot) return
+  const hasLines = (shot.narrations ?? []).length > 0
+
+  const run = async (replace: boolean): Promise<void> => {
+    aiAudioBusy.value = true
+    try {
+      const r = await aiGenerateLines(workspaceId.value, projectId.value, revId, shotNo, replace)
+      const sl = r.shots.find((x) => x.shotNo === shotNo)
+      for (const n of r.notes ?? []) message.info(n, { duration: 5000 })
+      if (!sl || !sl.lines.length) {
+        message.warning('AI 没有给出可用台词（可能是未配置 LLM，或本镜信息不足）')
+        return
+      }
+      applyAiLines(shotNo, sl.lines, replace)
+    } catch (e) {
+      message.error(e instanceof Error ? e.message : 'AI 台词生成失败')
+    } finally {
+      aiAudioBusy.value = false
+    }
+  }
+
+  if (hasLines) {
+    dialog.warning({
+      title: `第 ${shotNo} 镜已有台词`,
+      content: 'AI 生成的台词是「追加」到后面，还是「覆盖」掉现有台词？',
+      positiveText: '覆盖',
+      negativeText: '追加',
+      onPositiveClick: () => void run(true),
+      onNegativeClick: () => void run(false),
+    })
+    return
+  }
+  await run(false)
+}
+
+/** AI 一键配乐（按剧情分段，覆盖现有 music[]） */
+async function onAiMusic(): Promise<void> {
+  const revId = genRevisionId()
+  if (!revId) return
+  const plan = draft.value
+  if (!plan || !isVideoPlan(plan)) return
+  aiAudioBusy.value = true
+  try {
+    const r = await aiGenerateMusic(workspaceId.value, projectId.value, revId)
+    for (const n of r.notes ?? []) message.info(n, { duration: 5000 })
+    if (!r.music?.length) {
+      message.warning('AI 没有给出可用配乐（可能是未配置 LLM）')
+      return
+    }
+    plan.audio.music = r.music.map((c) => ({
+      id: c.id,
+      start_sec: c.start_sec,
+      end_sec: c.end_sec,
+      mood: c.mood,
+      gain_db: c.gain_db,
+      fade_in_sec: c.fade_in_sec,
+      fade_out_sec: c.fade_out_sec,
+      loop: c.loop,
+      duck: c.duck,
+    }))
+    message.success(`已写入 ${r.music.length} 段配乐（记得保存方案，然后点「生成配乐」渲染）`)
+  } catch (e) {
+    message.error(e instanceof Error ? e.message : 'AI 配乐生成失败')
+  } finally {
+    aiAudioBusy.value = false
   }
 }
 /** 参考图按上传时间倒序（最新在前，防旧图排在前面看不清新上传） */
@@ -1913,6 +2017,8 @@ const shotTotal = computed(() => {
                   @import-line="importVoiceLine"
                   @clone-voice="openCloneDialog"
                   @patch-shot="onPatchShot"
+                  @ai-lines="onAiLines"
+                  @ai-music="onAiMusic"
                   @remove-preset="removeClonePreset"
                   @update:plan="() => {}"
                   @close-preview="closeAudioPreview"

@@ -90,3 +90,67 @@ export async function rewritePromptFromZh(
     body: { rawText, originalPositive, originalNegative },
   })
 }
+
+/* ---------------- P11 AI 音频助手 ---------------- */
+
+/** AI 生成的一条台词（时间已由后端按字数与镜头时长铺排好） */
+export interface AiFittedLine {
+  at_sec: number
+  end_sec: number
+  text: string
+  kind: 'narration' | 'dialogue'
+  subject?: string | null
+  speed: number
+}
+
+export interface AiLinesResult {
+  source: 'llm' | 'stub'
+  shots: Array<{ shotNo: number; shotDurationSec: number; lines: AiFittedLine[] }>
+  notes: string[]
+}
+
+/** POST revisions/{rid}/ai-lines —— 分析画面+人物 → 1~3 段台词（模拟对话） */
+export async function aiGenerateLines(
+  workspaceId: string,
+  projectId: string,
+  revisionId: string,
+  shotNo: number | null,
+  replace: boolean,
+): Promise<AiLinesResult> {
+  return request<AiLinesResult>(`/api/v1/projects/${projectId}/revisions/${revisionId}/ai-lines`, {
+    method: 'POST',
+    headers: { [WORKSPACE_HEADER]: workspaceId },
+    body: { shotNo, replace },
+  })
+}
+
+/** AI 给出的一段配乐 */
+export interface AiMusicCue {
+  id: string
+  start_sec: number
+  end_sec: number
+  mood: string
+  gain_db: number
+  fade_in_sec: number
+  fade_out_sec: number
+  loop: boolean
+  duck: boolean
+}
+
+export interface AiMusicResult {
+  source: 'llm' | 'stub'
+  music: AiMusicCue[]
+  notes: string[]
+}
+
+/** POST revisions/{rid}/ai-music —— 依据剧情给出 2~5 段「时间段 + 情绪」 */
+export async function aiGenerateMusic(
+  workspaceId: string,
+  projectId: string,
+  revisionId: string,
+): Promise<AiMusicResult> {
+  return request<AiMusicResult>(`/api/v1/projects/${projectId}/revisions/${revisionId}/ai-music`, {
+    method: 'POST',
+    headers: { [WORKSPACE_HEADER]: workspaceId },
+  })
+}

@@ -27,9 +27,60 @@ import java.util.UUID;
 public class DirectorController {
 
     private final DirectorService directorService;
+    private final studio.weaveora.director.AiAudioService aiAudioService;
+    private final com.fasterxml.jackson.databind.ObjectMapper mapper =
+            new com.fasterxml.jackson.databind.ObjectMapper();
 
-    public DirectorController(DirectorService directorService) {
+    public DirectorController(DirectorService directorService,
+                              studio.weaveora.director.AiAudioService aiAudioService) {
         this.directorService = directorService;
+        this.aiAudioService = aiAudioService;
+    }
+
+    /**
+     * P11：AI 一键生成台词（分析画面+人物 → 1~3 段台词，模拟对话）。
+     *
+     * @param shotNo  可选；不传 = 为所有“还没有台词”的镜头批量生成
+     * @param replace true = 覆盖该镜已有台词
+     */
+    @PostMapping("/revisions/{revisionId}/ai-lines")
+    public ResponseEntity<com.fasterxml.jackson.databind.node.ObjectNode> aiLines(
+            HttpServletRequest request,
+            @RequestHeader(value = ProjectController.WORKSPACE_HEADER, required = false) String workspaceId,
+            @PathVariable UUID projectId,
+            @PathVariable UUID revisionId,
+            @RequestBody(required = false) AiLinesRequest body) {
+        Integer shotNo = body == null ? null : body.shotNo();
+        boolean replace = body != null && Boolean.TRUE.equals(body.replace());
+        var r = aiAudioService.generateLines(uid(request), ws(workspaceId), projectId, revisionId, shotNo, replace);
+        return ResponseEntity.ok(studio.weaveora.director.AiAudioService.linesToJson(mapper, r));
+    }
+
+    /** P11：AI 一键配乐（依据剧情给出 2~5 段「时间段 + 情绪」）。 */
+    @PostMapping("/revisions/{revisionId}/ai-music")
+    public ResponseEntity<java.util.Map<String, Object>> aiMusic(
+            HttpServletRequest request,
+            @RequestHeader(value = ProjectController.WORKSPACE_HEADER, required = false) String workspaceId,
+            @PathVariable UUID projectId,
+            @PathVariable UUID revisionId) {
+        var r = aiAudioService.generateMusic(uid(request), ws(workspaceId), projectId, revisionId);
+        java.util.List<java.util.Map<String, Object>> cues = new java.util.ArrayList<>();
+        for (var c : r.cues()) {
+            cues.add(java.util.Map.of(
+                    "id", c.id(), "start_sec", c.startSec(), "end_sec", c.endSec(),
+                    "mood", c.mood(), "gain_db", c.gainDb(),
+                    "fade_in_sec", c.fadeInSec(), "fade_out_sec", c.fadeOutSec(),
+                    "loop", c.loop(), "duck", c.duck()));
+        }
+        java.util.Map<String, Object> out = new java.util.LinkedHashMap<>();
+        out.put("source", r.source());
+        out.put("music", cues);
+        out.put("notes", r.notes());
+        return ResponseEntity.ok(out);
+    }
+
+    /** AI 台词请求体（shotNo 空 = 批量）。 */
+    public record AiLinesRequest(Integer shotNo, Boolean replace) {
     }
 
     @PostMapping("/director/rewrite-prompt")

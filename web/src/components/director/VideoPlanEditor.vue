@@ -39,6 +39,9 @@ const emit = defineEmits<{
   cloneVoice: [ctx: { mode: 'preset' | 'line'; name?: string; shotNo?: number; lineIndex?: number; atSec?: number; subject?: string; replaceId?: string }]
   /** P10：分镜请求调整本镜（延长时长 / 允许溢出）—— 由父级回写以触发脏标记 */
   patchShot: [shotNo: number, patch: { duration_sec?: number; allowNarrationOverflow?: boolean }]
+  /** P11：AI 一键生成台词 / 一键配乐 */
+  aiLines: [shotNo: number]
+  aiMusic: []
   /** P9：删除音色（父级调 API + 清理引用） */
   removePreset: [id: string]
   /** 方案被就地修改（改名等），父级用于触发 dirty */
@@ -378,6 +381,21 @@ const transitions = ['cut', 'dissolve', 'fade', 'wipe'].map((v) => ({ label: v, 
       <p class="block-label font-mono">
         配乐时间轴（可多段：起止 / 强弱 / 淡入淡出）
       </p>
+      <div class="ai-bar">
+        <NButton
+          size="tiny"
+          secondary
+          :disabled="!!disabled"
+          data-testid="btn-ai-music"
+          title="让 AI 根据剧情把全片划分成 2~5 段配乐（含情绪与强弱）"
+          @click="emit('aiMusic')"
+        >
+          ✨ AI 一键配乐（按剧情分段）
+        </NButton>
+        <span class="text-secondary" style="font-size: 12px">
+          会覆盖现有的配乐段落；生成后点「生成配乐」按情绪渲染
+        </span>
+      </div>
       <p class="hint-line text-secondary">
         成片总长 {{ totalDur.toFixed(2) }}s；每段独立音量，追赶/高潮段可调高并换情绪
       </p>
@@ -405,6 +423,7 @@ const transitions = ['cut', 'dissolve', 'fade', 'wipe'].map((v) => ({ label: v, 
             :speed-hints="speedHints"
             :durations="props.durations ?? {}"
             @extend-shot="(no, patch) => emit('patchShot', no, patch)"
+            @ai-lines="(no) => emit('aiLines', no)"
             @update:shot="onShotUpdate"
             @gen-line="(no, li) => emit('genLine', no, li)"
             @preview-line="(no, li) => emit('previewLine', no, li)"
@@ -572,5 +591,12 @@ const transitions = ['cut', 'dissolve', 'fade', 'wipe'].map((v) => ({ label: v, 
 }
 .vc-lib-dot {
   font-size: 12px;
+}
+.ai-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin: -2px 0 8px;
 }
 </style>
