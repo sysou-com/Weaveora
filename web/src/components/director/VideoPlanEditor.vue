@@ -8,7 +8,7 @@ import NarrationTimeline from '@/components/director/NarrationTimeline.vue'
 import ShotCard from '@/components/director/ShotCard.vue'
 import VoiceBindingsTable from '@/components/director/VoiceBindingsTable.vue'
 import type { DirectorShot, ShotRecord, VideoPlan } from '@/api/types'
-import { MUSIC_MOOD_PRESETS, VOICE_PRESETS, moodOptions, voiceOptions } from '@/utils/audio'
+import { MUSIC_MOOD_PRESETS, VOICE_PRESETS, moodOptions } from '@/utils/audio'
 
 const props = defineProps<{
   plan: VideoPlan
@@ -33,6 +33,8 @@ const emit = defineEmits<{
   genLine: [shotNo: number, lineIndex: number]
   previewLine: [shotNo: number, lineIndex: number]
   importLine: [shotNo: number, lineIndex: number, file: File, atSec: number, subject: string]
+  /** P9：打开克隆配音弹窗（preset=设为角色音色；line=也可直接用这段当本行配音） */
+  cloneVoice: [ctx: { mode: 'preset' | 'line'; name?: string; shotNo?: number; lineIndex?: number; atSec?: number; subject?: string }]
   closePreview: []
 }>()
 
@@ -71,6 +73,13 @@ function onShotUpdate(shot: DirectorShot): void {
   const i = (props.plan.shots ?? []).indexOf(shot)
   if (i >= 0) props.plan.shots[i] = shot
 }
+
+/** P9：音色选项 = 内置 7 个 + 本项目已录的克隆音色（clone:<id>） */
+const clonePresets = computed(() => props.plan.audio?.voicePresets ?? [])
+const voiceChoices = computed(() => [
+  ...VOICE_PRESETS.map((v) => ({ label: v, value: v })),
+  ...clonePresets.value.map((p) => ({ label: `🎙 ${p.name}（克隆）`, value: `clone:${p.id}` })),
+])
 
 /** 成片总时长 = 各镜时长之和；修改镜头时长后同步 plan.duration_sec。 */
 const totalDur = computed(() =>
@@ -114,10 +123,10 @@ const transitions = ['cut', 'dissolve', 'fade', 'wipe'].map((v) => ({ label: v, 
           />
         </label>
         <label class="row">
-          <span class="key">配音音色 voice（预设或参考音频路径）</span>
+          <span class="key">配音音色 voice（预设 / 克隆音色 / 参考音频路径）</span>
           <NSelect
             v-model:value="props.plan.audio.voice"
-            :options="voiceOptions"
+            :options="voiceChoices"
             size="small"
             filterable
             tag
@@ -125,6 +134,23 @@ const transitions = ['cut', 'dissolve', 'fade', 'wipe'].map((v) => ({ label: v, 
             placeholder="中文女"
           />
         </label>
+        <div class="vc-entry">
+          <NButton
+            size="tiny"
+            secondary
+            :disabled="!!disabled"
+            data-testid="btn-clone-voice"
+            title="录一段声音或上传样本，处理成可复用的音色"
+            @click="emit('cloneVoice', { mode: 'preset' })"
+          >
+            🎙 克隆音色（录音 / 上传样本）
+          </NButton>
+          <span class="text-secondary" style="font-size: 12px">
+            已录 {{ clonePresets.length }} 个音色<template v-if="clonePresets.length">：
+              <span class="font-mono">{{ clonePresets.map((p) => p.name).join('、') }}</span>
+            </template>；录好的会出现在上面的下拉里（标「克隆」）
+          </span>
+        </div>
         <div class="zh-head">
           <NButton
             size="small"
@@ -244,7 +270,7 @@ const transitions = ['cut', 'dissolve', 'fade', 'wipe'].map((v) => ({ label: v, 
       <VoiceBindingsTable
         :plan="props.plan"
         :disabled="disabled"
-        :voices="VOICE_PRESETS"
+        :voices="voiceChoices"
         :known-subjects="knownSubjects"
       />
     </section>
@@ -276,11 +302,12 @@ const transitions = ['cut', 'dissolve', 'fade', 'wipe'].map((v) => ({ label: v, 
             :disabled="disabled"
             :busy="previewBusy"
             :subjects="knownSubjects"
-            :voices="VOICE_PRESETS"
+            :voices="voiceChoices"
             @update:shot="onShotUpdate"
             @gen-line="(no, li) => emit('genLine', no, li)"
             @preview-line="(no, li) => emit('previewLine', no, li)"
             @import-line="(no, li, f, at, sub) => emit('importLine', no, li, f, at, sub)"
+            @clone-line="(no, li, at, sub) => emit('cloneVoice', { mode: 'line', shotNo: no, lineIndex: li, atSec: at, subject: sub, name: sub })"
           />
         </div>
       </div>
@@ -410,5 +437,12 @@ const transitions = ['cut', 'dissolve', 'fade', 'wipe'].map((v) => ({ label: v, 
 .nt-slot {
   flex: 1 1 auto;
   min-width: 0;
+}
+.vc-entry {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin: -2px 0 8px;
 }
 </style>

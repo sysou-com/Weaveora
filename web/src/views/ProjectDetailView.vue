@@ -25,13 +25,14 @@ import {
 import { createBrief, listBriefs } from '@/api/briefs'
 import { createJobs, listJobs, cancelJob, rerunJob, retryJobs, deleteJobs, JOB_STATE_LABEL } from '@/api/jobs'
 import { shareProject } from '@/api/market'
-import { listAssets, uploadReference, fetchAssetBlob, deleteAssets, uploadVoiceLine } from '@/api/assets'
+import { listAssets, uploadReference, fetchAssetBlob, deleteAssets, uploadVoiceLine, useSampleAsLineVoice } from '@/api/assets'
 import { createExport, fetchExportBlob, renderMaster, timecode } from '@/api/export'
 import { getProject, updateProjectDuration } from '@/api/projects'
 import type { AssetRef, DirectorPlan, DirectorShot, JobRecord } from '@/api/types'
 import BriefComposer from '@/components/director/BriefComposer.vue'
 import ImagePlanEditor from '@/components/director/ImagePlanEditor.vue'
 import RevisionRail from '@/components/director/RevisionRail.vue'
+import VoiceCloneDialog from '@/components/director/VoiceCloneDialog.vue'
 import VideoPlanEditor from '@/components/director/VideoPlanEditor.vue'
 import { useAuthStore } from '@/stores/auth'
 import { aspectNote, modeLabel } from '@/utils/format'
@@ -1396,6 +1397,76 @@ async function doImport(save: boolean): Promise<void> {
   }
 }
 
+/** P9：克隆配音弹窗上下文 */
+const cloneOpen = ref(false)
+const cloneCtx = ref<{ mode: 'preset' | 'line'; name: string; shotNo: number; lineIndex: number; atSec: number; subject: string }>({
+  mode: 'preset', name: '', shotNo: 0, lineIndex: 0, atSec: 0, subject: '',
+})
+
+function openCloneDialog(ctx: { mode: 'preset' | 'line'; name?: string; shotNo?: number; lineIndex?: number; atSec?: number; subject?: string }): void {
+  cloneCtx.value = {
+    mode: ctx.mode,
+    name: ctx.name ?? '',
+    shotNo: ctx.shotNo ?? 0,
+    lineIndex: ctx.lineIndex ?? 0,
+    atSec: ctx.atSec ?? 0,
+    subject: ctx.subject ?? '',
+  }
+  cloneOpen.value = true
+}
+
+/** 弹窗保存：写入音色库（A）；line 模式下 usedForLine 紧跟着触发 */
+function onCloneSaved(p: { id: string; name: string; presetAssetId: string; promptText: string; durationSec: number }): void {
+  lastCloneAssetId.value = p.presetAssetId
+  const plan = draft.value
+  if (!plan || !isVideoPlan(plan)) return
+  const audio = plan.audio as unknown as Record<string, unknown>
+  const list = Array.isArray(audio.voicePresets) ? (audio.voicePresets as Record<string, unknown>[]) : []
+  const idx = list.findIndex((x) => x && x.id === p.id)
+  const entry = {
+    id: p.id,
+    name: p.name,
+    assetId: p.presetAssetId,
+    promptText: p.promptText,
+    durationSec: p.durationSec,
+    processed: true,
+  }
+  if (idx >= 0) list[idx] = entry
+  else list.push(entry)
+  audio.voicePresets = list
+  // 第一次录音色时顺手把全片默认音色指过去（用户可再改）
+  if (cloneCtx.value.mode === 'preset' && !(plan.audio.voice ?? '').trim()) {
+    plan.audio.voice = `clone:${p.id}`
+  }
+  message.success(`音色「${p.name}」已加入音色库（记得保存方案）`)
+}
+
+/** B：把刚处理好的样本落成本行配音 */
+async function onCloneUsedForLine(): Promise<void> {
+  const ctx = cloneCtx.value
+  const presetAssetId = lastCloneAssetId.value
+  if (!presetAssetId) {
+    message.warning('没有拿到样本资产，请重新处理一次')
+    return
+  }
+  try {
+    await useSampleAsLineVoice(workspaceId.value, projectId.value, {
+      shotNo: ctx.shotNo,
+      lineIndex: ctx.lineIndex,
+      atSec: ctx.atSec,
+      subject: ctx.subject,
+      srcAssetId: presetAssetId,
+    })
+    await queryClient.invalidateQueries({ queryKey: ['assets'] })
+    message.success(`第 ${ctx.shotNo} 镜第 ${ctx.lineIndex + 1} 段已用你的录音作为配音`)
+  } catch (e) {
+    message.error(e instanceof Error ? e.message : '落库失败')
+  }
+}
+
+/** 弹窗最近一次处理出的样本资产（usedForLine 要用） */
+const lastCloneAssetId = ref('')
+
 async function handleApprove(): Promise<void> {
   if (!selectedRevId.value) return
   // 有未保存改动：先保存草稿再确认（否则确认会用服务端旧方案，草稿丢失）
@@ -1707,6 +1778,7 @@ const shotTotal = computed(() => {
                   @gen-line="genVoiceLine"
                   @preview-line="previewVoiceLine"
                   @import-line="importVoiceLine"
+                  @clone-voice="openCloneDialog"
                   @close-preview="closeAudioPreview"
                 />
               </template>
@@ -2087,6 +2159,22 @@ const shotTotal = computed(() => {
       </div>
 
       <!-- 底：版本条 + 确认闸门（§9.1/§9.5） -->
+      <!-- P9：克隆配音弹窗（放在页面级，方案区与分镜共用同一个） -->
+      <VoiceCloneDialog
+        v-model:show="cloneOpen"
+        :mode="cloneCtx.mode"
+        :default-name="cloneCtx.name"
+        :workspace-id="workspaceId"
+        :project-id="projectId"
+        :shot-no="cloneCtx.shotNo"
+        :line-index="cloneCtx.lineIndex"
+        :at-sec="cloneCtx.atSec"
+        :subject="cloneCtx.subject"
+        :disabled="!canEdit"
+        @saved="onCloneSaved"
+        @used-for-line="onCloneUsedForLine"
+      />
+
       <div class="studio-rail">
         <RevisionRail
           :revisions="revisions.data.value ?? []"

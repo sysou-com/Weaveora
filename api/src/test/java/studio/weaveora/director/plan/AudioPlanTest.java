@@ -297,4 +297,69 @@ class AudioPlanTest {
         assertEquals(14.0, AudioPlan.generateDurationFor(cues, "紧张悬疑"));
         assertEquals(0.0, AudioPlan.generateDurationFor(cues, "不存在的情绪"));
     }
+
+    // ------------------------------------------------------------ P9 克隆音色库
+
+    private ObjectNode planWithPresets() {
+        ObjectNode plan = videoPlan(10);
+        plan.putObject("audio").putArray("voicePresets")
+                .addObject().put("id", "guanyu").put("name", "关羽")
+                .put("assetId", "asset-1").put("promptText", "希望你以后能够做的比我还好唷。")
+                .put("durationSec", 12.4);
+        return plan;
+    }
+
+    @Test
+    void voicePresetsParsed() {
+        List<AudioPlan.VoicePreset> ps = AudioPlan.voicePresets(planWithPresets());
+        assertEquals(1, ps.size());
+        assertEquals("guanyu", ps.get(0).id());
+        assertEquals("关羽", ps.get(0).name());
+        assertEquals("asset-1", ps.get(0).assetId());
+        assertEquals(12.4, ps.get(0).durationSec(), 1e-9);
+        assertTrue(ps.get(0).promptText().contains("希望你以后"));
+    }
+
+    @Test
+    void missingAssetIdOrIdIsSkipped() {
+        ObjectNode plan = videoPlan(10);
+        var arr = plan.putObject("audio").putArray("voicePresets");
+        arr.addObject().put("id", "a");            // 缺 assetId → 跳
+        arr.addObject().put("assetId", "x");       // 缺 id → 跳
+        assertTrue(AudioPlan.voicePresets(plan).isEmpty());
+    }
+
+    @Test
+    void presetNameFallsBackToId() {
+        ObjectNode plan = videoPlan(10);
+        plan.putObject("audio").putArray("voicePresets")
+                .addObject().put("id", "guanyu").put("assetId", "a1");
+        assertEquals("guanyu", AudioPlan.voicePresets(plan).get(0).name());
+    }
+
+    @Test
+    void clonePrefixDetection() {
+        assertTrue(AudioPlan.isClone("clone:guanyu"));
+        assertEquals("guanyu", AudioPlan.cloneId("clone:guanyu"));
+        assertFalse(AudioPlan.isClone("中文女"));
+        assertFalse(AudioPlan.isClone("/data/audio/ref.wav"));
+        assertFalse(AudioPlan.isClone("clone:"), "只有前缀不算克隆，否则会当成空 id");
+        assertFalse(AudioPlan.isClone(null));
+    }
+
+    @Test
+    void presetByIdFindsAndMisses() {
+        ObjectNode plan = planWithPresets();
+        assertEquals("asset-1", AudioPlan.presetById(plan, "guanyu").assetId());
+        assertNull(AudioPlan.presetById(plan, "lubu"), "不存在的 id 必须返回 null，不能静默回落默认音色");
+    }
+
+    @Test
+    void cloneBindingResolvesThroughVoiceBindings() {
+        ObjectNode plan = planWithPresets();
+        plan.with("audio").putArray("voiceBindings")
+                .addObject().put("subject", "关羽").put("voice", "clone:guanyu");
+        assertEquals("clone:guanyu", AudioPlan.voiceFor(plan, "关羽", null));
+        assertEquals("guanyu", AudioPlan.cloneId(AudioPlan.voiceFor(plan, "关羽", null)));
+    }
 }

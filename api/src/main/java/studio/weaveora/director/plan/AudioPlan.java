@@ -34,6 +34,9 @@ public final class AudioPlan {
 
     public static final double DEFAULT_SPEED = 1.0;
 
+    /** 克隆音色的 voice 前缀：{@code clone:关羽} */
+    public static final String CLONE_PREFIX = "clone:";
+
     private AudioPlan() {
     }
 
@@ -67,6 +70,57 @@ public final class AudioPlan {
         public double durationSec() {
             return endSec - startSec;
         }
+    }
+
+    /**
+     * P9 克隆音色：用户录/传一段样本 → 处理 → 存为音色，供 {@code voice="clone:<id>"} 引用。
+     *
+     * @param promptText 样本的文本（whisper 转写，可手改）—— 传给 CosyVoice 的 prompt_text，
+     *                   比空串明显更贴音色
+     */
+    public record VoicePreset(String id, String name, String assetId, String promptText, double durationSec) {
+    }
+
+    /** 是否引用了克隆音色（形如 {@code clone:guanyu}）。 */
+    public static boolean isClone(String voice) {
+        return voice != null && voice.startsWith(CLONE_PREFIX) && voice.length() > CLONE_PREFIX.length();
+    }
+
+    /** 从 {@code clone:xxx} 取出 {@code xxx}。 */
+    public static String cloneId(String voice) {
+        return voice == null ? "" : voice.substring(CLONE_PREFIX.length()).trim();
+    }
+
+    /** 音色库：audio.voicePresets[] */
+    public static List<VoicePreset> voicePresets(JsonNode plan) {
+        List<VoicePreset> out = new ArrayList<>();
+        if (plan == null || plan.isMissingNode()) {
+            return out;
+        }
+        for (JsonNode p : plan.path("audio").path("voicePresets")) {
+            String id = p.path("id").asText("").trim();
+            String assetId = p.path("assetId").asText("").trim();
+            if (id.isEmpty() || assetId.isEmpty()) {
+                continue;
+            }
+            String name = p.path("name").asText("").trim();
+            out.add(new VoicePreset(id, name.isEmpty() ? id : name, assetId,
+                    p.path("promptText").asText("").trim(), p.path("durationSec").asDouble(0)));
+        }
+        return out;
+    }
+
+    /** 按 id 取音色；找不到返回 null（调用方应报错，不要静默回落成默认音色）。 */
+    public static VoicePreset presetById(JsonNode plan, String id) {
+        if (blank(id)) {
+            return null;
+        }
+        for (VoicePreset p : voicePresets(plan)) {
+            if (p.id().equals(id.trim())) {
+                return p;
+            }
+        }
+        return null;
     }
 
     // ---------------------------------------------------------------- 语音

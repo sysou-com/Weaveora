@@ -51,6 +51,9 @@ def tts(payload):
     }
     if payload.get("seed") is not None:
         body["seed"] = int(payload["seed"])
+    # P9：克隆音色的样本转写文本（传给 CosyVoice 的 prompt_text，比空串明显更贴音色）
+    if (payload.get("refPromptText") or "").strip():
+        body["prompt_text"] = payload["refPromptText"].strip()
     timeout = int(os.environ.get("WEAVEORA_TTS_TIMEOUT", "900"))
     return _post(TTS_URL + "/tts", body, timeout)
 

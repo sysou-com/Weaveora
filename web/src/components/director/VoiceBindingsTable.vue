@@ -13,7 +13,8 @@ const props = withDefaults(
   defineProps<{
     plan: VideoPlan
     disabled?: boolean
-    voices?: string[]
+    /** 音色选项（内置名 + 克隆音色 clone:<id>） */
+    voices?: { label: string; value: string }[]
     /** 已知角色名（来自参考图主体 + 分镜里的说话人），供下拉 */
     knownSubjects?: string[]
   }>(),
@@ -33,7 +34,7 @@ function commit(): void {
 }
 
 function add(): void {
-  rows.value.push({ subject: '', voice: props.voices[0] ?? '中文女', speed: 1 })
+  rows.value.push({ subject: '', voice: props.voices[0]?.value ?? '中文女', speed: 1 })
   commit()
 }
 
@@ -43,7 +44,7 @@ function remove(i: number): void {
 }
 
 const subjectOpts = computed(() => props.knownSubjects.filter(Boolean).map((s) => ({ label: s, value: s })))
-const voiceOpts = computed(() => props.voices.map((v) => ({ label: v, value: v })))
+const voiceOpts = computed(() => props.voices ?? [])
 
 /** 该角色在分镜里被引用了几次（提示绑定是否生效） */
 function usage(subject: string): number {

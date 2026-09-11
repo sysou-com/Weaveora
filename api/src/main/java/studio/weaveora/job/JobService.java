@@ -454,7 +454,20 @@ public class JobService {
                     payload.put("subject", line.subject());
                 }
                 payload.put("text", line.text());
-                payload.put("voice", AudioPlan.voiceFor(plan, line.subject(), line.voice()));
+                String voice = AudioPlan.voiceFor(plan, line.subject(), line.voice());
+                payload.put("voice", voice);
+                // P9：clone:<id> → 把参考音资产与转写文本一并下发，worker 负责拉到本地再喂 TTS
+                if (AudioPlan.isClone(voice)) {
+                    AudioPlan.VoicePreset vp = AudioPlan.presetById(plan, AudioPlan.cloneId(voice));
+                    if (vp == null) {
+                        throw new BizException(ErrorCode.VALIDATION,
+                                "克隆音色「" + AudioPlan.cloneId(voice) + "」不存在（可能已被删除），请重新绑定音色");
+                    }
+                    payload.put("refAssetId", vp.assetId());
+                    if (!vp.promptText().isBlank()) {
+                        payload.put("refPromptText", vp.promptText());
+                    }
+                }
                 payload.put("speed", AudioPlan.speedFor(plan, line.subject(), line.speed()));
                 payload.put("target_sec", window);
                 payload.put("seed", randomSeed());

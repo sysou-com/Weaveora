@@ -254,6 +254,51 @@ CosyVoice 依赖 Linux 专属轮子 → 只能走 WSL2。落地细节：
     不设结束点的对照组在 4.0s 仍是 -24.1dB → 证明剪裁真的生效
   * 一镜两段字幕：libass 接受（rc=0），0.8s 帧有字幕（14KB）/ 3.9s 帧无字幕（1.5KB）→ 逐段定时生效
 
+### P9 克隆音色 / 录音配音（2026-09-11）
+
+**目标**：让用户自己能提供声音，解决"内置只有 2 个男声"的限制。两种用途都做：
+
+| | A. 克隆音色（录一次跑全片） | B. 真人配音（一段一条） |
+| --- | --- | --- |
+| 入口 | 音频区「配音音色」旁：**🎙 克隆音色** | 每条语音面板里的 **克隆配音** |
+| 结果 | 写入 `audio.voicePresets`，下拉里出现 `clone:<id>` | 直接落成本行的 `voice` 资产 |
+
+#### 数据
+```jsonc
+"audio": {
+  "voicePresets": [ { "id":"guanyu", "name":"关羽", "assetId":"…",
+                      "promptText":"吾乃关云长…", "durationSec":12.4 } ],
+  "voiceBindings": [ { "subject":"关羽", "voice":"clone:guanyu" } ]
+}
+```
+`voice` 现在可能是：内置音色名 / GPU 机上的 wav 路径 / **`clone:<id>`**
+
+#### 后端
+| 位置 | 改动 |
+| --- | --- |
+| `AudioProcessService`（新） | ffmpeg 处理链：单声道+24kHz（必做）→（可选）降噪 `afftdn` → 去静音 `silenceremove` → 响度归一 `loudnorm=-16` → 音高 `asetrate+atempo` → 裁长。**先降噪再测静音/响度**，否则测的是噪底 |
+| `VoicePresetService`（新） | 存两份资产：`voice_preset_src`（原件，供 A/B 对比）+ `voice_preset`（处理后的参考音） |
+| `POST /projects/{id}/voice-presets` | multipart：file + 处理选项 → 返回 `{rawAssetId, presetAssetId, durationSec, warnings}` |
+| `POST /voice-presets/{assetId}/transcribe` | 调 GPU 机 whisper 转写，并把文本回写快照 |
+| `POST /shots/{no}/lines/{i}/voice-from-sample` | B 用途：**服务端复制**样本成该行 voice 资产（前端不用重传） |
+| `JobService` | `voice` 为 `clone:<id>` 时解析出 `refAssetId`/`refPromptText` 写进 payload |
+| `worker` | 有 `refAssetId` → 用现成的 `fetch_reference_bytes()` 把参考音拉到临时 wav → 把 `voice` 换成**本地路径** + `prompt_text` |
+| `tts_server.py` | `/tts` 增 `prompt_text`；新增 `/transcribe`（whisper，默认 base、默认跑 CPU 以免抢显存） |
+| `tunnel_comfy.ps1` | 新增 `-R 127.0.0.1:18091:127.0.0.1:8091`，供 API 调转写；`weaveora.tts-url` 默认指向它 |
+
+#### 前端
+- `VoiceCloneDialog.vue`：取声源（浏览器录音 MediaRecorder / 上传）→ 处理选项 → **原声 vs 处理后 A/B 试听** → 自动转写（可手改）→ 「设为角色音色」/「直接用这段作为本行配音」
+- 浏览器不支持时给出提示：**Chrome / Edge / Firefox，或 Safari 14.1+**，并引导改用上传
+- 录音容器自适应：优先 `audio/webm;codecs=opus`，Safari 回落 `audio/mp4`
+
+#### 实测
+- 单测 **57 个全绿**（新增 `AudioProcessServiceTest` 7 + 克隆解析 6）
+- `deploy/verify_voice_clone.sh` 真跑 ffmpeg：4.80s 的“差样本”（首尾静音+底噪+低电平）
+  → 3.39s / **24kHz 单声道** / 响度 -30dB → **-15.2dB**（接近目标 -16 LUFS）
+- whisper 转写链路实测通（服务器经隧道 18091 → GPU 机）：合成一句 → 转写回文本，3s（模型已缓存）
+  * 精度提醒：whisper-base 中文仍有同音错字（实测“虎牢关前…”→“胡牢关前…”），
+    所以 UI 里转写文本**可手改**；要更准可设 `WEAVEORA_WHISPER_MODEL=small`（首次下载 ~460MB）
+
 ### 待办（P7 收尾）
 - [ ] Web 端产出已构建（`web/dist`），但**部署到 sysou.com 的目标路径未在 175.12.60.225 的 nginx 配置里**，需确认后再发
 - [ ] 验收：Web → 视频项目 → 分镜填旁白 → 生成配音 → 资产库可播放 → 渲染成片听混音 → 导出包查 edit_list.json

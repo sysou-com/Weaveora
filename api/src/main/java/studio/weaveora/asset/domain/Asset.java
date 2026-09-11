@@ -138,6 +138,11 @@ public class Asset {
     public Long seed() { return seed; }
     /** 产生该资产的 job payload 快照（P8 配音靠它取 at_sec / line_index）；老数据可能为 null。 */
     public com.fasterxml.jackson.databind.JsonNode promptSnapshot() { return promptSnapshot; }
+
+    /** P9：转写后把文本回写到快照（音色资产的下次复用可直接拿）。 */
+    public void attachPromptSnapshot(com.fasterxml.jackson.databind.JsonNode snap) {
+        this.promptSnapshot = snap;
+    }
     public boolean nsfw() { return nsfw; }
     public OffsetDateTime createdAt() { return createdAt; }
 }

@@ -19,8 +19,8 @@ const props = withDefaults(
     busy?: boolean
     /** 角色建议列表（来自 voiceBindings + referenceAssets） */
     subjects?: string[]
-    /** 音色预设 */
-    voices?: string[]
+    /** 音色选项（内置名 + 克隆音色 clone:<id>） */
+    voices?: { label: string; value: string }[]
   }>(),
   { disabled: false, busy: false, subjects: () => [], voices: () => [] },
 )
@@ -33,6 +33,8 @@ const emit = defineEmits<{
   previewLine: [shotNo: number, lineIndex: number]
   /** 导入自己配好的声音 */
   importLine: [shotNo: number, lineIndex: number, file: File, atSec: number, subject: string]
+  /** P9：打开克隆配音（录音/上传 → 处理 → 设为音色或直接用这段） */
+  cloneLine: [shotNo: number, lineIndex: number, atSec: number, subject: string]
 }>()
 
 /** 中文配音大致语速（字/秒）——仅用于估算块宽与时长，不是真实合成结果 */
@@ -192,7 +194,7 @@ function setEndFromEstimate(): void {
 const subjectOptions = computed(() =>
   (props.subjects ?? []).filter(Boolean).map((s) => ({ label: s, value: s })),
 )
-const voiceOpts = computed(() => (props.voices ?? []).map((v) => ({ label: v, value: v })))
+const voiceOpts = computed(() => props.voices ?? [])
 
 /** 时间刻度：每秒一条（镜头过长时每 2 秒） */
 const ticks = computed(() => {
@@ -418,6 +420,16 @@ function pickVoiceFile(i: number): void {
         @click="emit('previewLine', shot.shot_no, selected)"
       >
         试听这条
+      </NButton>
+      <NButton
+        size="tiny"
+        quaternary
+        :disabled="disabled || busy"
+        :data-testid="`line-clone-${shot.shot_no}-${selected}`"
+        title="录一段声音或上传样本：可以先处理成音色，也可以直接用这段当本行配音"
+        @click="emit('cloneLine', shot.shot_no, selected, cur.at_sec ?? 0, cur.subject ?? '')"
+      >
+        克隆配音
       </NButton>
     </div>
 

@@ -122,14 +122,28 @@ export interface MusicCue {
   duck?: boolean | null
 }
 
+/** P9 克隆音色（录音/上传样本 → 处理 → 可复用） */
+export interface VoicePreset {
+  id: string
+  name: string
+  /** 处理后的参考音资产 id（24kHz 单声道） */
+  assetId: string
+  /** 样本说了什么（whisper 转写，可手改）——传给 CosyVoice 的 prompt_text */
+  promptText?: string | null
+  durationSec?: number | null
+  processed?: boolean | null
+}
+
 /** BasicPlan 共用音频配置（P8 扩展，字段均向后兼容） */
 export interface PlanAudio {
   /** 整片默认配乐情绪（无 music 段时铺满全片） */
   music_mood: string
-  /** 默认配音音色 */
+  /** 默认配音音色：内置名 / 参考音频路径 / clone:<id> */
   voice?: string
   /** P8 角色→音色绑定 */
   voiceBindings?: VoiceBinding[] | null
+  /** P9 克隆音色库 */
+  voicePresets?: VoicePreset[] | null
   /** P8 配乐段落表 */
   music?: MusicCue[] | null
   sfx: string[]

@@ -128,6 +128,37 @@ def make_animated_webp(width, height, seed, frames=14, duration_ms=110):
                  duration=duration_ms, loop=0)
     return buf.getvalue()
 
+def _voice_media(payload):
+    """P9：配音。若任务带 refAssetId（克隆音色），先把参考音拉到本机再喂 TTS。
+
+    为什么要拉：tts_server 的 zero-shot 接口要的是 **GPU 机器上的 wav 路径**，
+    而音色样本存在服务端资产库里。复用 worker 已有的内部通道下载能力（无需新机制）。
+    拉下来的临时文件用完即删。"""
+    ref = payload.get("refAssetId")
+    if not ref:
+        import audio_client as audio
+        data, mime, dur_ms = audio.tts(payload)
+        return [(data, mime, None, None, dur_ms)]
+
+    import tempfile
+    import comfy_client as c  # 仅用它的 fetch_reference_bytes（纯 urllib）
+    import audio_client as audio
+    raw, _mime = c.fetch_reference_bytes(ref)
+    p = dict(payload)
+    fd, path = tempfile.mkstemp(prefix="wv_ref_", suffix=".wav")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(raw)
+        p["voice"] = path          # 换成 GPU 机器上的本地路径
+        data, mime, dur_ms = audio.tts(p)
+        return [(data, mime, None, None, dur_ms)]
+    finally:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
 def _bgm_media(jid, payload):
     """配乐生成：默认走 ComfyUI（ACE-Step 1.5 原生节点 + all-in-one 权重）；
     WEAVEORA_MUSIC_ENGINE=http 时改走 deploy/audio/music_server.py（:8092）。
@@ -189,9 +220,7 @@ def execute_job(job):
     if kind in ("voice", "bgm"):
         try:
             if kind == "voice":
-                import audio_client as audio
-                data, mime, dur_ms = audio.tts(payload)
-                media = [(data, mime, None, None, dur_ms)]
+                media = _voice_media(payload)
             else:
                 media = _bgm_media(jid, payload)
             return _complete(jid, payload, media)

@@ -12,8 +12,11 @@
   python3 tts_server.py 8091
 
 接口：
-  POST /tts  {"text":"...", "voice":"中文女", "speed":1.0, "target_sec":5}
+  POST /tts  {"text":"...", "voice":"中文女", "speed":1.0, "target_sec":5,
+              "seed":123, "prompt_text":"参考音里说了什么"}
     → audio/wav 字节；响应头 X-Duration-Ms 给时长
+  POST /transcribe   body=音频字节 → {"text":"..."}（whisper，供克隆样本自动转写）
+  GET  /health
   voice 取值（按序判定）：
     1. 存在的 wav 路径        → CosyVoice2 zero-shot 克隆
     2. SFT 模型的 spk2info 名 → CosyVoice-300M-SFT inference_sft（中文女/中文男/英文女/英文男/日语男/韩语女/粤语女）
@@ -59,6 +62,12 @@ _models = {}
 # 预热：服务启动即在后台加载模型并跑一次小样推理，避免首个任务等 1-3 分钟
 PRELOAD = os.environ.get("WEAVEORA_TTS_PRELOAD", "1").lower() not in ("0", "false", "no")
 _state = {"warm": False, "kind": None, "spks": [], "warmed_kind": None}
+
+# P9：克隆样本自动转写（whisper）。模型默认 base；默认跑 CPU 以免与 ComfyUI 抢显存。
+WHISPER_MODEL = os.environ.get("WEAVEORA_WHISPER_MODEL", "base")
+WHISPER_DEVICE = os.environ.get("WEAVEORA_WHISPER_DEVICE", "cpu").strip().lower()
+_whisper = None
+_whisper_lock = threading.Lock()
 
 
 def _resolve(p):
@@ -144,10 +153,11 @@ def _tensors_to_wav(chunks, sample_rate):
     return buf.getvalue()
 
 
-def _render(text, v, spd, seed=None):
+def _render(text, v, spd, seed=None, prompt_text=""):
     """按 voice 路由跑一次推理 → (chunks, sample_rate, used_label)。
 
     seed 非空时先固定随机种子，保证同一文案可复现（否则采样随机）。
+    prompt_text 仅对 zero-shot 生效：传参考音的转写文本，比空串明显更贴音色。
     """
     if seed is not None:
         try:
@@ -162,7 +172,8 @@ def _render(text, v, spd, seed=None):
         #    注意：inference_zero_shot 第 3 参是 **wav 文件路径**（内部 frontend_* →
         #    load_wav → torchaudio.load），传张量会报 "Invalid file: tensor([...])"。
         m = _load("v2")
-        return list(m.inference_zero_shot(text, "", v, stream=False, speed=spd)), \
+        return list(m.inference_zero_shot(text, (prompt_text or "").strip(), v,
+                                          stream=False, speed=spd)), \
             m.sample_rate, "zero-shot:%s" % os.path.basename(v)
     spks = _sft_spks()
     if v in spks:
@@ -182,13 +193,13 @@ def _render(text, v, spd, seed=None):
                        % ("/".join(spks) or "SFT 模型缺失"))
 
 
-def synthesize(text, voice, speed, target_sec, seed=None):
+def synthesize(text, voice, speed, target_sec, seed=None, prompt_text=""):
     v = (voice or DEFAULT_VOICE).strip()
     spd = max(0.5, min(2.0, float(speed or 1.0)))
     tgt = float(target_sec or 0)
     t0 = time.time()
 
-    chunks, sr, used = _render(text, v, spd, seed)
+    chunks, sr, used = _render(text, v, spd, seed, prompt_text)
     wav = _tensors_to_wav(chunks, sr)
     ms = int(round((len(wav) - 44) / 2.0 / float(sr) * 1000))
 
@@ -203,7 +214,7 @@ def synthesize(text, voice, speed, target_sec, seed=None):
             if abs(spd2 - spd) > 0.02:
                 print("[tts] 时长对齐: 实际 %.2fs / 目标 %.2fs (ratio=%.2f)，语速 %.2f -> %.2f 重合成"
                       % (ms / 1000.0, tgt, ratio, spd, spd2), flush=True)
-                chunks, sr, used = _render(text, v, spd2, seed)
+                chunks, sr, used = _render(text, v, spd2, seed, prompt_text)
                 wav = _tensors_to_wav(chunks, sr)
                 ms = int(round((len(wav) - 44) / 2.0 / float(sr) * 1000))
                 spd = spd2
@@ -211,14 +222,63 @@ def synthesize(text, voice, speed, target_sec, seed=None):
         # 只报告差值，供 UI 提醒文案过长/过短，不动音频
         print("[tts] 时长比对(未对齐): 实际 %.2fs / 镜头 %.2fs" % (ms / 1000.0, tgt), flush=True)
 
-    print("[tts] text=%d字 voice=%s[%s] speed=%.2f target=%.1f seed=%s -> %.1fs in %.1fs"
-          % (len(text), v, used, spd, tgt, seed if seed is not None else "-", ms / 1000.0,
-             time.time() - t0), flush=True)
+    print("[tts] text=%d字 voice=%s[%s] speed=%.2f target=%.1f seed=%s prompt=%d字 -> %.1fs in %.1fs"
+          % (len(text), v, used, spd, tgt, seed if seed is not None else "-",
+             len(prompt_text or ""), ms / 1000.0, time.time() - t0), flush=True)
     return wav, ms
 
     print("[tts] text=%d字 voice=%s[%s] speed=%.2f target=%.1f -> %.1fs in %.1fs"
           % (len(text), v, used, spd, tgt, ms / 1000.0, time.time() - t0), flush=True)
     return wav, ms
+
+
+def _get_whisper():
+    """懒加载 whisper（首次会下载 base 模型 ~145MB）。"""
+    global _whisper
+    with _whisper_lock:
+        if _whisper is not None:
+            return _whisper
+        import whisper
+        t0 = time.time()
+        dev = WHISPER_DEVICE
+        if dev == "cuda":
+            try:
+                import torch
+                if not torch.cuda.is_available():
+                    dev = "cpu"
+            except Exception:
+                dev = "cpu"
+        _whisper = whisper.load_model(WHISPER_MODEL, device=dev)
+        print("[tts] whisper %s 已加载 (device=%s, %.1fs)" % (WHISPER_MODEL, dev, time.time() - t0),
+              flush=True)
+        return _whisper
+
+
+def _transcribe(raw: bytes, content_type: str) -> str:
+    """把音频字节转写成文本（供克隆样本自动生成 prompt_text）。
+
+    写到临时文件是因为 whisper 内部靠 ffmpeg 读文件；ffmpeg 在 WSL 里已装。
+    转写失败返回空串 —— 它只是锦上添花，不该让克隆流程断掉。
+    """
+    import tempfile
+    ext = "webm" if "webm" in (content_type or "") else \
+          "mp3" if "mpeg" in (content_type or "") else \
+          "m4a" if "mp4" in (content_type or "") else "wav"
+    fd, path = tempfile.mkstemp(suffix="." + ext)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(raw)
+        model = _get_whisper()
+        # whisper 中文默认会输出**繁体**且同音错字多；initial_prompt 用简体引导能明显改善
+        r = model.transcribe(path, fp16=False, verbose=False,
+                             initial_prompt="以下是普通话的句子，请用简体中文输出。",
+                             language=os.environ.get("WEAVEORA_WHISPER_LANG", "zh") or None)
+        return (r.get("text") or "").strip()
+    finally:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
 
 
 def _warm():
@@ -239,7 +299,8 @@ class Handler(BaseHTTPRequestHandler):
         if self.path.startswith("/health"):
             body = json.dumps({"ok": True, "loaded": bool(_models), "kind": _state["kind"],
                                "spks": _state["spks"], "sft_spks": _sft_spks(),
-                               "preload": PRELOAD, "warm": _state["warm"]}).encode()
+                               "preload": PRELOAD, "warm": _state["warm"],
+                               "whisper": WHISPER_MODEL, "whisper_device": WHISPER_DEVICE}).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
@@ -249,6 +310,28 @@ class Handler(BaseHTTPRequestHandler):
         self.send_error(404)
 
     def do_POST(self):
+        # P9：转写（body = 音频字节）
+        if self.path.startswith("/transcribe"):
+            try:
+                n = int(self.headers.get("Content-Length") or 0)
+                raw = self.rfile.read(n) if n > 0 else b""
+                if not raw:
+                    raise ValueError("没有收到音频字节")
+                text = _transcribe(raw, self.headers.get("Content-Type"))
+                body = json.dumps({"text": text}, ensure_ascii=False).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            except Exception as e:
+                msg = ("转写失败: " + str(e)[:300]).encode()
+                self.send_response(500)
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.send_header("Content-Length", str(len(msg)))
+                self.end_headers()
+                self.wfile.write(msg)
+            return
         if not self.path.startswith("/tts"):
             self.send_error(404)
             return
@@ -257,7 +340,7 @@ class Handler(BaseHTTPRequestHandler):
             req = json.loads(self.rfile.read(n) or b"{}")
             wav, ms = synthesize(req.get("text", ""), req.get("voice", ""),
                                  req.get("speed", 1.0), req.get("target_sec", 0),
-                                 req.get("seed"))
+                                 req.get("seed"), req.get("prompt_text", ""))
             self.send_response(200)
             self.send_header("Content-Type", "audio/wav")
             self.send_header("X-Duration-Ms", str(ms))

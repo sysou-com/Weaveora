@@ -30,9 +30,12 @@ import java.util.UUID;
 public class AssetController {
 
     private final AssetService assetService;
+    private final studio.weaveora.asset.VoicePresetService voicePresetService;
 
-    public AssetController(AssetService assetService) {
+    public AssetController(AssetService assetService,
+                           studio.weaveora.asset.VoicePresetService voicePresetService) {
         this.assetService = assetService;
+        this.voicePresetService = voicePresetService;
     }
 
     /** 上传参考图（W2C）：multipart 字段 file */
@@ -44,6 +47,75 @@ public class AssetController {
             @RequestParam("file") MultipartFile file) {
         return ResponseEntity.ok(assetService.uploadReference(
                 uid(request), ws(workspaceId), projectId, file));
+    }
+
+    /**
+     * P9：克隆音色 —— 上传样本 → 处理 → 返回原件/处理后两个资产（前端做 A/B 对比试听）。
+     */
+    @PostMapping(value = "/projects/{projectId}/voice-presets", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    public ResponseEntity<Map<String, Object>> createVoicePreset(
+            HttpServletRequest request,
+            @RequestHeader(value = ProjectController.WORKSPACE_HEADER, required = false) String workspaceId,
+            @PathVariable UUID projectId,
+            @RequestParam("file") MultipartFile file,
+            @RequestParam(value = "name", required = false) String name,
+            @RequestParam(value = "trimSilence", defaultValue = "true") Boolean trimSilence,
+            @RequestParam(value = "loudnorm", defaultValue = "true") Boolean loudnorm,
+            @RequestParam(value = "denoise", defaultValue = "false") Boolean denoise,
+            @RequestParam(value = "limitLength", defaultValue = "false") Boolean limitLength,
+            @RequestParam(value = "pitchSemitones", defaultValue = "0") Double pitchSemitones) {
+        var opts = new studio.weaveora.asset.AudioProcessService.Options(
+                Boolean.TRUE.equals(trimSilence), Boolean.TRUE.equals(loudnorm),
+                Boolean.TRUE.equals(denoise), Boolean.TRUE.equals(limitLength),
+                pitchSemitones == null ? 0 : pitchSemitones);
+        var c = voicePresetService.create(uid(request), ws(workspaceId), projectId, name, file, opts);
+        Map<String, Object> body = new java.util.LinkedHashMap<>();
+        body.put("rawAssetId", c.rawAssetId());
+        body.put("presetAssetId", c.presetAssetId());
+        body.put("durationSec", c.durationSec());
+        body.put("warnings", c.warnings());
+        return ResponseEntity.ok(body);
+    }
+
+    /** P9：转写样本（whisper 在 GPU 机器上），并把文本回写到音色快照供下次复用。 */
+    @PostMapping("/projects/{projectId}/voice-presets/{assetId}/transcribe")
+    public ResponseEntity<Map<String, String>> transcribe(
+            HttpServletRequest request,
+            @RequestHeader(value = ProjectController.WORKSPACE_HEADER, required = false) String workspaceId,
+            @PathVariable UUID projectId,
+            @PathVariable UUID assetId) {
+        String text = voicePresetService.transcribeAndCache(
+                uid(request), ws(workspaceId), projectId, assetId);
+        return ResponseEntity.ok(Map.of("text", text == null ? "" : text));
+    }
+
+    /** P9-B：把音色样本直接当本行配音（服务端复制，无需重新上传）。 */
+    @PostMapping("/projects/{projectId}/shots/{shotNo}/lines/{lineIndex}/voice-from-sample")
+    public ResponseEntity<Map<String, Object>> useSampleAsLineVoice(
+            HttpServletRequest request,
+            @RequestHeader(value = ProjectController.WORKSPACE_HEADER, required = false) String workspaceId,
+            @PathVariable UUID projectId,
+            @PathVariable int shotNo,
+            @PathVariable int lineIndex,
+            @RequestParam("srcAssetId") String srcAssetId,
+            @RequestParam(value = "atSec", defaultValue = "0") Double atSec,
+            @RequestParam(value = "subject", required = false) String subject) {
+        var c = voicePresetService.useAsLineVoice(uid(request), ws(workspaceId), projectId,
+                shotNo, lineIndex, atSec == null ? 0 : atSec, subject, UUID.fromString(srcAssetId));
+        return ResponseEntity.ok(Map.of("assetId", c.presetAssetId(), "durationSec", c.durationSec()));
+    }
+
+    /** P9：删除音色（原件 + 处理后）。 */
+    @PostMapping("/projects/{projectId}/voice-presets/{assetId}/delete")
+    public ResponseEntity<Map<String, String>> deleteVoicePreset(
+            HttpServletRequest request,
+            @RequestHeader(value = ProjectController.WORKSPACE_HEADER, required = false) String workspaceId,
+            @PathVariable UUID projectId,
+            @PathVariable UUID assetId,
+            @RequestParam(value = "rawAssetId", required = false) String rawAssetId) {
+        voicePresetService.delete(uid(request), ws(workspaceId), projectId, assetId,
+                rawAssetId == null || rawAssetId.isBlank() ? null : UUID.fromString(rawAssetId));
+        return ResponseEntity.ok(Map.of("deleted", "ok"));
     }
 
     /**
