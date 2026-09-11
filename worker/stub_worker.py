@@ -129,12 +129,12 @@ def make_animated_webp(width, height, seed, frames=14, duration_ms=110):
     return buf.getvalue()
 
 def _voice_media(payload):
-    """P9：配音。若任务带 refAssetId（克隆音色），先把参考音拉到本机再喂 TTS。
+    """P9：配音。若任务带 refAssetKey（克隆音色），先把参考音拉到本机再喂 TTS。
 
     为什么要拉：tts_server 的 zero-shot 接口要的是 **GPU 机器上的 wav 路径**，
     而音色样本存在服务端资产库里。复用 worker 已有的内部通道下载能力（无需新机制）。
-    拉下来的临时文件用完即删。"""
-    ref = payload.get("refAssetId")
+    refAssetKey 是**存储 key**（不是资产 UUID）；拉下来的临时文件用完即删。"""
+    ref = payload.get("refAssetKey")
     if not ref:
         import audio_client as audio
         data, mime, dur_ms = audio.tts(payload)

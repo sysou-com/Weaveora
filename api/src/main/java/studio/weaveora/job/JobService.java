@@ -456,14 +456,28 @@ public class JobService {
                 payload.put("text", line.text());
                 String voice = AudioPlan.voiceFor(plan, line.subject(), line.voice());
                 payload.put("voice", voice);
-                // P9：clone:<id> → 把参考音资产与转写文本一并下发，worker 负责拉到本地再喂 TTS
+                // P9：clone:<id> → 把参考音**存储 key**（不是资产 id！）与转写文本一并下发。
+                //     worker 拉参考音走的是 /internal/assets?key=storageKey（readAssetByKey），
+                //     早期误传资产 UUID → worker 拿它当 storage key 查 → 404 "fetch ref asset … -> 404"。
                 if (AudioPlan.isClone(voice)) {
                     AudioPlan.VoicePreset vp = AudioPlan.presetById(plan, AudioPlan.cloneId(voice));
                     if (vp == null) {
                         throw new BizException(ErrorCode.VALIDATION,
                                 "克隆音色「" + AudioPlan.cloneId(voice) + "」不存在（可能已被删除），请重新绑定音色");
                     }
-                    payload.put("refAssetId", vp.assetId());
+                    UUID presetAssetId;
+                    try {
+                        presetAssetId = UUID.fromString(vp.assetId());
+                    } catch (IllegalArgumentException bad) {
+                        throw new BizException(ErrorCode.VALIDATION,
+                                "克隆音色「" + vp.name() + "」的样本引用已损坏，请重新录音色");
+                    }
+                    String storageKey = assetRepo.findByIdAndWorkspaceId(presetAssetId, workspaceId)
+                            .map(studio.weaveora.asset.domain.Asset::storageKey)
+                            .orElseThrow(() -> new BizException(ErrorCode.VALIDATION,
+                                    "克隆音色「" + vp.name() + "」的样本文件已不存在"
+                                            + "（可能被删除或已重录）。请到音频区重新录音色，并重新绑定到该角色"));
+                    payload.put("refAssetKey", storageKey);
                     if (!vp.promptText().isBlank()) {
                         payload.put("refPromptText", vp.promptText());
                     }

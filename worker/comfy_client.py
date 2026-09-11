@@ -69,7 +69,11 @@ def _comfy(method, path, payload=None, files=None, timeout=120):
 
 
 def fetch_reference_bytes(storage_key):
-    """经 weaveora 内部通道取参考图原始字节（token 鉴权）。"""
+    """经 weaveora 内部通道取参考图/参考音原始字节（token 鉴权）。
+
+    注意：storage_key 必须是**存储 key**（形如 ws/project/ref/uuid.png），
+    不是资产 UUID —— 传 UUID 服务端会 404（readAssetByKey 按 key 查）。
+    """
     q = urllib.parse.quote(base64.urlsafe_b64encode(storage_key.encode()).decode(), safe="")
     req = urllib.request.Request("%s/internal/assets?key=%s" % (API, q),
                                  headers={"X-Worker-Token": TOKEN})
@@ -77,7 +81,8 @@ def fetch_reference_bytes(storage_key):
         with urllib.request.urlopen(req, timeout=60) as r:
             return r.read(), (r.headers.get("Content-Type") or "image/png")
     except urllib.error.HTTPError as e:
-        raise ComfyError("fetch ref asset %s -> %s" % (storage_key, e.code))
+        raise ComfyError("fetch ref asset %s -> %s（key 须为存储 key，不能传资产 UUID）"
+                         % (storage_key, e.code))
 
 
 
