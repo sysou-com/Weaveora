@@ -588,6 +588,49 @@ public class JobService {
         return toView(neu);
     }
 
+    /**
+     * 重跑 voice/bgm：重新解析克隆音色参考音（refAssetKey），并清掉旧的错误字段。
+     *
+     * <p>为什么必须做：旧版本曾把**资产 UUID** 写成 {@code refAssetId}（worker 需要的是存储 key），
+     * 且重跑时沿用旧 payload → worker 拿空参考音，TTS 静默兑底到自带参考音（用户听到“变标准女声”）。
+     */
+    private Retarget refreshAudioJobPayload(GenerationJob old, ProjectSnapshot project, UUID approvedId) {
+        JsonNode raw = old.payload();
+        if (!(raw instanceof ObjectNode src)) {
+            return new Retarget(old.revisionId(), old.shotId(), raw);
+        }
+        ObjectNode payload = src.deepCopy();
+        String voice = payload.path("voice").asText("");
+        if (!AudioPlan.isClone(voice)) {
+            return new Retarget(old.revisionId(), old.shotId(), payload);
+        }
+        // 先清掉历史错误字段，避免“看着有、其实用不上”
+        payload.remove("refAssetId");
+        UUID planRev = approvedId != null ? approvedId : old.revisionId();
+        JsonNode plan = null;
+        try {
+            plan = planReader.revisionPlan(planRev);
+        } catch (RuntimeException e) {
+            log.warn("voice rerun: 读取方案 {} 失败: {}", planRev, e.getMessage());
+        }
+        AudioPlan.VoicePreset vp = plan == null ? null : AudioPlan.presetById(plan, AudioPlan.cloneId(voice));
+        if (vp == null) {
+            throw new BizException(ErrorCode.VALIDATION,
+                    "克隆音色「" + AudioPlan.cloneId(voice) + "」在当前方案里已不存在，"
+                            + "请重新绑定音色后再生成（不要重跑旧任务）");
+        }
+        String key = assetRepo.findByIdAndWorkspaceId(UUID.fromString(vp.assetId()), old.workspaceId())
+                .map(studio.weaveora.asset.domain.Asset::storageKey)
+                .orElseThrow(() -> new BizException(ErrorCode.VALIDATION,
+                        "克隆音色「" + vp.name() + "」的样本文件已不存在（可能被删除或已重录），请重新录音色"));
+        payload.put("refAssetKey", key);
+        if (!vp.promptText().isBlank()) {
+            payload.put("refPromptText", vp.promptText());
+        }
+        log.info("voice rerun refreshed clone ref job={} preset={} rev={}", old.id(), vp.id(), planRev);
+        return new Retarget(planRev, old.shotId(), payload);
+    }
+
     /** 复制 payload 并替换 seed，使重跑/重生成得到不同结果。 */
     private static JsonNode reshuffleSeed(JsonNode payload) {
         ObjectNode cp = payload == null || !payload.isObject()
@@ -607,6 +650,13 @@ public class JobService {
      */
     private Retarget repointToCurrentApproved(GenerationJob old, ProjectSnapshot project, UUID userId) {
         UUID approvedId = project.approvedRevisionId();
+        // P9：声音类任务（voice/bgm）的参数全是“用户配置 + 参考音存储 key”，与画面改锚无关，
+        //     但**必须把克隆音色的参考音重新解析一遍** —— 否则重跑修复前创建的旧任务时，
+        //     payload 里只有旧的 refAssetId、没有 refAssetKey，worker 拿不到参考音，
+        //     TTS 会静默兑底到自带参考音（听感上就是“变成标准女声”）。
+        if ("voice".equals(old.kind()) || "bgm".equals(old.kind())) {
+            return refreshAudioJobPayload(old, project, approvedId);
+        }
         if (approvedId == null || approvedId.equals(old.revisionId())) {
             return new Retarget(old.revisionId(), old.shotId(), old.payload());
         }

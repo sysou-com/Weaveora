@@ -16,9 +16,20 @@ import stub_worker as w  # noqa: E402
 
 # 取线上那条 404 的资产（项目歼36击落B21）的存储 key
 SK = os.environ.get("TEST_REF_KEY", "")
+
+# ── 守门检查（不需要网络）：clone 音色但无 refAssetKey 必须直接报错 ──
+# 背景：重跑修复前创建的旧任务时，worker 拿不到参考音，却把 "clone:xxx" 当路径传给 TTS，
+#       TTS 静默兑底到自带参考音 → 用户听到“标准女声”而不知道哪错了。
+try:
+    w._voice_media({"kind": "voice", "text": "测试", "voice": "clone:not-exist"})
+    print("GUARD FAIL：clone 音色缺 refAssetKey 时应报错，但没报")
+    raise SystemExit(1)
+except RuntimeError as e:
+    print("GUARD OK：%s" % str(e)[:70])
+
 if not SK:
-    print("需要设置 TEST_REF_KEY=<存储 key>")
-    raise SystemExit(2)
+    print("（未设 TEST_REF_KEY，跳过真实链路测试）")
+    raise SystemExit(0)
 
 payload = {
     "kind": "voice",

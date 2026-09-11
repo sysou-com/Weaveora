@@ -133,8 +133,18 @@ def _voice_media(payload):
 
     为什么要拉：tts_server 的 zero-shot 接口要的是 **GPU 机器上的 wav 路径**，
     而音色样本存在服务端资产库里。复用 worker 已有的内部通道下载能力（无需新机制）。
-    refAssetKey 是**存储 key**（不是资产 UUID）；拉下来的临时文件用完即删。"""
+    refAssetKey 是**存储 key**（不是资产 UUID）；拉下来的临时文件用完即删。
+
+    守门：voice 形如 clone:xxx 却拿不到 refAssetKey 时**直接报错**，
+    不能把字符串当路径传给 TTS —— 那样 TTS 会静默兑底到自带参考音，
+    用户听到的是“标准女声”（实际踩过：重跑修复前创建的旧任务）。
+    """
+    voice = (payload.get("voice") or "")
     ref = payload.get("refAssetKey")
+    if isinstance(voice, str) and voice.startswith("clone:") and not ref:
+        raise RuntimeError(
+            "克隆音色参考音缺失（voice=%s 但任务里没有 refAssetKey）。"
+            "这通常是重跑了旧任务；请在分镜里重新点「重新生成这条」，不要重跑旧任务。" % voice)
     if not ref:
         import audio_client as audio
         data, mime, dur_ms = audio.tts(payload)

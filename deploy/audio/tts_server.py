@@ -182,6 +182,13 @@ def _render(text, v, spd, seed=None, prompt_text=""):
         return list(m.inference_sft(text, v, stream=False, speed=spd)), \
             m.sample_rate, "sft:%s" % v
     # 3) 兜底：CosyVoice2 + 仓库自带参考音频
+    if v.startswith("clone:"):
+        # 守门：clone:xxx 是**服务端音色库引用**，必须由 worker 解析成参考音路径后重写 voice。
+        # 走到这里说明上游没解析（旧任务 / 接线错误）—— 直接报错，
+        # 绝不静默兑底到自带参考音，否则用户听到的是“莫明其妙的标准女声”。
+        raise RuntimeError(
+            "voice '%s' 是克隆音色引用但未被解析成参考音路径（上游任务缺 refAssetKey）；"
+            "请在分镜里重新生成这条配音，不要重跑旧任务。" % v)
     if os.path.exists(_FALLBACK_PROMPT_WAV):
         print("[tts] voice '%s' 非内置(%s)且非路径，回退参考音频 %s" % (v, "/".join(spks) or "无", _FALLBACK_PROMPT_WAV),
               flush=True)
