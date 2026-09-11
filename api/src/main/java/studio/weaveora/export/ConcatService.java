@@ -129,7 +129,7 @@ public class ConcatService {
                 double pad = crossfade ? CROSSFADE_SEC : 0.0;
                 double target = c.durationSec() + pad;
                 encodeSegment(raw, seg, c, fps, target, pad, canvas[0], canvas[1],
-                        subtitleOn && subOk ? c.narration() : null, work);
+                        subtitleOn && subOk ? c.subs() : null, work);
                 segs.add(seg);
                 segDurs.add(String.valueOf(c.durationSec() + pad));
             }
@@ -201,14 +201,20 @@ public class ConcatService {
         int idx = 1;
         double cursor = 0;
         for (MediaClip c : clips) {
-            // P8：一镜可多段语音，各自摆到「镜头起点 + 镜内 at_sec」
+            // P8：一镜可多段语音，各自摆到「镜头起点 + 镜内 at_sec」；
+            //     设了 end_sec 的先裁到窗口长度再摆放（超出部分剪掉，不拖到下一段）
             for (studio.weaveora.asset.AudioAssetLookup.VoiceCue v : c.voices()) {
                 Path vp = work.resolve("voice_" + idx + ".bin");
                 writeAsset(v.assetKey(), vp);
                 inputs.addAll(List.of("-i", vp.toString()));
                 int ms = (int) Math.round((cursor + v.atSec()) * 1000);
+                String trim = "";
+                double win = v.windowSec();
+                if (win > 0) {
+                    trim = "atrim=0:" + fmt3(win) + ",asetpts=PTS-STARTPTS,";
+                }
                 parts.add("[" + idx + ":a]aresample=44100,aformat=sample_fmts=fltp:channel_layouts=stereo,"
-                        + "adelay=" + ms + "|" + ms + ",volume=1.0,apad[v" + idx + "]");
+                        + trim + "adelay=" + ms + "|" + ms + ",volume=1.0,apad[v" + idx + "]");
                 voiceLabels.add("[v" + idx + "]");
                 idx++;
             }
@@ -336,7 +342,7 @@ public class ConcatService {
      * pad>0 时用 tpad 尾帧 clone 补足（供 xfade 叠化与时长守恒）。
      */
     private void encodeSegment(Path raw, Path out, MediaClip c, int fps, double target, double pad,
-                               int cw, int ch, String narration, Path workDir)
+                               int cw, int ch, List<SubCue> subs, Path workDir)
             throws IOException, InterruptedException {
         String vf = "scale=" + cw + ":" + ch + ":force_original_aspect_ratio=increase,"
                 + "crop=" + cw + ":" + ch + ","
@@ -344,14 +350,17 @@ public class ConcatService {
         if (pad > 0) {
             vf += ",tpad=stop_mode=clone:stop_duration=" + pad;
         }
-        // 字幕（旁白）：ASS 字幕（libass）渲染，避免 drawtext 依赖；按画布宽折行，白字黑边
-        if (narration != null && !narration.isBlank()) {
+        // 字幕（旁白/台词）：ASS 字幕（libass）渲染，避免 drawtext 依赖；逐段定时，白字黑边
+        if (subs != null && !subs.isEmpty()) {
             Path ass = workDir.resolve("sub_" + out.getFileName() + ".ass");
             double fs = Math.max(24, ch * 0.055);
             int perLine = Math.max(8, (int) Math.floor((cw - 60) / (fs * 0.9)));
-            String body = assBody(cw, ch, (int) fs, target,
-                    wrapNarration(narration.trim(), perLine).replace("\n", "\\N"));
-            Files.writeString(ass, body, StandardCharsets.UTF_8);
+            StringBuilder b = new StringBuilder();
+            for (SubCue sc : subs) {
+                b.append(assDialogue(cw, ch, (int) fs, sc.startSec(), sc.endSec(),
+                        wrapNarration(sc.text(), perLine).replace("\n", "\\N")));
+            }
+            Files.writeString(ass, assHeader(cw, ch, (int) fs) + b, StandardCharsets.UTF_8);
             vf += ",ass=filename=" + quoteFilter(ass.toString());
         }
         List<String> args = new ArrayList<>(List.of("-y"));
@@ -384,26 +393,53 @@ public class ConcatService {
     }
 
     /** 生成 ASS 字幕文本（libass）：白字黑边、底部居中、自动换行已含 \N。 */
-    private static String assBody(int cw, int ch, int fs, double target, String text) {
-        String t = text.replace("\\", "\\\\").replace("{", "\\{").replace("}", "\\}");
-        int endSec = Math.max(1, (int) Math.floor(target - 0.3));
-        int endCs = Math.max(0, (int) Math.round((target - 0.3 - Math.floor(target - 0.3)) * 100));
+    /** ASS 头（样式）。 */
+    static String assHeader(int cw, int ch, int fs) {
         int marginV = (int) Math.round(ch * 0.08);
-        StringBuilder b = new StringBuilder();
-        b.append("[Script Info]\nScriptType: v4.00+\nPlayResX: ").append(cw)
-                .append("\nPlayResY: ").append(ch).append("\nWrapStyle: 0\n\n");
-        b.append("[V4+ Styles]\n")
+        return new StringBuilder()
+                .append("[Script Info]\nScriptType: v4.00+\nPlayResX: ").append(cw)
+                .append("\nPlayResY: ").append(ch).append("\nWrapStyle: 0\n\n")
+                .append("[V4+ Styles]\n")
                 .append("Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour,")
                 .append(" BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle,")
                 .append(" BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n")
                 .append("Style: Sub,Noto Sans CJK SC,").append(fs)
                 .append(",&H00FFFFFF,&H000000FF,&H00000000,&H90000000,0,0,0,0,100,100,0,0,")
-                .append("1,2.2,1,2,40,40,").append(marginV).append(",1\n\n");
-        b.append("[Events]\n")
+                .append("1,2.2,1,2,40,40,").append(marginV).append(",1\n\n")
+                .append("[Events]\n")
                 .append("Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n")
-                .append("Dialogue: 0,0:00:00.40,0:00:").append(String.format("%02d.%02d", endSec, endCs))
-                .append(",Sub,,0,0,0,,").append(t).append("\n");
-        return b.toString();
+                .toString();
+    }
+
+    /** 一条 ASS 字幕事件（时间按镜内相对秒 → H:MM:SS.cc）。 */
+    static String assDialogue(int cw, int ch, int fs, double startSec, double endSec, String text) {
+        String t = text.replace("\\", "\\\\").replace("{", "\\{").replace("}", "\\}");
+        return "Dialogue: 0," + assTs(startSec) + "," + assTs(Math.max(startSec + 0.2, endSec))
+                + ",Sub,,0,0,0,," + t + "\n";
+    }
+
+    /** 秒 → ASS 时间戳 H:MM:SS.cc */
+    static String assTs(double sec) {
+        double s = Math.max(0, sec);
+        int h = (int) (s / 3600);
+        int m = (int) ((s % 3600) / 60);
+        double rest = s % 60;
+        int si = (int) Math.floor(rest);
+        int cs = (int) Math.round((rest - si) * 100);
+        if (cs >= 100) {
+            cs -= 100;
+            si += 1;
+        }
+        if (si >= 60) {
+            si -= 60;
+            m += 1;
+        }
+        return String.format("%d:%02d:%02d.%02d", h, m, si, cs);
+    }
+
+    /** 单段字幕（兼容旧签名）。 */
+    private static String assBody(int cw, int ch, int fs, double target, String text) {
+        return assHeader(cw, ch, fs) + assDialogue(cw, ch, fs, 0.4, target - 0.3, text);
     }
 
     /** 探测 ffmpeg 是否带某滤镜（如 ass），用于字幕降级保护。 */
@@ -529,8 +565,8 @@ public class ConcatService {
             UUID shotId = order <= shotIds.size() ? shotIds.get(order - 1) : null;
             Asset m = pickClipOrStill(workspaceId, projectId, shotId, shotNo);
             if (m == null) continue;
-            out.add(new MediaClip(m.storageKey(), isVideo(m), dur, subtitleText(shot),
-                    voiceCues(workspaceId, projectId, shotNo)));
+            out.add(new MediaClip(m.storageKey(), isVideo(m), dur,
+                    voiceCues(workspaceId, projectId, shotNo), subtitleCues(shot, dur)));
         }
         return out;
     }
@@ -544,13 +580,36 @@ public class ConcatService {
         return audioLookup.voiceCues(workspaceId, projectId, shotNo);
     }
 
-    /** 该镜的字幕文本：多段则拼接（P8.6 再做逐段字幕定时）。 */
-    private static String subtitleText(JsonNode shot) {
-        List<String> texts = new ArrayList<>();
-        for (AudioPlan.Line line : AudioPlan.lines(shot)) {
-            texts.add(line.text());
+    /**
+     * P8：逐段字幕定时 —— 每条语音段各自一个时间段：
+     * start = at_sec；end = 显式 end_sec，否则下一段起点，否则镜尾。
+     * 每段各显示自己的文本，不再把整镜拼成一句话。
+     */
+    private static List<SubCue> subtitleCues(JsonNode shot, double shotDur) {
+        List<AudioPlan.Line> lines = AudioPlan.lines(shot);
+        List<SubCue> out = new ArrayList<>();
+        for (int i = 0; i < lines.size(); i++) {
+            AudioPlan.Line l = lines.get(i);
+            if (l.text().isBlank()) {
+                continue;
+            }
+            Double nextAt = (i + 1 < lines.size()) ? lines.get(i + 1).atSec() : null;
+            double start = Math.max(0, l.atSec());
+            double end;
+            if (l.hasEnd()) {
+                end = l.endSec();
+            } else if (nextAt != null) {
+                end = nextAt;
+            } else {
+                end = shotDur;
+            }
+            end = Math.min(end, shotDur > 0 ? shotDur : end);
+            if (end - start < 0.4) {
+                end = Math.min(start + 0.4, Math.max(start + 0.4, shotDur));   // 太短给个下限，免得闪一下
+            }
+            out.add(new SubCue(start, end, l.text().trim()));
         }
-        return texts.isEmpty() ? null : String.join("  ", texts);
+        return out;
     }
 
     private Asset pickClipOrStill(UUID workspaceId, UUID projectId, UUID shotId, int shotNo) {
@@ -607,7 +666,11 @@ public class ConcatService {
                 a.width(), a.height(), a.createdAt());
     }
 
-    private record MediaClip(String assetKey, boolean video, double durationSec, String narration,
-                             List<studio.weaveora.asset.AudioAssetLookup.VoiceCue> voices) {
+    /** 一个字幕段（镜内相对秒）。 */
+    private record SubCue(double startSec, double endSec, String text) {
+    }
+
+    private record MediaClip(String assetKey, boolean video, double durationSec,
+                             List<studio.weaveora.asset.AudioAssetLookup.VoiceCue> voices, List<SubCue> subs) {
     }
 }

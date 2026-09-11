@@ -227,6 +227,33 @@ CosyVoice 依赖 Linux 专属轮子 → 只能走 WSL2。落地细节：
 - [ ] Web 部署（`web/dist` 已构建，sysou.com 的 web 根目录待确认）
 - [ ] 验收：Web → 视频项目 → 拖拽语音/配乐 → 生成配音/配乐 → 渲染成片听混音 → 导出包查 edit_list.json
 
+### P8.7 配音结束点 + 逐段字幕定时（2026-09-11）
+
+**问题**：一镜内每段语音只能设起点，无法限定结束；字幕还是“整镜一句话”（两条台词会同时压在屏幕上）。
+
+#### `narrations[].end_sec`（新，可选）
+```jsonc
+"narrations": [ { "at_sec": 2.0, "end_sec": 3.6, "text": "谁敢与我决一死战！", "subject": "吕布" } ]
+```
+- 设了 → 混音时先 `atrim=0:(end-at)` **剪掉超出部分**，再 `adelay` 摆到起点；job 的 `target_sec` 也用这个窗口
+- 留空 → 用配音自然长度（旧行为）
+- 非法值（`end<=at`）自动忽略；窗口超出镜长会被截断
+- UI：时间轴上**拖块右缘**直接设结束点（比字数估算准）；面板里有「结束(s)」输入 +
+  「清结束点」（回到自然长）+「按估算设结束」；块宽在设了结束点后变成精确值（无结束点的带 `~` 标记为估算）
+
+#### 逐段字幕定时
+原先：整镜拼接成一句，一条 ASS Dialogue 从 0.4s 到镜尾 → 多段时两句话重叠。
+现在：每段各一条 Dialogue，`start=at_sec`，`end=end_sec` 或下一段起点或镜尾；
+新增 `assTs()`/`assDialogue()`/`assHeader()`（时间戳 `H:MM:SS.cc`，`{}` 与 `\` 转义），
+删除已无用的 `MediaClip.narration` 与 `subtitleText()`。
+
+#### 验证
+- 单测 **44 个全绿**（新增 `ConcatSubtitleTest` 6 + `AudioPlanTest` 结束点 4）
+- `deploy/verify_voice_window.sh` 真跑 ffmpeg：
+  * 配音窗口 2.0→3.6s：1.0-1.8s 静音、2.2-3.4s **-24.1dB**、4.0s 后**静音**；
+    不设结束点的对照组在 4.0s 仍是 -24.1dB → 证明剪裁真的生效
+  * 一镜两段字幕：libass 接受（rc=0），0.8s 帧有字幕（14KB）/ 3.9s 帧无字幕（1.5KB）→ 逐段定时生效
+
 ### 待办（P7 收尾）
 - [ ] Web 端产出已构建（`web/dist`），但**部署到 sysou.com 的目标路径未在 175.12.60.225 的 nginx 配置里**，需确认后再发
 - [ ] 验收：Web → 视频项目 → 分镜填旁白 → 生成配音 → 资产库可播放 → 渲染成片听混音 → 导出包查 edit_list.json

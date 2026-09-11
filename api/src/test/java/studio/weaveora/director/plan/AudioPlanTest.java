@@ -134,6 +134,55 @@ class AudioPlanTest {
         assertEquals(0.0, lines.get(0).speed());   // 越界 → 0 = 用默认
     }
 
+    // ------------------------------------------------------------ 结束点 end_sec
+
+    @Test
+    void endSecParsedAndWindowComputed() {
+        ObjectNode s = shot(1, 8, null);
+        var arr = s.putArray("narrations");
+        arr.addObject().put("at_sec", 1).put("end_sec", 3.5).put("text", "一");
+        arr.addObject().put("at_sec", 5).put("text", "二");          // 无结束点
+        List<AudioPlan.Line> lines = AudioPlan.lines(s);
+
+        assertTrue(lines.get(0).hasEnd());
+        assertEquals(3.5, lines.get(0).endSec(), 1e-9);
+        // 设了结束点 → 窗口就是 end-at（与下一段无关）
+        assertEquals(2.5, lines.get(0).windowSec(8, 5.0), 1e-9);
+
+        assertFalse(lines.get(1).hasEnd());
+        // 未设 → 窗口到下一段起点；最后一段 → 到镜尾
+        assertEquals(3.0, lines.get(1).windowSec(8, null), 1e-9);
+    }
+
+    @Test
+    void illegalEndSecIgnored() {
+        ObjectNode s = shot(1, 8, null);
+        var arr = s.putArray("narrations");
+        arr.addObject().put("at_sec", 4).put("end_sec", 2).put("text", "a");   // end < at → 忽略
+        arr.addObject().put("at_sec", 6).put("end_sec", 6).put("text", "b");   // end == at → 忽略
+        List<AudioPlan.Line> lines = AudioPlan.lines(s);
+        assertFalse(lines.get(0).hasEnd());
+        assertFalse(lines.get(1).hasEnd());
+        assertEquals(2.0, lines.get(0).windowSec(8, 6.0), 1e-9);
+    }
+
+    @Test
+    void endSecClampedToShotDurationInWindow() {
+        ObjectNode s = shot(1, 4, null);
+        s.putArray("narrations").addObject().put("at_sec", 2).put("end_sec", 99).put("text", "a");
+        AudioPlan.Line l = AudioPlan.lines(s).get(0);
+        assertEquals(2.0, l.windowSec(4, null), 1e-9);   // 窗口被镜头时长截断
+    }
+
+    @Test
+    void legacyNarrationHasNoEnd() {
+        ObjectNode plan = videoPlan(10);
+        plan.withArray("shots").add(shot(1, 5, "旧旁白"));
+        AudioPlan.Line l = AudioPlan.lines(plan.path("shots").get(0)).get(0);
+        assertFalse(l.hasEnd());
+        assertEquals(5.0, l.windowSec(5, null), 1e-9);
+    }
+
     @Test
     void totalLinesCountsAcrossShots() {
         ObjectNode plan = videoPlan(20);

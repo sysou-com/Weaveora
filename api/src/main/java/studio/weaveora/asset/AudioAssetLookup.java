@@ -33,10 +33,16 @@ public class AudioAssetLookup {
         this.assets = assets;
     }
 
-    /** 一段配音在镜内的位置（带资产，供导出取 mime/durationMs）。 */
-    public record VoiceCue(Asset asset, double atSec, int lineIndex, String lineKind, String subject) {
+    /** 一段配音在镜内的位置与窗口（带资产，供导出取 mime/durationMs）。 */
+    public record VoiceCue(Asset asset, double atSec, double endSec, int lineIndex,
+                           String lineKind, String subject) {
         public String assetKey() {
             return asset.storageKey();
+        }
+
+        /** 设了结束点时的裁切时长（秒）；0 = 不裁，用配音自然长度。 */
+        public double windowSec() {
+            return endSec > atSec ? endSec - atSec : 0;
         }
     }
 
@@ -57,11 +63,16 @@ public class AudioAssetLookup {
             }
             double at = (snap != null && snap.hasNonNull("at_sec"))
                     ? Math.max(0, snap.path("at_sec").asDouble(0)) : 0;
+            double end = (snap != null && snap.hasNonNull("end_sec"))
+                    ? snap.path("end_sec").asDouble(0) : 0;
+            if (end <= at) {
+                end = 0;   // 未设/非法 → 不裁切
+            }
             String kind = (snap != null && snap.hasNonNull("line_kind"))
                     ? snap.path("line_kind").asText("narration") : "narration";
             String subject = (snap != null && snap.hasNonNull("subject"))
                     ? snap.path("subject").asText("") : "";
-            latestPerLine.put(li, new VoiceCue(a, at, li, kind,
+            latestPerLine.put(li, new VoiceCue(a, at, end, li, kind,
                     subject.isBlank() ? null : subject));
         }
         List<VoiceCue> out = new ArrayList<>(latestPerLine.values());

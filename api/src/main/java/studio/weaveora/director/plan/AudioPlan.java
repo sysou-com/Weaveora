@@ -37,10 +37,27 @@ public final class AudioPlan {
     private AudioPlan() {
     }
 
-    /** 镜内一段语音。{@code voice==null} 表示交给 {@link #voiceFor} 解析；{@code speed<=0} 表示用默认。 */
-    public record Line(double atSec, String text, String kind, String subject, String voice, double speed) {
+    /** 镜内一段语音。{@code voice==null} 表示交给 {@link #voiceFor} 解析；{@code speed<=0} 表示用默认。
+     *  {@code endSec<=atSec} 表示未设结束点（用配音自然长度）。 */
+    public record Line(double atSec, double endSec, String text, String kind, String subject,
+                       String voice, double speed) {
         public boolean dialogue() {
             return "dialogue".equals(kind);
+        }
+
+        /** 是否设了明确的结束点。 */
+        public boolean hasEnd() {
+            return endSec > atSec;
+        }
+
+        /**
+         * 本段的可用窗口（秒）：有 end_sec 用它，否则到下一段起点（或镜头末尾）。
+         * 给混音的裁切与 job 的 target_sec 用。
+         */
+        public double windowSec(double shotDur, Double nextAtSec) {
+            double end = hasEnd() ? Math.min(endSec, shotDur > 0 ? shotDur : endSec)
+                    : (nextAtSec != null ? nextAtSec : shotDur);
+            return Math.max(0, end - atSec);
         }
     }
 
@@ -74,7 +91,7 @@ public final class AudioPlan {
         // 兼容旧 plan：narration 单段
         String nar = shot.path("narration").asText("").trim();
         if (!nar.isEmpty()) {
-            out.add(new Line(0, nar, "narration", null, null, 0));
+            out.add(new Line(0, 0, nar, "narration", null, null, 0));
         }
         return out;
     }
@@ -98,7 +115,11 @@ public final class AudioPlan {
         if (at < 0 || Double.isNaN(at)) {
             at = 0;
         }
-        return new Line(at, text, kind, subject.isEmpty() ? null : subject,
+        double end = n.path("end_sec").asDouble(0);
+        if (end <= at || Double.isNaN(end)) {
+            end = 0;   // 0/非法 → 未设结束点
+        }
+        return new Line(at, end, text, kind, subject.isEmpty() ? null : subject,
                 blankToNull(n.path("voice").asText("")), speed);
     }
 

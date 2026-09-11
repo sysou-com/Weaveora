@@ -192,6 +192,9 @@ public class ExportService {
                         vc.put("subject", cue.subject());
                     }
                     vc.put("at_sec", round2(cue.atSec()));          // 镜内起点
+                    if (cue.windowSec() > 0) {
+                        vc.put("end_sec", round2(cue.endSec()));    // 镜内结束点（设了就按窗口裁切）
+                    }
                     vc.put("src", vsrc);
                     vc.put("in_sec", 0);
                     double vdur = v.durationMs() != null && v.durationMs() > 0 ? v.durationMs() / 1000.0 : dur;

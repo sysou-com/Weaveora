@@ -433,9 +433,9 @@ public class JobService {
             for (int k = 0; k < lines.size(); k++) {
                 if (req.lineIndex() != null && req.lineIndex() != k) continue;
                 AudioPlan.Line line = lines.get(k);
-                // 本段可用时长 = 下一段起点（或镜头末尾）− 本段起点
-                double next = (k + 1 < lines.size()) ? lines.get(k + 1).atSec() : shotDur;
-                double window = Math.max(0.5, next - line.atSec());
+                // 本段可用窗口：优先 end_sec，否则到下一段起点（或镜头末尾）
+                Double nextAt = (k + 1 < lines.size()) ? lines.get(k + 1).atSec() : null;
+                double window = Math.max(0.5, line.windowSec(shotDur, nextAt));
                 ObjectNode payload = mapper().createObjectNode();
                 payload.put("kind", "voice");
                 payload.put("preview", Boolean.TRUE.equals(req.preview()));
@@ -447,6 +447,9 @@ public class JobService {
                 payload.put("line_index", k);
                 payload.put("line_kind", line.kind());       // narration | dialogue
                 payload.put("at_sec", line.atSec());         // 镜内起点（混音靠它摆放）
+                if (line.hasEnd()) {
+                    payload.put("end_sec", line.endSec());   // 镜内结束点（混音靠它裁切）
+                }
                 if (line.subject() != null) {
                     payload.put("subject", line.subject());
                 }

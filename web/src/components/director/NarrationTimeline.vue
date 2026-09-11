@@ -61,6 +61,14 @@ function estimateSec(text: string): number {
   return Math.max(0.8, n / CHARS_PER_SEC)
 }
 
+/** 该段占用的镜内区间（秒）：设了 end_sec 用 ends，否则用字数估算 */
+function spanOf(l: NarrationLine): { start: number; len: number; exact: boolean } {
+  const start = Math.max(0, l.at_sec ?? 0)
+  const end = Number(l.end_sec ?? 0)
+  if (end > start) return { start, len: end - start, exact: true }
+  return { start, len: Math.min(estimateSec(l.text), Math.max(0.4, dur.value - start)), exact: false }
+}
+
 /** 按 at_sec 排序后的“显示索引”与真实数组索引一致（lines 已排序并写回前先规整） */
 function sortInPlace(): void {
   const ns = props.shot.narrations
@@ -113,26 +121,71 @@ function onDragStart(i: number, ev: PointerEvent): void {
   if (props.disabled) return
   selected.value = i
   dragging.value = i
+  dragMode.value = 'move'
   const el = ev.currentTarget as HTMLElement
   el.setPointerCapture?.(ev.pointerId)
 }
 
+/** 拖块右边缘 → 直接设结束点（精确设定，比估算准） */
+function onResizeStart(i: number, ev: PointerEvent): void {
+  if (props.disabled) return
+  selected.value = i
+  dragging.value = i
+  dragMode.value = 'resize'
+  ;(ev.currentTarget as HTMLElement).setPointerCapture?.(ev.pointerId)
+  ev.stopPropagation()
+}
+
+const dragMode = ref<'move' | 'resize'>('move')
+
+/** 把 clientX 换算成镜内秒 */
+function secAtClientX(clientX: number): number {
+  const track = trackEl.value
+  if (!track) return 0
+  const rect = track.getBoundingClientRect()
+  if (rect.width <= 0) return 0
+  const x = Math.min(Math.max(0, clientX - rect.left), rect.width)
+  return (x / rect.width) * dur.value
+}
+
 function onDragMove(i: number, ev: PointerEvent): void {
   if (props.disabled || dragging.value !== i) return
-  const track = trackEl.value
   const line = props.shot.narrations?.[i]
-  if (!track || !line) return
-  const rect = track.getBoundingClientRect()
-  if (rect.width <= 0) return
-  const x = Math.min(Math.max(0, ev.clientX - rect.left), rect.width)
-  const sec = (x / rect.width) * dur.value
-  // 吸附到 0.1s，且不允许超出镜头（至少留 0.3s）
-  line.at_sec = Math.max(0, Math.min(dur.value - 0.3, Math.round(sec * 10) / 10))
+  if (!line) return
+  const sec = secAtClientX(ev.clientX)
+  if (dragMode.value === 'resize') {
+    // 结束点：至少比起点大 0.3s，不超过镜头
+    line.end_sec = Math.max((line.at_sec ?? 0) + 0.3, Math.min(dur.value, Math.round(sec * 10) / 10))
+  } else {
+    const span = spanOf(line)
+    const start = Math.max(0, Math.min(dur.value - Math.min(span.len, dur.value - 0.3), sec))
+    line.at_sec = Math.round(start * 10) / 10
+    // 跟着平移时同步平移结束点，保持时长不变
+    if (Number(line.end_sec ?? 0) > 0) {
+      line.end_sec = Math.round((line.at_sec + span.len) * 10) / 10
+    }
+  }
   commit()
 }
 
 function onDragEnd(): void {
   dragging.value = -1
+  commit()
+}
+
+/** 清除结束点 → 回到“配音自然长度” */
+function clearEnd(): void {
+  if (!cur.value) return
+  cur.value.end_sec = null
+  commit()
+}
+
+/** 把结束点设为“此刻 + 估算时长” */
+function setEndFromEstimate(): void {
+  if (!cur.value) return
+  const est = estimateSec(cur.value.text)
+  const start = cur.value.at_sec ?? 0
+  cur.value.end_sec = Math.round(Math.min(dur.value, start + est) * 10) / 10
   commit()
 }
 
@@ -183,10 +236,10 @@ function pickVoiceFile(i: number): void {
         class="nt-block"
         :class="{ sel: selected === i, narration: (l.kind ?? 'narration') === 'narration', dialogue: l.kind === 'dialogue', dragging: dragging === i }"
         :style="{
-          left: ((l.at_sec ?? 0) / dur) * 100 + '%',
-          width: Math.max(4, (estimateSec(l.text) / dur) * 100) + '%',
+          left: (spanOf(l).start / dur) * 100 + '%',
+          width: Math.max(3, (spanOf(l).len / dur) * 100) + '%',
         }"
-        :title="`${l.at_sec ?? 0}s · ${l.subject || '旁白'} · ${l.text || '(空)'}`"
+        :title="`${l.at_sec ?? 0}s${Number(l.end_sec ?? 0) > 0 ? ' → ' + l.end_sec + 's（固定窗口）' : '（自然长度）'} · ${l.subject || '旁白'} · ${l.text || '(空)'}`"
         :data-testid="`narration-block-${shot.shot_no}-${i}`"
         @pointerdown="onDragStart(i, $event)"
         @pointermove="onDragMove(i, $event)"
@@ -195,6 +248,14 @@ function pickVoiceFile(i: number): void {
       >
         <span class="nt-block-tag font-mono">{{ (l.kind ?? 'narration') === 'dialogue' ? (l.subject || '台词') : '旁白' }}</span>
         <span class="nt-block-text">{{ l.text || '（空）' }}</span>
+        <span class="nt-est font-mono">{{ spanOf(l).len.toFixed(1) }}{{ spanOf(l).exact ? '' : '~' }}s</span>
+        <!-- 拖右缘 = 设结束点 -->
+        <span
+          class="nt-resize"
+          title="拖我设结束点（超出部分会被剪掉）"
+          :data-testid="`narration-resize-${shot.shot_no}-${i}`"
+          @pointerdown="onResizeStart(i, $event)"
+        />
       </div>
 
       <div v-if="!lines.length" class="nt-empty text-secondary">
@@ -212,7 +273,7 @@ function pickVoiceFile(i: number): void {
         加一段
       </NButton>
       <span class="text-secondary" style="font-size: 12px">
-        拖块改起点（吸附 0.1s）；旁白短于镜头就留白，不会为填满而慢放
+        拖块改起点（吸附 0.1s）、拖<span class="hl">右缘</span>设结束点；不设结束点就用配音自然长度，旁白短于镜头就留白
       </span>
     </div>
 
@@ -285,6 +346,27 @@ function pickVoiceFile(i: number): void {
         />
       </label>
       <label class="nt-field narrow">
+        <span class="fl">结束(s)</span>
+        <NInputNumber
+          v-model:value="cur.end_sec"
+          size="small"
+          :min="(cur.at_sec ?? 0) + 0.3"
+          :max="dur"
+          :step="0.1"
+          clearable
+          :disabled="disabled"
+          placeholder="自然长"
+          :data-testid="`narration-end-${shot.shot_no}`"
+          @update:value="commit"
+        />
+      </label>
+      <NButton size="tiny" quaternary :disabled="disabled || !(Number(cur.end_sec ?? 0) > 0)" @click="clearEnd">
+        清结束点
+      </NButton>
+      <NButton size="tiny" quaternary :disabled="disabled" @click="setEndFromEstimate">
+        按估算设结束
+      </NButton>
+      <label class="nt-field narrow">
         <span class="fl">语速</span>
         <NTooltip>
           <template #trigger>
@@ -340,8 +422,8 @@ function pickVoiceFile(i: number): void {
     </div>
 
     <p v-if="lines.length" class="nt-hint text-secondary">
-      预计语音总长 {{ lines.reduce((s, l) => s + estimateSec(l.text), 0).toFixed(1) }}s /
-      镜头 {{ dur.toFixed(1) }}s（估算，实际由 TTS 决定）
+      语音总长 {{ lines.reduce((s, l) => s + spanOf(l).len, 0).toFixed(1) }}s /
+      镜头 {{ dur.toFixed(1) }}s（带 ~ 的是按字数估算，拖右缘可固定结束点）
     </p>
   </div>
 </template>
@@ -384,7 +466,7 @@ function pickVoiceFile(i: number): void {
   bottom: 4px;
   min-width: 26px;
   border-radius: 5px;
-  padding: 2px 6px;
+  padding: 2px 12px 2px 6px;
   display: flex;
   align-items: center;
   gap: 5px;
@@ -394,6 +476,19 @@ function pickVoiceFile(i: number): void {
   white-space: nowrap;
   font-size: 11px;
   border: 1px solid transparent;
+}
+.nt-resize {
+  position: absolute;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  width: 8px;
+  cursor: ew-resize;
+  background: rgba(255, 255, 255, 0.16);
+}
+.nt-est {
+  opacity: 0.7;
+  font-size: 10px;
 }
 .nt-block.dragging {
   cursor: grabbing;
@@ -469,5 +564,9 @@ function pickVoiceFile(i: number): void {
   align-self: stretch;
   background: rgba(140, 160, 190, 0.25);
   margin: 0 2px;
+}
+.hl {
+  color: #f4b460;
+  font-weight: 600;
 }
 </style>

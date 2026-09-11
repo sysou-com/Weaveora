@@ -7,9 +7,24 @@
   "script": {
     "theme": "三国·虎牢关之战",
     "acts": [
-      { "name": "列阵", "start_sec": 0, "end_sec": 8, "purpose": "对峙与叫阵" },
-      { "name": "交锋", "start_sec": 8, "end_sec": 16, "purpose": "刀戟相击，吕布心怯" },
-      { "name": "追赶", "start_sec": 16, "end_sec": 24, "purpose": "吕布退走，关羽追击" }
+      {
+        "name": "列阵",
+        "start_sec": 0,
+        "end_sec": 8,
+        "purpose": "对峙与叫阵"
+      },
+      {
+        "name": "交锋",
+        "start_sec": 8,
+        "end_sec": 16,
+        "purpose": "刀戟相击，吕布心怯"
+      },
+      {
+        "name": "追赶",
+        "start_sec": 16,
+        "end_sec": 24,
+        "purpose": "吕布退走，关羽追击"
+      }
     ]
   },
   "shots": [
@@ -23,7 +38,11 @@
       "negative_prompt": "text, watermark, modern clothing, cars",
       "seed_lock": true,
       "narrations": [
-        { "at_sec": 0.2, "text": "虎牢关前，两军列阵，尘烟蔽日。", "kind": "narration" }
+        {
+          "at_sec": 0.2,
+          "text": "虎牢关前，两军列阵，尘烟蔽日。",
+          "kind": "narration"
+        }
       ]
     },
     {
@@ -36,8 +55,19 @@
       "negative_prompt": "text, watermark, modern clothing",
       "seed_lock": true,
       "narrations": [
-        { "at_sec": 0.0, "text": "吕布横戟立马，声震四野。", "kind": "narration" },
-        { "at_sec": 2.0, "text": "谁敢与我决一死战！", "kind": "dialogue", "subject": "吕布", "speed": 1.05 }
+        {
+          "at_sec": 0,
+          "text": "吕布横戟立马，声震四野。",
+          "kind": "narration"
+        },
+        {
+          "at_sec": 2,
+          "text": "谁敢与我决一死战！",
+          "kind": "dialogue",
+          "subject": "吕布",
+          "speed": 1.05,
+          "end_sec": 3.6
+        }
       ]
     },
     {
@@ -50,8 +80,17 @@
       "negative_prompt": "text, watermark, modern clothing",
       "seed_lock": true,
       "narrations": [
-        { "at_sec": 0.0, "text": "一将提刀出阵，丹凤眼，卧蚕眉。", "kind": "narration" },
-        { "at_sec": 2.0, "text": "关云长在此！", "kind": "dialogue", "subject": "关羽" }
+        {
+          "at_sec": 0,
+          "text": "一将提刀出阵，丹凤眼，卧蚕眉。",
+          "kind": "narration"
+        },
+        {
+          "at_sec": 2,
+          "text": "关云长在此！",
+          "kind": "dialogue",
+          "subject": "关羽"
+        }
       ]
     },
     {
@@ -64,8 +103,17 @@
       "negative_prompt": "text, watermark, gore",
       "seed_lock": true,
       "narrations": [
-        { "at_sec": 0.0, "text": "刀戟相击，火星四溅。", "kind": "narration" },
-        { "at_sec": 2.0, "text": "看刀！", "kind": "dialogue", "subject": "关羽" }
+        {
+          "at_sec": 0,
+          "text": "刀戟相击，火星四溅。",
+          "kind": "narration"
+        },
+        {
+          "at_sec": 2,
+          "text": "看刀！",
+          "kind": "dialogue",
+          "subject": "关羽"
+        }
       ]
     },
     {
@@ -78,8 +126,18 @@
       "negative_prompt": "text, watermark, modern clothing",
       "seed_lock": true,
       "narrations": [
-        { "at_sec": 0.0, "text": "战至三十合，吕布心生怯意。", "kind": "narration" },
-        { "at_sec": 1.8, "text": "此人不可力敌！", "kind": "dialogue", "subject": "吕布", "speed": 1.15 }
+        {
+          "at_sec": 0,
+          "text": "战至三十合，吕布心生怯意。",
+          "kind": "narration"
+        },
+        {
+          "at_sec": 1.8,
+          "text": "此人不可力敌！",
+          "kind": "dialogue",
+          "subject": "吕布",
+          "speed": 1.15
+        }
       ]
     },
     {
@@ -92,8 +150,19 @@
       "negative_prompt": "text, watermark, modern clothing",
       "seed_lock": true,
       "narrations": [
-        { "at_sec": 0.0, "text": "关羽纵马追赶，尘烟滚滚。", "kind": "narration" },
-        { "at_sec": 2.0, "text": "休走！", "kind": "dialogue", "subject": "关羽", "speed": 1.2 }
+        {
+          "at_sec": 0,
+          "text": "关羽纵马追赶，尘烟滚滚。",
+          "kind": "narration"
+        },
+        {
+          "at_sec": 2,
+          "text": "休走！",
+          "kind": "dialogue",
+          "subject": "关羽",
+          "speed": 1.2,
+          "end_sec": 3.8
+        }
       ]
     }
   ],
@@ -101,8 +170,16 @@
     "music_mood": "史诗磅礴",
     "voice": "中文女",
     "voiceBindings": [
-      { "subject": "关羽", "voice": "中文男", "speed": 1.0 },
-      { "subject": "吕布", "voice": "日语男", "speed": 1.0 }
+      {
+        "subject": "关羽",
+        "voice": "中文男",
+        "speed": 1
+      },
+      {
+        "subject": "吕布",
+        "voice": "日语男",
+        "speed": 1
+      }
     ],
     "music": [
       {
@@ -111,8 +188,8 @@
         "end_sec": 16,
         "mood": "史诗磅礴",
         "gain_db": -16.5,
-        "fade_in_sec": 2.0,
-        "fade_out_sec": 1.0,
+        "fade_in_sec": 2,
+        "fade_out_sec": 1,
         "loop": true,
         "duck": true
       },
@@ -121,15 +198,22 @@
         "start_sec": 16,
         "end_sec": 24,
         "mood": "紧张悬疑",
-        "gain_db": -8.0,
+        "gain_db": -8,
         "fade_in_sec": 0.5,
-        "fade_out_sec": 2.0,
+        "fade_out_sec": 2,
         "loop": true,
         "duck": true
       }
     ],
-    "sfx": ["刀戟相击", "马蹄声"],
+    "sfx": [
+      "刀戟相击",
+      "马蹄声"
+    ],
     "vo": ""
   },
-  "edit_plan": { "fps": 24, "transition_default": "cut", "subtitle": true }
+  "edit_plan": {
+    "fps": 24,
+    "transition_default": "cut",
+    "subtitle": true
+  }
 }

@@ -84,6 +84,8 @@ export interface Brief {
 export interface NarrationLine {
   /** 该段在**镜内**的起始秒（相对镜头起点） */
   at_sec: number
+  /** 该段在镜内的结束秒（可选）；设了就按这个窗口裁切配音，留空用配音自然长度 */
+  end_sec?: number | null
   text: string
   /** 缺省：有 subject 则为 dialogue，否则 narration */
   kind?: 'narration' | 'dialogue' | null
