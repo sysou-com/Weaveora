@@ -40,25 +40,63 @@ class AiAudioServiceTest {
     }
 
     @Test
-    void raisesSpeedWhenTotalOverflows() {
-        // 镜头 4s；两段约 6.2s（含标点）→ 按比例提速（不写死具体值，断言行为）
+    void overlongDialogueIsNotSpedUpAndOverflowsInstead() {
+        // P12 口径：镜头 4s、台词约 6.2s —— 不再提速，保持自然语速 1.0×，允许溢出到下一镜
         var ai = List.of(line("dialogue", "关羽", "来者何人，报上名来，快快通名！"),
                 line("dialogue", "吕布", "吾乃吕布，谁敢与我一战！"));
-        var fitted = AiAudioService.fitLines(ai, 4, Set.of("关羽", "吕布"));
-        double spd = fitted.get(0).speed();
-        assertTrue(spd > 1.4 && spd <= 2.0, "装不下应按比例提速，实际 " + spd);
-        assertEquals(spd, fitted.get(1).speed(), 1e-9, "全镜统一语速");
-        // 提速后总长应能进镜头（留 10% 余量，因为间隙/下限会带来误差）
-        double end = fitted.get(fitted.size() - 1).endSec();
-        assertTrue(end <= 4.4, "提速后不应明显溢出，实际 " + end + "s");
+        var fit = AiAudioService.fitLinesDetailed(ai, 4, Set.of("关羽", "吕布"));
+        var fitted = fit.lines();
+        assertEquals(2, fitted.size());
+        assertEquals(1.0, fitted.get(0).speed(), 1e-9, "默认不提速");
+        assertEquals(1.0, fitted.get(1).speed(), 1e-9, "全镜自然语速");
+        assertTrue(fitted.get(1).endSec() > 4, "装不下就溢出，实际 " + fitted.get(1).endSec() + "s");
+        assertTrue(fit.notes().stream().anyMatch(n -> n.contains("溢出")), "要提示已溢出：" + fit.notes());
     }
 
     @Test
-    void speedCappedAtTwo() {
-        // 镜头 2s，同样两段 → 需要约 3× → 被 2.0× 封顶，剩余溢出交由界面告警
+    void narrationSkippedWhenDialogueFillsShot() {
+        // 台词 15 字 ≈ 3.33s 已占满 5s 镜头（含间隙）→ 旁白装不下就整段不铺
         var ai = List.of(line("dialogue", "关羽", "来者何人，报上名来，快快通名！"),
-                line("dialogue", "吕布", "吾乃吕布，谁敢与我一战！"));
-        assertEquals(2.0, AiAudioService.fitLines(ai, 2, Set.of("关羽", "吕布")).get(0).speed(), 1e-9);
+                line("narration", "", "刀光一闪，尘土飞扬，杀气瞬间笼罩了整个战场。"));
+        var fit = AiAudioService.fitLinesDetailed(ai, 5, Set.of("关羽"));
+        assertEquals(1, fit.lines().size(), "旁白放不下就不铺：" + fit.lines());
+        assertEquals("dialogue", fit.lines().get(0).kind());
+        assertTrue(fit.notes().stream().anyMatch(n -> n.contains("跳过") && n.contains("旁白")),
+                "要说明跳过了旁白：" + fit.notes());
+    }
+
+    @Test
+    void narrationFillsLeftoverWhenDialogueShort() {
+        var ai = List.of(line("dialogue", "关羽", "且慢"), line("narration", "", "风起。"));
+        var fit = AiAudioService.fitLinesDetailed(ai, 5, Set.of("关羽"));
+        assertEquals(2, fit.lines().size(), "台词短则旁白填空档");
+        assertEquals("narration", fit.lines().get(1).kind());
+        assertTrue(fit.lines().get(1).atSec() >= fit.lines().get(0).endSec(), "旁白接在台词之后");
+        assertTrue(fit.notes().isEmpty(), "装得下不该有提示：" + fit.notes());
+    }
+
+    @Test
+    void dialogueComesFirstEvenIfAiListedNarrationFirst() {
+        var ai = List.of(line("narration", "", "风起。"), line("dialogue", "关羽", "看刀！"));
+        var fitted = AiAudioService.fitLines(ai, 5, Set.of("关羽"));
+        assertEquals("dialogue", fitted.get(0).kind(), "台词优先占镜头发端");
+        assertEquals("narration", fitted.get(1).kind());
+    }
+
+    @Test
+    void narrationOnlyShotOverflowsInsteadOfBeingDropped() {
+        // 本镜根本没台词 → 旁白就是主体内容，不能因为装不下就被清空
+        var ai = List.of(line("narration", "", "刀光一闪，尘土飞扬，杀气瞬间笼罩了整个战场。"));
+        var fit = AiAudioService.fitLinesDetailed(ai, 3, Set.of());
+        assertEquals(1, fit.lines().size(), "纯旁白镜头不该被清空");
+        assertTrue(fit.lines().get(0).endSec() > 3, "允许溢出");
+    }
+
+    @Test
+    void charBudgetLeavesHeadroom() {
+        assertEquals(0, AiAudioService.charBudget(0));
+        assertEquals(20, AiAudioService.charBudget(5), "5s × 4.5 字/秒 × 0.9 = 20 字");
+        assertTrue(AiAudioService.charBudget(4) < 4 * AiAudioService.CHARS_PER_SEC, "预算必须小于理论上限");
     }
 
     @Test

@@ -11,6 +11,7 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.multipart.MultipartFile;
 import studio.weaveora.asset.domain.Asset;
 import studio.weaveora.asset.domain.AssetRepository;
+import studio.weaveora.director.plan.AudioPlan;
 import studio.weaveora.identity.api.WorkspaceGuard;
 import studio.weaveora.infra.storage.StoragePort;
 import studio.weaveora.project.api.ProjectContextPort;
@@ -52,6 +53,9 @@ public class VoicePresetService {
             "audio/mp4", "audio/x-m4a", "audio/aac", "audio/ogg", "audio/flac", "audio/x-flac",
             "audio/webm", "video/webm");   // 浏览器 MediaRecorder 产出的常是 webm/opus
     private static final long MAX_SAMPLE = 50L * 1024 * 1024;
+
+    /** 音色试听的模板文本（P12）：内置音色第一次试听时现合成一条，之后永久复用。 */
+    public static final String AUDITION_TEXT = "你好，欢迎试音";
 
     private final AssetRepository assets;
     private final StoragePort storage;
@@ -270,6 +274,122 @@ public class VoicePresetService {
                 assets.delete(a);
             });
         }
+    }
+
+    /**
+     * P12 音色试听：**直接听这个音色自己的样本**，而不是念当前镜头的旁白。
+     *
+     * <ul>
+     *   <li>克隆音色（{@code clone:<id>}）→ 直接回「克隆时录入的那段音频」（处理后 24kHz 参考音），零延迟。</li>
+     *   <li>内置音色（中文女…）→ 回项目内缓存的模板音频（{@value #AUDITION_TEXT}）；没有就现合成一条并落库，
+     *       下次秒回。</li>
+     * </ul>
+     *
+     * @param cached true = 命中了已有音频（克隆音色 / 已生成的模板），false = 本次新合成
+     * @param fromSample true = 回的是克隆时录入的那段音频（不是生成的模板）
+     */
+    public record Audition(UUID assetId, Integer durationMs, boolean cached, boolean fromSample) {
+    }
+
+    /** 音色试听：拿到「该音色的样本资产」（必要时生成并缓存模板）。 */
+    @Transactional
+    public Audition audition(UUID userId, UUID workspaceId, UUID projectId, String voice) {
+        guard.requireMember(userId, workspaceId);
+        projects.require(userId, workspaceId, projectId);
+        String v = voice == null || voice.isBlank() ? AudioPlan.DEFAULT_VOICE : voice.trim();
+
+        // 1) 克隆音色：克隆时录入/处理好的那份就是最真实的试听样本，直接用
+        if (AudioPlan.isClone(v)) {
+            UUID presetId;
+            try {
+                presetId = UUID.fromString(AudioPlan.cloneId(v));
+            } catch (IllegalArgumentException e) {
+                throw new BizException(ErrorCode.VALIDATION, "音色标识非法：" + v);
+            }
+            Asset a = assets.findByIdAndWorkspaceId(presetId, workspaceId)
+                    .orElseThrow(() -> new BizException(ErrorCode.NOT_FOUND,
+                            "该克隆音色已不存在（可能被删除），请重新选择音色"));
+            if (!projectId.equals(a.projectId())) {
+                throw new BizException(ErrorCode.NOT_FOUND, "该克隆音色不属于本项目");
+            }
+            if (storage.get(a.storageKey()) == null) {
+                throw new BizException(ErrorCode.NOT_FOUND, "音色文件已丢失，请重新录制该音色");
+            }
+            return new Audition(a.id(), a.durationMs(), true, true);
+        }
+
+        // 2) 内置音色：先找项目内缓存的模板（同音色只生成一次）
+        if (!AudioPlan.BUILTIN_VOICES.contains(v)) {
+            throw new BizException(ErrorCode.VALIDATION, "「" + v
+                    + "」不是内置音色（" + String.join("/", AudioPlan.BUILTIN_VOICES)
+                    + "），也不是克隆音色，无法生成试听模板；请改选内置音色，或先克隆一个音色");
+        }
+        for (Asset a : assets.findByProjectIdAndWorkspaceIdAndKindOrderByCreatedAtDesc(
+                projectId, workspaceId, "voice_demo")) {
+            if (v.equals(snapText(a, "voice")) && storage.get(a.storageKey()) != null) {
+                return new Audition(a.id(), a.durationMs(), true, false);
+            }
+        }
+
+        // 3) 没有模板 → 现合成一条并落库（下次秒回）
+        Synthesized s = synthesizeDemo(v);
+        String key = workspaceId + "/" + projectId + "/voice-demo/" + UUID.randomUUID() + ".wav";
+        put(key, s.audio(), "audio/wav");
+        ObjectNode snap = mapper.createObjectNode();
+        snap.put("voice", v);
+        snap.put("text", AUDITION_TEXT);
+        snap.put("source", "audition-template");
+        Asset demo = assets.save(Asset.output(workspaceId, projectId, null, null, null,
+                "voice_demo", key, "audio/wav", null, null, null, s.durationMs(), snap));
+        return new Audition(demo.id(), s.durationMs(), false, false);
+    }
+
+    private record Synthesized(byte[] audio, Integer durationMs) {
+    }
+
+    /** 调 GPU 机器的 tts 服务合成模板音频。 */
+    private Synthesized synthesizeDemo(String voice) {
+        ObjectNode body = mapper.createObjectNode();
+        body.put("text", AUDITION_TEXT);
+        body.put("voice", voice);
+        body.put("speed", 1.0);
+        try {
+            HttpRequest req = HttpRequest.newBuilder(URI.create(ttsUrl + "/tts"))
+                    .timeout(Duration.ofSeconds(180))
+                    .header("Content-Type", "application/json; charset=utf-8")
+                    .POST(HttpRequest.BodyPublishers.ofString(body.toString(), StandardCharsets.UTF_8))
+                    .build();
+            HttpResponse<byte[]> resp = http.send(req, HttpResponse.BodyHandlers.ofByteArray());
+            if (resp.statusCode() != 200) {
+                String msg = new String(resp.body(), StandardCharsets.UTF_8);
+                throw new BizException(ErrorCode.TTS_UNAVAILABLE,
+                        "音色试听合成失败（HTTP " + resp.statusCode() + "）：" + msg.substring(0, Math.min(200, msg.length())));
+            }
+            byte[] wav = resp.body();
+            if (wav == null || wav.length == 0) {
+                throw new BizException(ErrorCode.TTS_UNAVAILABLE, "音色试听合成返回空音频");
+            }
+            Integer ms = resp.headers().firstValue("X-Duration-Ms")
+                    .map(h -> {
+                        try {
+                            return Integer.valueOf(h.trim());
+                        } catch (NumberFormatException e) {
+                            return null;
+                        }
+                    }).orElse(null);
+            return new Synthesized(wav, ms);
+        } catch (IOException | InterruptedException e) {
+            Thread.currentThread().interrupt();
+            log.warn("音色试听合成不可用（{}）：{}", ttsUrl, e.getMessage());
+            throw new BizException(ErrorCode.TTS_UNAVAILABLE,
+                    "配音服务暂时不可用（" + ttsUrl + "）：" + e.getMessage()
+                            + "；确认 GPU 机器与隧道（ComfyTTS / 18091）是否在运行");
+        }
+    }
+
+    /** 读资产快照里的字符串字段（取不到就空串）。 */
+    private static String snapText(Asset a, String field) {
+        return a.promptSnapshot() == null ? "" : a.promptSnapshot().path(field).asText("");
     }
 
     private void put(String key, byte[] bytes, String mime) {

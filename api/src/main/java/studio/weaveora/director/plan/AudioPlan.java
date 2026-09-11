@@ -27,6 +27,13 @@ public final class AudioPlan {
     public static final String DEFAULT_VOICE = "中文女";
 
     /**
+     * 内置音色（CosyVoice-300M-SFT 的 7 个 spk）——与前端 {@code web/src/utils/audio.ts} 的
+     * {@code VOICE_PRESETS} 保持一致。P12 用它判断「音色试听」是内置音色还是用户的参考音频路径。
+     */
+    public static final List<String> BUILTIN_VOICES = List.of(
+            "中文女", "中文男", "英文女", "英文男", "日语男", "韩语女", "粤语女");
+
+    /**
      * 默认配乐音量（dB）。-10.5dB ≈ 线性 0.30，与 P7 硬编码的 {@code volume=0.30} 等价，
      * 保证不填 gain_db 的老方案听感不变。「一半」约 -16.5dB。
      */

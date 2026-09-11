@@ -249,17 +249,19 @@ const transitions = ['cut', 'dissolve', 'fade', 'wipe'].map((v) => ({ label: v, 
       </p>
       <div class="dur-grid">
         <label v-for="shot in props.plan.shots" :key="shot.shot_no" class="dur-cell">
-          <span class="key">第 {{ shot.shot_no }} 镜</span>
-          <NInputNumber
-            v-model:value="shot.duration_sec"
-            :min="1"
-            :max="10"
-            :step="0.5"
-            size="small"
-            style="width: 100%"
-            :disabled="!!disabled"
-          />
-          <span class="hint-line text-secondary">秒</span>
+          <span class="dur-no font-mono">第 {{ shot.shot_no }} 镜</span>
+          <span class="dur-input">
+            <NInputNumber
+              v-model:value="shot.duration_sec"
+              :min="1"
+              :max="10"
+              :step="0.5"
+              size="small"
+              style="width: 100%"
+              :disabled="!!disabled"
+            />
+            <span class="dur-unit">秒</span>
+          </span>
         </label>
       </div>
     </section>
@@ -629,14 +631,36 @@ const transitions = ['cut', 'dissolve', 'fade', 'wipe'].map((v) => ({ label: v, 
 /* P12：镜头时长自适应网格（桌面多列，手机 1~2 列） */
 .dur-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
-  gap: 8px;
+  /* P12：每镜一个小卡片，卡片之间留足间隙（太栅会看成一整块，分不清哪镜是哪镜） */
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  gap: 12px 14px;
+  margin-top: 6px;
 }
 .dur-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--wv-line);
+  border-radius: 10px;
+  background: var(--wv-surface-sunken);
+}
+.dur-no {
+  font-size: 11px;
+  color: var(--wv-text-3);
+  letter-spacing: 0.04em;
+}
+.dur-input {
   display: flex;
   align-items: center;
   gap: 6px;
   min-width: 0;
+}
+.dur-unit {
+  font-size: 12px;
+  color: var(--wv-text-3);
+  flex: none;
 }
 /* P12：声音卡片的分块 */
 .sub-block {
@@ -667,7 +691,11 @@ const transitions = ['cut', 'dissolve', 'fade', 'wipe'].map((v) => ({ label: v, 
 /* P12：手机端适配 */
 @media (max-width: 640px) {
   .dur-grid {
-    grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+    gap: 10px;
+  }
+  .dur-cell {
+    padding: 7px 9px;
   }
   .voice-row > * {
     flex: 1 1 auto;

@@ -35,7 +35,9 @@ import java.util.UUID;
  *   <li>AI 只能从**已绑定角色**里选说话人；不在列表里的名字一律降级为旁白。</li>
  *   <li>产出的台词**只写 subject，不写死 voice** —— 音色由角色绑定解析。
  *       写死会重演「改了绑定但旧台词仍用老音色」的坑。</li>
- *   <li>时长铺排：按中文 4.5 字/秒估算，段间留 0.25s 间隙；总长超出镜头时统一提语速（≤2.0×）。</li>
+ *   <li>时长铺排：按中文 4.5 字/秒估算，段间留 0.25s 间隙；**固定自然语速 1.0×**（P12：不再自动提速）。</li>
+ *   <li><b>台词优先</b>：先铺台词（dialogue），超出镜头就**允许溢出到下一镜**，不缩短、不提速、
+ *       也不自动延长镜头；<b>旁白只填剩余空档</b>，镜头里台词没占满才铺旁白，放不下就整段不铺（会提示）。</li>
  * </ol>
  */
 @Service
@@ -49,8 +51,13 @@ public class AiAudioService {
     public static final double GAP_SEC = 0.25;
     /** 单段最短时长（秒） */
     public static final double MIN_LINE_SEC = 0.8;
-    public static final double MAX_SPEED = 2.0;
-    public static final double MIN_SPEED = 0.5;
+    /** 台词铺排固定语速：自然语速，不再自动提速（P12 口径） */
+    public static final double NATURAL_SPEED = 1.0;
+    /**
+     * 字数预算的安全系数：镜头 dur 秒能念 {@code dur × CHARS_PER_SEC} 字，
+     * 给 AI 的预算再留 10% 余量（不要卡到临界，实测临界必溢出）。
+     */
+    public static final double BUDGET_RATIO = 0.9;
 
     private final DirectorLlm llm;
     private final PlanReader planReader;
@@ -77,6 +84,10 @@ public class AiAudioService {
     }
 
     public record ShotLines(int shotNo, double shotDurationSec, List<FittedLine> lines) {
+    }
+
+    /** 铺排结果 + 需要回给用户的话（跳过旁白 / 溢出）。 */
+    public record FitResult(List<FittedLine> lines, List<String> notes) {
     }
 
     public record LinesResult(String source, List<ShotLines> shots, List<String> notes) {
@@ -128,10 +139,14 @@ public class AiAudioService {
                 notes.add("第 " + no + " 镜：AI 没有给出可用台词（已跳过）");
                 continue;
             }
-            List<FittedLine> fitted = fitLines(ai, dur, boundSubjects);
-            if (fitted.isEmpty()) {
+            FitResult fit = fitLinesDetailed(ai, dur, boundSubjects);
+            if (fit.lines().isEmpty()) {
                 continue;
             }
+            for (String n : fit.notes()) {
+                notes.add("第 " + no + " 镜：" + n);
+            }
+            List<FittedLine> fitted = fit.lines();
             // 追加时，新台词接在已有台词之后
             if (hasLines && !replace) {
                 double after = 0;
@@ -159,12 +174,13 @@ public class AiAudioService {
                                   JsonNode shot, Set<String> boundSubjects, String narrationVoice) {
         String system = """
                 你是竖屏短剧的编剧/对白指导。根据给定镜头的画面与项目人物，写 1~3 段台词。
-                要求：
-                1. 台词要口语化、贴合画面动作，符合人物身份与当下情绪；
-                2. 优先写「角色对白」（dialogue），必要时补一句旁白（narration）交代背景；
-                3. 说话人只能从「可用人物」里选；旁白把 subject 留空；
-                4. 每段尽量简短（中文 8~25 字），总字数要能在镜头时长内念完；
-                5. 不要写画面描写、不要加引号外的解释。
+                硬性约束（必须满足，否则配音会念不完）：
+                1. 本镜「总字数上限」由用户消息给出：**所有段字数相加不得超过它**。
+                2. 旁白（narration）只在「台词写完后还有余额」时才写；没余额就不要写旁白，宁可只给台词。
+                3. 配音固定自然语速 1.0×（不会提速），所以宁少勿长。
+                4. 说话人只能从「可用人物」里选；旁白把 subject 留空。
+                5. 优先写「角色对白」（dialogue，口语化、贴合画面动作、符合人物身份与情绪），必要时才补旁白。
+                6. 不要写画面描写、不要加引号外的解释。
                 只输出 JSON，形如：
                 {"lines":[{"kind":"dialogue","subject":"关羽","text":"来者何人！"},
                           {"kind":"narration","subject":"","text":"刀光一闪。"}]}
@@ -179,7 +195,11 @@ public class AiAudioService {
         user.append("可用人物（仅可选这些作为对白说话人）：").append(characters).append('\n');
         user.append("旁白音色：").append(narrationVoice).append('\n');
         user.append("本镜：第 ").append(shot.path("shot_no").asInt()).append(" 镜");
-        user.append("，时长 ").append(String.format(java.util.Locale.ROOT, "%.1f", shot.path("duration_sec").asDouble(3))).append("s\n");
+        double dur = shot.path("duration_sec").asDouble(3);
+        user.append("，时长 ").append(String.format(java.util.Locale.ROOT, "%.1f", dur)).append("s\n");
+        user.append("字数上限：台词+旁白合计不超过 ").append(charBudget(dur))
+                .append(" 字（按 ").append(String.format(java.util.Locale.ROOT, "%.1f", CHARS_PER_SEC))
+                .append(" 字/秒、自然语速 1.0× 估算；超出会溢出到下一镜）\n");
         user.append("景别：").append(shot.path("shot_size").asText("")).append('\n');
         user.append("运镜：").append(shot.path("camera_move").asText("")).append('\n');
         user.append("画面动作：").append(shot.path("action").asText("")).append('\n');
@@ -232,53 +252,98 @@ public class AiAudioService {
     /**
      * 把 AI 台词铺到镜头时间轴上（纯函数，便于单测）。
      *
-     * <p>规则：
-     * <ul>
+     * <p>P12 口径（默认不自动提速、不自动延长镜头）：
+     * <ol>
      *   <li>说话人不在 {@code boundSubjects} 里 → 降级为旁白（subject 置空），避免指向不存在的角色。</li>
-     *   <li>每段时长按 {@link #CHARS_PER_SEC} 估算，段间留 {@link #GAP_SEC}；末段不超过镜头时长。</li>
-     *   <li>总长超出镜头 → 统一提语速（≤{@link #MAX_SPEED}）把总长压进镜头；压不进就按语速上限铺、并允许溢出。</li>
-     * </ul>
+     *   <li><b>台词优先</b>：台词按自然语速 {@link #NATURAL_SPEED} 从镜头发端顺铺，
+     *       超出镜头也**不提速** —— 允许溢出到下一镜（渲染层已支持）。</li>
+     *   <li><b>旁白只填剩余空档</b>：镜头里有台词时，旁白只在「剩余时长装得下整段」时才铺，
+     *       否则整段不铺（避免旁白拖着镜头走）；若本镜根本没有台词，旁白就是主体内容，照常铺（可溢出）。</li>
+     * </ol>
      */
-    static List<FittedLine> fitLines(List<AiLine> ai, double shotDur, Set<String> boundSubjects) {
-        List<FittedLine> out = new ArrayList<>();
-        double usable = Math.max(1.0, shotDur);
-        // 1) 估算总长（单位：按 1.0 语速的秒数）
-        double sum = 0;
-        for (AiLine l : ai) {
-            sum += estimate(l.text()) + GAP_SEC;
-        }
-        sum = Math.max(0, sum - GAP_SEC);
-        // 2) 需要的语速（挤不下就提，最多 2.0×）
-        double speed = 1.0;
-        if (sum > usable && sum > 0) {
-            // 注意 /100.0：写成 /100 是**整数除法**，会把语速截断成整数（实测踩过）
-            speed = Math.min(MAX_SPEED, Math.max(MIN_SPEED, Math.round((sum / usable) * 100) / 100.0));
-        }
-        // 3) 依次铺排
-        double cursor = 0;
-        for (AiLine l : ai) {
-            String kind = l.kind() == null ? "" : l.kind().trim();
-            String subject = l.subject() == null ? "" : l.subject().trim();
+    static FitResult fitLinesDetailed(List<AiLine> ai, double shotDur, Set<String> boundSubjects) {
+        List<String> notes = new ArrayList<>();
+        List<AiLine> dialogue = new ArrayList<>();
+        List<AiLine> narration = new ArrayList<>();
+        for (AiLine raw : ai) {
+            String subject = raw.subject() == null ? "" : raw.subject().trim();
             if (!subject.isEmpty() && (boundSubjects == null || !boundSubjects.contains(subject))) {
-                subject = "";   // 不在已绑定角色里 → 当旁白
+                subject = "";   // 不在已绑定角色里 → 降级为旁白
             }
             if (subject.isEmpty()) {
-                kind = "narration";
-            } else if (kind.isEmpty()) {
-                kind = "dialogue";
+                narration.add(new AiLine(raw.text(), "narration", ""));
+            } else {
+                dialogue.add(new AiLine(raw.text(), "dialogue", subject));
             }
-            double d = Math.max(MIN_LINE_SEC, estimate(l.text()) / speed);
-            out.add(new FittedLine(round1(cursor), round1(cursor + d), l.text(), kind,
-                    subject.isEmpty() ? null : subject, speed));
-            cursor += d + GAP_SEC / Math.max(1.0, speed);
         }
-        return out;
+
+        double usable = Math.max(1.0, shotDur);
+        List<FittedLine> out = new ArrayList<>();
+        double cursor = 0;
+
+        // 1) 台词优先：自然语速顺铺（不缩短、不提速；超了就溢出，由渲染层跨到下一镜）
+        for (AiLine l : dialogue) {
+            double d = estimate(l.text());
+            out.add(new FittedLine(round1(cursor), round1(cursor + d), l.text(), "dialogue",
+                    l.subject(), NATURAL_SPEED));
+            cursor = cursor + d + GAP_SEC;
+        }
+        double dialogueEnd = out.isEmpty() ? 0 : out.get(out.size() - 1).endSec();
+
+        // 2) 旁白只填剩余空档：本镜有台词时，装不下就整段不铺
+        boolean mustFit = !dialogue.isEmpty();
+        int skipped = 0;
+        int skippedChars = 0;
+        for (AiLine l : narration) {
+            double at = cursor;
+            double d = estimate(l.text());
+            if (mustFit && at + d > usable + 1e-6) {
+                skipped++;
+                skippedChars += chars(l.text());
+                continue;
+            }
+            out.add(new FittedLine(round1(at), round1(at + d), l.text(), "narration", null, NATURAL_SPEED));
+            cursor = at + d + GAP_SEC;
+        }
+
+        // 3) 提示：溢出与跳过的旁白都要说清楚（不静默丢内容）
+        double end = out.isEmpty() ? 0 : out.get(out.size() - 1).endSec();
+        if (dialogueEnd > usable + 0.05) {
+            notes.add("台词约 " + fmt(dialogueEnd) + "s 超出镜头 " + fmt(usable)
+                    + "s —— 已按自然语速 1.0× 铺排并允许溢出到下一镜（未自动提速、未延长镜头）");
+        } else if (end > usable + 0.05) {
+            notes.add("语音合计约 " + fmt(end) + "s 超出镜头 " + fmt(usable)
+                    + "s —— 已允许溢出到下一镜（未自动提速、未延长镜头）");
+        }
+        if (skipped > 0) {
+            notes.add("台词已占用镜头时长，跳过 " + skipped + " 段旁白（共 " + skippedChars
+                    + " 字）—— 如需保留可手动缩短台词或延长镜头");
+        }
+        return new FitResult(out, notes);
+    }
+
+    /** 兼容旧调用：只要铺好的行。 */
+    static List<FittedLine> fitLines(List<AiLine> ai, double shotDur, Set<String> boundSubjects) {
+        return fitLinesDetailed(ai, shotDur, boundSubjects).lines();
+    }
+
+    /** 去掉空白后的字数（与 {@link #estimate} 同一口径）。 */
+    static int chars(String text) {
+        return text == null ? 0 : text.replaceAll("\\s", "").length();
+    }
+
+    /** 铺给 AI 的字数预算：镜头时长能读完的字数 ×{@link #BUDGET_RATIO}。 */
+    static int charBudget(double shotDur) {
+        return Math.max(0, (int) Math.floor(Math.max(0, shotDur) * CHARS_PER_SEC * BUDGET_RATIO));
+    }
+
+    private static String fmt(double v) {
+        return String.format(java.util.Locale.ROOT, "%.1f", v);
     }
 
     /** 中文朗读时长估算（秒）。 */
     static double estimate(String text) {
-        int n = text == null ? 0 : text.replaceAll("\\s", "").length();
-        return Math.max(MIN_LINE_SEC, n / CHARS_PER_SEC);
+        return Math.max(MIN_LINE_SEC, chars(text) / CHARS_PER_SEC);
     }
 
     private static double round1(double v) {

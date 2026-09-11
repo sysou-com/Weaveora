@@ -20,6 +20,7 @@ import studio.weaveora.project.api.ProjectController;
 import studio.weaveora.shared.api.BizException;
 import studio.weaveora.shared.api.ErrorCode;
 
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -74,6 +75,27 @@ public class AssetController {
         body.put("presetAssetId", c.presetAssetId());
         body.put("durationSec", c.durationSec());
         body.put("warnings", c.warnings());
+        return ResponseEntity.ok(body);
+    }
+
+    /**
+     * P12 音色试听：返回「该音色自己的样本资产」。
+     *
+     * <p>克隆音色 → 回克隆时录入的那段音频；内置音色 → 回模板音频（「你好，欢迎试音」，
+     * 首次现合成并缓存）。前端拿 assetId 走既有 {@code /assets/{id}/download} 播放。
+     */
+    @PostMapping("/projects/{projectId}/voice-presets/audition")
+    public ResponseEntity<Map<String, Object>> audition(
+            HttpServletRequest request,
+            @RequestHeader(value = ProjectController.WORKSPACE_HEADER, required = false) String workspaceId,
+            @PathVariable UUID projectId,
+            @RequestParam(value = "voice", required = false) String voice) {
+        var a = voicePresetService.audition(uid(request), ws(workspaceId), projectId, voice);
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("assetId", a.assetId().toString());
+        body.put("durationMs", a.durationMs());
+        body.put("cached", a.cached());
+        body.put("fromSample", a.fromSample());
         return ResponseEntity.ok(body);
     }
 

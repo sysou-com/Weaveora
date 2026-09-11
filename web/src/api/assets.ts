@@ -132,6 +132,24 @@ export async function createVoicePreset(
   return (await resp.json()) as VoicePresetCreated
 }
 
+/**
+ * P12 音色试听：拿到「该音色自己的样本资产」。
+ *
+ * 克隆音色 → 回克隆时录入的那段音频（fromSample=true，零延迟）；
+ * 内置音色 → 回模板音频「你好，欢迎试音」（首次现合成并缓存，cached=false 表示本次新建）。
+ */
+export async function auditionVoicePreset(
+  workspaceId: string,
+  projectId: string,
+  voice: string,
+): Promise<{ assetId: string; durationMs: number | null; cached: boolean; fromSample: boolean }> {
+  const q = new URLSearchParams({ voice })
+  return request<{ assetId: string; durationMs: number | null; cached: boolean; fromSample: boolean }>(
+    `/api/v1/projects/${projectId}/voice-presets/audition?${q}`,
+    { method: 'POST', headers: { [WORKSPACE_HEADER]: workspaceId } },
+  )
+}
+
 /** P9：转写样本（whisper 在 GPU 机器上），返回识别文本；失败返回空串。 */
 export async function transcribeVoicePreset(
   workspaceId: string,

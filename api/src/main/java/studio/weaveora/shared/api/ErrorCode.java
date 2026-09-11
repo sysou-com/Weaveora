@@ -32,6 +32,8 @@ public enum ErrorCode {
     WORKER_UNAVAILABLE(503),
     UPLOAD_TYPE_NOT_ALLOWED(400),
     UPLOAD_TOO_LARGE(413),
+    /** 自托管 TTS / 音乐生成服务不可达或合成失败（GPU 机器挖道挂了、模型未加载等）。 */
+    TTS_UNAVAILABLE(503),
     EXPORT_EMPTY(409);
 
     private final int httpStatus;

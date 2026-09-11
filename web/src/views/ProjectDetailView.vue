@@ -25,7 +25,7 @@ import {
 import { createBrief, listBriefs } from '@/api/briefs'
 import { createJobs, listJobs, cancelJob, rerunJob, retryJobs, deleteJobs, JOB_STATE_LABEL } from '@/api/jobs'
 import { shareProject } from '@/api/market'
-import { listAssets, uploadReference, fetchAssetBlob, deleteAssets, uploadVoiceLine, useSampleAsLineVoice, deleteVoicePreset } from '@/api/assets'
+import { listAssets, uploadReference, fetchAssetBlob, deleteAssets, uploadVoiceLine, useSampleAsLineVoice, deleteVoicePreset, auditionVoicePreset } from '@/api/assets'
 import { createExport, fetchExportBlob, renderMaster, timecode } from '@/api/export'
 import { aiGenerateLines, aiGenerateMusic } from '@/api/director'
 import { getProject, updateProjectDuration } from '@/api/projects'
@@ -1062,7 +1062,52 @@ async function waitJobDone(jobId: string, timeoutMs: number): Promise<JobRecord>
   }
 }
 
+/**
+ * P12 音色试听：直接播放「下拉里选中的那个音色」自己的样本。
+ *  - 克隆音色 → 克隆时录入的那段音频（后端直接回，零延迟）
+ *  - 内置音色 → 「你好，欢迎试音」模板（首次现合成并缓存，之后秒回）
+ */
+async function auditionVoice(): Promise<void> {
+  const plan = draft.value
+  if (!plan || !isVideoPlan(plan)) {
+    message.warning('当前不是视频方案，无法试听音色')
+    return
+  }
+  const voice = (plan.audio.voice || '').trim() || '中文女'
+  previewBusy.value = true
+  try {
+    const r = await auditionVoicePreset(workspaceId.value, projectId.value, voice)
+    const blob = await fetchAssetBlob(workspaceId.value, r.assetId)
+    if (!blob) throw new Error('试听音频读取失败')
+    const name = voice.startsWith('clone:')
+      ? ((plan.audio.voicePresets ?? []).find((p) => `clone:${p.id}` === voice)?.name || '克隆音色')
+      : voice
+    const dur = r.durationMs ? ` · ${(r.durationMs / 1000).toFixed(1)}s` : ''
+    closeAudioPreview()
+    audioPreview.value = {
+      url: URL.createObjectURL(blob),
+      kind: 'voice',
+      label: `音色试听 · ${name}${r.fromSample ? '（克隆样本）' : ''}${dur}`,
+    }
+    if (r.fromSample) {
+      message.success('音色试听就绪（克隆时录入的样本）')
+    } else if (r.cached) {
+      message.success('音色试听就绪（模板已缓存）')
+    } else {
+      message.success(`已用「${name}」合成模板「你好，欢迎试音」（已缓存，下次秒开）`)
+    }
+  } catch (e) {
+    message.error(e instanceof Error ? e.message : '音色试听失败')
+  } finally {
+    previewBusy.value = false
+  }
+}
+
 async function previewVoice(shotNo?: number): Promise<void> {
+  // P12：不带镜号 = 「音色试听」→ 直接听该音色自己的样本（克隆→录入音频；内置→缓存模板）
+  if (shotNo == null) {
+    return auditionVoice()
+  }
   const revId = genRevisionId()
   if (!revId) return
   if (dirty.value && !(await handleSave())) return
