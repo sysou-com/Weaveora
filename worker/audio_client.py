@@ -54,6 +54,9 @@ def tts(payload):
     # P9：克隆音色的样本转写文本（传给 CosyVoice 的 prompt_text，比空串明显更贴音色）
     if (payload.get("refPromptText") or "").strip():
         body["prompt_text"] = payload["refPromptText"].strip()
+    # P9：参考音**字节**（base64）—— 跨系统（Windows worker / WSL 服务）传路径不可行
+    if payload.get("refAudioB64"):
+        body["ref_audio_b64"] = payload["refAudioB64"]
     timeout = int(os.environ.get("WEAVEORA_TTS_TIMEOUT", "900"))
     return _post(TTS_URL + "/tts", body, timeout)
 

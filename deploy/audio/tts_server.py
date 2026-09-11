@@ -153,11 +153,13 @@ def _tensors_to_wav(chunks, sample_rate):
     return buf.getvalue()
 
 
-def _render(text, v, spd, seed=None, prompt_text=""):
+def _render(text, v, spd, seed=None, prompt_text="", ref_audio=b""):
     """按 voice 路由跑一次推理 → (chunks, sample_rate, used_label)。
 
     seed 非空时先固定随机种子，保证同一文案可复现（否则采样随机）。
     prompt_text 仅对 zero-shot 生效：传参考音的转写文本，比空串明显更贴音色。
+    ref_audio 优先：**参考音字节直接随请求传**（worker 在 Windows、本服务在 WSL，
+    文件路径跨系统不可见 —— 早期用路径传导致静默落到兑底参考音，克隆从未生效）。
     """
     if seed is not None:
         try:
@@ -167,6 +169,24 @@ def _render(text, v, spd, seed=None, prompt_text=""):
                 torch.cuda.manual_seed_all(int(seed))
         except Exception:
             pass
+
+    # 0) 参考音字节（克隆）—— 本机写临时文件后走 zero-shot
+    if ref_audio:
+        import tempfile
+        fd, path = tempfile.mkstemp(prefix="wv_ref_", suffix=".wav")
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(ref_audio)
+            m = _load("v2")
+            return list(m.inference_zero_shot(text, (prompt_text or "").strip(), path,
+                                              stream=False, speed=spd)), \
+                m.sample_rate, "clone:(%d bytes)" % len(ref_audio)
+        finally:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
     if os.path.exists(v):
         # 1) 参考音频路径 → CosyVoice2 zero-shot 克隆
         #    注意：inference_zero_shot 第 3 参是 **wav 文件路径**（内部 frontend_* →
@@ -200,13 +220,13 @@ def _render(text, v, spd, seed=None, prompt_text=""):
                        % ("/".join(spks) or "SFT 模型缺失"))
 
 
-def synthesize(text, voice, speed, target_sec, seed=None, prompt_text=""):
+def synthesize(text, voice, speed, target_sec, seed=None, prompt_text="", ref_audio=b""):
     v = (voice or DEFAULT_VOICE).strip()
     spd = max(0.5, min(2.0, float(speed or 1.0)))
     tgt = float(target_sec or 0)
     t0 = time.time()
 
-    chunks, sr, used = _render(text, v, spd, seed, prompt_text)
+    chunks, sr, used = _render(text, v, spd, seed, prompt_text, ref_audio)
     wav = _tensors_to_wav(chunks, sr)
     ms = int(round((len(wav) - 44) / 2.0 / float(sr) * 1000))
 
@@ -221,7 +241,7 @@ def synthesize(text, voice, speed, target_sec, seed=None, prompt_text=""):
             if abs(spd2 - spd) > 0.02:
                 print("[tts] 时长对齐: 实际 %.2fs / 目标 %.2fs (ratio=%.2f)，语速 %.2f -> %.2f 重合成"
                       % (ms / 1000.0, tgt, ratio, spd, spd2), flush=True)
-                chunks, sr, used = _render(text, v, spd2, seed, prompt_text)
+                chunks, sr, used = _render(text, v, spd2, seed, prompt_text, ref_audio)
                 wav = _tensors_to_wav(chunks, sr)
                 ms = int(round((len(wav) - 44) / 2.0 / float(sr) * 1000))
                 spd = spd2
@@ -229,14 +249,26 @@ def synthesize(text, voice, speed, target_sec, seed=None, prompt_text=""):
         # 只报告差值，供 UI 提醒文案过长/过短，不动音频
         print("[tts] 时长比对(未对齐): 实际 %.2fs / 镜头 %.2fs" % (ms / 1000.0, tgt), flush=True)
 
-    print("[tts] text=%d字 voice=%s[%s] speed=%.2f target=%.1f seed=%s prompt=%d字 -> %.1fs in %.1fs"
+    print("[tts] text=%d字 voice=%s[%s] speed=%.2f target=%.1f seed=%s prompt=%d字 ref=%dB -> %.1fs in %.1fs"
           % (len(text), v, used, spd, tgt, seed if seed is not None else "-",
-             len(prompt_text or ""), ms / 1000.0, time.time() - t0), flush=True)
+             len(prompt_text or ""), len(ref_audio or b""), ms / 1000.0, time.time() - t0), flush=True)
     return wav, ms
 
     print("[tts] text=%d字 voice=%s[%s] speed=%.2f target=%.1f -> %.1fs in %.1fs"
           % (len(text), v, used, spd, tgt, ms / 1000.0, time.time() - t0), flush=True)
     return wav, ms
+
+
+def _decode_ref(b64):
+    """解码随请求传来的克隆参考音（base64）。空/非法一律当作没有。"""
+    if not b64:
+        return b""
+    try:
+        import base64
+        raw = base64.b64decode(b64)
+        return raw if len(raw) > 1024 else b""
+    except Exception:
+        return b""
 
 
 def _get_whisper():
@@ -347,7 +379,8 @@ class Handler(BaseHTTPRequestHandler):
             req = json.loads(self.rfile.read(n) or b"{}")
             wav, ms = synthesize(req.get("text", ""), req.get("voice", ""),
                                  req.get("speed", 1.0), req.get("target_sec", 0),
-                                 req.get("seed"), req.get("prompt_text", ""))
+                                 req.get("seed"), req.get("prompt_text", ""),
+                                 _decode_ref(req.get("ref_audio_b64")))
             self.send_response(200)
             self.send_header("Content-Type", "audio/wav")
             self.send_header("X-Duration-Ms", str(ms))
