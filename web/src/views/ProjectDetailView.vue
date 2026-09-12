@@ -8,7 +8,7 @@ import {
   Save,
   WandSparkles,
 } from 'lucide-vue-next'
-import { NAlert, NButton, NIcon, NInputNumber, NModal, NSkeleton, NTag, useDialog, useMessage } from 'naive-ui'
+import { NAlert, NButton, NDropdown, NIcon, NInputNumber, NModal, NSkeleton, NTag, useDialog, useMessage } from 'naive-ui'
 import { computed, onErrorCaptured, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
@@ -495,6 +495,20 @@ async function onExtractSubjects(): Promise<void> {
     subjectBusy.value = ''
   }
 }
+/** 主体操作菜单：生成/换一版 · 选图 · 删除 */
+function subjectActions(sub: PlanSubject): Array<{ label: string; key: string; disabled?: boolean }> {
+  return [
+    { label: sub.portraitAssetId ? '换一版定妆照' : '生成定妆照', key: 'gen' },
+    { label: '把最新定妆照设为锚定图', key: 'pick', disabled: !portraitsOf(sub.name).length },
+    { label: '删除该主体', key: 'del' },
+  ]
+}
+function onSubjectAction(key: string, name: string): void {
+  if (key === 'gen') void genPortrait(name)
+  else if (key === 'pick') pickPortrait(name)
+  else if (key === 'del') removeSubject(name)
+}
+
 /** 删除主体：连同它在参考图上的主体标记一起清掉（否则会残留成无主参考图） */
 function removeSubject(name: string): void {
   const target = planSubjects().find((s) => s.name === name)
@@ -609,6 +623,13 @@ function syncReferenceAssets(): void {
   ;(draft.value as unknown as { subjects?: PlanSubject[] }).subjects = out
 }
 /** 勾选/取消某张参考图参与锚定 */
+/** 新加入的参考图默认**不勾选**（它只是定妆的参照，默认不参与锚定；要用请显式勾选） */
+function markUnchecked(id: string): void {
+  if (!refUnchecked.value.includes(id)) {
+    refUnchecked.value = [...refUnchecked.value, id]
+  }
+}
+
 function toggleRefChecked(id: string, on: boolean): void {
   refUnchecked.value = on ? refUnchecked.value.filter((x) => x !== id) : [...new Set([...refUnchecked.value, id])]
   syncReferenceAssets()
@@ -640,11 +661,10 @@ const enabledSubjects = computed<PlanSubject[]>(() =>
   planSubjects().filter((s) => s.enabled !== false && (s.name ?? '').trim() !== ''),
 )
 /** 该主体显示的图：定妆照优先，其次第一张勾选素材图 */
+/** 已选主体里显示的图 = **只显示定妆照**（素材图仅作定妆参照，不作为定妆图展示） */
 function subjectThumb(sub: PlanSubject): string {
   if (sub.portraitAssetId && galUrls.value[sub.portraitAssetId]) return galUrls.value[sub.portraitAssetId]
-  const id = (sub.refs ?? []).find((r) => r.checked !== false)?.assetId
-  if (!id) return ''
-  return galUrls.value[id] ?? thumbUrls.value[id] ?? ''
+  return ''
 }
 /** 主体区域（优先取该主体当前的区��输入，其次取方案里存的 region） */
 function subjectRegion(sub: PlanSubject, k: 'x' | 'y' | 'w' | 'h'): string {
@@ -829,7 +849,7 @@ const refOverModelLimit = computed(
 const LIST_PAGE = 5
 
 /* ---------------- P12 任务 / 资产按类型分 Tab（避免一次刷一堆） ---------------- */
-type AudioTab = 'master' | 'voice' | 'bgm' | 'still' | 'clip' | 'all'
+type AudioTab = 'master' | 'portrait' | 'voice' | 'bgm' | 'still' | 'clip' | 'all'
 /**
  * 任务卡片的 Tab：**不含成片 master**（任务区不会产出 master，成片是导出/合成的产物，只在资产库）。
  * “全部”放最后。
@@ -844,6 +864,7 @@ const JOB_TABS: Array<{ key: AudioTab; label: string; kind?: string; hint: strin
 /** 资产库 Tab：保留成片 master（导出/合成产物在这里） */
 const GAL_TABS: Array<{ key: AudioTab; label: string; kind?: string; hint: string }> = [
   { key: 'master', label: '成片', kind: 'master', hint: '导出/合成出的成片 master' },
+  { key: 'portrait', label: '定妆', kind: 'portrait', hint: '剧情主体定妆照（subject_portrait）' },
   { key: 'voice', label: '配音', kind: 'voice', hint: '含试听产物 voice_preview' },
   { key: 'bgm', label: '配乐', kind: 'bgm', hint: '含试听产物 bgm_preview' },
   { key: 'still', label: '关键帧', kind: 'still', hint: '首帧图片 still' },
@@ -852,6 +873,7 @@ const GAL_TABS: Array<{ key: AudioTab; label: string; kind?: string; hint: strin
 ]
 /** 把 kind 归到 Tab（试听产物归入对应正式类型） */
 function kindTab(kind: string): AudioTab {
+  if (kind === 'portrait') return 'portrait'
   if (kind === 'voice' || kind === 'voice_preview') return 'voice'
   if (kind === 'bgm' || kind === 'bgm_preview') return 'bgm'
   if (kind === 'still') return 'still'
@@ -912,7 +934,7 @@ function newestStamp<T extends { createdAt: string }>(list: T[]): T | undefined 
 }
 
 // ---------- W4 资产库 ----------
-const outputAssets = computed(() => (assets.data.value ?? []).filter((a) => ['still','clip','master','voice','bgm','voice_preview','bgm_preview'].includes(a.kind)))
+const outputAssets = computed(() => (assets.data.value ?? []).filter((a) => ['still','clip','master','voice','bgm','voice_preview','bgm_preview','portrait'].includes(a.kind)))
 
 /** P12：资产库也按类型分 Tab */
 const galTabCounts = computed(() => {
@@ -924,8 +946,12 @@ const galTabCounts = computed(() => {
   }
   return m
 })
+/** 资产的分类：定妆照优先看快照（历史数据 kind 被写成 still） */
+function assetTab(a: AssetRef): AudioTab {
+  return a.kind === 'portrait' || a.snapshotKind === 'portrait' ? 'portrait' : kindTab(a.kind)
+}
 const galleryForTab = computed(() =>
-  galTab.value === 'all' ? outputAssets.value : outputAssets.value.filter((a) => kindTab(a.kind) === galTab.value),
+  galTab.value === 'all' ? outputAssets.value : outputAssets.value.filter((a) => assetTab(a) === galTab.value),
 )
 // 默认 Tab：没记录过就用「最新一条产物」那一类
 watch(outputAssets, (list) => {
@@ -1030,8 +1056,9 @@ function setRefFromAsset(id: string): void {
     return
   }
   refSelected.value.push(id)
+  markUnchecked(id)
   syncReferenceAssets()
-  message.success('已加入参考图（显示在左侧参考图卡片，可标主体/区域）')
+  message.success('已加入参考图（默认不勾选=不参与锚定；勾选后才参与，它也可作为定妆的参照）')
 }
 
 function onPickFile(e: Event): void {
@@ -1046,7 +1073,7 @@ function onPickFile(e: Event): void {
       if (refSelected.value.length >= MAX_REFS) {
         message.warning(`参考图最多 ${MAX_REFS} 张（已加入的不受影响）`)
       }
-      else refSelected.value.push(a.id)
+      else { refSelected.value.push(a.id); markUnchecked(a.id) }
     } catch (err) {
       message.error(err instanceof Error ? err.message : '上传失败')
     } finally {
@@ -1064,7 +1091,7 @@ function toggleRef(id: string, on: boolean): void {
       message.warning(`参考图最多 ${MAX_REFS} 张`)
       return
     }
-    if (!refSelected.value.includes(id)) refSelected.value.push(id)
+    if (!refSelected.value.includes(id)) { refSelected.value.push(id); markUnchecked(id) }
   } else {
     refSelected.value = refSelected.value.filter((x) => x !== id)
     delete refSubjects.value[id]
@@ -2445,21 +2472,16 @@ const shotTotal = computed(() => {
                 <span class="subj-refs font-mono" :title="'该主体的素材参考图张数'">
                   {{ (sub.refs ?? []).length }} 图
                 </span>
-                <NButton size="tiny" secondary :loading="portraitBusy" :disabled="!canEdit"
-                         :data-testid="`subj-gen-${sub.name}`" title="用该主体勾选的素材图生成标准定妆图"
-                         @click="genPortrait(sub.name)">
-                  {{ sub.portraitAssetId ? '换一版' : '生成图像' }}
-                </NButton>
-                <NButton size="tiny" quaternary :disabled="!portraitsOf(sub.name).length"
-                         :data-testid="`subj-pick-${sub.name}`" title="把最新一版定妆图设为该主体的锚定图"
-                         @click="pickPortrait(sub.name)">
-                  选图
-                </NButton>
-                <NButton size="tiny" quaternary type="error" :disabled="!canEdit"
-                         :data-testid="`subj-del-${sub.name}`" title="删除该主体（连同它在参考图上的主体标记）"
-                         @click="removeSubject(sub.name)">
-                  删除
-                </NButton>
+                <NDropdown
+                  trigger="click"
+                  size="small"
+                  :options="subjectActions(sub)"
+                  :disabled="!canEdit"
+                  :data-testid="`subj-ops-${sub.name}`"
+                  @select="(k: string) => onSubjectAction(k, sub.name)"
+                >
+                  <NButton size="tiny" secondary :loading="portraitBusy">操作 ▾</NButton>
+                </NDropdown>
               </div>
               <p class="subj-hint text-secondary">
                 勾选 = 参与锚定；分镜锚定用「定妆图」优先，没有定妆图才用素材图。改动后请<b>保存并重新确认</b>，否则生成仍读旧稿。
@@ -2553,7 +2575,7 @@ const shotTotal = computed(() => {
               <div v-for="sub in enabledSubjects" :key="sub.name" class="ref-subject-block">
                 <div class="ref-subject-row">
                   <img v-if="subjectThumb(sub)" :src="subjectThumb(sub)" class="ref-subject-thumb" alt="" />
-                  <span v-else class="ref-subject-thumb empty font-mono">无定妆照</span>
+                  <span v-else class="ref-subject-thumb empty font-mono">未定妆</span>
                   <span class="ref-subject-name">{{ sub.name }}</span>
                   <span v-if="sub.portraitAssetId" class="ref-subject-tag font-mono">定妆照 v{{ sub.portraitVersion ?? 1 }}</span>
                   <span v-else class="ref-subject-tag off font-mono">素材图</span>
