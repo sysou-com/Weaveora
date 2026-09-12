@@ -6,7 +6,7 @@
  * 「转为多段」把它迁进来（保留旧字段不再写，向后兼容）。
  */
 import { Delete, Plus } from 'lucide-vue-next'
-import { NButton, NIcon, NInput, NInputNumber, NSelect, NTooltip } from 'naive-ui'
+import { NButton, NIcon, NInput, NInputNumber, NSelect, NTooltip, useMessage } from 'naive-ui'
 import { computed, ref } from 'vue'
 
 import type { DirectorShot, NarrationLine } from '@/api/types'
@@ -44,6 +44,9 @@ const emit = defineEmits<{
   /** P11：AI 一键生成台词（本镜） */
   aiLines: [shotNo: number]
 }>()
+
+/** toast（「按实际配时」提示用） */
+const message = useMessage()
 
 /** 配音大致语速（字/秒）——仅用于估算块宽与时长，不是真实合成结果 */
 const CHARS_PER_SEC = 4.5
