@@ -48,6 +48,15 @@ NAME = os.environ.get("WEAVEORA_WORKER_NAME", "stub-worker")
 WORKSPACE = os.environ.get("WEAVEORA_WORKER_WORKSPACE")  # None = 节点池
 MODE = os.environ.get("WEAVEORA_WORKER_MODE", "stub")  # stub|comfy
 
+# P13 护栏：stub 模式已废弃，但历史上它会被注册成「GPU worker」并抢走 gpu 路由的
+# 配音/配乐任务 —— 而跑它的机器（如 VPS）既没有 TTS 也没有 ACE-Step，只能走 http 兜底
+# → 任务瞬间全部失败（实测：9 个 voice + 15 个 bgm 全挂，只有本机 comfy worker 抢到的成功）。
+# 宁可拒绝启动，也不要静默抢占。
+if MODE not in ("comfy", "cloud"):
+    print("[worker] 拒绝启动：WEAVEORA_WORKER_MODE=%r 不是 comfy/cloud。" % MODE, flush=True)
+    print("[worker] 生产只用：comfy（Windows，含 WSL-TTS + ComfyUI）或 cloud（云图片/视频）。", flush=True)
+    raise SystemExit(2)
+
 
 def _req(method, path, payload=None, files=None, timeout=30):
     headers = {"X-Worker-Token": TOKEN}
