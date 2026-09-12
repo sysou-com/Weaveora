@@ -926,7 +926,7 @@ async function refreshThumbs(): Promise<void> {
   await Promise.all(
     picks.slice(0, 12).map(async (a) => {
       if (!thumbUrls.value[a.id]) {
-        const blob = await fetchAssetBlob(workspaceId.value, a.id)
+        const blob = await assetBlob(a.id)
         if (blob) thumbUrls.value[a.id] = URL.createObjectURL(blob)
       }
       next[a.id] = thumbUrls.value[a.id]
@@ -1073,10 +1073,25 @@ watch(outputAssets, (list) => {
   galTabPinned.value = true
 })
 const galUrls = ref<Record<string, string>>({})
+/**
+ * P13：取不到（404）的资产记下来，本次会话不再重试 ——
+ * 否则一个已失效的 id 会在每次刷新时反复 404，既刷控制台又拖慢页面。
+ */
+const missingAssets = ref<string[]>([])
+async function assetBlob(id: string): Promise<Blob | null> {
+  if (missingAssets.value.includes(id)) return null
+  const blob = await fetchAssetBlob(workspaceId.value, id)
+  if (!blob) {
+    missingAssets.value = [...missingAssets.value, id]
+    console.warn('[asset] 读取失败（已标记，不再重试）:', id)
+  }
+  return blob
+}
+
 async function refreshGallery(): Promise<void> {
   await Promise.all(outputAssets.value.map(async (a) => {
     if (!galUrls.value[a.id]) {
-      const blob = await fetchAssetBlob(workspaceId.value, a.id)
+      const blob = await assetBlob(a.id)
       if (blob) galUrls.value[a.id] = URL.createObjectURL(blob)
     }
   }))
