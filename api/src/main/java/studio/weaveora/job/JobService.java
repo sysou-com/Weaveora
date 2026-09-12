@@ -966,15 +966,23 @@ public class JobService {
         if (arr == null || !arr.isArray() || arr.size() == 0) return null;
         String t = text == null ? "" : text;
         List<JsonNode> picked = new ArrayList<>();
+        List<String> dropped = new ArrayList<>();
         for (JsonNode b : arr) {
             if (b == null || !b.isObject() || b.path("assetId").asText("").isBlank()) continue;
             String subject = b.path("subject").asText("");
-            if (subject.isBlank() || t.contains(subject)) picked.add(b);
+            if (subjectMatches(t, subject)) picked.add(b);
+            else if (!subject.isBlank()) dropped.add(subject);
         }
         if (picked.isEmpty()) {
+            // 该镜文本一个主体都没提到 → 带回全部（避免空锚定）
             for (JsonNode b : arr) {
                 if (b != null && b.isObject() && !b.path("assetId").asText("").isBlank()) picked.add(b);
             }
+            log.info("refs: 镜文本未匹配到任何主体（{}），回退为绑定全部 {} 张参考图",
+                    dropped, picked.size());
+        } else if (!dropped.isEmpty()) {
+            // 一定要看得见：漏绑参考图 = 人物一致性直接崩（踩过：方案绑「秦可卿」、镜文写「可卿」）
+            log.info("refs: 本镜绑定 {} 张（已剔未提及的主体 {}）", picked.size(), dropped);
         }
         if (picked.isEmpty()) return null;
         List<UUID> ids = new ArrayList<>();
@@ -1085,6 +1093,27 @@ public class JobService {
         } catch (BizException e) {
             return RefCtx.empty(); // 引用缺失不阻塞出图（仅丢锚定）
         }
+    }
+
+    /**
+     * 参考图主体是否出现在镜文本里。
+     *
+     * <p>先精确包含；中文名再退一步做「2 字片段」匹配 —— 方案里绑定常用全名（秦可卿 / 贾宝玉），
+     * 而镜头文本里往往只写名（可卿 / 宝玉），精确包含会把参考图**默默丢掉**，
+     * 于是关键帧完全不参考人物形象（实测踩过）。
+     *
+     * <p>空 subject = 无主体绑定的通用参考图，总是绑定。
+     */
+    static boolean subjectMatches(String text, String subject) {
+        if (subject == null || subject.isBlank()) return true;
+        String t = text == null ? "" : text;
+        String s = subject.trim();
+        if (t.contains(s)) return true;
+        if (s.length() < 3) return false;          // 2 字名没有可退的片段
+        for (int i = 0; i + 2 <= s.length(); i++) {
+            if (t.contains(s.substring(i, i + 2))) return true;
+        }
+        return false;
     }
 
     /** 多主体时追加“防串脸”负词。 */
