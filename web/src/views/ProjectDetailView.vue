@@ -2851,7 +2851,10 @@ const shotTotal = computed(() => {
                   <img v-if="subjectThumb(sub)" :src="subjectThumb(sub)" class="ref-subject-thumb" alt="" />
                   <span v-else class="ref-subject-thumb empty font-mono">未定妆</span>
                   <span class="ref-subject-name">{{ sub.name }}</span>
-                  <span v-if="sub.portraitAssetId" class="ref-subject-tag font-mono">定妆照 v{{ sub.portraitVersion ?? 1 }}</span>
+                  <span v-if="sub.portraitAssetId" class="ref-subject-tag font-mono"
+                        :title="`定妆照资产 ${sub.portraitAssetId}`">
+                    定妆照 v{{ sub.portraitVersion ?? 1 }} ·#{{ sub.portraitAssetId.slice(0, 8) }}
+                  </span>
                   <span v-else class="ref-subject-tag off font-mono">素材图</span>
                 </div>
                 <div class="ref-region-row">
