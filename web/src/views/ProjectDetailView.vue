@@ -1088,15 +1088,28 @@ async function assetBlob(id: string): Promise<Blob | null> {
   return blob
 }
 
+/**
+ * P13：资产库只拉**当前 Tab 可见**的产物，并限并发 4。
+ *
+ * 以前对 outputAssets（全项目，动辄 170+ 项）一次性并发拉 blob：
+ * ① 首屏很慢 ② 触发 nginx 站点级 limit_conn(20/IP) → 部分请求被打成 50x→404
+ * （实测：控制台反复报某几个 assets/…/download 404，其实文件都在）
+ */
 async function refreshGallery(): Promise<void> {
-  await Promise.all(outputAssets.value.map(async (a) => {
-    if (!galUrls.value[a.id]) {
+  const todo = galleryForTab.value.filter((a) => !galUrls.value[a.id] && !missingAssets.value.includes(a.id))
+  let cursor = 0
+  const worker = async (): Promise<void> => {
+    while (cursor < todo.length) {
+      const a = todo[cursor++]
       const blob = await assetBlob(a.id)
       if (blob) galUrls.value[a.id] = URL.createObjectURL(blob)
     }
-  }))
+  }
+  await Promise.all(Array.from({ length: Math.min(4, todo.length) }, () => worker()))
 }
-watch(() => outputAssets.value.map((a) => a.id).join(','), () => { void refreshGallery() }, { immediate: true })
+// 数据或 Tab 变化时再拉（切 Tab 才拉该 Tab 的图）
+watch(() => [outputAssets.value.map((a) => a.id).join(','), galTab.value].join('|'),
+  () => { void refreshGallery() }, { immediate: true })
 
 // ---------- 资产库：管理态（勾选批量删除 / 单个删除） ----------
 const galManage = ref(false)
