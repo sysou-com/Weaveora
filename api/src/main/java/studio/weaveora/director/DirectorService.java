@@ -350,9 +350,11 @@ public class DirectorService {
         validateOrThrow(obj, curMode, project.durationSec());
         r.replacePlan(obj);
         revisions.save(r);
-        if ("video".equals(curMode)) {
-            syncShots(r.id(), obj);
-        }
+        // 注意：这里**不能** syncShots()！
+        // syncShots 是「删除并重建 shot_drafts 行」，而已有生成任务通过
+        // generation_jobs.shot_id 外键引用这些行 → 重建会抛外键冲突（500 内部错误，实测踩过），
+        // 且会重置分镜的 approved 状态导致后续生成被拒。
+        // 逐条调音只关心 plan 里的 narrations/音色（任务从 plan 读段落地），不动分镜行即可。
         log.info("plan patched in place: project={} rev={}", projectId, revisionId);
         return toDetail(r, project.approvedRevisionId());
     }
