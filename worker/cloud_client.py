@@ -42,6 +42,9 @@ VIDEO_LAST_FRAME_PARAM = os.environ.get("WEAVEORA_VIDEO_LAST_FRAME_PARAM", "").s
 
 TRANSIENT = {429, 500, 502, 503, 504}
 
+# 参考图内联上限（base64 后的字符数）：超了就退回 /v1/files 上传
+DATA_URI_MAX_B64 = int(os.environ.get("WEAVEORA_REF_INLINE_MAX_B64", str(6 * 1024 * 1024)))
+
 
 class CloudError(Exception):
     def __init__(self, message, status=None):
@@ -239,6 +242,25 @@ def _model_has(fields, name):
     return bool(name) and (not fields or name in fields)
 
 
+def _ref_transport(token, storage_key):
+    """把参考图变成模型能吃的 URL：**优先 data URI**，其次才走 /v1/files 上传。
+
+    为什么要这样（2026-09 实测）：Replicate 的 `POST /v1/files` 会**持续 500**
+    （同一 token 对 /v1/account 返回 200、对 /predictions 正常），而旧代码在上传失败时
+    **只打一行警告就继续生成** → 出图完全没有参考图，表现就是「人物形象和参考图完全对不上」。
+    data URI 走 predictions 请求体本身，不依赖那个文件接口（实测被 flux-2 正常接受）。
+    """
+    import base64 as _b64
+    blob = _fetch_asset(storage_key)
+    mime = _sniff_image_mime(blob)
+    b64 = _b64.b64encode(blob).decode()
+    if len(b64) <= DATA_URI_MAX_B64:
+        return "data:%s;base64,%s" % (mime, b64)
+    print("[cloud-image] 参考图 %d bytes（base64 %d）超过内联上限，改走 /v1/files 上传"
+          % (len(blob), len(b64)), flush=True)
+    return _upload_file(token, storage_key.split("/")[-1] or "ref.png", blob, mime)
+
+
 def _wh_for(ar, base_w=0, base_h=0):
     """按画幅给出生成尺寸（16 的倍数）。
 
@@ -372,26 +394,37 @@ def replicate_image(payload, token, model, progress_fn=None, cfg=None):
             picked_idx = picked_idx[:refs_max]
         urls = []
         subj_map = []
+        failed = []
         for i in picked_idx:
             try:
-                blob = _fetch_asset(refs[i])
-                u = _upload_file(token, refs[i].split("/")[-1] or "ref.png", blob)
+                u = _ref_transport(token, refs[i])
                 urls.append(u)
                 subj = subjects[i] if i < len(subjects) else ""
                 if subj:
                     subj_map.append("%d) %s" % (len(urls), subj))
             except Exception as e:
-                print("[cloud-image] ref#%d 上传失败，跳过: %s" % (i, e), flush=True)
+                subj = subjects[i] if i < len(subjects) else "?"
+                failed.append("%s(%s)" % (subj, str(e)[:80]))
+                print("[cloud-image] ref#%d 参考图准备失败: %s" % (i, e), flush=True)
+        if not urls:
+            # 关键：绝不能静默降级成“无参考图”出图 —— 那会直接毁掉人物一致性，
+            #       而用户看不出原因（实测踩过：/v1/files 持续 500 → 出图完全不参考）
+            raise CloudError("参考图全部准备失败（%d 张）：%s；本镜已中止，"
+                             "请稍后重试（不会用无参考图的结果冒充）" % (len(picked_idx), "; ".join(failed)))
+        if failed:
+            print("[cloud-image] 警告：%d 张参考图准备失败，本镜只用剩下的 %d 张：%s"
+                  % (len(failed), len(urls), "; ".join(failed)), flush=True)
         if urls:
             # 按 schema 给的字段名填（数组字段给全，标量字段给主主体那张）
             inp[refs_field] = urls if refs_is_array else urls[0]
             if len(urls) > 1 and subj_map:
                 # 把“图序→主体”写进 prompt，降低串脸
                 inp[prompt_field] = "Reference images in order: " + "; ".join(subj_map) + ". " + positive
-            print("[cloud-image] refs=%d field=%s subjects=%s model=%s"
-                  % (len(urls), refs_field, subj_map, model), flush=True)
+            _kind = "data-uri" if str(urls[0]).startswith("data:") else "file-url"
+            print("[cloud-image] refs=%d field=%s transport=%s subjects=%s model=%s"
+                  % (len(urls), refs_field, _kind, subj_map, model), flush=True)
         else:
-            print("[cloud-image] 警告：%d 张参考图全部上传失败，本次无参考图（一致性会变差）"
+            print("[cloud-image] 警告：%d 张参考图全部不可用，本镜一致性不能保证"
                   % len(picked_idx), flush=True)
     elif fields and not any(f.get("group") == "refs" for f in fields.values()):
         print("[cloud-image] 警告：模型 %s 没有参考图字段，本镜一致性无法保证" % model, flush=True)

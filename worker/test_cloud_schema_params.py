@@ -132,8 +132,11 @@ cloud_client.replicate_image(dict(PAYLOAD), "fake-token", "black-forest-labs/flu
                              cfg=cfg)
 inp = CAPTURED[-1]["input"]
 print("   提交的 input =", json.dumps(inp, ensure_ascii=False)[:260])
-check("参考图发到 images（schema 指定）", inp.get("images") ==
-      ["http://fake/ref/ref-guanyu.png", "http://fake/ref/ref-lvbu.png"])
+_imgs = inp.get("images") or []
+check("参考图发到 images（schema 指定）", len(_imgs) == 2)
+check("走 data URI（不依赖会 500 的 /v1/files）",
+      bool(_imgs) and all(str(u).startswith("data:image/") for u in _imgs))
+check("data URI 带对 mime", bool(_imgs) and str(_imgs[0]).startswith("data:image/png;base64,"))
 check("没有误发 input_images（旧 bug）", "input_images" not in inp)
 check("没有误发 image", "image" not in inp)
 check("画幅 aspect_ratio=9:16", inp.get("aspect_ratio") == "9:16")
@@ -233,6 +236,25 @@ cloud_client.replicate_image(
 inp = CAPTURED[-1]["input"]
 print("   提交尺寸 =", inp.get("width"), "x", inp.get("height"))
 check("枚举内取值", (inp.get("width"), inp.get("height")) == (1344, 768))
+
+print("[8] 参考图全部准备失败 → 必须报错中止（不能静默出无参考图的图）")
+import base64 as _b64
+_ok_fetch = cloud_client._fetch_asset
+_ok_sniff = cloud_client._sniff_image_mime
+
+def _boom(key):
+    raise RuntimeError("asset fetch 500")
+
+cloud_client._fetch_asset = _boom
+CAPTURED.clear()
+try:
+    cloud_client.replicate_image(dict(PAYLOAD), "fake-token", "black-forest-labs/flux-2-klein-9b", cfg=dict(cfg))
+    check("应抛异常", False, "却正常返回了（静默降级）")
+except Exception as e:
+    check("抛出明确错误", "参考图全部准备失败" in str(e), str(e)[:90])
+    check("没有发出任何预测请求", len(CAPTURED) == 0)
+finally:
+    cloud_client._fetch_asset = _ok_fetch
 
 srv.shutdown()
 print()
