@@ -495,6 +495,21 @@ async function onExtractSubjects(): Promise<void> {
     subjectBusy.value = ''
   }
 }
+/** 删除主体：连同它在参考图上的主体标记一起清掉（否则会残留成无主参考图） */
+function removeSubject(name: string): void {
+  const target = planSubjects().find((s) => s.name === name)
+  const ids = new Set<string>(Object.keys(refSubjects.value).filter((id) => (refSubjects.value[id] ?? '').trim() === name))
+  for (const r of target?.refs ?? []) ids.add(r.assetId)
+  for (const id of ids) {
+    delete refSubjects.value[id]
+    delete refRegions.value[id]
+    refSelected.value = refSelected.value.filter((x) => x !== id)
+  }
+  pruneUnchecked()
+  setPlanSubjects(planSubjects().filter((s) => s.name !== name))
+  message.success(`已删除主体「${name}」（参考图仍留在图库里，可重新勾选并命名）`)
+}
+
 /** 主体参与锚定开关 */
 function toggleSubject(name: string, on: boolean): void {
   setPlanSubjects(planSubjects().map((s) => (s.name === name ? { ...s, enabled: on } : s)))
@@ -575,7 +590,12 @@ function syncReferenceAssets(): void {
   const byName = new Map(prev.map((s) => [s.name, s]))
   const grouped = new Map<string, PlanSubjectRef[]>()
   for (const r of refs) {
-    const key = (r.subject ?? '').trim() || '（未命名）'
+    // 未标主体名的图**不创建“（未命名）”主体**（只留在 referenceAssets 里），
+    // 否则随手选一张图就会多出一个空名主体（实测踩过）
+    const key = (r.subject ?? '').trim()
+    if (!key) {
+      continue
+    }
     grouped.set(key, [...(grouped.get(key) ?? []), { assetId: r.assetId, checked: !refUnchecked.value.includes(r.assetId), region: r.region ?? null }])
   }
   const out: PlanSubject[] = []
@@ -2434,6 +2454,11 @@ const shotTotal = computed(() => {
                          :data-testid="`subj-pick-${sub.name}`" title="把最新一版定妆图设为该主体的锚定图"
                          @click="pickPortrait(sub.name)">
                   选图
+                </NButton>
+                <NButton size="tiny" quaternary type="error" :disabled="!canEdit"
+                         :data-testid="`subj-del-${sub.name}`" title="删除该主体（连同它在参考图上的主体标记）"
+                         @click="removeSubject(sub.name)">
+                  删除
                 </NButton>
               </div>
               <p class="subj-hint text-secondary">
