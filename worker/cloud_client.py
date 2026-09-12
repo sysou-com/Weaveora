@@ -259,6 +259,20 @@ def _model_has(fields, name):
     return bool(name) and (not fields or name in fields)
 
 
+def _merge_negative(prompt, negative, limit=900):
+    """模型没有 negative_prompt 参数时，把负向词**并入正向提示词**。
+
+    实测：FLUX.2 / seedream / 方舟等新模型只看一个 prompt，负向词发过去会被**静默忽略** ——
+    与其丢掉，不如转成明确的“避免项”指令。用中英双语是因为提示词常是英文而负向词常是中文。
+    """
+    neg = (negative or '').strip().strip(',').strip()
+    if not neg:
+        return prompt
+    if len(neg) > limit:
+        neg = neg[:limit]
+    return (prompt or '').rstrip() + chr(10) + chr(10) + 'Avoid the following (不要出现): ' + neg
+
+
 def _ref_transport(token, storage_key):
     """把参考图变成模型能吃的 URL：**优先 data URI**，其次才走 /v1/files 上传。
 
@@ -469,8 +483,13 @@ def replicate_image(payload, token, model, progress_fn=None, cfg=None):
             inp[w_field] = _fit_enum_side(fields, w_field, pw) or pw
             inp[h_field] = _fit_enum_side(fields, h_field, ph) or ph
         neg = payload.get("negative_prompt") or ""
-        if neg and _model_has(fields, (mp.get("negative") or "").strip()):
-            inp[mp.get("negative")] = neg
+        neg_field = (mp.get("negative") or "").strip()
+        if neg and _model_has(fields, neg_field):
+            inp[neg_field] = neg
+        elif neg:
+            # 模型没有 negative_prompt（FLUX.2 / seedream / 方舟等）→ 并入正向提示词，别静默丢掉
+            inp[prompt_field] = _merge_negative(inp.get(prompt_field, ""), neg)
+            print("[cloud-image] 该模型无 negative_prompt，负向词已并入提示词（%d 字）" % len(neg), flush=True)
         steps_field = (mp.get("steps") or "").strip()
         if _model_has(fields, steps_field):
             inp[steps_field] = max(1, min(100, int(params.get("steps") or 28)))

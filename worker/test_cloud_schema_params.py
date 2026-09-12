@@ -274,6 +274,27 @@ for fld, is_arr in (("input_files", True), ("input_file", False)):
     else:
         check("发到 %s（标量，只取主主体那张）" % fld, isinstance(got, str) and got.startswith("data:"))
 
+print("[7c] 模型没有 negative_prompt → 负向词并入正向提示词（不静默丢）")
+CAPTURED.clear()
+no_neg_cfg = {"mapping": {"m": {"refs": "images", "refsIsArray": True, "prompt": "prompt"}},
+              "schemaParams": [{"name": "prompt"}, {"name": "images", "type": "array"}]}
+p2 = dict(PAYLOAD)
+p2["negative_prompt"] = "多手多脚, 脸崩"
+cloud_client.replicate_image(p2, "fake-token", "black-forest-labs/flux-2-klein-9b", cfg=no_neg_cfg)
+inp = CAPTURED[-1]["input"]
+check("负向词并入 prompt", "Avoid the following" in inp.get("prompt", "") and "多手多脚" in inp.get("prompt", ""))
+check("没有 negative_prompt 字段", "negative_prompt" not in inp)
+
+print("[7d] 模型有 negative_prompt → 原样单独下发，不并入")
+CAPTURED.clear()
+has_neg_cfg = {"mapping": {"m": {"prompt": "prompt", "negative": "negative_prompt"}},
+               "schemaParams": [{"name": "prompt"}, {"name": "negative_prompt"}]}
+p3 = {k: v for k, v in p2.items() if k not in ("referenceKeys", "referenceSubjects", "primarySubject")}
+cloud_client.replicate_image(p3, "fake-token", "acme/sdxl-like", cfg=has_neg_cfg)
+inp = CAPTURED[-1]["input"]
+check("单独下发 negative_prompt", inp.get("negative_prompt") == "多手多脚, 脸崩")
+check("prompt 未被污染", "Avoid the following" not in inp.get("prompt", ""))
+
 print("[8] 参考图全部准备失败 → 必须报错中止（不能静默出无参考图的图）")
 import base64 as _b64
 _ok_fetch = cloud_client._fetch_asset

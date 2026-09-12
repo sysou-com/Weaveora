@@ -210,7 +210,7 @@ public class ModelSchemaService {
             notes.add("参考图字段 " + refsField + " 只收单张：多主体镜只会用「主主体」那一张");
         }
         if (mapping.path("negative").asText("").isEmpty()) {
-            notes.add("该模型没有 negative_prompt 参数：负向提示词会被忽略（FLUX.2 / seedream 等新模型普遍如此）");
+            notes.add("该模型没有 negative_prompt 参数：负向词会**自动并入正向提示词**（转成“Avoid the following / 不要出现”指令），不会丢");
         }
         return out;
     }

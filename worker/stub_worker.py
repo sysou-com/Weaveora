@@ -268,8 +268,15 @@ def execute_job(job):
                         # 不能静默降级成“无参考图”出图（会直接毁掉人物一致性）
                         raise RuntimeError("参考图全部准备失败（%d 张）；本镜已中止，"
                                            "请稍后重试（不会用无参考图的结果冒充）" % len(keys))
+                    _pos = payload.get("positive_prompt", "")
+                    _neg = (payload.get("negative_prompt") or "").strip()
+                    if _neg:
+                        # 网关（方舟等 OpenAI 兼容 images 接口）没有 negative_prompt → 并入提示词
+                        _pos = _cc._merge_negative(_pos, _neg)
+                        print("[cloud-image] 网关无 negative_prompt，负向词已并入提示词（%d 字）" % len(_neg),
+                              flush=True)
                     raw = cloud_image.generate(
-                        payload.get("positive_prompt", ""), payload.get("params") or {}, icfg,
+                        _pos, payload.get("params") or {}, icfg,
                         ref_blobs=ref_blobs)
                     blobs = raw if raw else []
                     if not blobs:
