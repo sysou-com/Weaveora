@@ -41,9 +41,13 @@ public class ModelSchemaService {
     private static final String REPLICATE_API = "https://api.replicate.com/v1";
 
     /** 候选字段名（越靠前越优先）。顺序来自各模型实际 schema 的观察，避免"猜一个名字"。 */
+
     private static final List<String> REFS_CANDIDATES = List.of(
             "input_images", "image_input", "images", "reference_images", "ref_images",
-            "input_image", "image", "init_image", "image_prompt", "reference_image",
+            "input_image",
+            // ComfyUI 系习惯：把参考图叫 input_file / input_files
+            "input_files", "input_file",
+            "image", "init_image", "image_prompt", "reference_image",
             "start_image", "first_frame_image");
     private static final List<String> PROMPT_CANDIDATES = List.of("prompt", "text", "positive_prompt", "caption");
     private static final List<String> NEGATIVE_CANDIDATES = List.of("negative_prompt", "negative");
@@ -239,7 +243,8 @@ public class ModelSchemaService {
             if (REFS_LOOKALIKE.contains(lower) || name.startsWith("output_")) {
                 continue;
             }
-            boolean looksLikeImage = lower.contains("image") || lower.contains("img") || lower.contains("photo");
+            boolean looksLikeImage = lower.contains("image") || lower.contains("img") || lower.contains("photo")
+                    || lower.contains("file");   // ComfyUI 系：input_file / input_files
             if (!looksLikeImage) {
                 continue;
             }
@@ -328,7 +333,9 @@ public class ModelSchemaService {
     /** 参数分组：refs / prompt / quality / control / other（前端据此分组显示）。 */
     static String groupOf(String name) {
         String n = name.toLowerCase(Locale.ROOT);
-        if (REFS_CANDIDATES.contains(name) || n.equals("image_input") || n.equals("input_image")) {
+        if (REFS_CANDIDATES.contains(name)
+                || n.equals("image_input") || n.equals("input_image")
+                || n.equals("input_file") || n.equals("input_files")) {
             return "refs";
         }
         if (n.contains("prompt") && !n.endsWith("_prompt") && !n.endsWith("_prompts")) {
@@ -353,7 +360,8 @@ public class ModelSchemaService {
         if (SYSTEM_OWNED.contains(name)) {
             return false;
         }
-        if (REFS_CANDIDATES.contains(name)) {
+        if (REFS_CANDIDATES.contains(name) || "refs".equals(groupOf(name))) {
+            // 参考图类字段（含 name_input / input_file(s) 等各种命名）不能当全局参数改
             return false;
         }
         String t = typeOf(v);

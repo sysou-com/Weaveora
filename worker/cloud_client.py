@@ -201,7 +201,7 @@ def _fields(cfg):
 
 
 def _refs_spec(mapping, model, fields=None):
-    """参考图字段：优先 schema 映射；无 schema 时退回“按模型名”的保守兜底。
+    """参考图字段：优先 schema 映射；无映射时先在 schema 里按名字找，再退回“按模型名”的兜底。
 
     实测踩坑：flux-2-klein-9b 的参考图字段是 images，早期按 'flux' 猜成 input_images，
     Replicate 对未知字段**静默忽略** → 图根本没传进去（参考图完全不生效）。
@@ -212,6 +212,23 @@ def _refs_spec(mapping, model, fields=None):
     if field:
         return field, bool(mapping.get("refsIsArray")), int(mapping.get("refsMax") or 0)
     if fields:
+        # 本地兜底：API 侧没给出映射（旧缓存 schema 等）时，自己按名字在 schema 里找
+        for cand in ("input_images", "image_input", "images", "reference_images", "ref_images",
+                     "input_image", "input_files", "input_file", "image", "init_image",
+                     "image_prompt", "reference_image", "start_image", "first_frame_image"):
+            p = fields.get(cand)
+            if isinstance(p, dict):
+                is_arr = p.get("type") == "array"
+                mi = p.get("maxItems") or 0
+                return cand, is_arr, int(mi or 0)
+        for name, p in fields.items():
+            low = name.lower()
+            if not isinstance(p, dict) or p.get("type") != "array":
+                continue
+            if low in ("max_images", "num_images", "num_outputs", "output_images"):
+                continue
+            if ("image" in low or "img" in low or "file" in low) and not low.startswith("output_"):
+                return name, True, int(p.get("maxItems") or 0)
         return None, False, 0          # 有 schema 且没有参考图字段：不要猜
     ml = (model or "").lower()
     if "flux-2" in ml or "klein" in ml:

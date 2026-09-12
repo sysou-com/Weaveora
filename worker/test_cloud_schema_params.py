@@ -255,6 +255,25 @@ inp = CAPTURED[-1]["input"]
 print("   提交尺寸 =", inp.get("width"), "x", inp.get("height"))
 check("枚举内取值", (inp.get("width"), inp.get("height")) == (1344, 768))
 
+print("[7b] 没有 mapping 时，从 schema 自行认出 input_files / input_file（ComfyUI 命名）")
+for fld, is_arr in (("input_files", True), ("input_file", False)):
+    CAPTURED.clear()
+    c = {"mapping": {}, "schemaParams": [
+        {"name": "prompt"},
+        {"name": fld, "type": "array" if is_arr else "string"},
+        {"name": "num_images", "type": "integer", "default": 1},
+    ]}
+    cloud_client.replicate_image({"positive_prompt": "x", "referenceKeys": ["ws/p/a.png", "ws/p/b.png"],
+                                  "referenceSubjects": ["A", "B"], "params": {}},
+                                 "fake-token", "acme/comfy-style", cfg=dict(c))
+    inp = CAPTURED[-1]["input"]
+    got = inp.get(fld)
+    print("   %s ->" % fld, (len(got) if isinstance(got, list) else got) if got else None)
+    if is_arr:
+        check("发到 %s（数组，2 张）" % fld, isinstance(got, list) and len(got) == 2)
+    else:
+        check("发到 %s（标量，只取主主体那张）" % fld, isinstance(got, str) and got.startswith("data:"))
+
 print("[8] 参考图全部准备失败 → 必须报错中止（不能静默出无参考图的图）")
 import base64 as _b64
 _ok_fetch = cloud_client._fetch_asset

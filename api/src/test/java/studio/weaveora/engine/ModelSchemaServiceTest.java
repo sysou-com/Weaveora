@@ -194,6 +194,36 @@ class ModelSchemaServiceTest {
     }
 
     @Test
+    void detectsComfyStyleInputFileCandidates() throws Exception {
+        // ComfyUI 系习惯把参考图叫 input_file / input_files —— 也要能认出来
+        String plural = """
+                {"latest_version":{"id":"v1","openapi_schema":{"components":{"schemas":{
+                  "Input":{"type":"object","properties":{
+                    "prompt":{"type":"string"},
+                    "input_files":{"type":"array","items":{"type":"string"},
+                                    "description":"reference images for consistency"},
+                    "num_images":{"type":"integer","default":1}
+                  }}}}}}}
+                """;
+        var s1 = new ModelSchemaService().normalize("acme/input-files",
+                new ObjectMapper().readTree(plural));
+        assertEquals("input_files", s1.path("mapping").path("refs").asText());
+        assertTrue(s1.path("mapping").path("refsIsArray").asBoolean());
+
+        String single = """
+                {"latest_version":{"id":"v2","openapi_schema":{"components":{"schemas":{
+                  "Input":{"type":"object","properties":{
+                    "prompt":{"type":"string"},
+                    "input_file":{"type":"string","description":"input image"}
+                  }}}}}}}
+                """;
+        var s2 = new ModelSchemaService().normalize("acme/input-file",
+                new ObjectMapper().readTree(single));
+        assertEquals("input_file", s2.path("mapping").path("refs").asText());
+        assertFalse(s2.path("mapping").path("refsIsArray").asBoolean());
+    }
+
+    @Test
     void guessesRefsFieldWhenNotInCandidateList() throws Exception {
         // 通用兜底：名单没命中也要能从 schema 里找出「收图的数组字段」（防止又漏一个新名字）
         String raw = """
@@ -201,13 +231,13 @@ class ModelSchemaServiceTest {
                   "Input":{"type":"object","properties":{
                     "prompt":{"type":"string"},
                     "num_images":{"type":"integer","default":1},
-                    "source_photos":{"type":"array","items":{"type":"string"},
+                    "source_files":{"type":"array","items":{"type":"string"},
                                       "description":"reference photos of the character"}
                   }}}}}}}
                 """;
         var s = new ModelSchemaService().normalize("acme/unknown-model",
                 new ObjectMapper().readTree(raw));
-        assertEquals("source_photos", s.path("mapping").path("refs").asText());
+        assertEquals("source_files", s.path("mapping").path("refs").asText());
         assertTrue(s.path("mapping").path("refsGuessed").asBoolean());
     }
 
