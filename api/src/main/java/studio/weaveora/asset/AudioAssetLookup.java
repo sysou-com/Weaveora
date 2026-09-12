@@ -40,9 +40,25 @@ public class AudioAssetLookup {
             return asset.storageKey();
         }
 
-        /** 设了结束点时的裁切时长（秒）；0 = 不裁，用配音自然长度。 */
+        /**
+         * 设了结束点时的裁切时长（秒）；0 = 不裁，用配音自然长度。
+         *
+         * <p>P13 修正：**不得把音频截到比它本身还短** —— 以前无条件 `atrim` 到窗口，
+         * 而窗口来自前端的**字数估算**（如 2.9s），实际音频只有 2.3s/更短或者更长，
+         * 结果就是“成片里配音被截断/下一句提早开始”。
+         * 现在：若窗口比实际音频**长或相等** → 不裁（音频完整播放）；
+         * 只有窗口确实**短于**实际音频时才裁（用户显式把结束点改小了）。
+         */
         public double windowSec() {
-            return endSec > atSec ? endSec - atSec : 0;
+            if (endSec <= atSec) {
+                return 0;
+            }
+            Integer ms = asset.durationMs();
+            if (ms != null && ms > 0) {
+                double actual = ms / 1000.0;
+                return (endSec - atSec) >= actual - 0.05 ? 0 : (endSec - atSec);
+            }
+            return endSec - atSec;
         }
     }
 

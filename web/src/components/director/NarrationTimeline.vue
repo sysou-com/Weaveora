@@ -85,16 +85,34 @@ function lineDurSec(i: number): number | null {
   return ms && ms > 0 ? ms / 1000 : null
 }
 
-/** 该段占用的镜内区间（秒）：手动 end_sec > 配音实际时长 > 字数估算 */
+/** 该段占用的镜内区间（秒）：**配音实际时长优先** > 手动 end_sec > 字数估算
+ *
+ * <p>P13：以前优先用手动 end_sec，而它常常是自动铺排时用**字数估算**写进去的
+ * （例：显示 2.9s，实际音频只有 2.3s）→ 时间刻度不可信。改为：有实际时长就以它为准。
+ */
 function spanOf(l: NarrationLine, i: number): { start: number; len: number; exact: boolean } {
   const start = Math.max(0, l.at_sec ?? 0)
-  const end = Number(l.end_sec ?? 0)
-  if (end > start) return { start, len: end - start, exact: true }
   const actual = lineDurSec(i)
   if (actual != null) {
-    return { start, len: Math.min(actual, Math.max(0.4, dur.value - start)), exact: true }
+    return { start, len: actual, exact: true }
   }
+  const end = Number(l.end_sec ?? 0)
+  if (end > start) return { start, len: end - start, exact: true }
   return { start, len: Math.min(estimateSec(l.text), Math.max(0.4, dur.value - start)), exact: false }
+}
+
+/** 把当前段的结束点按“实际音频时长”写回（手动微调，不再靠估算） */
+function adoptActualEnd(i: number): void {
+  const l = props.shot.narrations?.[i]
+  const actual = lineDurSec(i)
+  if (!l || actual == null) {
+    message.warning('这一段还没有实际配音（先「重新生成这条」）')
+    return
+  }
+  l.manual = true
+  l.end_sec = Math.round(((l.at_sec ?? 0) + actual) * 10) / 10
+  commit()
+  message.success(`已按实际音频对齐：结束点 = ${l.end_sec}s`)
 }
 
 /** 本镜配音总时长（秒）：有实际时长用实际，否则用窗口/估算 */
@@ -546,6 +564,10 @@ function pickVoiceFile(i: number): void {
       </NButton>
       <NButton size="tiny" quaternary :disabled="disabled" @click="setEndFromEstimate">
         按估算设结束
+      </NButton>
+      <NButton size="tiny" quaternary :disabled="disabled" :data-testid="`narration-end-actual-${shot.shot_no}`"
+               title="用这段配音的**实际音频时长**写回结束点（比字数估算准）" @click="adoptActualEnd(selected)">
+        按实际配时
       </NButton>
       <NButton
         v-if="cur.manual"
