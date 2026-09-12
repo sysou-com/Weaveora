@@ -3,11 +3,16 @@ package studio.weaveora.engine;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import studio.weaveora.engine.api.EngineSettingsRequest;
 import studio.weaveora.engine.api.EngineSettingsResponse;
 import studio.weaveora.engine.domain.UserEngineSettings;
 import studio.weaveora.engine.domain.UserEngineSettingsRepository;
 import studio.weaveora.infra.crypto.AesGcm;
+import studio.weaveora.shared.api.BizException;
+import studio.weaveora.shared.api.ErrorCode;
 
 import java.util.Map;
 import java.util.UUID;
@@ -17,6 +22,8 @@ import java.util.UUID;
 public class EngineSettingsService {
 
     private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(EngineSettingsService.class);
+
+    private final com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
 
     private final UserEngineSettingsRepository repo;
     private final ModelSchemaService schemaService;
@@ -91,7 +98,159 @@ public class EngineSettingsService {
                 fresh(true) ? s.imageModelSchema() : null,
                 fresh(false) ? s.videoModelSchema() : null,
                 s.imageParams(), s.videoParams(),
-                s.imageModelSchemaError(), s.videoModelSchemaError(), s.gatewayRefsMax());
+                s.imageModelSchemaError(), s.videoModelSchemaError(), s.gatewayRefsMax(),
+                s.gatewaySample(), s.imageModelPresets(), s.videoModelPresets());
+    }
+
+    // ---------------------------------------------------------------- P12 模型库
+
+    /** 列出模型库（kind=image|video）。 */
+    @Transactional(readOnly = true)
+    public JsonNode listPresets(UUID userId, String kind) {
+        UserEngineSettings s = load(userId);
+        JsonNode arr = "video".equals(kind) ? s.videoModelPresets() : s.imageModelPresets();
+        return arr == null || !arr.isArray() ? mapper.createArrayNode() : arr;
+    }
+
+    /**
+     * 新增/更新一个模型条目，并**顺手刷新它的参数说明**。
+     *
+     * <p>为什么在这做：换模型/改参数后必须重新解析参数格式（Replicate 拉 schema；网关解析示例），
+     * 否则界面展示的会是上一个模型的说明（实测踩过）。
+     */
+    @Transactional
+    public EngineSettingsResponse upsertPreset(UUID userId, studio.weaveora.engine.api.ModelPresetRequest req) {
+        UserEngineSettings s = repo.findByUserId(userId).orElseGet(() -> UserEngineSettings.defaults(userId));
+        this.current = s;
+        boolean video = "video".equals(req.kind());
+        String model = req.model() == null ? "" : req.model().trim();
+        if (model.isEmpty()) {
+            throw new BizException(ErrorCode.VALIDATION, "模型名不能为空");
+        }
+        String baseUrl = req.baseUrl() == null ? "" : req.baseUrl().trim();
+        boolean apply = req.apply() != null && req.apply();
+        if (apply) {
+            if (video) {
+                s.setVideoCloudModel(model);
+            } else {
+                s.setImageCloudBaseUrl(baseUrl);
+                s.setImageCloudModel(model);
+            }
+        }
+        if (!video) {
+            if (req.gatewayRefsMax() != null) {
+                s.setGatewayRefsMax(req.gatewayRefsMax() >= 0 ? req.gatewayRefsMax() : null);
+            }
+            if (req.gatewaySample() != null) {
+                s.setGatewaySample(req.gatewaySample().isBlank() ? null : req.gatewaySample());
+            }
+        }
+        if (req.params() != null) {
+            if (video) {
+                s.setVideoParams(schemaService.sanitizeParams(s.videoModelSchema(), req.params()));
+            } else {
+                s.setImageParams(schemaService.sanitizeParams(s.imageModelSchema(), req.params()));
+            }
+        }
+        repo.save(s);
+        refreshSchemas(userId, !video, video);
+        UserEngineSettings fresh = repo.findByUserId(userId).orElse(s);
+        this.current = fresh;
+        upsertPresetInto(fresh, video, baseUrl, model, presetEntry(fresh, video, baseUrl, model));
+        repo.save(fresh);
+        return toResponse(userId);
+    }
+
+    /** 只刷新某个条目的参数说明（界面上的「刷新参数说明」）。 */
+    @Transactional
+    public EngineSettingsResponse refreshPreset(UUID userId, String kind, String baseUrl, String model) {
+        UserEngineSettings s = repo.findByUserId(userId).orElseGet(() -> UserEngineSettings.defaults(userId));
+        this.current = s;
+        boolean video = "video".equals(kind);
+        if (baseUrl != null && !baseUrl.isBlank() && !video) {
+            s.setImageCloudBaseUrl(baseUrl.trim());
+        }
+        if (model != null && !model.isBlank()) {
+            if (video) {
+                s.setVideoCloudModel(model.trim());
+            } else {
+                s.setImageCloudModel(model.trim());
+            }
+        }
+        repo.save(s);
+        refreshSchemas(userId, !video, video);
+        UserEngineSettings fresh = repo.findByUserId(userId).orElse(s);
+        this.current = fresh;
+        upsertPresetInto(fresh, video, baseUrl, model, presetEntry(fresh, video, baseUrl, model));
+        repo.save(fresh);
+        return toResponse(userId);
+    }
+
+    /** 删除一个条目。 */
+    @Transactional
+    public EngineSettingsResponse deletePreset(UUID userId, String kind, String baseUrl, String model) {
+        UserEngineSettings s = repo.findByUserId(userId).orElseGet(() -> UserEngineSettings.defaults(userId));
+        this.current = s;
+        boolean video = "video".equals(kind);
+        ArrayNode keep = mapper.createArrayNode();
+        for (JsonNode e : arr(s, video)) {
+            if (!sameKey(e, baseUrl, model)) {
+                keep.add(e);
+            }
+        }
+        if (video) {
+            s.setVideoModelPresets(keep);
+        } else {
+            s.setImageModelPresets(keep);
+        }
+        repo.save(s);
+        return toResponse(userId);
+    }
+
+    private JsonNode arr(UserEngineSettings s, boolean video) {
+        JsonNode a = video ? s.videoModelPresets() : s.imageModelPresets();
+        return a != null && a.isArray() ? a : mapper.createArrayNode();
+    }
+
+    private static boolean sameKey(JsonNode e, String baseUrl, String model) {
+        return e.path("model").asText("").equals(model == null ? "" : model.trim())
+                && e.path("baseUrl").asText("").equals(baseUrl == null ? "" : baseUrl.trim());
+    }
+
+    /** 组装一条库条目（含该条目对应的参数说明/参数）。 */
+    private ObjectNode presetEntry(UserEngineSettings s, boolean video, String baseUrl, String model) {
+        ObjectNode e = mapper.createObjectNode();
+        e.put("baseUrl", baseUrl == null ? "" : baseUrl.trim());
+        e.put("model", model == null ? "" : model.trim());
+        e.set("params", video ? s.videoParams() : s.imageParams());
+        e.set("schema", video ? s.videoModelSchema() : s.imageModelSchema());
+        java.time.OffsetDateTime at = video ? s.videoModelSchemaAt() : s.imageModelSchemaAt();
+        e.put("schemaAt", at == null ? "" : at.toString());
+        String err = video ? s.videoModelSchemaError() : s.imageModelSchemaError();
+        e.put("schemaError", err == null ? "" : err);
+        if (!video) {
+            e.put("gatewayRefsMax", s.gatewayRefsMax() == null ? 0 : s.gatewayRefsMax());
+            e.put("gatewaySample", s.gatewaySample() == null ? "" : s.gatewaySample());
+        }
+        e.put("updatedAt", java.time.OffsetDateTime.now().toString());
+        return e;
+    }
+
+    /** 按 (kind, baseUrl, model) 覆盖写入模型库。 */
+    private void upsertPresetInto(UserEngineSettings s, boolean video, String baseUrl, String model,
+                                  ObjectNode entry) {
+        ArrayNode keep = mapper.createArrayNode();
+        for (JsonNode e : arr(s, video)) {
+            if (!sameKey(e, baseUrl, model)) {
+                keep.add(e);
+            }
+        }
+        keep.add(entry);
+        if (video) {
+            s.setVideoModelPresets(keep);
+        } else {
+            s.setImageModelPresets(keep);
+        }
     }
 
     /** 网关通道（OpenAI Images 兼容）？网关不是 Replicate，无法自动拉 schema。 */
@@ -132,10 +291,41 @@ public class EngineSettingsService {
         this.current = s;
         if (image && s.imageCloudModel() != null && !s.imageCloudModel().isBlank()) {
             if (isGateway(s.imageCloudBaseUrl())) {
-                // 网关通道（方舟等）：模型 id 不是 Replicate 模型，拉取无意义
-                s.setImageModelSchema(null);
-                s.setImageModelSchemaError("当前用的是 OpenAI Images 兼容网关通道（BaseURL 已填），"
-                        + "无法自动获取参数说明；参考图按 image 字段发送，张数上限请按官方文档填写「参考图上限」");
+                // 网关通道（方舟等）：模型 id 不是 Replicate 模型，拉 Replicate 无意义。
+                // 改为：① 探测 /models（存在性 + 模态 + 任务类型）② 解析用户粘贴的示例请求
+                String key = AesGcm.decrypt(storeKey, s.imageCloudApiKeyCipher());
+                var probe = studio.weaveora.engine.GatewayModelProbe.probeGateway(
+                        s.imageCloudBaseUrl(), key, s.imageCloudModel());
+                String sample = s.gatewaySample();
+                if (sample != null && !sample.isBlank()) {
+                    var parsed = studio.weaveora.engine.GatewayModelProbe.parseSample(sample);
+                    parsed.set("gatewayProbe", probe);
+                    if (!parsed.hasNonNull("model") || parsed.path("model").asText("").isEmpty()) {
+                        parsed.put("model", s.imageCloudModel() == null ? "" : s.imageCloudModel());
+                    }
+                    s.setImageModelSchema(parsed);
+                    s.setImageModelSchemaAt(java.time.OffsetDateTime.now());
+                    s.setImageModelSchemaError(null);
+                    log.info("网关模型参数已按示例解析 user={} model={} refsField={} params={}",
+                            userId, s.imageCloudModel(), parsed.path("mapping").path("refs").asText("-"),
+                            parsed.path("params").size());
+                } else {
+                    var minimal = mapper.createObjectNode();
+                    minimal.put("provider", "gateway");
+                    minimal.put("model", s.imageCloudModel() == null ? "" : s.imageCloudModel());
+                    minimal.put("fetchedAt", java.time.OffsetDateTime.now().toString());
+                    minimal.putArray("params");
+                    var m2 = minimal.putObject("mapping");
+                    m2.put("refs", "image");          // 网关（方舟/OpenAI 兼容）通行字段名
+                    m2.put("refsIsArray", true);
+                    minimal.putArray("notes").add("未能自动获取参数：网关（如火山方舟）只提供模型列表（模态/任务类型），"
+                            + "没有逐参数规范。请在下方粘贴一段「示例请求」后点「解析示例」，即可自动识别参考图字段等参数名。");
+                    minimal.set("gatewayProbe", probe);
+                    s.setImageModelSchema(minimal);
+                    s.setImageModelSchemaAt(java.time.OffsetDateTime.now());
+                    s.setImageModelSchemaError("网关通道：已探测模型元信息但未获得参数规范 —— "
+                            + "请粘贴示例请求（curl / JSON body）后点「解析示例」（参考图默认按 image 字段发送）");
+                }
             } else {
                 try {
                     var schema = schemaService.fetchReplicate(s.imageCloudModel(),
@@ -205,6 +395,7 @@ public class EngineSettingsService {
         if (req.gpuServerUrl() != null) s.setGpuServerUrl(req.gpuServerUrl());
         if (req.gpuServerPort() != null) s.setGpuServerPort(req.gpuServerPort());
         if (req.gatewayRefsMax() != null) s.setGatewayRefsMax(req.gatewayRefsMax() >= 0 ? req.gatewayRefsMax() : null);
+        if (req.gatewaySample() != null) s.setGatewaySample(req.gatewaySample().isBlank() ? null : req.gatewaySample());
         // P12：全局参数（画质等）按 schema 收口——只留该模型真认识的键，防手改坏调用
         if (req.imageParams() != null) {
             s.setImageParams(schemaService.sanitizeParams(s.imageModelSchema(), req.imageParams()));

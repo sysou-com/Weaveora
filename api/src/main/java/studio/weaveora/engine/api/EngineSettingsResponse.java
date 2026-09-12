@@ -26,6 +26,11 @@ public record EngineSettingsResponse(
         String imageModelSchemaError,
         String videoModelSchemaError,
         /** 网关通道：本模型单次最多参考图张数（0/空=未知） */
-        Integer gatewayRefsMax
+        Integer gatewayRefsMax,
+        /** 网关通道：已保存的示例请求 */
+        String gatewaySample,
+        /** P12 模型库：已配置的模型条目（baseUrl/model/params/schema…） */
+        com.fasterxml.jackson.databind.JsonNode imageModelPresets,
+        com.fasterxml.jackson.databind.JsonNode videoModelPresets
 ) {
 }

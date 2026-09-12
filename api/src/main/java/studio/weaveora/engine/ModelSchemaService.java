@@ -170,16 +170,12 @@ public class ModelSchemaService {
 
         // 参数映射：worker 按它填参数（这是修「参考图没生效」的关键）
         ObjectNode mapping = out.putObject("mapping");
-        putIfFound(mapping, "refs", byName, REFS_CANDIDATES);
-        if (mapping.path("refs").asText("").isEmpty()) {
-            // 通用兜底：schema 里没命中名单时，自己找「能收图的数组字段」。
-            // 踩过的坑：bytedance/seedream-4 与 google/nano-banana 用 image_input，
-            // 早期名单里没有它 → 界面报「该模型没有参考图入口」而模型明明支持。
-            String guess = guessRefsField(byName);
-            if (!guess.isEmpty()) {
-                mapping.put("refs", guess);
+        CandidatePick pick = pickRefs(byName);
+        if (pick != null) {
+            mapping.put("refs", pick.name());
+            if (pick.guessed()) {
                 mapping.put("refsGuessed", true);
-                log.info("参考图字段未命中名单，按通用规则推得：{}（模型 {}）", guess, model);
+                log.info("参考图字段未命中名单，按通用规则推得：{}（模型 {}）", pick.name(), model);
             }
         }
         putIfFound(mapping, "size", byName, SIZE_CANDIDATES);
@@ -196,7 +192,7 @@ public class ModelSchemaService {
         String refsField = mapping.path("refs").asText("");
         if (!refsField.isEmpty()) {
             JsonNode rv = byName.get(refsField);
-            boolean isArray = "array".equals(typeOf(rv));
+            boolean isArray = isArrayLike(rv);
             mapping.put("refsIsArray", isArray);
             if (isArray) {
                 JsonNode items = rv.path("items");
@@ -252,7 +248,7 @@ public class ModelSchemaService {
             if (negative) {
                 continue;
             }
-            boolean isArray = "array".equals(typeOf(e.getValue()));
+            boolean isArray = isArrayLike(e.getValue());
             int score = 0;
             if (lower.contains("input")) score += 4;
             if (lower.contains("reference") || lower.contains("ref")) score += 4;
@@ -316,8 +312,38 @@ public class ModelSchemaService {
         return m.find() ? Integer.parseInt(m.group(1)) : 0;
     }
 
+    /**
+     * 是否数组类型：兼容两种输入 —— schema 属性节点（{@code {type:"array"}}）
+     * 与「用户示例」里的原始值（直接就是 JSON 数组）。
+     */
+    static boolean isArrayLike(JsonNode v) {
+        if (v == null) {
+            return false;
+        }
+        return v.isArray() || "array".equals(typeOf(v));
+    }
+
     static String typeOf(JsonNode v) {
         if (v == null) {
+            return "unknown";
+        }
+        // 兼容两种输入：schema 属性节点（{type:...}）与「用户示例」里的**原始值**（如 false / ["u"]）
+        if (!v.isObject()) {
+            if (v.isArray()) {
+                return "array";
+            }
+            if (v.isBoolean()) {
+                return "boolean";
+            }
+            if (v.isIntegralNumber()) {
+                return "integer";
+            }
+            if (v.isNumber()) {
+                return "number";
+            }
+            if (v.isTextual()) {
+                return "string";
+            }
             return "unknown";
         }
         if (v.has("enum")) {
@@ -367,6 +393,28 @@ public class ModelSchemaService {
         String t = typeOf(v);
         return "integer".equals(t) || "number".equals(t) || "boolean".equals(t)
                 || "enum".equals(t) || "string".equals(t);
+    }
+
+    /** 参考图字段的挑选结果。 */
+    public record CandidatePick(String name, boolean array, boolean guessed) {
+    }
+
+    /**
+     * 挑出参考图字段：先按候选名单精确命中，再走通用推断（找「收图的数组字段」）。
+     *
+     * <p>被网关示例解析（{@link GatewayModelProbe}）复用，保证两条通道的判定规则一致。
+     *
+     * @return null = 没找到（该模型不支持参考图）
+     */
+    public static CandidatePick pickRefs(Map<String, JsonNode> byName) {
+        for (String c : REFS_CANDIDATES) {
+            JsonNode v = byName.get(c);
+            if (v != null) {
+                return new CandidatePick(c, isArrayLike(v), false);
+            }
+        }
+        String guess = guessRefsField(byName);
+        return guess.isEmpty() ? null : new CandidatePick(guess, isArrayLike(byName.get(guess)), true);
     }
 
     /** 从 schema 里挑出「用户改过的全局参数」，只保留 schema 认识的键（防手改坏调用）。 */

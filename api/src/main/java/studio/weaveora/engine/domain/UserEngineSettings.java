@@ -88,6 +88,19 @@ public class UserEngineSettings {
     @Column(name = "gateway_refs_max")
     private Integer gatewayRefsMax;
 
+    /** 网关通道：用户粘贴的示例请求（curl / JSON body），用于解析出参数格式 */
+    @Column(name = "gateway_sample")
+    private String gatewaySample;
+
+    /** 已配置模型库（图片/视频各一份 JSON 数组；元素含 baseUrl/model/params/schema…） */
+    @org.hibernate.annotations.JdbcTypeCode(org.hibernate.type.SqlTypes.JSON)
+    @Column(name = "image_model_presets")
+    private com.fasterxml.jackson.databind.JsonNode imageModelPresets;
+
+    @org.hibernate.annotations.JdbcTypeCode(org.hibernate.type.SqlTypes.JSON)
+    @Column(name = "video_model_presets")
+    private com.fasterxml.jackson.databind.JsonNode videoModelPresets;
+
     @UpdateTimestamp
     @Column(name = "updated_at", nullable = false)
     private OffsetDateTime updatedAt;
@@ -140,6 +153,12 @@ public class UserEngineSettings {
     public void setImageModelSchemaError(String v) { this.imageModelSchemaError = v; }
     public String videoModelSchemaError() { return videoModelSchemaError; }
     public void setVideoModelSchemaError(String v) { this.videoModelSchemaError = v; }
+    public com.fasterxml.jackson.databind.JsonNode imageModelPresets() { return imageModelPresets; }
+    public void setImageModelPresets(com.fasterxml.jackson.databind.JsonNode v) { this.imageModelPresets = v; }
+    public com.fasterxml.jackson.databind.JsonNode videoModelPresets() { return videoModelPresets; }
+    public void setVideoModelPresets(com.fasterxml.jackson.databind.JsonNode v) { this.videoModelPresets = v; }
+    public String gatewaySample() { return gatewaySample; }
+    public void setGatewaySample(String v) { this.gatewaySample = v; }
     public Integer gatewayRefsMax() { return gatewayRefsMax; }
     public void setGatewayRefsMax(Integer v) { this.gatewayRefsMax = v; }
     public Integer gpuServerPort() { return gpuServerPort; }

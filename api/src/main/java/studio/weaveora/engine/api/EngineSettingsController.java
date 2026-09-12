@@ -3,6 +3,7 @@ package studio.weaveora.engine.api;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -44,6 +45,31 @@ public class EngineSettingsController {
         boolean image = kind == null || kind.isBlank() || "image".equals(kind);
         boolean video = kind == null || kind.isBlank() || "video".equals(kind);
         return service.refreshSchemas(uid(request), image, video);
+    }
+
+    /** P12 模型库：新增/更新条目（顺手刷新该模型的参数说明；apply=true 同时设为当前生效模型）。 */
+    @org.springframework.web.bind.annotation.PostMapping("/models")
+    public EngineSettingsResponse upsertModel(HttpServletRequest request,
+                                              @Valid @RequestBody ModelPresetRequest body) {
+        return service.upsertPreset(uid(request), body);
+    }
+
+    /** P12 模型库：刷新某条目的参数说明。 */
+    @org.springframework.web.bind.annotation.PostMapping("/models/refresh")
+    public EngineSettingsResponse refreshModel(HttpServletRequest request,
+                                               @RequestParam("kind") String kind,
+                                               @RequestParam(value = "baseUrl", required = false) String baseUrl,
+                                               @RequestParam("model") String model) {
+        return service.refreshPreset(uid(request), kind, baseUrl, model);
+    }
+
+    /** P12 模型库：删除条目。 */
+    @org.springframework.web.bind.annotation.PostMapping("/models/delete")
+    public EngineSettingsResponse deleteModel(HttpServletRequest request,
+                                              @RequestParam("kind") String kind,
+                                              @RequestParam(value = "baseUrl", required = false) String baseUrl,
+                                              @RequestParam("model") String model) {
+        return service.deletePreset(uid(request), kind, baseUrl, model);
     }
 
     private UUID uid(HttpServletRequest request) {

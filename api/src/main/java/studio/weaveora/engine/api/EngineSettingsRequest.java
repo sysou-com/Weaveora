@@ -20,6 +20,8 @@ public record EngineSettingsRequest(
         com.fasterxml.jackson.databind.JsonNode imageParams,
         com.fasterxml.jackson.databind.JsonNode videoParams,
         /** 网关通道：本模型单次最多参考图张数（按官方文档填，如方舟 doubao-seedream-5 = 14） */
-        Integer gatewayRefsMax
+        Integer gatewayRefsMax,
+        /** 网关通道：示例请求（curl 或 JSON body），用于解析参数格式 */
+        String gatewaySample
 ) {
 }

@@ -377,6 +377,24 @@ export interface EngineSettings {
   videoModelSchemaError: string | null
   /** P12：网关通道单次最多参考图张数（0/空=未知） */
   gatewayRefsMax: number | null
+  /** P12：网关通道：已保存的示例请求（curl / JSON body），用于解析参数格式 */
+  gatewaySample: string | null
+  /** P12 模型库：已配置的模型条目 */
+  imageModelPresets: ModelPreset[] | null
+  videoModelPresets: ModelPreset[] | null
+}
+
+/** P12 模型库条目（一个已配置过的 baseUrl + 模型 + 参数 + 参数说明） */
+export interface ModelPreset {
+  baseUrl: string
+  model: string
+  params: Record<string, unknown> | null
+  schema: ModelSchema | null
+  schemaAt?: string
+  schemaError?: string
+  gatewayRefsMax?: number
+  gatewaySample?: string
+  updatedAt?: string
 }
 
 /** P12：云模型 input schema 归一化结果（后端 ModelSchemaService 产出） */
@@ -391,6 +409,18 @@ export interface ModelSchema {
   /** 归一化参数映射（worker 按它填参）：refs/prompt/aspect/seed/width/height/negative/lastFrame… */
   mapping: Record<string, string | number | boolean>
   notes: string[]
+  /** 网关通道（方舟等）探测结果：模型是否存在、模态、任务类型、提示 */
+  gatewayProbe?: {
+    ok?: boolean
+    modelExists?: boolean
+    takesImage?: boolean
+    inputModalities?: string[]
+    outputModalities?: string[]
+    taskTypes?: string[]
+    note?: string
+    error?: string
+    modelCount?: number
+  } | null
 }
 
 export interface ModelSchemaParam {
@@ -423,6 +453,7 @@ export interface EngineSettingsInput {
   imageParams?: Record<string, unknown> | null
   videoParams?: Record<string, unknown> | null
   gatewayRefsMax?: number | null
+  gatewaySample?: string | null
 }
 
 /** 统一错误体（§17）：{ code, message, traceId } */

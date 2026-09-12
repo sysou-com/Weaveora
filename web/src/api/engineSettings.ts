@@ -19,3 +19,36 @@ export async function refreshModelSchemas(kind?: 'image' | 'video'): Promise<Eng
   const q = kind ? `?kind=${kind}` : ''
   return request<EngineSettings>(`/api/v1/me/engine-settings/refresh-models${q}`, { method: 'POST' })
 }
+
+/** P12 模型库：新增/更新一个模型条目（顺手刷新参数说明；apply=true 同时设为当前生效） */
+export async function saveModelPreset(input: {
+  kind: 'image' | 'video'
+  baseUrl?: string | null
+  model: string
+  params?: Record<string, unknown> | null
+  gatewayRefsMax?: number | null
+  gatewaySample?: string | null
+  apply?: boolean
+}): Promise<EngineSettings> {
+  return request<EngineSettings>('/api/v1/me/engine-settings/models', { method: 'POST', body: input })
+}
+
+/** P12 模型库：刷新某条目的参数说明 */
+export async function refreshModelPreset(
+  kind: 'image' | 'video',
+  model: string,
+  baseUrl?: string | null,
+): Promise<EngineSettings> {
+  const q = new URLSearchParams({ kind, model, ...(baseUrl ? { baseUrl } : {}) })
+  return request<EngineSettings>(`/api/v1/me/engine-settings/models/refresh?${q}`, { method: 'POST' })
+}
+
+/** P12 模型库：删除条目 */
+export async function deleteModelPreset(
+  kind: 'image' | 'video',
+  model: string,
+  baseUrl?: string | null,
+): Promise<EngineSettings> {
+  const q = new URLSearchParams({ kind, model, ...(baseUrl ? { baseUrl } : {}) })
+  return request<EngineSettings>(`/api/v1/me/engine-settings/models/delete?${q}`, { method: 'POST' })
+}
