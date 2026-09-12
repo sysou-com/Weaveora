@@ -2511,10 +2511,9 @@ const shotTotal = computed(() => {
               未设区域（整幅生效）：
               <span v-for="it in refPreviewItems.filter((i) => !i.region)" :key="it.id" class="pos-chip font-mono">{{ it.label }}</span>
             </p>
-            <p class="ref-hint text-secondary">
-              拖动色块移动、右下角拖动缩放；也可在上方「区域%」精确填写（x/y=左上角，w/h=宽高，0–100）。填了区域后，GPU(Comfy) 会按区域分别注入参考图（彻底解耦多角色）；云模型无遮罩能力，会把方位写进提示词。
-            </p>
-<div v-if="enabledSubjects.length" class="ref-subjects pos-subjects" data-testid="subject-ref-block">
+
+            <!-- P13：区域表紧贴预览框（提示与告警放在其下方） -->
+            <div v-if="enabledSubjects.length" class="ref-subjects pos-subjects" data-testid="subject-ref-block">
               <p class="ref-subjects-title font-mono">已选主体<span class="text-secondary">（勾选参与的主体；只可编辑区域）</span></p>
               <div v-for="sub in enabledSubjects" :key="sub.name" class="ref-subject-block">
                 <div class="ref-subject-row">
@@ -2539,6 +2538,10 @@ const shotTotal = computed(() => {
                 </div>
               </div>
             </div>
+
+            <p class="ref-hint text-secondary">
+              拖动色块移动、右下角拖动缩放；也可在上方「区域%」精确填写（x/y=左上角，w/h=宽高，0–100）。填了区域后，GPU(Comfy) 会按区域分别注入参考图（彻底解耦多角色）；云模型无遮罩能力，会把方位写进提示词。
+            </p>
           <!-- 计数与提示放到「位置预览」描述下方 -->
           <div class="ref-meta">
             <p v-if="refSelected.length" class="ref-count font-mono" data-testid="ref-count">
