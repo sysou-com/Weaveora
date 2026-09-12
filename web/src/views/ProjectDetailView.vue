@@ -599,13 +599,6 @@ function setRefRegion(id: string, k: 'x' | 'y' | 'w' | 'h', v: string): void {
   refRegions.value = { ...refRegions.value, [id]: { ...cur, [k]: v } }
   syncReferenceAssets()
 }
-function setRefSubject(id: string, v: string): void {
-  refSubjects.value[id] = v
-  syncReferenceAssets()
-}
-function onRefSubjectInput(id: string, e: Event): void {
-  setRefSubject(id, (e.target as HTMLInputElement).value)
-}
 
 
 const POS_COLORS = ['#8FB9B4', '#C8A25E', '#C45C4A', '#7AA87A']
@@ -622,6 +615,40 @@ function setRefRegionPct(id: string, region: { x: number; y: number; w: number; 
   refRegions.value = { ...refRegions.value, [id]: { x: r(region.x), y: r(region.y), w: r(region.w), h: r(region.h) } }
   syncReferenceAssets()
 }
+/** P13：勾选参与的主体（用于「已选主体」显示：定妆照 + 区域） */
+const enabledSubjects = computed<PlanSubject[]>(() =>
+  planSubjects().filter((s) => s.enabled !== false && (s.name ?? '').trim() !== ''),
+)
+/** 该主体显示的图：定妆照优先，其次第一张勾选素材图 */
+function subjectThumb(sub: PlanSubject): string {
+  if (sub.portraitAssetId && galUrls.value[sub.portraitAssetId]) return galUrls.value[sub.portraitAssetId]
+  const id = (sub.refs ?? []).find((r) => r.checked !== false)?.assetId
+  if (!id) return ''
+  return galUrls.value[id] ?? thumbUrls.value[id] ?? ''
+}
+/** 主体区域（优先取该主体当前的区��输入，其次取方案里存的 region） */
+function subjectRegion(sub: PlanSubject, k: 'x' | 'y' | 'w' | 'h'): string {
+  const id = sub.portraitAssetId || (sub.refs ?? []).find((x) => x.checked !== false)?.assetId || ''
+  const src = id ? refRegions.value[id] : undefined
+  if (src && src[k]) return src[k]
+  const r = (sub.refs ?? []).find((x) => x.checked !== false)?.region
+  return r ? pctOf(r, k) : ''
+}
+/** 归一化 region（0–1）→ 百分比字符串 */
+function pctOf(r: { x: number; y: number; w: number; h: number }, k: 'x' | 'y' | 'w' | 'h'): string {
+  const v = r[k]
+  return Number.isFinite(v) ? String(Math.round(v * 100)) : ''
+}
+/** 编辑主体区域：写回该主体第一张勾选素材图（或定妆图）对应的 refRegions，并同步进方案 */
+function setSubjectRegion(sub: PlanSubject, k: 'x' | 'y' | 'w' | 'h', v: string): void {
+  const id = sub.portraitAssetId || (sub.refs ?? []).find((r) => r.checked !== false)?.assetId || ''
+  if (!id) {
+    message.warning(`「${sub.name}」没有可挂区域的图（先上传/勾选素材图或生成定妆照）`)
+    return
+  }
+  setRefRegion(id, k, v)
+}
+
 /** 位置预览数据：主体名 + 区域 + 配色 */
 const refPreviewItems = computed(() =>
   selectedRefAssets.value.map((a, i) => ({
@@ -2443,28 +2470,16 @@ const shotTotal = computed(() => {
               </div>
             </div>
 
-            <div v-if="selectedRefAssets.length" class="ref-subjects">
-              <p class="ref-subjects-title font-mono">已选（资产库点「参考」的图也会出现在这里）</p>
-              <div v-for="a in selectedRefAssets" :key="a.id" class="ref-subject-block">
+            <!-- P13：勾选的主体（显示定妆照，名字只读，只编区域；取消勾选即从显示中移除） -->
+            <div v-if="enabledSubjects.length" class="ref-subjects" data-testid="subject-ref-block">
+              <p class="ref-subjects-title font-mono">已选主体<span class="text-secondary">（勾选参与的主体；只可编辑区域）</span></p>
+              <div v-for="sub in enabledSubjects" :key="sub.name" class="ref-subject-block">
                 <div class="ref-subject-row">
-                  <img v-if="thumbUrls[a.id]" :src="thumbUrls[a.id]" class="ref-subject-thumb" alt="" />
-                  <input
-                    class="text"
-                    type="text"
-                    :value="refSubjects[a.id] ?? ''"
-                    placeholder="主体名，如 唐僧 / 女王"
-                    @input="onRefSubjectInput(a.id, $event)"
-                  />
-                  <button type="button" class="ref-op" title="取消选择" @click="toggleRef(a.id, false)">取消</button>
-                  <button
-                    v-if="a.kind === 'reference'"
-                    type="button"
-                    class="ref-op danger"
-                    title="删除该参考图"
-                    @click="removeRefAsset(a.id)"
-                  >
-                    删除
-                  </button>
+                  <img v-if="subjectThumb(sub)" :src="subjectThumb(sub)" class="ref-subject-thumb" alt="" />
+                  <span v-else class="ref-subject-thumb empty font-mono">无定妆照</span>
+                  <span class="ref-subject-name">{{ sub.name }}</span>
+                  <span v-if="sub.portraitAssetId" class="ref-subject-tag font-mono">定妆照 v{{ sub.portraitVersion ?? 1 }}</span>
+                  <span v-else class="ref-subject-tag off font-mono">素材图</span>
                 </div>
                 <div class="ref-region-row">
                   <span class="ref-region-label font-mono">区域%</span>
@@ -2475,17 +2490,26 @@ const shotTotal = computed(() => {
                     type="text"
                     inputmode="numeric"
                     :placeholder="k"
-                    :value="refRegions[a.id]?.[k] ?? ''"
-                    @input="setRefRegion(a.id, k, ($event.target as HTMLInputElement).value)"
+                    :value="subjectRegion(sub, k)"
+                    @input="setSubjectRegion(sub, k, ($event.target as HTMLInputElement).value)"
                   />
                 </div>
               </div>
             </div>
-            <p v-else class="ref-hint text-secondary">
-              上传参考图（png/jpg/webp，本方案最多 15 张）或从下方资产库点「参考」；给选中的图标主体名（如「唐僧」）后，系统只会在文案提到该主体的镜头里使用它，并把「形象以参考图为准」写入提示词。
-            </p>
             <p v-if="refSelected.length" class="ref-count font-mono">{{ refSelected.length }}/{{ MAX_REFS }} 已选</p>
             <!-- P12：模型一次能收几张参考图（各模型不同）——超出会被丢弃，提前提示 -->
+            <p v-if="refOverModelLimit" class="ref-conflict" data-testid="ref-model-limit">
+              当前图片模型「{{ modelRefHint.name }}」最多接收 {{ modelRefHint.max }} 张参考图，
+              本方案已绑定 {{ refSelected.length }} 张 —— 超出的会被自动丢弃（多主体镜头建议改用
+              支持多图的模型，如 bytedance/seedream-4 / google/nano-banana：image_input）。
+            </p>
+          </div>
+
+          <!-- 计数与提示放到「位置预览」描述下方 -->
+          <div class="ref-meta">
+            <p v-if="refSelected.length" class="ref-count font-mono" data-testid="ref-count">
+              {{ refSelected.length }}/{{ MAX_REFS }} 已选
+            </p>
             <p v-if="refOverModelLimit" class="ref-conflict" data-testid="ref-model-limit">
               当前图片模型「{{ modelRefHint.name }}」最多接收 {{ modelRefHint.max }} 张参考图，
               本方案已绑定 {{ refSelected.length }} 张 —— 超出的会被自动丢弃（多主体镜头建议改用
@@ -3132,6 +3156,19 @@ const shotTotal = computed(() => {
 </template>
 
 <style scoped>
+.ref-subject-name { font-size: 13px; }
+.ref-subject-tag { font-size: 10.5px; color: var(--wv-success, #7BC47F); }
+.ref-subject-tag.off { color: var(--wv-text-4); }
+.ref-subject-thumb.empty {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 9.5px;
+  color: var(--wv-text-4);
+  background: var(--wv-surface-sunken);
+}
+.ref-meta { margin-top: 10px; display: flex; flex-direction: column; gap: 6px; }
+
 .ref-head-ops { display: inline-flex; align-items: center; gap: 6px; }
 .subj-list {
   display: flex;
