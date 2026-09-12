@@ -152,6 +152,8 @@ watch(
     refSelected.value = ids
     refSubjects.value = subjects
     refRegions.value = regions
+    // P13：参考图默认**全部不选中**（它们只是生成定妆的素材；要用再点选）
+    refUnchecked.value = [...ids]
     pristineJson.value = JSON.stringify(draft.value)
     dirty.value = false
   },
@@ -575,10 +577,16 @@ async function genPortrait(name: string): Promise<void> {
   if (dirty.value && !(await handleSave())) return
   portraitBusy.value = true
   try {
+    // 用界面上“当前点选的参考图”直接生成 —— 不必先保存/确认方案
+    const pickedIds = refSelected.value.filter((id) => {
+      const subj = (refSubjects.value[id] ?? '').trim()
+      return subj === '' || subj === name
+    })
     const created = await createJobs(workspaceId.value, projectId.value, {
       revisionId: revId,
       kind: 'portrait',
       subject: name,
+      refAssetIds: pickedIds,
     } as never)
     const jobId = created[0]?.id
     if (!jobId) throw new Error('未创建定妆图任务')
@@ -588,9 +596,13 @@ async function genPortrait(name: string): Promise<void> {
     await queryClient.invalidateQueries({ queryKey: ['assets'] })
     await queryClient.invalidateQueries({ queryKey: ['jobs'] })
     await refreshGallery()
-    // 参考图只是“生成定妆的素材”：用完即复位为未勾选（不再当作锚定图）
+    // 参考图只是“生成定妆的素材”：用完**立即释放选中**（不再当锚定图）
+    const used = new Set<string>(pickedIds)
     const sub = planSubjects().find((x) => x.name === name)
-    for (const r of sub?.refs ?? []) markUnchecked(r.assetId)
+    for (const r of sub?.refs ?? []) used.add(r.assetId)
+    for (const id of used) markUnchecked(id)
+    refSelected.value = refSelected.value.filter((id) => !used.has(id))
+    for (const id of used) delete refSubjects.value[id]
     syncReferenceAssets()
     message.success(`「${name}」定妆图已生成（参考图已复位为未选中）—— 用「操作 ▾ → 把最新定妆照设为锚定图」`)
   } catch (e) {

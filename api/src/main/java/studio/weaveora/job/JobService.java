@@ -1339,24 +1339,36 @@ public class JobService {
                 studio.weaveora.director.plan.PlanSubjects.parse(plan).stream()
                         .filter(s -> subject.equals(s.name()))
                         .findFirst()
-                        .orElseThrow(() -> new BizException(ErrorCode.VALIDATION,
-                                "方案里没有主体「" + subject + "」（先在参考图卡片里「一键生成主体」或手动添加）"));
-        // 输入图：本主体的定妆图（换一版）优先，否则勾选的素材图
-        java.util.List<studio.weaveora.director.plan.PlanSubjects.Ref> refs = sub.checkedRefs();
+                        .orElse(null);
         java.util.List<UUID> ids = new ArrayList<>();
-        if (sub.hasPortrait()) {
+        // P13：界面上“当前点选的参考图”直接传进来时优先用它 —— 用户不必先保存/确认就能出定妆照
+        for (String raw : (req.refAssetIds() == null ? java.util.List.<String>of() : req.refAssetIds())) {
             try {
-                ids.add(UUID.fromString(sub.portraitAssetId()));
+                ids.add(UUID.fromString(raw));
             } catch (IllegalArgumentException ignored) {
                 // 忽略非法 id
             }
         }
-        for (studio.weaveora.director.plan.PlanSubjects.Ref r : refs) {
-            try {
-                ids.add(UUID.fromString(r.assetId()));
-            } catch (IllegalArgumentException ignored) {
-                // 忽略
+        int explicitRefs = ids.size();
+        if (sub != null) {
+            if (sub.hasPortrait()) {
+                try {
+                    ids.add(UUID.fromString(sub.portraitAssetId()));
+                } catch (IllegalArgumentException ignored) {
+                    // 忽略非法 id
+                }
             }
+            for (studio.weaveora.director.plan.PlanSubjects.Ref r : sub.checkedRefs()) {
+                try {
+                    ids.add(UUID.fromString(r.assetId()));
+                } catch (IllegalArgumentException ignored) {
+                    // 忽略
+                }
+            }
+        }
+        if (sub == null && explicitRefs == 0) {
+            throw new BizException(ErrorCode.VALIDATION,
+                    "方案里没有主体「" + subject + "」，且没有指定参考图（先在参考图卡片里「一键生成主体」或手动添加）");
         }
         java.util.List<String> keys = new ArrayList<>();
         for (studio.weaveora.asset.domain.Asset a : assetRepo.findByIdInAndWorkspaceId(ids, workspaceId)) {
@@ -1368,8 +1380,8 @@ public class JobService {
         payload.put("revisionId", req.revisionId().toString());
         payload.put("revision_no", revisionNo);
         payload.put("subject", subject);
-        payload.put("portrait_version", sub.portraitVersion() + 1);
-        payload.put("positive_prompt", studio.weaveora.director.SubjectPrompts.portraitPrompt(sub.name(), sub.kind(), keys.size()));
+        payload.put("portrait_version", (sub == null ? 1 : sub.portraitVersion() + 1));
+        payload.put("positive_prompt", studio.weaveora.director.SubjectPrompts.portraitPrompt(subject, sub == null ? null : sub.kind(), keys.size()));
         payload.put("negative_prompt", "text, watermark, logo, multiple people, deformed face, extra limbs, lowres");
         payload.put("aspect_ratio", project.aspectRatio());
         int[] dd = dimsFor(project.aspectRatio());

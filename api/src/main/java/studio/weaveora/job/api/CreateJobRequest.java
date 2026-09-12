@@ -13,6 +13,7 @@ public record CreateJobRequest(
         Integer lineIndex,    // P8：voice 任务只重生成该镜的第 N 段语音（null=全部段落）
         java.util.List<Integer> shotNos,   // P12：只生成这些镜（null=全部；显式列出时可包含已封版镜）
         Boolean includeLocked,             // P12：true=连已封版镜一起生成（默认 false）
-        String subject                     // P13：kind=portrait 时指定剧情主体名
+        String subject,                    // P13：kind=portrait 时指定剧情主体名
+        java.util.List<String> refAssetIds // P13：kind=portrait 时直接指定参考图资产（用界面上当前点选的图，无需先保存/确认）
 ) {
 }
