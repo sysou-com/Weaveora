@@ -378,23 +378,20 @@ public class DirectorService {
             }
         }
         studio.weaveora.director.plan.PlanSubjects.write(obj, subs);
-        // P13 护栏：不同主体不得共用同一张定妆照（踩过：前端候选顺序有 bug 时
-        // 多个主体的 portraitAssetId 被写成同一个 → 关键帧人物全错/失败）
-        java.util.Map<String, String> byPortrait = new java.util.HashMap<>();
-        for (studio.weaveora.director.plan.PlanSubjects.Subject cur : subs) {
-            String pid = cur.portraitAssetId();
-            if (pid == null || pid.isBlank()) {
-                continue;
-            }
-            String other = byPortrait.put(pid, cur.name());
-            if (other != null) {
-                throw new BizException(ErrorCode.VALIDATION,
-                        "主体「" + other + "」与「" + cur.name() + "」用了同一张定妆照，已拒绝保存；"
-                                + "请为每个主体分别指定定妆照（或先用同一个主体生成定妆照）");
-            }
-        }
+        // 注：**允许**多个主体共用同一张定妆照（双胞胎/同人等就是合理需求），不拦；
+        //     只记一条日志，便于排查“怎么两个人长得一样”。
         r.replacePlan(obj);
         revisions.save(r);
+        java.util.Map<String, String> seen = new java.util.HashMap<>();
+        for (studio.weaveora.director.plan.PlanSubjects.Subject cur : subs) {
+            String pid = cur.portraitAssetId();
+            if (pid != null && !pid.isBlank()) {
+                String other = seen.put(pid, cur.name());
+                if (other != null) {
+                    log.info("多个主体共用同一张定妆照：{} / {}（允许，如双胞胎）", other, cur.name());
+                }
+            }
+        }
         log.info("subjects meta patched in place: project={} rev={} n={}", projectId, revisionId, subs.size());
         return toDetail(r, project.approvedRevisionId());
     }
