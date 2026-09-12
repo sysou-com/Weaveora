@@ -6,12 +6,13 @@ import java.util.UUID;
 public record CreateJobRequest(
         UUID revisionId,      // 必须为项目当前 approved_revision
         UUID shotId,          // 可选：视频单镜
-        String kind,          // still | clip | voice | bgm
+        String kind,          // still | clip | voice | bgm | portrait（P13 定妆图）
         Integer count,        // 图片张数 1/2/4（默认 1）
         Integer frames,       // motion(clip) 帧数：系统范围 32–96
         Boolean preview,      // true=试听任务（配音/配乐试听），不参与正式成片
         Integer lineIndex,    // P8：voice 任务只重生成该镜的第 N 段语音（null=全部段落）
         java.util.List<Integer> shotNos,   // P12：只生成这些镜（null=全部；显式列出时可包含已封版镜）
-        Boolean includeLocked              // P12：true=连已封版镜一起生成（默认 false）
+        Boolean includeLocked,             // P12：true=连已封版镜一起生成（默认 false）
+        String subject                     // P13：kind=portrait 时指定剧情主体名
 ) {
 }

@@ -28,11 +28,14 @@ public class DirectorController {
 
     private final DirectorService directorService;
     private final studio.weaveora.director.AiAudioService aiAudioService;
+    private final studio.weaveora.director.SubjectService subjectService;
     private final com.fasterxml.jackson.databind.ObjectMapper mapper =
             new com.fasterxml.jackson.databind.ObjectMapper();
 
     public DirectorController(DirectorService directorService,
-                              studio.weaveora.director.AiAudioService aiAudioService) {
+                              studio.weaveora.director.AiAudioService aiAudioService,
+                              studio.weaveora.director.SubjectService subjectService) {
+        this.subjectService = subjectService;
         this.directorService = directorService;
         this.aiAudioService = aiAudioService;
     }
@@ -54,6 +57,34 @@ public class DirectorController {
         boolean replace = body != null && Boolean.TRUE.equals(body.replace());
         var r = aiAudioService.generateLines(uid(request), ws(workspaceId), projectId, revisionId, shotNo, replace);
         return ResponseEntity.ok(studio.weaveora.director.AiAudioService.linesToJson(mapper, r));
+    }
+
+    /** P13：一键抽取剧情主体（人物/载具/物件/场景），已有主体保留、只补新的。 */
+    @PostMapping("/revisions/{revisionId}/subjects/extract")
+    public ResponseEntity<com.fasterxml.jackson.databind.node.ObjectNode> extractSubjects(
+            HttpServletRequest request,
+            @RequestHeader(value = ProjectController.WORKSPACE_HEADER, required = false) String workspaceId,
+            @PathVariable UUID projectId,
+            @PathVariable UUID revisionId) {
+        var r = subjectService.extract(uid(request), ws(workspaceId), projectId, revisionId);
+        var body = mapper.createObjectNode();
+        body.put("source", r.source());
+        var arr = body.putArray("subjects");
+        r.subjects().forEach(s -> {
+            var o = arr.addObject();
+            o.put("name", s.name());
+            o.put("kind", s.kind());
+            o.put("enabled", s.enabled());
+            o.put("hasPortrait", s.hasPortrait());
+            o.put("portraitVersion", s.portraitVersion());
+            o.put("refCount", s.refs().size());
+            o.put("checkedCount", s.checkedRefs().size());
+            var al = o.putArray("aliases");
+            s.aliases().forEach(al::add);
+        });
+        var added = body.putArray("added");
+        r.added().forEach(added::add);
+        return ResponseEntity.ok(body);
     }
 
     /** P11：AI 一键配乐（依据剧情给出 2~5 段「时间段 + 情绪」）。 */

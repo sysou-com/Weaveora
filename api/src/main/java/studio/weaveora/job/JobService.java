@@ -200,7 +200,7 @@ public class JobService {
     public List<JobView> create(UUID userId, UUID workspaceId, UUID projectId, CreateJobRequest req) {
         guard.requireMember(userId, workspaceId);
         ProjectSnapshot project = projects.require(userId, workspaceId, projectId);
-        if (req.kind() == null || !List.of("still", "clip", "voice", "bgm").contains(req.kind())) {
+        if (req.kind() == null || !List.of("still", "clip", "voice", "bgm", "portrait").contains(req.kind())) {
             throw new BizException(ErrorCode.VALIDATION, "kind 必须为 still|clip|voice|bgm");
         }
         if (project.approvedRevisionId() == null || !project.approvedRevisionId().equals(req.revisionId())) {
@@ -218,6 +218,10 @@ public class JobService {
         }
         // W4 一致性锚定：逐镜解析（方案内标注主体的参考图优先，见 resolveRefs）
         // 引擎路由（用户设置）：本批次按 kind 决定 gpu|cloud；配音/配乐为自托管服务，固定走 gpu 节点
+        if ("portrait".equals(req.kind())) {
+            return createPortraitJob(workspaceId, projectId, req, plan, revisionNo, userId)
+                    .stream().map(this::toView).toList();
+        }
         boolean audioKind = "voice".equals(req.kind()) || "bgm".equals(req.kind());
         String engineRoute = audioKind ? "gpu" : engineSettings.resolveEngine(userId, req.kind());
 
@@ -940,12 +944,100 @@ public class JobService {
                 ? plan.path("positive_prompt").asText("") + " " + plan.path("prompt_zh").asText("")
                 : shot.path("action").asText("") + " " + shot.path("zh").asText("")
                   + " " + shot.path("positive_prompt").asText("");
+        // P13：按「剧情主体」取锚定资产 —— **定妆图优先**（一致性靠它），没有定妆图才退回勾选的素材图
+        RefCtx fromSubjects = bindFromSubjects(plan, text, workspaceId);
+        if (fromSubjects != null) return fromSubjects;
         RefCtx fromPlan = bindFrom(plan == null ? null : plan.get("referenceAssets"), text, workspaceId);
         if (fromPlan != null) return fromPlan;
         RefCtx fromBrief = bindFrom(briefReferenceAssets(userId, workspaceId, projectId, revisionId), text, workspaceId);
         if (fromBrief != null) return fromBrief;
         RefCtx legacy = loadRefs(userId, workspaceId, projectId, revisionId);
         return new RefCtx(legacy.ids(), legacy.keys(), legacy.subjects(), legacy.regions(), "", legacy.primarySubject());
+    }
+
+    /**
+     * P13：按剧情主体绑定锚定图。
+     *
+     * <p>规则：
+     * <ol>
+     *   <li>只取 {@code enabled}（勾选参与）的主体；镜文案命中名/别名者优先，一个都没命中则带回全部（避免空锚定）。</li>
+     *   <li>每个主体取「**定妆图** → 勾选的素材图」中的第一张；两者都没有则跳过。</li>
+     *   <li>顺序：先「镜文案里出现且为主主体」的，再按方案里的声明顺序 —— 保住「第 i 张图 = 哪个主体」。</li>
+     * </ol>
+     */
+    private RefCtx bindFromSubjects(JsonNode plan, String text, UUID workspaceId) {
+        java.util.List<studio.weaveora.director.plan.PlanSubjects.Subject> subjects =
+                studio.weaveora.director.plan.PlanSubjects.parse(plan);
+        if (subjects.isEmpty()) {
+            return null;
+        }
+        java.util.List<studio.weaveora.director.plan.PlanSubjects.Subject> enabled = subjects.stream()
+                .filter(studio.weaveora.director.plan.PlanSubjects.Subject::enabled)
+                .filter(s -> s.anchorAssetId() != null)
+                .toList();
+        if (enabled.isEmpty()) {
+            return null;
+        }
+        String t = text == null ? "" : text;
+        java.util.List<studio.weaveora.director.plan.PlanSubjects.Subject> picked = enabled.stream()
+                .filter(s -> studio.weaveora.director.plan.PlanSubjects.matches(t, s))
+                .toList();
+        if (picked.isEmpty()) {
+            picked = enabled;
+            log.info("refs: 镜文本未命中任何主体，回退为全部 {} 个主体（{}）",
+                    picked.size(), picked.stream().map(studio.weaveora.director.plan.PlanSubjects.Subject::name).toList());
+        }
+        java.util.List<UUID> ids = new ArrayList<>();
+        for (studio.weaveora.director.plan.PlanSubjects.Subject sub : picked) {
+            try {
+                ids.add(UUID.fromString(sub.anchorAssetId()));
+            } catch (IllegalArgumentException ignored) {
+                // 资产 id 非法（手工改过方案）→ 跳过该主体
+            }
+        }
+        if (ids.isEmpty()) {
+            return null;
+        }
+        java.util.Map<String, studio.weaveora.asset.domain.Asset> byId = new java.util.HashMap<>();
+        for (studio.weaveora.asset.domain.Asset a : assetRepo.findByIdInAndWorkspaceId(ids, workspaceId)) {
+            byId.put(a.id().toString(), a);
+        }
+        java.util.List<String> okIds = new ArrayList<>();
+        java.util.List<String> keys = new ArrayList<>();
+        java.util.List<String> subjNames = new ArrayList<>();
+        java.util.List<String> regions = new ArrayList<>();
+        StringBuilder mapping = new StringBuilder();
+        String primary = "";
+        for (studio.weaveora.director.plan.PlanSubjects.Subject sub : picked) {
+            studio.weaveora.asset.domain.Asset a = byId.get(sub.anchorAssetId());
+            if (a == null) {
+                continue;
+            }
+            boolean portrait = sub.hasPortrait() && sub.portraitAssetId().equals(a.id().toString());
+            subjNames.add(sub.name());
+            keys.add(a.storageKey());
+            okIds.add(a.id().toString());
+            regions.add(null);
+            if (mapping.length() > 0) {
+                mapping.append("; ");
+            }
+            mapping.append(keys.size()).append(") ").append(sub.name())
+                    .append(portrait ? "(定妆图)" : "(素材图)");
+            if (primary.isEmpty() && studio.weaveora.director.plan.PlanSubjects.nameMatches(t, sub.name())) {
+                primary = sub.name();
+            }
+        }
+        if (keys.isEmpty()) {
+            return null;
+        }
+        if (primary.isEmpty()) {
+            primary = subjNames.get(0);
+        }
+        String anchor = "\nReference images in order: " + mapping
+                + ". Each subject MUST strictly match its own reference image (face / hair / costume / shape);"
+                + " keep subjects distinct and never blend or swap their identities.";
+        log.info("refs: 本镜锚定 {} 张（{}）primary={}", keys.size(), mapping, primary);
+        return new RefCtx(okIds, keys, subjNames, regions, anchor, primary);
     }
 
     /** brief.constraints.referenceAssets（新流程：未出方案前就标注的主体绑定）。取不到/无则 null。 */
@@ -1228,6 +1320,72 @@ public class JobService {
     private List<UUID> resolveVideoShots(UUID userId, UUID workspaceId, UUID projectId,
                                          UUID revisionId, UUID shotId, String kind) {
         return resolveVideoShots(userId, workspaceId, projectId, revisionId, shotId, kind, null, false);
+    }
+
+    /**
+     * P13 定妆图（subject portrait）：用该主体勾选的素材图/上一版定妆图做输入，生成一张「标准角色设定图」。
+     *
+     * <p>这张图之后会作为该主体在所有分镜里的**唯一锚定图** —— 直接喂随手拍的用户图，
+     * 风格/构图不可控，一致性会飘；先定妆再锚定才稳定。
+     */
+    private List<GenerationJob> createPortraitJob(UUID workspaceId, UUID projectId, CreateJobRequest req,
+                                                  JsonNode plan, int revisionNo, UUID userId) {
+        String subject = req.subject() == null ? "" : req.subject().trim();
+        if (subject.isEmpty()) {
+            throw new BizException(ErrorCode.VALIDATION, "生成定妆图需要指定主体名（subject）");
+        }
+        ProjectContextPort.ProjectSnapshot project = projects.require(userId, workspaceId, projectId);
+        studio.weaveora.director.plan.PlanSubjects.Subject sub =
+                studio.weaveora.director.plan.PlanSubjects.parse(plan).stream()
+                        .filter(s -> subject.equals(s.name()))
+                        .findFirst()
+                        .orElseThrow(() -> new BizException(ErrorCode.VALIDATION,
+                                "方案里没有主体「" + subject + "」（先在参考图卡片里「一键生成主体」或手动添加）"));
+        // 输入图：本主体的定妆图（换一版）优先，否则勾选的素材图
+        java.util.List<studio.weaveora.director.plan.PlanSubjects.Ref> refs = sub.checkedRefs();
+        java.util.List<UUID> ids = new ArrayList<>();
+        if (sub.hasPortrait()) {
+            try {
+                ids.add(UUID.fromString(sub.portraitAssetId()));
+            } catch (IllegalArgumentException ignored) {
+                // 忽略非法 id
+            }
+        }
+        for (studio.weaveora.director.plan.PlanSubjects.Ref r : refs) {
+            try {
+                ids.add(UUID.fromString(r.assetId()));
+            } catch (IllegalArgumentException ignored) {
+                // 忽略
+            }
+        }
+        java.util.List<String> keys = new ArrayList<>();
+        for (studio.weaveora.asset.domain.Asset a : assetRepo.findByIdInAndWorkspaceId(ids, workspaceId)) {
+            keys.add(a.storageKey());
+        }
+        ObjectNode payload = mapper().createObjectNode();
+        payload.put("kind", "portrait");
+        payload.put("mode", "video");
+        payload.put("revisionId", req.revisionId().toString());
+        payload.put("revision_no", revisionNo);
+        payload.put("subject", subject);
+        payload.put("portrait_version", sub.portraitVersion() + 1);
+        payload.put("positive_prompt", studio.weaveora.director.SubjectPrompts.portraitPrompt(sub.name(), sub.kind(), keys.size()));
+        payload.put("negative_prompt", "text, watermark, logo, multiple people, deformed face, extra limbs, lowres");
+        payload.put("aspect_ratio", project.aspectRatio());
+        int[] dd = dimsFor(project.aspectRatio());
+        payload.set("params", mapper().createObjectNode().put("width", dd[0]).put("height", dd[1]));
+        payload.put("seed", randomSeed());
+        com.fasterxml.jackson.databind.node.ArrayNode keysNode = payload.putArray("referenceKeys");
+        keys.forEach(keysNode::add);
+        com.fasterxml.jackson.databind.node.ArrayNode subjNode = payload.putArray("referenceSubjects");
+        keys.forEach(k -> subjNode.add(subject));
+        payload.put("primarySubject", subject);
+        stampRevisionMeta(payload, revisionNo, payload.path("positive_prompt").asText(""));
+        String engine = engineSettings.resolveEngine(userId, "still");
+        GenerationJob job = createOne(workspaceId, projectId, req.revisionId(), null, PRESET_STILL,
+                "portrait", payload, userId, engine);
+        log.info("portrait job created project={} subject={} refs={}", projectId, subject, keys.size());
+        return List.of(job);
     }
 
     /** P12：镜头被过滤空时的准确原因（区分「没确认」和「全被封版跳过」）。 */
