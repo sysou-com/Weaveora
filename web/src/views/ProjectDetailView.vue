@@ -2853,7 +2853,7 @@ const shotTotal = computed(() => {
                   <span class="ref-subject-name">{{ sub.name }}</span>
                   <span v-if="sub.portraitAssetId" class="ref-subject-tag font-mono"
                         :title="`定妆照资产 ${sub.portraitAssetId}`">
-                    定妆照 v{{ sub.portraitVersion ?? 1 }} ·#{{ sub.portraitAssetId.slice(0, 8) }}
+                    定妆照 v{{ sub.portraitVersion ?? 1 }} ·#{{ sub.portraitAssetId.slice(-6) }}
                   </span>
                   <span v-else class="ref-subject-tag off font-mono">素材图</span>
                 </div>
