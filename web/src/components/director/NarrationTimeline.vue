@@ -10,6 +10,7 @@ import { NButton, NIcon, NInput, NInputNumber, NSelect, NTooltip, useMessage } f
 import { computed, ref } from 'vue'
 
 import type { DirectorShot, NarrationLine } from '@/api/types'
+import { relayoutShotByActual } from '@/utils/plan'
 
 const props = withDefaults(
   defineProps<{
@@ -286,6 +287,25 @@ function clearEnd(): void {
   if (!cur.value) return
   cur.value.end_sec = null
   commit()
+}
+
+/**
+ * 按**实际配音时长**重排本镜（修历史上被「字数估算」写坏的时间轴）：
+ * 忽略 manual 标记与旧 end_sec，逐段无重叠铺排，段间留 0.1s。
+ */
+function relayoutByActual(): void {
+  const lines = props.shot.narrations ?? []
+  const miss = lines.filter((_, i) => lineDurSec(i) == null).length
+  if (relayoutShotByActual(props.shot, props.durations ?? {})) {
+    commit()
+    message.success(
+      miss
+        ? `已按实际音频重排（还有 ${miss} 段没有实际配音，暂用估算）`
+        : '已按实际音频重排本镜',
+    )
+  } else {
+    message.info('本镜已经与实际音频一致，无需重排')
+  }
 }
 
 /** 把结束点设为“此刻 + 估算时长” */
@@ -567,6 +587,12 @@ function pickVoiceFile(i: number): void {
       </NButton>
       <NButton size="tiny" quaternary :disabled="disabled" @click="setEndFromEstimate">
         按估算设结束
+      </NButton>
+      <NButton size="tiny" quaternary type="primary" :disabled="disabled"
+               :data-testid="`narration-relayout-${shot.shot_no}`"
+               title="用每段配音的实际音频时长重新铺排本镜（丢掉旧的估算结束点，段间留 0.1s）"
+               @click="relayoutByActual">
+        按实际重排本镜
       </NButton>
       <NButton size="tiny" quaternary :disabled="disabled" :data-testid="`narration-end-actual-${shot.shot_no}`"
                title="用这段配音的**实际音频时长**写回结束点（比字数估算准）" @click="adoptActualEnd(selected)">

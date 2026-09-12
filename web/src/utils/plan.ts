@@ -36,8 +36,55 @@ export function autoLayoutShot(shot: DirectorShot, durations: Record<string, num
         }
       }
     }
+    // 推进游标：以「实际音频」为真值。
+    //
+    // 以前只用 end_sec（可能是自动铺排时用**字数估算**写进去的，例：段0 估 2.3s 而实际 2.92s），
+    // 结果下一段起点落在 2.3s → 段0 还没播完段1 就开始（重升）→ 成片听起来像被截断。
+    // 手动段也要按“实际音频更长”推游标，否则手动留下的估算 end_sec 会永久制造重升。
+    const at = Math.max(0, l.at_sec ?? 0)
     const end = Number(l.end_sec ?? 0)
-    if (end > (l.at_sec ?? 0)) prevEnd = end
+    const natural = ms && ms > 0 ? at + ms / 1000 : 0
+    const next = Math.max(at, end, natural)
+    if (next > at) prevEnd = next
+  })
+  return changed
+}
+
+/**
+ * P13：「按实际重排本镜」——忽略 manual / 旧的估算 end_sec，
+ * 用**配音实际时长**逐段无重升地重新铺排（修历史上被估算写坏的时间轴）。
+ *
+ * @returns 本镜是否真的改动了
+ */
+export function relayoutShotByActual(shot: DirectorShot, durations: Record<string, number>): boolean {
+  const lines = shot.narrations ?? []
+  if (!lines.length) return false
+  let cursor = 0
+  let changed = false
+  lines.forEach((l, i) => {
+    const ms = durations[`${shot.shot_no}:${i}`]
+    const actual = ms && ms > 0 ? ms / 1000 : null
+    const at = Math.round(cursor * 10) / 10
+    if ((l.at_sec ?? 0) !== at) {
+      l.at_sec = at
+      changed = true
+    }
+    // 用实际时长作本段的结束点；没有实际音频的段保留估算长度（不写 end_sec，留给下次）
+    if (actual != null) {
+      const end = Math.round((at + actual) * 10) / 10
+      if (Number(l.end_sec ?? 0) !== end) {
+        l.end_sec = end
+        changed = true
+      }
+      cursor = at + actual + 0.1
+    } else {
+      const est = Number(l.end_sec ?? 0) > at ? Number(l.end_sec) - at : 0
+      cursor = at + (est > 0 ? est : 0) + 0.1
+    }
+    if (l.manual === true) {
+      l.manual = false // 交给自动铺排，避免下次又被跳过
+      changed = true
+    }
   })
   return changed
 }
