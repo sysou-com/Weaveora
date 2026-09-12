@@ -45,6 +45,9 @@ import java.util.stream.Collectors;
 @Service
 public class ProjectService implements ProjectContextPort {
 
+    /** P12：一个方案最多绑定多少张参考图（各模型一次能输入几张另算：超出的由 worker 按模型上限裁剪并告警） */
+    private static final int MAX_REFS = 15;
+
     private static final List<String> ALLOWED_MODES = List.of("image", "video", "mixed");
     private static final List<String> ALLOWED_RATIOS = List.of("1:1", "3:2", "2:3", "16:9", "9:16");
     private static final List<String> BRIEF_MODES = List.of("image", "video", "auto");
@@ -176,8 +179,8 @@ public class ProjectService implements ProjectContextPort {
                 : com.fasterxml.jackson.databind.node.JsonNodeFactory.instance.objectNode();
         if (refIds != null && !refIds.isEmpty()) {
             java.util.List<UUID> distinct = refIds.stream().distinct().toList();
-            if (distinct.size() > 4) {
-                throw new BizException(ErrorCode.VALIDATION, "参考图最多 4 张（§7.2）");
+            if (distinct.size() > MAX_REFS) {
+                throw new BizException(ErrorCode.VALIDATION, "参考图最多 " + MAX_REFS + " 张");
             }
             var arr = out.putArray("referenceAssetIds");
             distinct.forEach(u -> arr.add(u.toString()));

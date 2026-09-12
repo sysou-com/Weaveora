@@ -252,15 +252,33 @@ def execute_job(job):
                 media = [(o[0], o[1], o[2], o[3], o[4]) for o in outs]
             else:
                 import cloud_image
+                import cloud_client as _cc
                 icfg = cfg.get("image") or {}
                 base = icfg.get("baseUrl") or ""
                 if base.startswith("http"):
-                    pngs = cloud_image.generate(
-                        payload.get("positive_prompt", ""), payload.get("params") or {}, icfg)
-                    params = payload.get("params") or {}
-                    w = int(params.get("width") or 1024)
-                    h = int(params.get("height") or 1024)
-                    media = [(pngs[0], "image/png", w, h, None)]
+                    keys = payload.get("referenceKeys") or []
+                    # 参考图：OpenAI 兼容生态里用 `image`（Ark/seedream 支持单张或数组）
+                    ref_blobs = []
+                    for rk in keys:
+                        try:
+                            ref_blobs.append(_cc._fetch_asset(rk))
+                        except Exception as e:
+                            print("[cloud-image] 参考图准备失败，跳过: %s" % e, flush=True)
+                    if keys and not ref_blobs:
+                        # 不能静默降级成“无参考图”出图（会直接毁掉人物一致性）
+                        raise RuntimeError("参考图全部准备失败（%d 张）；本镜已中止，"
+                                           "请稍后重试（不会用无参考图的结果冒充）" % len(keys))
+                    raw = cloud_image.generate(
+                        payload.get("positive_prompt", ""), payload.get("params") or {}, icfg,
+                        ref_blobs=ref_blobs)
+                    blobs = raw if raw else []
+                    if not blobs:
+                        raise RuntimeError("云图片返回空结果")
+                    size = _cc._image_size(blobs[0])
+                    media = [(blobs[0], _cc._sniff_image_mime(blobs[0]),
+                              size[0] if size else None, size[1] if size else None, None)]
+                    print("[cloud-image] ark/openai 兼容出图 %d bytes refs=%d size=%s"
+                          % (len(blobs[0]), len(ref_blobs), size), flush=True)
                 else:
                     # BaseURL 留空 = Replicate 通道（apiKey 为 Replicate token）
                     if not (icfg.get("apiKey") or ""):

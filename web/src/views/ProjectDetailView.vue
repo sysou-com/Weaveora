@@ -28,6 +28,7 @@ import { shareProject } from '@/api/market'
 import { listAssets, uploadReference, fetchAssetBlob, deleteAssets, uploadVoiceLine, useSampleAsLineVoice, deleteVoicePreset, auditionVoicePreset } from '@/api/assets'
 import { createExport, fetchExportBlob, renderMaster, timecode } from '@/api/export'
 import { aiGenerateLines, aiGenerateMusic } from '@/api/director'
+import { getEngineSettings } from '@/api/engineSettings'
 import { getProject, updateProjectDuration } from '@/api/projects'
 import { listShotLocks, setShotLocks } from '@/api/shotLocks'
 import type { AssetRef, DirectorPlan, DirectorShot, JobRecord } from '@/api/types'
@@ -634,6 +635,28 @@ async function refreshThumbs(): Promise<void> {
 }
 watch(() => [...refLibrary.value.map((a) => a.id)].join(','), () => { void refreshThumbs() }, { immediate: true })
 
+/** P12：本方案最多可绑定的参考图张数（各模型对「一次能输入几张」另有各自上限，见引擎配置） */
+const MAX_REFS = 15
+
+/** 当前图片模型一次能收几张参考图（来自模型 schema 的 mapping.refsMax；未知则 0=不提示） */
+const engineSettings = useQuery({
+  queryKey: ['engine-settings'],
+  queryFn: () => getEngineSettings(),
+  enabled: computed(() => workspaceId.value !== ''),
+})
+const modelRefHint = computed(() => {
+  const s = engineSettings.data.value
+  const map = (s?.imageModelSchema?.mapping ?? {}) as Record<string, unknown>
+  return {
+    name: s?.imageCloudModel ?? '',
+    max: Number(map.refsMax ?? 0) || 0,
+    isArray: map.refsIsArray === true,
+  }
+})
+const refOverModelLimit = computed(
+  () => modelRefHint.value.max > 0 && refSelected.value.length > modelRefHint.value.max,
+)
+
 /** P12：项目详情各长列表默认只展示这么多行（分镜/镜头时长/音色绑定/配音/任务/时间线…） */
 const LIST_PAGE = 5
 
@@ -834,8 +857,8 @@ function openImmersive(id: string, mime: string): void {
 }
 function setRefFromAsset(id: string): void {
   if (refSelected.value.includes(id)) return
-  if (refSelected.value.length >= 4) {
-    message.warning('参考图最多 4 张（§7.2）')
+  if (refSelected.value.length >= MAX_REFS) {
+    message.warning(`参考图最多 ${MAX_REFS} 张`)
     return
   }
   refSelected.value.push(id)
@@ -852,7 +875,9 @@ function onPickFile(e: Event): void {
     try {
       const a = await uploadReference(workspaceId.value, projectId.value, file)
       await queryClient.invalidateQueries({ queryKey: ['assets'] })
-      if (refSelected.value.length >= 4) message.warning('参考图最多 4 张')
+      if (refSelected.value.length >= MAX_REFS) {
+        message.warning(`参考图最多 ${MAX_REFS} 张（已加入的不受影响）`)
+      }
       else refSelected.value.push(a.id)
     } catch (err) {
       message.error(err instanceof Error ? err.message : '上传失败')
@@ -864,8 +889,8 @@ function onPickFile(e: Event): void {
 }
 function toggleRef(id: string, on: boolean): void {
   if (on) {
-    if (refSelected.value.length >= 4) {
-      message.warning('参考图最多 4 张（§7.2）')
+    if (refSelected.value.length >= MAX_REFS) {
+      message.warning(`参考图最多 ${MAX_REFS} 张`)
       return
     }
     if (!refSelected.value.includes(id)) refSelected.value.push(id)
@@ -2280,9 +2305,15 @@ const shotTotal = computed(() => {
               </div>
             </div>
             <p v-else class="ref-hint text-secondary">
-              上传参考图（png/jpg/webp ≤4 张）或从下方资产库点「参考」；给选中的图标主体名（如「唐僧」）后，系统只会在文案提到该主体的镜头里使用它，并把「形象以参考图为准」写入提示词。
+              上传参考图（png/jpg/webp，本方案最多 15 张）或从下方资产库点「参考」；给选中的图标主体名（如「唐僧」）后，系统只会在文案提到该主体的镜头里使用它，并把「形象以参考图为准」写入提示词。
             </p>
-            <p v-if="refSelected.length" class="ref-count font-mono">{{ refSelected.length }}/4 已选</p>
+            <p v-if="refSelected.length" class="ref-count font-mono">{{ refSelected.length }}/{{ MAX_REFS }} 已选</p>
+            <!-- P12：模型一次能收几张参考图（各模型不同）——超出会被丢弃，提前提示 -->
+            <p v-if="refOverModelLimit" class="ref-conflict" data-testid="ref-model-limit">
+              当前图片模型「{{ modelRefHint.name }}」最多接收 {{ modelRefHint.max }} 张参考图，
+              本方案已绑定 {{ refSelected.length }} 张 —— 超出的会被自动丢弃（多主体镜头建议改用
+              支持多图的模型，如 bytedance/seedream-4 / google/nano-banana：image_input）。
+            </p>
             <p v-if="cameraIntentWithRefs" class="ref-conflict">
               检测到「背影/过肩/机位」类构图诉求：参考图可能把构图拉回参考视角。建议先取消勾选参考图（仅需形象/画风锚定时再选），或把机位写进「视角/前景/主体朝向」字段。
             </p>
