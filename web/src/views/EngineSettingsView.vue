@@ -286,26 +286,14 @@ onMounted(load)
             参考图按 <code>image</code> 字段发送（单张=字符串，多张=数组，值用 data URI）；
             该通道无法自动获取模型参数说明，请按官方文档确认「参考图上限」并填写。
           </p>
-          <div class="gw-row">
-            <span class="gw-label">参考图上限（张）</span>
-            <NInputNumber v-model:value="gatewayRefsMax" :min="0" :max="50" size="small"
-                          style="width: 130px" placeholder="如 14" />
-            <span class="gw-note text-secondary">超出会被自动裁剪并告警；0/空 = 用内置默认</span>
-          </div>
 
           <!-- P12：网关没有逐参数规范（方舟只给模态/任务类型），让用户粘贴示例来自动识别字段 -->
-          <p class="gw-text">
-            网关（如火山方舟）只提供模型列表（模态 / 任务类型），<b>没有逐参数规范</b>，所以无法自动获取参数。
-            粘一段<b>示例请求</b>（curl 或 JSON body）→ 自动识别参考图字段、尺寸字段等参数名。
-          </p>
+
           <NInput v-model:value="gatewaySample" type="textarea" :autosize="{ minRows: 3, maxRows: 8 }"
                   placeholder="例：curl https://ark.cn-beijing.volces.com/api/v3/images/generations -H 'Authorization: Bearer …' -d '{&quot;model&quot;:&quot;doubao-seedream-5-0-260128&quot;,&quot;prompt&quot;:&quot;a cat&quot;,&quot;image&quot;:[&quot;data:image/jpeg;base64,…&quot;],&quot;size&quot;:&quot;2K&quot;,&quot;watermark&quot;:false}'" />
           <div class="gw-row">
             <NButton size="small" type="primary" :loading="saving" data-testid="btn-parse-sample-apply"
-                     @click="save">解析参数并保存</NButton>
-            <span class="gw-note text-secondary">
-              解析后可在下方直接改参数值；生成时会**按保存的参数模板填充**，接口未传的字段以模板为准
-            </span>
+                     @click="save">解析示例参数</NButton>
           </div>
           <!-- 参数模板：可直接编辑值（保存配置时一起落库，供生成时填充） -->
           <ModelSchemaPanel

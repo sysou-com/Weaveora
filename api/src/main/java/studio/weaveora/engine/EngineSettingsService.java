@@ -68,7 +68,8 @@ public class EngineSettingsService {
                         "params", s.imageParams() == null ? java.util.Map.of() : s.imageParams(),
                         "schemaParams", s.imageModelSchema() == null ? java.util.List.of()
                                 : s.imageModelSchema().path("params"),
-                        "refsMax", s.gatewayRefsMax() == null ? 0 : s.gatewayRefsMax()),
+                        // 参考图上限：后台固定 15 张（不再让用户配；超出 worker 裁剪并告警 —— 防手滑烧 API 费用）
+                        "refsMax", 15),
                 "video", java.util.Map.of(
                         "apiKey", str(AesGcm.decrypt(storeKey, s.videoCloudApiKeyCipher())),
                         "model", str(s.videoCloudModel()),

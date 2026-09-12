@@ -767,11 +767,10 @@ const engineSettings = useQuery({
 const modelRefHint = computed(() => {
   const s = engineSettings.data.value
   const map = (s?.imageModelSchema?.mapping ?? {}) as Record<string, unknown>
-  return {
-    name: s?.imageCloudModel ?? '',
-    max: Number(map.refsMax ?? 0) || 0,
-    isArray: map.refsIsArray === true,
-  }
+  // 网关通道（方舟等）没有 schema → 用后端默认上限 15（超出会被裁剪，提示用户避免白烧费用）
+  const gateway = !!(s?.imageCloudBaseUrl ?? '').trim()
+  const max = Number(map.refsMax ?? 0) || (gateway ? Number(s?.gatewayRefsMax ?? 0) || 15 : 0)
+  return { name: s?.imageCloudModel ?? '', max, isArray: map.refsIsArray === true }
 })
 const refOverModelLimit = computed(
   () => modelRefHint.value.max > 0 && refSelected.value.length > modelRefHint.value.max,

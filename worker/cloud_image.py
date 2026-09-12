@@ -28,7 +28,7 @@ import urllib.request
 # 可用 WEAVEORA_ARK_MIN_PIXELS 覆盖。
 ARK_MIN_PIXELS = int(os.environ.get("WEAVEORA_ARK_MIN_PIXELS", "3686400"))
 # 方舟 seedream 单次最多参考图张数（超出会被拒；这里主动裁剪并告警）
-ARK_MAX_REFS = int(os.environ.get("WEAVEORA_ARK_MAX_REFS", "10"))
+ARK_MAX_REFS = int(os.environ.get("WEAVEORA_ARK_MAX_REFS", "15"))
 # 常见画幅的「标准尺寸」（均满足上述像素下限，长边 ≤ 4096）
 _ASPECT_CANON = {
     (16, 9): (2560, 1440),
