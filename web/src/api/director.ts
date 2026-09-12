@@ -180,3 +180,17 @@ export async function patchSubjectMeta(
     body: { subjects },
   })
 }
+
+/** P13：就地保存方案（不另存版本、不改确认态）—— 逐条重生成/试听配音用，避免反复要求确认 */
+export async function patchPlanInPlace(
+  workspaceId: string,
+  projectId: string,
+  revisionId: string,
+  plan: DirectorPlan,
+): Promise<RevisionDetail> {
+  return request<RevisionDetail>(`/api/v1/projects/${projectId}/revisions/${revisionId}/plan/inplace`, {
+    method: 'PATCH',
+    headers: { [WORKSPACE_HEADER]: workspaceId },
+    body: { plan },
+  })
+}

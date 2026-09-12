@@ -27,7 +27,7 @@ import { createJobs, listJobs, cancelJob, rerunJob, retryJobs, deleteJobs, JOB_S
 import { shareProject } from '@/api/market'
 import { listAssets, uploadReference, fetchAssetBlob, deleteAssets, uploadVoiceLine, useSampleAsLineVoice, deleteVoicePreset, auditionVoicePreset } from '@/api/assets'
 import { createExport, fetchExportBlob, renderMaster, timecode } from '@/api/export'
-import { aiGenerateLines, aiGenerateMusic, extractSubjects, patchSubjectMeta } from '@/api/director'
+import { aiGenerateLines, aiGenerateMusic, extractSubjects, patchPlanInPlace, patchSubjectMeta } from '@/api/director'
 import { getEngineSettings } from '@/api/engineSettings'
 import { getProject, updateProjectDuration } from '@/api/projects'
 import { listShotLocks, setShotLocks } from '@/api/shotLocks'
@@ -1828,7 +1828,8 @@ async function previewVoice(shotNo?: number): Promise<void> {
 async function genVoiceLine(shotNo: number, lineIndex: number): Promise<void> {
   const revId = genRevisionId()
   if (!revId) return
-  if (!(await ensureApprovedForGenerate('重新生成配音'))) return     // 先落盘，否则服务端拿到的是旧段落
+  // 逐条调音：就地保存即可（不另存版本、不弹确认），否则改一条就要确认一次，根本没法逐条做
+  if (dirty.value && !(await savePlanInPlace())) return
   const rec = (detail.data.value?.shots ?? []).find((r) => r.shotNo === shotNo)
   previewBusy.value = true
   try {
@@ -1858,7 +1859,7 @@ async function genVoiceLine(shotNo: number, lineIndex: number): Promise<void> {
 async function previewVoiceLine(shotNo: number, lineIndex: number): Promise<void> {
   const revId = genRevisionId()
   if (!revId) return
-  if (!(await ensureApprovedForGenerate('试听该条配音'))) return
+  if (dirty.value && !(await savePlanInPlace())) return
   const rec = (detail.data.value?.shots ?? []).find((r) => r.shotNo === shotNo)
   previewBusy.value = true
   try {
@@ -2528,6 +2529,26 @@ function revLabel(rev: { revisionNo: number; source: string; approved: boolean }
  *
  * @return true = 可以继续生成；false = 用户取消
  */
+/**
+ * P13：**就地保存**当前草稿（不动版本、不需确认）—— 供「逐条重生成/试听配音」使用。
+ * 返回是否成功。
+ */
+async function savePlanInPlace(): Promise<boolean> {
+  const revId = genRevisionId()
+  const plan = draft.value
+  if (!revId || !plan) return false
+  try {
+    await patchPlanInPlace(workspaceId.value, projectId.value, revId, plan)
+    pristineJson.value = JSON.stringify(plan)   // 已落库 → 不再算脏
+    dirty.value = false
+    await queryClient.invalidateQueries({ queryKey: ['revision', workspaceId.value, projectId.value, revId] })
+    return true
+  } catch (e) {
+    message.error(e instanceof Error ? e.message : '就地保存失败')
+    return false
+  }
+}
+
 /* GEN_PREFLIGHT_DONE */
 async function ensureApprovedForGenerate(action: string): Promise<boolean> {
   // 只在意“影响生成”的差异：纯元数据（别名/勾选/定妆照）已就地写到当前版本，不必打扰

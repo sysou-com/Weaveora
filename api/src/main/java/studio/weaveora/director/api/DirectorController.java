@@ -170,6 +170,18 @@ public class DirectorController {
                 uid(request), ws(workspaceId), projectId, revisionId, req));
     }
 
+    /** P13：就地保存方案（不另存版本、不改确认态）——供逐条重生成/试听配音使用。 */
+    @PatchMapping("/revisions/{revisionId}/plan/inplace")
+    public ResponseEntity<RevisionDetailResponse> patchPlanInPlace(
+            HttpServletRequest request,
+            @RequestHeader(value = ProjectController.WORKSPACE_HEADER, required = false) String workspaceId,
+            @PathVariable UUID projectId,
+            @PathVariable UUID revisionId,
+            @RequestBody com.fasterxml.jackson.databind.JsonNode body) {
+        return ResponseEntity.ok(directorService.patchPlanInPlace(
+                uid(request), ws(workspaceId), projectId, revisionId, body.path("plan")));
+    }
+
     /** P13：只更新主体元数据（别名/勾选），就地生效、不另存版本。 */
     @PostMapping("/revisions/{revisionId}/subjects/meta")
     public ResponseEntity<RevisionDetailResponse> patchSubjectMeta(

@@ -331,6 +331,33 @@ public class DirectorService {
     }
 
     /**
+     * P13：**就地保存方案**（不另存版本、不改确认态）——用于「逐条重生成/试听配音」这类
+     * 正在迭代当前 take 的操作，避免每改一条就另存 vN+1 从而反复要求确认。
+     *
+     * <p>与 {@link #patchRevision} 的区别：后者在已确认稿上会 fork 新版本 + 需重新确认。
+     */
+    @Transactional
+    public RevisionDetailResponse patchPlanInPlace(UUID userId, UUID workspaceId, UUID projectId,
+                                                   UUID revisionId, com.fasterxml.jackson.databind.JsonNode plan) {
+        ProjectSnapshot project = context.require(userId, workspaceId, projectId);
+        PromptRevision r = findRevision(workspaceId, projectId, revisionId);
+        if (plan == null || !plan.isObject()) {
+            throw new BizException(ErrorCode.VALIDATION, "方案内容为空");
+        }
+        com.fasterxml.jackson.databind.node.ObjectNode obj = plan.deepCopy();
+        String curMode = r.schemaJson() == null ? "" : r.schemaJson().path("mode").asText("");
+        enrich(obj, curMode, project.aspectRatio());
+        validateOrThrow(obj, curMode, project.durationSec());
+        r.replacePlan(obj);
+        revisions.save(r);
+        if ("video".equals(curMode)) {
+            syncShots(r.id(), obj);
+        }
+        log.info("plan patched in place: project={} rev={}", projectId, revisionId);
+        return toDetail(r, project.approvedRevisionId());
+    }
+
+    /**
      * P13：只更新「主体元数据」（别名 / 参与勾选）——**就地改当前版本，不另存新版本、不改变确认态**。
      *
      * <p>为什么单独开一个口子：别名/勾选这类只影响“分镜文案↔主体的匹配关系”，
