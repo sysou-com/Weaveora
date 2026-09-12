@@ -473,7 +473,7 @@ function portraitsOf(name: string): Array<{ id: string; url?: string; width?: nu
 async function onExtractSubjects(): Promise<void> {
   const revId = genRevisionId()
   if (!revId) return
-  if (!(await ensureApprovedForGenerate('AI 台词'))) return
+  if (dirty.value && !(await savePlanInPlace())) return
   subjectBusy.value = 'extract'
   try {
     const r = await extractSubjects(workspaceId.value, projectId.value, revId)
@@ -637,7 +637,7 @@ function toggleSubject(name: string, on: boolean): void {
 async function genPortrait(name: string): Promise<void> {
   const revId = genRevisionId()
   if (!revId) return
-  if (!(await ensureApprovedForGenerate('生成定妆照'))) return
+  if (dirty.value && !(await savePlanInPlace())) return
   portraitBusy.value = true
   try {
     // 用界面上“当前点选的参考图”直接生成 —— 不必先保存/确认方案
@@ -1476,7 +1476,7 @@ async function startGeneration(shotNos?: number[] | null): Promise<void> {
   // P12：生成后自动切到对应 Tab（顺手解锁），否则用户看不到刚发起任务的进度
   focusJobTab('still')
   // P4：先把当前草稿（含参考图/主体标注/提示词改动）落库，再发起生成
-  if (!(await ensureApprovedForGenerate('AI 配乐'))) return
+  if (dirty.value && !(await savePlanInPlace())) return
   genBusy.value = true
   try {
     const isVideo = draft.value?.mode === 'video'
@@ -1659,7 +1659,7 @@ const KIND_LABEL: Record<string, string> = { still: '关键帧', clip: '运动',
 async function startVoice(shotNos?: number[] | null): Promise<void> {
   const revId = genRevisionId()
   if (!revId) return
-  if (!(await ensureApprovedForGenerate('生成配音'))) return
+  if (dirty.value && !(await savePlanInPlace())) return
   focusJobTab('voice')
   if (dirty.value && !(await handleSave())) return
   genBusy.value = true
@@ -1768,7 +1768,7 @@ async function previewVoice(shotNo?: number): Promise<void> {
   }
   const revId = genRevisionId()
   if (!revId) return
-  if (!(await ensureApprovedForGenerate('试听配音'))) return
+  if (dirty.value && !(await savePlanInPlace())) return
   const plan = draft.value
   const shots = plan && isVideoPlan(plan) ? plan.shots : []
   if (!shots.length) {
@@ -1923,7 +1923,7 @@ async function importVoiceLine(
 async function previewBgm(): Promise<void> {
   const revId = genRevisionId()
   if (!revId) return
-  if (!(await ensureApprovedForGenerate('试听配乐'))) return
+  if (dirty.value && !(await savePlanInPlace())) return
   previewBusy.value = true
   try {
     const created = await createJobs(workspaceId.value, projectId.value, {
@@ -1962,7 +1962,7 @@ async function previewBgm(): Promise<void> {
 async function startBgm(): Promise<void> {
   const revId = genRevisionId()
   if (!revId) return
-  if (!(await ensureApprovedForGenerate('生成配乐'))) return
+  if (dirty.value && !(await savePlanInPlace())) return
   focusJobTab('bgm')
   if (dirty.value && !(await handleSave())) return
   genBusy.value = true
@@ -2035,7 +2035,7 @@ function showMoreTl(): void {
 }
 async function doExport(): Promise<void> {
   if (!selectedRevId.value) return
-  if (!(await ensureApprovedForGenerate('导出成片包'))) return
+  
   exportBusy.value = true
   try {
     const info = await createExport(workspaceId.value, projectId.value, selectedRevId.value)
@@ -2058,7 +2058,7 @@ async function doExport(): Promise<void> {
 const renderBusy = ref(false)
 async function doRender(): Promise<void> {
   if (!selectedRevId.value) return
-  if (!(await ensureApprovedForGenerate('渲染成片'))) return
+  
   focusJobTab('master')
   renderBusy.value = true
   try {

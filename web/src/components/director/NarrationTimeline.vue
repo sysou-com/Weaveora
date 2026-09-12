@@ -190,12 +190,18 @@ function migrateLegacy(): void {
 /** 块拖拽：pointerdown 后按像素位移换算秒（时间轴宽度 = 容器宽） */
 const trackEl = ref<HTMLElement | null>(null)
 const dragging = ref(-1)
+/** 按下时的横坐标：位移 < 阈值 就当成“点击选中”，**不改时间**（修：点一下就动了起点 / 变 manual） */
+const dragStartX = ref(0)
+/** 本次拖拽是否真的移动过（纯点击不提交、不置脏） */
+const dragMoved = ref(false)
+const DRAG_THRESHOLD = 3
 
 function onDragStart(i: number, ev: PointerEvent): void {
   if (props.disabled) return
   selected.value = i
   dragging.value = i
   dragMode.value = 'move'
+  dragStartX.value = ev.clientX
   const el = ev.currentTarget as HTMLElement
   el.setPointerCapture?.(ev.pointerId)
 }
@@ -206,6 +212,7 @@ function onResizeStart(i: number, ev: PointerEvent): void {
   selected.value = i
   dragging.value = i
   dragMode.value = 'resize'
+  dragStartX.value = ev.clientX
   ;(ev.currentTarget as HTMLElement).setPointerCapture?.(ev.pointerId)
   ev.stopPropagation()
 }
@@ -224,10 +231,13 @@ function secAtClientX(clientX: number): number {
 
 function onDragMove(i: number, ev: PointerEvent): void {
   if (props.disabled || dragging.value !== i) return
+  // 纯点击/微小抖动不算拖动：不改时间、不标记 manual（否则点一下就脏了方案）
+  if (Math.abs(ev.clientX - dragStartX.value) < DRAG_THRESHOLD) return
+  dragMoved.value = true
   const line = props.shot.narrations?.[i]
   if (!line) return
   const sec = secAtClientX(ev.clientX)
-  line.manual = true          // P10：手动拖过 → 自动铺排不再动它
+  line.manual = true          // P10：真的拖过 → 自动铺排不再动它
   if (dragMode.value === 'resize') {
     // 结束点：至少比起点大 0.3s，不超过镜头
     line.end_sec = Math.max((line.at_sec ?? 0) + 0.3, Math.min(dur.value, Math.round(sec * 10) / 10))
@@ -244,8 +254,10 @@ function onDragMove(i: number, ev: PointerEvent): void {
 }
 
 function onDragEnd(): void {
+  // 只有真的拖动过才提交（否则“点一下就改时间/置脏” —— 实测痛点）
+  if (dragging.value >= 0 && dragMoved.value) commit()
   dragging.value = -1
-  commit()
+  dragMoved.value = false
 }
 
 /** 清除结束点 → 回到“配音自然长度” */
