@@ -1874,7 +1874,11 @@ async function startMotion(frames?: number, shotNos?: number[] | null): Promise<
       ...(shotNos && shotNos.length ? { shotNos } : {}),
     })
     await queryClient.invalidateQueries({ queryKey: ['jobs'] })
-    message.success(`已创建 ${created.length} 个运动任务（关键帧→motion · 基于确认稿 v${approvedRev.value?.revisionNo ?? '?'}）`)
+    // P13：有关键帧的镜先跑，缺关键帧的镜由后端跳过 —— 这里把差额说明白
+    const want = pickerShots.value.length || 0
+    const skipped = Math.max(0, want - created.length)
+    message.success(`已创建 ${created.length} 个运动任务（关键帧→motion · 基于确认稿 v${approvedRev.value?.revisionNo ?? '?'}）`
+      + (skipped > 0 ? `；另有 ${skipped} 个镜尚无关键帧，已自动跳过（可先补关键帧再单独跑 motion）` : ''))
   } catch (e) {
     message.error(e instanceof Error ? e.message : '创建运动任务失败')
   } finally {

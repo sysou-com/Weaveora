@@ -232,6 +232,7 @@ public class JobService {
         }
 
         List<GenerationJob> created = new ArrayList<>();
+        List<String> skippedShots = new ArrayList<>();   // P13：motion 跳过「尚无关键帧」的镜
         if ("video".equals(planMode)) {
             List<UUID> shotIds = resolveVideoShots(userId, workspaceId, projectId, req.revisionId(), req.shotId(), req.kind(),
                     req.shotNos(), Boolean.TRUE.equals(req.includeLocked()));
@@ -317,8 +318,17 @@ public class JobService {
                         }
                     }
                     if (kfAssets.isEmpty()) {
-                        throw new BizException(ErrorCode.VALIDATION, "第 " + shot.path("shot_no").asInt()
-                                + " 镜尚无关键帧，请先生成 still（两段式 §11.3）");
+                        // P13：**跳过**还缺关键帧的镜，而不是整批报错 ——
+                        // 否则用户必须等所有关键帧都出完才能做 motion，前面已生成的关键帧干等着，
+                        // 一旦关键帧生成失败/中断就白烧生图费用（实测痛点）。
+                        String miss = shot.path("shot_no").asText("?");
+                        if (!created.isEmpty()) {
+                            skippedShots.add(miss);
+                            log.info("motion skip: project={} shot_no={} 无关键帧（继续其它镜）", projectId, miss);
+                            continue;
+                        }
+                        skippedShots.add(miss);
+                        continue;
                     }
                     studio.weaveora.asset.domain.Asset first = pickKeyframeAsset(kfAssets, 0);
                     historical = historical || (first.shotId() != null && !first.shotId().equals(shotId));
@@ -377,6 +387,13 @@ public class JobService {
                         PRESET_STILL, "still", payload, userId, engineRoute);
                 created.add(job);
             }
+        }
+        if ("clip".equals(req.kind()) && !skippedShots.isEmpty()) {
+            if (created.isEmpty()) {
+                throw new BizException(ErrorCode.VALIDATION, "第 " + String.join("、", skippedShots)
+                        + " 镜尚无关键帧：请先为这些镜生成 still（其它镜可单独再跑 motion）");
+            }
+            log.info("motion partial: project={} created={} skipped={}", projectId, created.size(), skippedShots);
         }
         log.info("jobs created project={} count={} kind={}", projectId, created.size(), req.kind());
         return created.stream().map(this::toView).toList();
