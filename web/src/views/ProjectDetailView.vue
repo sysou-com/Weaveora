@@ -9,7 +9,7 @@ import {
   WandSparkles,
 } from 'lucide-vue-next'
 import { NAlert, NButton, NDropdown, NInput, NIcon, NInputNumber, NModal, NSkeleton, NTag, useDialog, useMessage } from 'naive-ui'
-import { computed, h, onErrorCaptured, ref, watch } from 'vue'
+import { computed, h, nextTick, onErrorCaptured, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import {
@@ -1053,10 +1053,25 @@ function pickGalTab(t: AudioTab): void {
   galTabPinned.value = true
   rememberTab(GAL_TAB_KEY, t)
 }
-/** 生成任务时自动切到对应 Tab，否则用户看不到刚发起任务的进度 */
+/**
+ * 生成任务时自动切到对应 Tab（任务区 + **资产库**），否则用户看不到刚发起任务的进度与产物。
+ * 例：点「生成关键帧」→ 任务区切「关键帧」、资产库也切「关键帧」。
+ */
 function focusJobTab(t: AudioTab): void {
   pickJobTab(t)
+  galFollowTab(t)
 }
+/** 资产库跟随操作切换（master/still/... 与任务 Tab 同名同义） */
+function galFollowTab(t: AudioTab): void {
+  if (!GAL_TABS.some((x) => x.key === t)) return
+  galTab.value = t
+  galTabPinned.value = true
+  rememberTab(GAL_TAB_KEY, t)
+  galNewestHint.value = ''
+}
+
+/** 刚完成一批任务时高亮的最新资产 id（自动定位用） */
+const galNewestHint = ref('')
 
 function newestStamp<T extends { createdAt: string }>(list: T[]): T | undefined {
   let best: T | undefined
@@ -1117,6 +1132,25 @@ async function assetBlob(id: string): Promise<Blob | null> {
  * ① 首屏很慢 ② 触发 nginx 站点级 limit_conn(20/IP) → 部分请求被打成 50x→404
  * （实测：控制台反复报某几个 assets/…/download 404，其实文件都在）
  */
+/**
+ * 定位到当前 Tab 里最新的一条资产：滚到可视区并短暂高亮。
+ * （生成完成后自动调用，省得用户自己在资产库里翻）
+ */
+function focusNewestAsset(): void {
+  const list = [...galleryForTab.value].sort(
+    (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
+  )
+  const newest = list[0]
+  if (!newest) return
+  galNewestHint.value = newest.id
+  requestAnimationFrame(() => {
+    const el = document.querySelector(`[data-testid="asset-${newest.id}"]`) as HTMLElement | null
+    el?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  })
+  window.setTimeout(() => { galNewestHint.value = '' }, 3000)
+  message.info('资产库已刷新，并定位到最新产物')
+}
+
 async function refreshGallery(): Promise<void> {
   const todo = galleryForTab.value.filter((a) => !galUrls.value[a.id] && !missingAssets.value.includes(a.id))
   let cursor = 0
@@ -1274,7 +1308,9 @@ const pickCtx = ref<{ title: string; run: (shotNos: number[] | null) => Promise<
 async function withShotPicker(
   title: string,
   run: (shotNos: number[] | null) => Promise<void> | void,
+  kind: 'still' | 'clip' | 'voice' = 'still',
 ): Promise<void> {
+  pickerKind.value = kind
   // P13：生成前预检（未确认改动 → 先问）
   if (!(await ensureApprovedForGenerate(title))) return
   if (pickerShots.value.length <= 3) {
@@ -1338,13 +1374,20 @@ const shotLocks = useQuery({
 })
 const lockedShots = computed<number[]>(() => shotLocks.data.value ?? [])
 
-/** 弹窗要展示的分镜列表：镜号 + 该镜资源版本（取最新一条 still/voice 产物所属版本）+ 语音段数 */
+/**
+ * 弹窗要展示的分镜列表：镜号 + **当前操作类型**的资源版本与数量。
+ *
+ * 点「生成关键帧」就只看 still 的版本/张数；点「生成配音」才看 voice 的版本/段数 ——
+ * 混着显示其它类型（如语音段数）对当前操作没意义。
+ */
+const pickerKind = ref<'still' | 'clip' | 'voice'>('still')
 const pickerShots = computed(() => {
   const plan = draft.value
   if (!plan || !isVideoPlan(plan)) return []
+  const kind = pickerKind.value
   return (plan.shots ?? []).map((s) => {
     const rel = (jobs.data.value ?? []).filter(
-      (j) => j.payload?.shot_no === s.shot_no && ['still', 'clip', 'voice'].includes(j.kind) && j.state === 'succeeded',
+      (j) => j.payload?.shot_no === s.shot_no && j.kind === kind && j.state === 'succeeded',
     )
     const newest = newestStamp(rel)
     const rev = newest ? revOfJob(newest) : undefined
@@ -1352,7 +1395,9 @@ const pickerShots = computed(() => {
       shotNo: s.shot_no,
       revNo: rev?.no ?? null,
       stale: rev?.stale === true,
-      lineCount: (s.narrations ?? []).length,
+      // 只有配音才显示段数；关键帧/motion 显示该镜已产出的张数
+      lineCount: kind === 'voice' ? (s.narrations ?? []).length : rel.length,
+      unit: kind === 'voice' ? '段语音' : '张已出',
     }
   })
 })
@@ -1381,8 +1426,13 @@ watch(
     } else if (n === 0 && jobsTimer) {
       clearInterval(jobsTimer)
       jobsTimer = undefined
-      // 任务全部结束后资产已落库 → 自动刷新资产库预览
-      void queryClient.invalidateQueries({ queryKey: ['assets'] })
+      // 任务全部结束后资产已落库 → 刷新资产库，并**定位到当前 Tab 最新的一条**方便查看
+      void (async () => {
+        await queryClient.invalidateQueries({ queryKey: ['assets'] })
+        await nextTick()
+        await refreshGallery()
+        focusNewestAsset()
+      })()
     }
   },
   { immediate: true },
@@ -1651,7 +1701,7 @@ function confirmMotion(): void {
     return
   }
   motionOpen.value = false
-  withShotPicker('运动(motion)', (shotNos) => startMotion(f, shotNos))
+  withShotPicker('运动(motion)', (shotNos) => startMotion(f, shotNos), 'clip')
 }
 const KIND_LABEL: Record<string, string> = { still: '关键帧', clip: '运动', voice: '配音', bgm: '配乐' }
 
@@ -3062,7 +3112,7 @@ const shotTotal = computed(() => {
               data-testid="btn-voice-jobs"
               :disabled="!detApproved"
               :title="detApproved ? '自托管 CosyVoice：逐镜台词 → 配音' : '需先确认方案（右上角「确认」）后生成配音；未确认的镜头不能配音'"
-              @click="withShotPicker('生成配音(voice)', (nos) => startVoice(nos))"
+              @click="withShotPicker('生成配音(voice)', (nos) => startVoice(nos), 'voice')"
             >
               生成配音(voice)
             </NButton>
@@ -3078,7 +3128,7 @@ const shotTotal = computed(() => {
             >
               生成配乐(bgm)
             </NButton>
-            <NButton size="small" type="primary" :loading="genBusy" data-testid="btn-gen-jobs" @click="withShotPicker(isVideoNow ? '生成关键帧(still)' : '开始生成', (nos) => startGeneration(nos))">
+            <NButton size="small" type="primary" :loading="genBusy" data-testid="btn-gen-jobs" @click="withShotPicker(isVideoNow ? '生成关键帧(still)' : '开始生成', (nos) => startGeneration(nos), 'still')">
               {{ isVideoNow ? '生成关键帧(still)' : '开始生成' }}
             </NButton>
           </div>
@@ -3231,7 +3281,9 @@ const shotTotal = computed(() => {
         </nav>
 
         <div class="gallery-grid">
-          <div v-for="a in galleryForTab" :key="a.id" :class="['g-item', { manage: galManage, sel: galSel.includes(a.id) }]">
+          <div v-for="a in galleryForTab" :key="a.id"
+               :class="['g-item', { manage: galManage, sel: galSel.includes(a.id), newest: galNewestHint === a.id }]"
+               :data-testid="`asset-${a.id}`">
             <label v-if="galManage" class="g-sel">
               <input type="checkbox" :checked="galSel.includes(a.id)" @change="toggleGalSel(a.id)" />
             </label>
@@ -3555,6 +3607,17 @@ const shotTotal = computed(() => {
 </template>
 
 <style scoped>
+.g-item.newest {
+  outline: 2px solid var(--wv-accent);
+  outline-offset: 2px;
+  border-radius: 10px;
+  animation: gal-pop 1.6s ease-out 1;
+}
+@keyframes gal-pop {
+  0% { box-shadow: 0 0 0 6px color-mix(in srgb, var(--wv-accent) 35%, transparent); }
+  100% { box-shadow: 0 0 0 0 transparent; }
+}
+
 .confirm-banner {
   display: flex;
   align-items: center;

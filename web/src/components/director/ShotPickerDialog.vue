@@ -19,6 +19,8 @@ export interface PickerShot {
   stale?: boolean
   /** 是否有语音段（用于展示「N 段」） */
   lineCount?: number
+  /** 计数的单位（配音=段语音；关键帧/motion=张已出）——由当前操作类型决定 */
+  unit?: string
 }
 
 const props = withDefaults(
@@ -134,7 +136,7 @@ function confirm(): void {
           <span class="sp-rev font-mono" :class="{ stale: s.stale }">
             {{ s.revNo ? `v${s.revNo}${s.stale ? '·旧' : ''}` : 'v—' }}
           </span>
-          <span v-if="s.lineCount" class="sp-extra font-mono">{{ s.lineCount }} 段语音</span>
+          <span v-if="s.lineCount" class="sp-extra font-mono">{{ s.lineCount }} {{ s.unit ?? '段语音' }}</span>
         </NCheckbox>
         <NCheckbox
           :checked="lockedSet.includes(s.shotNo)"
