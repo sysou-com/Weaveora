@@ -193,7 +193,59 @@ public final class AudioPlan {
         return n;
     }
 
-    /** 音色解析：lineVoice > voiceBindings[subject] > audio.voice > 默认。 */
+    /**
+     * 主体名是否与绑定项一致 —— 支持**别名互认**。
+     *
+     * <p>踩过的坑：绑定表里写的是别名（`贾宝玉`），剧情主体/台词里写的是 `宝玉`，
+     * 早前这里只做字符串相等 → 全部对不上 → **所有角色都回落到同一个默认音色**
+     * （用户以为"所有人都绑成了同一个人"）。
+     */
+    static boolean subjectMatches(JsonNode plan, String a, String b) {
+        String x = a == null ? "" : a.trim();
+        String y = b == null ? "" : b.trim();
+        if (x.isEmpty() || y.isEmpty()) {
+            return false;
+        }
+        if (x.equals(y)) {
+            return true;
+        }
+        // 别名互认：任一方是对方所在主体的别名
+        for (String name : new String[]{x, y}) {
+            String other = name.equals(x) ? y : x;
+            for (JsonNode sub : plan.path("subjects")) {
+                java.util.Set<String> names = new java.util.LinkedHashSet<>();
+                names.add(sub.path("name").asText("").trim());
+                for (JsonNode al : sub.path("aliases")) {
+                    names.add(al.asText("").trim());
+                }
+                if (names.contains(name) && names.contains(other)) {
+                    return true;
+                }
+            }
+        }
+        // 退一步：中文名 2 字片段（秦可卿 ↔ 可卿）
+        return nameSimilar(x, y);
+    }
+
+    /** 中文名容错：长度≥3 的一方包含另一方的 2 字片段。 */
+    static boolean nameSimilar(String x, String y) {
+        String longOne = x.length() >= y.length() ? x : y;
+        String shortOne = x.length() >= y.length() ? y : x;
+        if (shortOne.length() < 2 || longOne.length() < 3) {
+            return false;
+        }
+        if (longOne.contains(shortOne)) {
+            return true;
+        }
+        for (int i = 0; i + 2 <= longOne.length(); i++) {
+            if (shortOne.contains(longOne.substring(i, i + 2))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** 音色解析：lineVoice > voiceBindings[subject]（别名互认） > audio.voice > 默认。 */
     public static String voiceFor(JsonNode plan, String subject, String lineVoice) {
         if (!blank(lineVoice)) {
             return lineVoice.trim();
@@ -201,8 +253,8 @@ public final class AudioPlan {
         JsonNode audio = plan.path("audio");
         if (!blank(subject)) {
             for (JsonNode b : audio.path("voiceBindings")) {
-                if (subject.trim().equals(b.path("subject").asText("").trim())
-                        && !blank(b.path("voice").asText(""))) {
+                if (!blank(b.path("voice").asText(""))
+                        && subjectMatches(plan, subject, b.path("subject").asText(""))) {
                     return b.path("voice").asText("").trim();
                 }
             }
@@ -218,7 +270,7 @@ public final class AudioPlan {
         }
         if (!blank(subject)) {
             for (JsonNode b : plan.path("audio").path("voiceBindings")) {
-                if (subject.trim().equals(b.path("subject").asText("").trim())) {
+                if (subjectMatches(plan, subject, b.path("subject").asText(""))) {
                     double s = b.path("speed").asDouble(0);
                     if (s >= 0.5 && s <= 2.0) {
                         return s;
