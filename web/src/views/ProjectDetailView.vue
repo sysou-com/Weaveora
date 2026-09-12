@@ -2471,31 +2471,7 @@ const shotTotal = computed(() => {
             </div>
 
             <!-- P13：勾选的主体（显示定妆照，名字只读，只编区域；取消勾选即从显示中移除） -->
-            <div v-if="enabledSubjects.length" class="ref-subjects" data-testid="subject-ref-block">
-              <p class="ref-subjects-title font-mono">已选主体<span class="text-secondary">（勾选参与的主体；只可编辑区域）</span></p>
-              <div v-for="sub in enabledSubjects" :key="sub.name" class="ref-subject-block">
-                <div class="ref-subject-row">
-                  <img v-if="subjectThumb(sub)" :src="subjectThumb(sub)" class="ref-subject-thumb" alt="" />
-                  <span v-else class="ref-subject-thumb empty font-mono">无定妆照</span>
-                  <span class="ref-subject-name">{{ sub.name }}</span>
-                  <span v-if="sub.portraitAssetId" class="ref-subject-tag font-mono">定妆照 v{{ sub.portraitVersion ?? 1 }}</span>
-                  <span v-else class="ref-subject-tag off font-mono">素材图</span>
-                </div>
-                <div class="ref-region-row">
-                  <span class="ref-region-label font-mono">区域%</span>
-                  <input
-                    v-for="k in (['x', 'y', 'w', 'h'] as const)"
-                    :key="k"
-                    class="text ref-region-input"
-                    type="text"
-                    inputmode="numeric"
-                    :placeholder="k"
-                    :value="subjectRegion(sub, k)"
-                    @input="setSubjectRegion(sub, k, ($event.target as HTMLInputElement).value)"
-                  />
-                </div>
-              </div>
-            </div>
+            
             <p v-if="refSelected.length" class="ref-count font-mono">{{ refSelected.length }}/{{ MAX_REFS }} 已选</p>
             <!-- P12：模型一次能收几张参考图（各模型不同）——超出会被丢弃，提前提示 -->
             <p v-if="refOverModelLimit" class="ref-conflict" data-testid="ref-model-limit">
@@ -2505,28 +2481,7 @@ const shotTotal = computed(() => {
             </p>
           </div>
 
-          <!-- 计数与提示放到「位置预览」描述下方 -->
-          <div class="ref-meta">
-            <p v-if="refSelected.length" class="ref-count font-mono" data-testid="ref-count">
-              {{ refSelected.length }}/{{ MAX_REFS }} 已选
-            </p>
-            <p v-if="refOverModelLimit" class="ref-conflict" data-testid="ref-model-limit">
-              当前图片模型「{{ modelRefHint.name }}」最多接收 {{ modelRefHint.max }} 张参考图，
-              本方案已绑定 {{ refSelected.length }} 张 —— 超出的会被自动丢弃（多主体镜头建议改用
-              支持多图的模型，如 bytedance/seedream-4 / google/nano-banana：image_input）。
-            </p>
-            <p v-if="cameraIntentWithRefs" class="ref-conflict">
-              检测到「背影/过肩/机位」类构图诉求：参考图可能把构图拉回参考视角。建议先取消勾选参考图（仅需形象/画风锚定时再选），或把机位写进「视角/前景/主体朝向」字段。
-            </p>
-          </div>
 
-          <div class="pos-panel" data-testid="pos-panel">
-            <div class="brief-head">
-              <span class="font-mono eyebrow">位置预览（相对位置 / 区域%）</span>
-              <button v-if="selectedRefAssets.length > 1" type="button" class="link-btn" @click="autoLayoutRegions">
-                自动均分
-              </button>
-            </div>
             <div class="pos-frame" :style="{ aspectRatio: posAspectCss }">
               <div class="pos-third pos-third-v1" /><div class="pos-third pos-third-v2" />
               <div class="pos-third pos-third-h1" /><div class="pos-third pos-third-h2" />
@@ -2559,6 +2514,53 @@ const shotTotal = computed(() => {
             <p class="ref-hint text-secondary">
               拖动色块移动、右下角拖动缩放；也可在上方「区域%」精确填写（x/y=左上角，w/h=宽高，0–100）。填了区域后，GPU(Comfy) 会按区域分别注入参考图（彻底解耦多角色）；云模型无遮罩能力，会把方位写进提示词。
             </p>
+<div v-if="enabledSubjects.length" class="ref-subjects pos-subjects" data-testid="subject-ref-block">
+              <p class="ref-subjects-title font-mono">已选主体<span class="text-secondary">（勾选参与的主体；只可编辑区域）</span></p>
+              <div v-for="sub in enabledSubjects" :key="sub.name" class="ref-subject-block">
+                <div class="ref-subject-row">
+                  <img v-if="subjectThumb(sub)" :src="subjectThumb(sub)" class="ref-subject-thumb" alt="" />
+                  <span v-else class="ref-subject-thumb empty font-mono">无定妆照</span>
+                  <span class="ref-subject-name">{{ sub.name }}</span>
+                  <span v-if="sub.portraitAssetId" class="ref-subject-tag font-mono">定妆照 v{{ sub.portraitVersion ?? 1 }}</span>
+                  <span v-else class="ref-subject-tag off font-mono">素材图</span>
+                </div>
+                <div class="ref-region-row">
+                  <span class="ref-region-label font-mono">区域%</span>
+                  <input
+                    v-for="k in (['x', 'y', 'w', 'h'] as const)"
+                    :key="k"
+                    class="text ref-region-input"
+                    type="text"
+                    inputmode="numeric"
+                    :placeholder="k"
+                    :value="subjectRegion(sub, k)"
+                    @input="setSubjectRegion(sub, k, ($event.target as HTMLInputElement).value)"
+                  />
+                </div>
+              </div>
+            </div>
+          <!-- 计数与提示放到「位置预览」描述下方 -->
+          <div class="ref-meta">
+            <p v-if="refSelected.length" class="ref-count font-mono" data-testid="ref-count">
+              {{ refSelected.length }}/{{ MAX_REFS }} 已选
+            </p>
+            <p v-if="refOverModelLimit" class="ref-conflict" data-testid="ref-model-limit">
+              当前图片模型「{{ modelRefHint.name }}」最多接收 {{ modelRefHint.max }} 张参考图，
+              本方案已绑定 {{ refSelected.length }} 张 —— 超出的会被自动丢弃（多主体镜头建议改用
+              支持多图的模型，如 bytedance/seedream-4 / google/nano-banana：image_input）。
+            </p>
+            <p v-if="cameraIntentWithRefs" class="ref-conflict">
+              检测到「背影/过肩/机位」类构图诉求：参考图可能把构图拉回参考视角。建议先取消勾选参考图（仅需形象/画风锚定时再选），或把机位写进「视角/前景/主体朝向」字段。
+            </p>
+          </div>
+
+          <div class="pos-panel" data-testid="pos-panel">
+            <div class="brief-head">
+              <span class="font-mono eyebrow">位置预览（相对位置 / 区域%）</span>
+              <button v-if="selectedRefAssets.length > 1" type="button" class="link-btn" @click="autoLayoutRegions">
+                自动均分
+              </button>
+            </div>
           </div>
         </div>
 
@@ -3492,10 +3494,23 @@ const shotTotal = computed(() => {
 
 /* 布局：BRIEF 一行；下方左参考图 / 右位置预览 */
 .brief-row { display: flex; flex-direction: column; gap: 8px; margin-bottom: 14px; }
-.ref-row { display: grid; grid-template-columns: minmax(0, 360px) minmax(0, 1fr); gap: 12px; margin-bottom: 16px; }
-.refs-panel { width: auto; }
+.ref-row {
+  display: grid;
+  grid-template-columns: minmax(0, 360px) minmax(0, 1fr);
+  gap: 12px;
+  margin-bottom: 16px;
+  /* P13：两卡并排且**始终等高**（以前左卡高右卡矮，页面看着不齐） */
+  align-items: stretch;
+}
+.ref-row > .refs-panel,
+.ref-row > .pos-panel {
+  height: 100%;
+}
+.refs-panel { width: auto; overflow: auto; }
 .pos-panel {
   display: flex; flex-direction: column; gap: 8px; min-width: 0;
+  /* 等高：内容多时自己滚，不把另一张卡撑变形 */
+  overflow: auto;
   padding: 14px; background: var(--wv-surface);
   border: 1px solid var(--wv-line); border-radius: var(--wv-radius-m);
 }
