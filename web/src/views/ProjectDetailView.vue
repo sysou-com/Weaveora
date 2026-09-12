@@ -2408,6 +2408,7 @@ const shotTotal = computed(() => {
             </div>
 
             <!-- P13：剧情主体列表（勾选=参与锚定；定妆图=一致性锚定图） -->
+            <p class="ref-group-title font-mono">剧情主体：</p>
             <div v-if="planSubjects().length" class="subj-list" data-testid="subject-list">
               <div v-for="sub in planSubjects()" :key="sub.name" class="subj-row" :data-testid="`subj-${sub.name}`">
                 <label class="subj-check" :title="sub.enabled === false ? '未勾选 = 不参与锚定' : '参与锚定'">
@@ -2471,8 +2472,9 @@ const shotTotal = computed(() => {
             </div>
 
             <!-- P13：勾选的主体（显示定妆照，名字只读，只编区域；取消勾选即从显示中移除） -->
-            
-            <p v-if="refSelected.length" class="ref-count font-mono">{{ refSelected.length }}/{{ MAX_REFS }} 已选</p>
+
+            <!-- 参考图：标题 -->
+            <p class="ref-group-title font-mono">参考图：</p>
             <!-- P12：模型一次能收几张参考图（各模型不同）——超出会被丢弃，提前提示 -->
             <p v-if="refOverModelLimit" class="ref-conflict" data-testid="ref-model-limit">
               当前图片模型「{{ modelRefHint.name }}」最多接收 {{ modelRefHint.max }} 张参考图，
@@ -2512,7 +2514,11 @@ const shotTotal = computed(() => {
               <span v-for="it in refPreviewItems.filter((i) => !i.region)" :key="it.id" class="pos-chip font-mono">{{ it.label }}</span>
             </p>
 
-            <!-- P13：区域表紧贴预览框（提示与告警放在其下方） -->
+            <p class="ref-hint text-secondary">
+              拖动色块移动、右下角拖动缩放；也可在上方「区域%」精确填写（x/y=左上角，w/h=宽高，0–100）。填了区域后，GPU(Comfy) 会按区域分别注入参考图（彻底解耦多角色）；云模型无遮罩能力，会把方位写进提示词。
+            </p>
+
+            <!-- 区域表（提示下方） -->
             <div v-if="enabledSubjects.length" class="ref-subjects pos-subjects" data-testid="subject-ref-block">
               <p class="ref-subjects-title font-mono">已选主体<span class="text-secondary">（勾选参与的主体；只可编辑区域）</span></p>
               <div v-for="sub in enabledSubjects" :key="sub.name" class="ref-subject-block">
@@ -2539,14 +2545,8 @@ const shotTotal = computed(() => {
               </div>
             </div>
 
-            <p class="ref-hint text-secondary">
-              拖动色块移动、右下角拖动缩放；也可在上方「区域%」精确填写（x/y=左上角，w/h=宽高，0–100）。填了区域后，GPU(Comfy) 会按区域分别注入参考图（彻底解耦多角色）；云模型无遮罩能力，会把方位写进提示词。
-            </p>
-          <!-- 计数与提示放到「位置预览」描述下方 -->
+          <!-- 红色告警（不要计数） -->
           <div class="ref-meta">
-            <p v-if="refSelected.length" class="ref-count font-mono" data-testid="ref-count">
-              {{ refSelected.length }}/{{ MAX_REFS }} 已选
-            </p>
             <p v-if="refOverModelLimit" class="ref-conflict" data-testid="ref-model-limit">
               当前图片模型「{{ modelRefHint.name }}」最多接收 {{ modelRefHint.max }} 张参考图，
               本方案已绑定 {{ refSelected.length }} 张 —— 超出的会被自动丢弃（多主体镜头建议改用
@@ -3173,6 +3173,12 @@ const shotTotal = computed(() => {
   background: var(--wv-surface-sunken);
 }
 .ref-meta { margin-top: 10px; display: flex; flex-direction: column; gap: 6px; }
+.ref-group-title {
+  margin: 10px 0 2px;
+  font-size: 11.5px;
+  color: var(--wv-text-3);
+  letter-spacing: 0.06em;
+}
 
 .ref-head-ops { display: inline-flex; align-items: center; gap: 6px; }
 .subj-list {
