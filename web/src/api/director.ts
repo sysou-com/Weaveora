@@ -166,3 +166,17 @@ export async function extractSubjects(
     headers: { [WORKSPACE_HEADER]: workspaceId },
   })
 }
+
+/** P13：只更新主体元数据（别名 / 参与勾选）—— 就地生效，不另存版本、不需重新确认 */
+export async function patchSubjectMeta(
+  workspaceId: string,
+  projectId: string,
+  revisionId: string,
+  subjects: Array<{ name: string; aliases?: string[]; enabled?: boolean }>,
+): Promise<RevisionDetail> {
+  return request<RevisionDetail>(`/api/v1/projects/${projectId}/revisions/${revisionId}/subjects/meta`, {
+    method: 'POST',
+    headers: { [WORKSPACE_HEADER]: workspaceId },
+    body: { subjects },
+  })
+}

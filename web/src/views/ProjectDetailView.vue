@@ -27,7 +27,7 @@ import { createJobs, listJobs, cancelJob, rerunJob, retryJobs, deleteJobs, JOB_S
 import { shareProject } from '@/api/market'
 import { listAssets, uploadReference, fetchAssetBlob, deleteAssets, uploadVoiceLine, useSampleAsLineVoice, deleteVoicePreset, auditionVoicePreset } from '@/api/assets'
 import { createExport, fetchExportBlob, renderMaster, timecode } from '@/api/export'
-import { aiGenerateLines, aiGenerateMusic, extractSubjects } from '@/api/director'
+import { aiGenerateLines, aiGenerateMusic, extractSubjects, patchSubjectMeta } from '@/api/director'
 import { getEngineSettings } from '@/api/engineSettings'
 import { getProject, updateProjectDuration } from '@/api/projects'
 import { listShotLocks, setShotLocks } from '@/api/shotLocks'
@@ -527,7 +527,8 @@ function removeAlias(name: string, alias: string): void {
     x.name === name ? { ...x, aliases: (x.aliases ?? []).filter((a) => a !== alias) } : x,
   )
   setPlanSubjects(subs)
-  message.success(`已删除「${name}」的别名「${alias}」`)
+  void saveSubjectMeta()
+  message.success(`已删除「${name}」的别名「${alias}」（已就地保存，无需确认）`)
 }
 function addAlias(name: string): void {
   const v = aliasDraft.value.trim()
@@ -536,8 +537,9 @@ function addAlias(name: string): void {
     x.name === name ? { ...x, aliases: Array.from(new Set([...(x.aliases ?? []), v])) } : x,
   )
   setPlanSubjects(subs)
+  void saveSubjectMeta()
   aliasDraft.value = ''
-  message.success(`已为「${name}」添加别名「${v}」`)
+  message.success(`已为「${name}」添加别名「${v}」（已就地保存，无需确认）`)
 }
 
 /** 剧情主体搜索（按名字 / 别名模糊过滤） */
@@ -566,9 +568,29 @@ function removeSubject(name: string): void {
   message.success(`已删除主体「${name}」（参考图仍留在图库里，可重新勾选并命名）`)
 }
 
+/**
+ * P13：主体元数据（别名 / 参与勾选）**就地保存**：直接改当前版本，不另存 vN+1、不需要重新确认。
+ * 只提交这两类字段，后端也只改这两类（不影响 prompt/分镜/台词等生成相关字段）。
+ */
+async function saveSubjectMeta(): Promise<void> {
+  const revId = genRevisionId()
+  const subs = planSubjects()
+  if (!revId || !subs.length) return
+  try {
+    await patchSubjectMeta(workspaceId.value, projectId.value, revId,
+      subs.map((x) => ({ name: x.name, aliases: x.aliases ?? [], enabled: x.enabled !== false })))
+    // 元数据已落库 → 不置脏（避免又要求“保存 + 确认”）
+    metaSyncedAt.value = Date.now()
+    message.info('主体别名/勾选已就地保存（无需重新确认）')
+  } catch (e) {
+    message.warning(e instanceof Error ? e.message : '元数据保存失败（不影响其它改动）')
+  }
+}
+
 /** 主体参与锚定开关 */
 function toggleSubject(name: string, on: boolean): void {
   setPlanSubjects(planSubjects().map((s) => (s.name === name ? { ...s, enabled: on } : s)))
+  void saveSubjectMeta()
 }
 /** 生成该主体的定妆图（kind=portrait） */
 async function genPortrait(name: string): Promise<void> {
@@ -1430,6 +1452,12 @@ const revisionById = computed<Record<string, { no: number; approved: boolean }>>
   return m
 })
 const approvedRev = computed(() => (revisions.data.value ?? []).find((r) => r.approved) ?? null)
+/** P13：已确认版本的方案（变更摘要的对比基线） */
+const approvedDetail = useQuery({
+  queryKey: computed(() => ['revision-approved', projectId.value, approvedRev.value?.id ?? '']),
+  queryFn: () => getRevision(workspaceId.value, projectId.value, approvedRev.value!.id),
+  enabled: computed(() => !!approvedRev.value?.id && workspaceId.value !== ''),
+})
 /** 生成/运动始终以“当前确认稿”为准（服务端同样只认确认稿）；避免用户对着旧 tab/旧任务误生成 */
 function genRevisionId(): string | null {
   return approvedRev.value?.id ?? selectedRevId.value
@@ -2403,6 +2431,58 @@ function revLabel(rev: { revisionNo: number; source: string; approved: boolean }
   return `v${rev.revisionNo} · ${SOURCE_LABEL[rev.source] ?? rev.source}${rev.approved ? ' ✓已确认' : ''}`
 }
 
+/** P13：是否需要「确认」（当前是未确认版本，或草稿有未保存的改动） */
+const confirmBanner = computed(() => !detApproved.value || dirty.value)
+const metaSyncedAt = ref(0)
+
+/** P13：对比基线 —— 当前就是确认稿时对比“已保存的那份”（看未保存改动）；否则对比已确认稿 */
+const baselinePlan = computed(() => (detApproved.value
+  ? (detail.data.value?.plan ?? null)
+  : (approvedDetail.data.value?.plan ?? null)))
+
+/** P13：变更摘要 —— 与对比基线相比改了什么（让确认变成“看一眼差异”） */
+const changeSummary = computed<string[]>(() => {
+  const cur = draft.value
+  const app = baselinePlan.value
+  if (!cur) return []
+  if (!app) return detApproved.value ? [] : ['首次确认']
+  const out: string[] = []
+  if (!isVideoPlan(cur)) return ['图片方案有改动']
+  const ac = app as unknown as Record<string, unknown>
+  const cc = cur as unknown as Record<string, unknown>
+  const themeA = ((app as { script?: { theme?: string } }).script?.theme ?? '') as string
+  const themeC = ((cur as unknown as { script?: { theme?: string } }).script?.theme ?? '') as string
+  if (themeA !== themeC) out.push('主题')
+  const shotsA = (app.shots ?? []) as Array<Record<string, unknown>>
+  const shotsC = (cur.shots ?? []) as Array<Record<string, unknown>>
+  let changedShots = 0
+  let changedLines = 0
+  const byNo = new Map(shotsA.map((x) => [Number(x.shot_no), x]))
+  for (const cs of shotsC) {
+    const as = byNo.get(Number(cs.shot_no))
+    if (!as || JSON.stringify(as) !== JSON.stringify(cs)) changedShots++
+    const la = JSON.stringify(as?.narrations ?? [])
+    const lc = JSON.stringify(cs.narrations ?? [])
+    if (la !== lc) changedLines++
+  }
+  if (shotsC.length !== shotsA.length) out.push(`分镜数量 ${shotsA.length}→${shotsC.length}`)
+  if (changedShots) out.push(`分镜 ${changedShots} 镜有改动`)
+  if (changedLines) out.push(`台词/旁白 ${changedLines} 镜有改动`)
+  const vbA = JSON.stringify((ac.audio as { voiceBindings?: unknown } | undefined)?.voiceBindings ?? [])
+  const vbC = JSON.stringify((cc.audio as { voiceBindings?: unknown } | undefined)?.voiceBindings ?? [])
+  if (vbA !== vbC) out.push('角色音色绑定')
+  const vA = JSON.stringify((ac.audio as { voice?: unknown } | undefined)?.voice ?? '')
+  const vC = JSON.stringify((cc.audio as { voice?: unknown } | undefined)?.voice ?? '')
+  if (vA !== vC) out.push('默认音色')
+  const mA = JSON.stringify((ac.audio as { music?: unknown } | undefined)?.music ?? (ac.audio as { music_mood?: unknown } | undefined)?.music_mood ?? '')
+  const mC = JSON.stringify((cc.audio as { music?: unknown } | undefined)?.music ?? (cc.audio as { music_mood?: unknown } | undefined)?.music_mood ?? '')
+  if (mA !== mC) out.push('配乐')
+  const rA = JSON.stringify(ac.referenceAssets ?? [])
+  const rC = JSON.stringify(cc.referenceAssets ?? [])
+  if (rA !== rC) out.push('参考图/区域')
+  return out.length ? out : ['（仅有不影响生成的元数据变化）']
+})
+
 const shotTotal = computed(() => {
   const shots = draft.value && isVideoPlan(draft.value) ? draft.value.shots : []
   const sum = shots.reduce((acc, s) => acc + (Number(s.duration_sec) || 0), 0)
@@ -2677,6 +2757,20 @@ const shotTotal = computed(() => {
             </p>
           </div>
           </div>
+        </div>
+
+        <!-- P13：未确认横幅（一键确认 + 变更摘要） -->
+        <div v-if="confirmBanner" class="confirm-banner" data-testid="confirm-banner">
+          <span class="cb-title font-mono">
+            {{ detApproved ? '草稿有未保存改动' : `当前是未确认版本 v${approvedRev?.revisionNo != null ? approvedRev.revisionNo + 1 : '?'}` }}
+          </span>
+          <span class="cb-diff text-secondary">
+            变更：{{ changeSummary.join('、') }}
+          </span>
+          <span class="cb-ops">
+            <NButton v-if="dirty" size="tiny" secondary data-testid="cb-save" @click="handleSave">保存</NButton>
+            <NButton size="tiny" type="primary" data-testid="cb-approve" @click="handleApprove">确认并使用此版本</NButton>
+          </span>
         </div>
 
         <!-- 中：方案编辑区 -->
@@ -3303,6 +3397,22 @@ const shotTotal = computed(() => {
 </template>
 
 <style scoped>
+.confirm-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin: 0 0 12px;
+  padding: 8px 12px;
+  border: 1px solid color-mix(in srgb, var(--wv-accent) 55%, var(--wv-line));
+  background: color-mix(in srgb, var(--wv-accent) 10%, transparent);
+  border-radius: 10px;
+  font-size: 12.5px;
+}
+.cb-title { color: var(--wv-accent-text); }
+.cb-diff { flex: 1 1 auto; }
+.cb-ops { display: inline-flex; gap: 6px; }
+
 .subj-wrap { display: flex; flex-direction: column; gap: 6px; margin: 6px 0 8px; }
 .subj-search {
   width: 100%;

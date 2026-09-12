@@ -330,6 +330,55 @@ public class DirectorService {
         return toDetail(r, project.approvedRevisionId());
     }
 
+    /**
+     * P13：只更新「主体元数据」（别名 / 参与勾选）——**就地改当前版本，不另存新版本、不改变确认态**。
+     *
+     * <p>为什么单独开一个口子：别名/勾选这类只影响“分镜文案↔主体的匹配关系”，
+     * 用户改一次就要「另存 vN+1 + 重新确认」太重（实测抱怨）。
+     * 注意：不动 prompt/分镜/台词等会影响生成的字段，所以不破坏确认稿的语义。
+     */
+    @Transactional
+    public RevisionDetailResponse patchSubjectMeta(UUID userId, UUID workspaceId, UUID projectId,
+                                                   UUID revisionId, com.fasterxml.jackson.databind.JsonNode body) {
+        ProjectSnapshot project = context.require(userId, workspaceId, projectId);
+        PromptRevision r = findRevision(workspaceId, projectId, revisionId);
+        com.fasterxml.jackson.databind.JsonNode plan = r.schemaJson();
+        if (plan == null || !plan.isObject()) {
+            throw new BizException(ErrorCode.NOT_FOUND, "方案不存在");
+        }
+        com.fasterxml.jackson.databind.node.ObjectNode obj = plan.deepCopy();
+        java.util.List<studio.weaveora.director.plan.PlanSubjects.Subject> subs =
+                new java.util.ArrayList<>(studio.weaveora.director.plan.PlanSubjects.parse(obj));
+        for (com.fasterxml.jackson.databind.JsonNode in : body.path("subjects")) {
+            String name = in.path("name").asText("").trim();
+            if (name.isEmpty()) {
+                continue;
+            }
+            for (int i = 0; i < subs.size(); i++) {
+                studio.weaveora.director.plan.PlanSubjects.Subject cur = subs.get(i);
+                if (!cur.name().equals(name)) {
+                    continue;
+                }
+                java.util.List<String> aliases = new java.util.ArrayList<>();
+                for (com.fasterxml.jackson.databind.JsonNode a : in.path("aliases")) {
+                    String v = a.asText("").trim();
+                    if (!v.isEmpty() && !v.equals(name)) {
+                        aliases.add(v);
+                    }
+                }
+                subs.set(i, new studio.weaveora.director.plan.PlanSubjects.Subject(
+                        cur.name(), cur.kind(), in.has("aliases") ? aliases : cur.aliases(),
+                        in.has("enabled") ? in.path("enabled").asBoolean(true) : cur.enabled(),
+                        cur.locked(), cur.refs(), cur.portraitAssetId(), cur.portraitVersion()));
+            }
+        }
+        studio.weaveora.director.plan.PlanSubjects.write(obj, subs);
+        r.replacePlan(obj);
+        revisions.save(r);
+        log.info("subjects meta patched in place: project={} rev={} n={}", projectId, revisionId, subs.size());
+        return toDetail(r, project.approvedRevisionId());
+    }
+
     @Transactional
     public RevisionDetailResponse patchRevision(UUID userId, UUID workspaceId, UUID projectId, UUID revisionId,
                                                 PatchRevisionRequest req) {
