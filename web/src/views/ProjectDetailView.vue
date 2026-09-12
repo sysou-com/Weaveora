@@ -557,18 +557,32 @@ function filteredSubjects(): PlanSubject[] {
 
 /** 可作为定妆照的参考图：**该主体名下命名的图优先**，其次界面当前点选（未命名）的图 */
 function subjectRefCandidates(name: string): string[] {
+  // 排除已被**其他主体**占用的图：一张图只能当一个主体的定妆照
+  const usedByOthers = new Set(
+    planSubjects()
+      .filter((x) => x.name !== name)
+      .map((x) => (x.portraitAssetId ?? '').trim())
+      .filter(Boolean),
+  )
   const inPlan = (planSubjects().find((x) => x.name === name)?.refs ?? []).map((r) => r.assetId)
   const named = Object.keys(refSubjects.value).filter(
     (id) => (refSubjects.value[id] ?? '').trim() === name && refSelected.value.includes(id),
   )
   const unnamed = refSelected.value.filter((id) => (refSubjects.value[id] ?? '').trim() === '')
-  return Array.from(new Set([...named, ...inPlan, ...unnamed]))
+  return Array.from(new Set([...named, ...inPlan, ...unnamed])).filter((id) => !usedByOthers.has(id))
 }
-/** P13：把所选参考图**直接设为定妆照**（免生成，就地生效） */
+/** P13：把所选参考图**直接设为定妆照**（免生成，就地生效；一张图只能给一个主体） */
 function useRefAsPortrait(name: string): void {
   const cand = subjectRefCandidates(name)
   if (!cand.length) {
-    message.warning(`先点选一张参考图（或给图填「${name}」主体名），再设为定妆照`)
+    const owners = planSubjects()
+      .filter((x) => x.name !== name && (x.portraitAssetId ?? '').trim())
+      .map((x) => x.name)
+    message.warning(
+      owners.length
+        ? `这张图（或现有候选）已经是「${owners.join('、')}」的定妆照了 —— 请为「${name}」另外点选一张图，或先去那个主体「操作 ▾ → 重新选图」`
+        : `先点选一张参考图（或给图填「${name}」主体名），再设为定妆照`,
+    )
     return
   }
   const assetId = cand[0]
@@ -576,8 +590,12 @@ function useRefAsPortrait(name: string): void {
   setPlanSubjects(planSubjects().map((x) => (x.name === name
     ? { ...x, portraitAssetId: assetId, portraitVersion: ver }
     : x)))
+  // 该图已被消费：释放点选，避免下一次又把它设给别的角色（踩过的坑）
+  refSelected.value = refSelected.value.filter((id) => id !== assetId)
+  delete refSubjects.value[assetId]
+  pruneUnchecked()
   void saveSubjectMeta()
-  message.success(`已把所选参考图设为「${name}」的定妆照（v${ver}，已就地保存，无需确认）`)
+  message.success(`已把所选参考图设为「${name}」的定妆照（v${ver} ·#${assetId.slice(-6)}，已就地保存）`)
 }
 
 /** 删除主体：连同它在参考图上的主体标记一起清掉（否则会残留成无主参考图） */
