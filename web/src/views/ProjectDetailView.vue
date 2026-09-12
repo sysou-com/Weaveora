@@ -2483,6 +2483,14 @@ const shotTotal = computed(() => {
             </p>
           </div>
 
+          <!-- 位置预览卡片（右卡）：预览框 → 拖动提示 → 已选主体区域表 → 红色告警 -->
+          <div class="pos-panel" data-testid="pos-panel">
+            <div class="brief-head">
+              <span class="font-mono eyebrow">位置预览（相对位置 / 区域%）</span>
+              <button v-if="selectedRefAssets.length > 1" type="button" class="link-btn" @click="autoLayoutRegions">
+                自动均分
+              </button>
+            </div>
 
             <div class="pos-frame" :style="{ aspectRatio: posAspectCss }">
               <div class="pos-third pos-third-v1" /><div class="pos-third pos-third-v2" />
@@ -2552,14 +2560,6 @@ const shotTotal = computed(() => {
               检测到「背影/过肩/机位」类构图诉求：参考图可能把构图拉回参考视角。建议先取消勾选参考图（仅需形象/画风锚定时再选），或把机位写进「视角/前景/主体朝向」字段。
             </p>
           </div>
-
-          <div class="pos-panel" data-testid="pos-panel">
-            <div class="brief-head">
-              <span class="font-mono eyebrow">位置预览（相对位置 / 区域%）</span>
-              <button v-if="selectedRefAssets.length > 1" type="button" class="link-btn" @click="autoLayoutRegions">
-                自动均分
-              </button>
-            </div>
           </div>
         </div>
 
