@@ -28,6 +28,8 @@ const props = defineProps<{
   } | null
   /** P10：各段配音实际时长（"镜号:段号" → 毫秒），用于字幕对齐提示与超长判定 */
   durations?: Record<string, number>
+  /** P12：已封版镜号（资源达标，批量生成会跳过） */
+  lockedShots?: number[]
 }>()
 
 const emit = defineEmits<{
@@ -35,6 +37,8 @@ const emit = defineEmits<{
   aiPrompt: [shot: DirectorShot]
   aiSyncAll: []
   previewVoice: [shotNo?: number]
+  /** P12：切换某镜封版 */
+  toggleLock: [shotNo: number, locked: boolean]
   previewBgm: []
   /** P8：单条重生成 / 单条试听 / 单条导入配音 */
   genLine: [shotNo: number, lineIndex: number]
@@ -219,6 +223,8 @@ const transitions = ['cut', 'dissolve', 'fade', 'wipe'].map((v) => ({ label: v, 
           :disabled="!!disabled || approvedAll"
           :busy="busyShot === shot.shot_no"
           :preview-busy="previewBusy"
+          :locked="(props.lockedShots ?? []).includes(shot.shot_no)"
+          @toggle-lock="(no: number, l: boolean) => emit('toggleLock', no, l)"
           @approve="emit('approveShot', $event)"
           @preview-voice="emit('previewVoice', $event)"
         />

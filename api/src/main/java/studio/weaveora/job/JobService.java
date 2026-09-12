@@ -36,9 +36,11 @@ import studio.weaveora.shared.api.ErrorResponse;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ThreadLocalRandom;
 
@@ -114,6 +116,7 @@ public class JobService {
     }
 
     private final GenerationJobRepository jobs;
+    private final studio.weaveora.project.ShotLockService shotLocks;
     private final WorkerNodeRepository nodes;
     private final AssetService assets;
     private final StoragePort storage;
@@ -138,6 +141,7 @@ public class JobService {
                       studio.weaveora.asset.domain.AssetRepository assetRepo,
                       QuotaService quota, Metrics metrics, StyleTemplateRepository styleRepo,
                       studio.weaveora.engine.EngineSettingsService engineSettings,
+                      studio.weaveora.project.ShotLockService shotLocks,
                       UserRepository users,
                       @org.springframework.beans.factory.annotation.Value(
                               "${weaveora.access.admin-email:sysou.com@outlook.com}") String adminEmail,
@@ -148,6 +152,7 @@ public class JobService {
                       @org.springframework.beans.factory.annotation.Value(
                               "${weaveora.job.queued-timeout-minutes:1440}") int queuedTimeoutMin) {
         this.jobs = jobs;
+        this.shotLocks = shotLocks;
         this.nodes = nodes;
         this.assets = assets;
         this.storage = storage;
@@ -224,9 +229,10 @@ public class JobService {
 
         List<GenerationJob> created = new ArrayList<>();
         if ("video".equals(planMode)) {
-            List<UUID> shotIds = resolveVideoShots(userId, workspaceId, projectId, req.revisionId(), req.shotId(), req.kind());
+            List<UUID> shotIds = resolveVideoShots(userId, workspaceId, projectId, req.revisionId(), req.shotId(), req.kind(),
+                    req.shotNos(), Boolean.TRUE.equals(req.includeLocked()));
             if (shotIds.isEmpty()) {
-                throw new BizException(ErrorCode.SHOT_NOT_APPROVED, "没有已确认的镜头可生成");
+                throw new BizException(ErrorCode.SHOT_NOT_APPROVED, emptyShotReason(workspaceId, projectId, req));
             }
             if ("clip".equals(req.kind())) {
                 int secs = 0;
@@ -413,9 +419,10 @@ public class JobService {
             return out;
         }
         // voice：逐镜旁白
-        List<UUID> shotIds = resolveVideoShots(userId, workspaceId, projectId, req.revisionId(), req.shotId(), "still");
+        List<UUID> shotIds = resolveVideoShots(userId, workspaceId, projectId, req.revisionId(), req.shotId(), "still",
+                req.shotNos(), Boolean.TRUE.equals(req.includeLocked()));
         if (shotIds.isEmpty()) {
-            throw new BizException(ErrorCode.SHOT_NOT_APPROVED, "没有已确认的镜头可用于配音");
+            throw new BizException(ErrorCode.SHOT_NOT_APPROVED, emptyShotReason(workspaceId, projectId, req));
         }
         for (UUID shotId : shotIds) {
             JsonNode shot = shotOf(plan, shotId);
@@ -1138,8 +1145,19 @@ public class JobService {
         return saved;
     }
 
+    /**
+     * 解析本批要处理的镜头。
+     *
+     * <p>P12 封版口径：
+     * <ul>
+     *   <li>单个镜（{@code shotId} 指定）→ 是他明确要重做的，**不受封版限制**；</li>
+     *   <li>显式列了 {@code shotNos} → 按他勾的跑（含已封版镜也算明确要求）；</li>
+     *   <li>其余（全部/批量）→ 跳过已封版镜，避免重跑把满意的镜头又生成一遍。</li>
+     * </ul>
+     */
     private List<UUID> resolveVideoShots(UUID userId, UUID workspaceId, UUID projectId,
-                                         UUID revisionId, UUID shotId, String kind) {
+                                         UUID revisionId, UUID shotId, String kind,
+                                         List<Integer> onlyShotNos, boolean includeLocked) {
         // 镜头状态表在 director 侧；此处经由公开查询：approved 镜头才可生成。
         List<UUID> ids = new ArrayList<>();
         if (shotId != null) {
@@ -1150,7 +1168,56 @@ public class JobService {
         }
         List<UUID> allowed = planReader.approvedShotIds(revisionId);
         ids.removeIf(id -> !allowed.contains(id));
-        return ids;
+
+        boolean explicit = shotId != null || (onlyShotNos != null && !onlyShotNos.isEmpty()) || includeLocked;
+        Set<Integer> locked = explicit ? Set.of() : shotLocks.lockedShotNosRaw(workspaceId, projectId);
+        return applyShotFilter(ids, onlyShotNos, locked, planReader::shotNoOf);
+    }
+
+    /**
+     * P12 纯函数：按「勾选的镜」与「封版」过滤镜头清单（便于单测）。
+     *
+     * <ul>
+     *   <li>{@code onlyShotNos} 非空 → 只留这些镜（用户显式勾选，含已封版镜也算明确要求）；</li>
+     *   <li>{@code locked} 非空 → 剔除这些镜（批量生成默认跳过封版镜）。</li>
+     * </ul>
+     */
+    static List<UUID> applyShotFilter(List<UUID> ids, List<Integer> onlyShotNos, Set<Integer> locked,
+                                      java.util.function.ToIntFunction<UUID> shotNoOf) {
+        List<UUID> out = new ArrayList<>(ids);
+        if (onlyShotNos != null && !onlyShotNos.isEmpty()) {
+            Set<Integer> want = new LinkedHashSet<>(onlyShotNos);
+            out.removeIf(id -> !want.contains(shotNoOf.applyAsInt(id)));
+        }
+        if (locked != null && !locked.isEmpty()) {
+            out.removeIf(id -> locked.contains(shotNoOf.applyAsInt(id)));
+        }
+        return out;
+    }
+
+    /** 旧签名（不带 shotNos / includeLocked）：等于“全部且跳过封版”。 */
+    private List<UUID> resolveVideoShots(UUID userId, UUID workspaceId, UUID projectId,
+                                         UUID revisionId, UUID shotId, String kind) {
+        return resolveVideoShots(userId, workspaceId, projectId, revisionId, shotId, kind, null, false);
+    }
+
+    /** P12：镜头被过滤空时的准确原因（区分「没确认」和「全被封版跳过」）。 */
+    private String emptyShotReason(UUID workspaceId, UUID projectId, CreateJobRequest req) {
+        int approved = planReader.approvedShotIds(req.revisionId()).size();
+        if (approved == 0) {
+            return "没有已确认的镜头可生成（先在方案里确认分镜）";
+        }
+        boolean explicit = req.shotId() != null
+                || (req.shotNos() != null && !req.shotNos().isEmpty())
+                || Boolean.TRUE.equals(req.includeLocked());
+        if (!explicit) {
+            Set<Integer> locked = shotLocks.lockedShotNosRaw(workspaceId, projectId);
+            if (!locked.isEmpty()) {
+                return "已确认的 " + approved + " 个镜头全部处于「封版」状态（第 " + locked + " 镜）—— "
+                        + "本批已自动跳过；如需重做请取消封版，或在生成弹窗里显式勾选要跑的镜头";
+            }
+        }
+        return "没有可生成的镜头（勾选的镜头不在当前确认稿里，或尚未确认）";
     }
 
     private JsonNode shotOf(JsonNode plan, UUID shotId) {

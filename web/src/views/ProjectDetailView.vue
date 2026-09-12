@@ -29,10 +29,12 @@ import { listAssets, uploadReference, fetchAssetBlob, deleteAssets, uploadVoiceL
 import { createExport, fetchExportBlob, renderMaster, timecode } from '@/api/export'
 import { aiGenerateLines, aiGenerateMusic } from '@/api/director'
 import { getProject, updateProjectDuration } from '@/api/projects'
+import { listShotLocks, setShotLocks } from '@/api/shotLocks'
 import type { AssetRef, DirectorPlan, DirectorShot, JobRecord } from '@/api/types'
 import BriefComposer from '@/components/director/BriefComposer.vue'
 import ImagePlanEditor from '@/components/director/ImagePlanEditor.vue'
 import RevisionRail from '@/components/director/RevisionRail.vue'
+import ShotPickerDialog from '@/components/director/ShotPickerDialog.vue'
 import VoiceCloneDialog from '@/components/director/VoiceCloneDialog.vue'
 import VideoPlanEditor from '@/components/director/VideoPlanEditor.vue'
 import { useAuthStore } from '@/stores/auth'
@@ -872,11 +874,97 @@ function toggleRef(id: string, on: boolean): void {
   syncReferenceAssets()
 }
 
+/* ---------------- P12：生成前弹分镜勾选（>3 镜时） ---------------- */
+const pickOpen = ref(false)
+const pickBusy = ref(false)
+const pickCtx = ref<{ title: string; run: (shotNos: number[] | null) => Promise<void> | void } | null>(null)
+
+/**
+ * 分镜多于 3 镜 → 先弹勾选窗（选部分镜还是全部，顺便可封版）；
+ * ≤ 3 镜直接跑（不传 shotNos = 全部，后端会自动跳过已封版镜）。
+ */
+function withShotPicker(
+  title: string,
+  run: (shotNos: number[] | null) => Promise<void> | void,
+): void {
+  if (pickerShots.value.length <= 3) {
+    void run(null)
+    return
+  }
+  pickCtx.value = { title, run }
+  pickOpen.value = true
+}
+
+/** 弹窗确认：先落封版变更，再按勾选的镜头跑 */
+async function onShotPicked(p: { shotNos: number[]; lock: number[]; unlock: number[] }): Promise<void> {
+  const ctx = pickCtx.value
+  pickCtx.value = null
+  if (!ctx) return
+  pickBusy.value = true
+  try {
+    if (p.lock.length) {
+      await setShotLocks(workspaceId.value, projectId.value, p.lock, true)
+      message.success(`已封版 ${p.lock.length} 镜（第 ${p.lock.join('、')} 镜）—— 之后批量生成会自动跳过`)
+    }
+    if (p.unlock.length) {
+      await setShotLocks(workspaceId.value, projectId.value, p.unlock, false)
+      message.info(`已取消封版 ${p.unlock.length} 镜（第 ${p.unlock.join('、')} 镜）`)
+    }
+    if (p.lock.length || p.unlock.length) {
+      await queryClient.invalidateQueries({ queryKey: ['shot-locks'] })
+    }
+    await ctx.run(p.shotNos)
+  } catch (e) {
+    message.error(e instanceof Error ? e.message : '生成失败')
+  } finally {
+    pickBusy.value = false
+  }
+}
+
+/** 单独给某镜切换封版（分镜卡片上的小锁） */
+async function toggleShotLock(shotNo: number, locked: boolean): Promise<void> {
+  try {
+    await setShotLocks(workspaceId.value, projectId.value, [shotNo], locked)
+    await queryClient.invalidateQueries({ queryKey: ['shot-locks'] })
+    if (locked) message.success(`第 ${shotNo} 镜已封版（批量生成会跳过它）`)
+    else message.info(`第 ${shotNo} 镜已取消封版`)
+  } catch (e) {
+    message.error(e instanceof Error ? e.message : '封版设置失败')
+  }
+}
+
 // ---------- W3 任务 ----------
 const jobs = useQuery({
   queryKey: computed(() => ['jobs', workspaceId.value, projectId.value]),
   queryFn: () => listJobs(workspaceId.value, projectId.value),
   enabled: computed(() => workspaceId.value !== '' && projectId.value !== ''),
+})
+
+// ---------- P12 分镜封版 ----------
+const shotLocks = useQuery({
+  queryKey: computed(() => ['shot-locks', workspaceId.value, projectId.value]),
+  queryFn: () => listShotLocks(workspaceId.value, projectId.value),
+  enabled: computed(() => workspaceId.value !== '' && projectId.value !== ''),
+})
+const lockedShots = computed<number[]>(() => shotLocks.data.value ?? [])
+
+/** 弹窗要展示的分镜列表：镜号 + 该镜资源版本（取最新一条 still/voice 产物所属版本）+ 语音段数 */
+const pickerShots = computed(() => {
+  const plan = draft.value
+  if (!plan || !isVideoPlan(plan)) return []
+  return (plan.shots ?? []).map((s) => {
+    const rel = (jobs.data.value ?? []).filter(
+      (j) => j.payload?.shot_no === s.shot_no && ['still', 'clip', 'voice'].includes(j.kind) && j.state === 'succeeded',
+    )
+    const newest = newestStamp(rel)
+    const rev = newest ? revOfJob(newest) : undefined
+    return {
+      shotNo: s.shot_no,
+      revNo: rev?.no ?? null,
+      stale: rev?.stale === true,
+      lineCount: (s.narrations ?? []).length,
+    }
+  })
 })
 const activeJobCount = computed(() => (jobs.data.value ?? []).filter((j) =>
   ['queued', 'running'].includes(j.state)).length)
@@ -992,7 +1080,7 @@ watch(
   },
 )
 
-async function startGeneration(): Promise<void> {
+async function startGeneration(shotNos?: number[] | null): Promise<void> {
   const revId = genRevisionId()
   if (!revId) return
   // P12：生成后自动切到对应 Tab（顺手解锁），否则用户看不到刚发起任务的进度
@@ -1006,6 +1094,7 @@ async function startGeneration(): Promise<void> {
       revisionId: revId,
       kind: 'still',
       count: isVideo ? undefined : imgCount.value,
+      ...(shotNos && shotNos.length ? { shotNos } : {}),
     })
     await queryClient.invalidateQueries({ queryKey: ['jobs'] })
     message.success(`已创建 ${created.length} 个任务（关键帧 · 基于确认稿 v${approvedRev.value?.revisionNo ?? '?'}）`)
@@ -1160,19 +1249,23 @@ function confirmMotion(): void {
     return
   }
   motionOpen.value = false
-  void startMotion(f)
+  withShotPicker('运动(motion)', (shotNos) => startMotion(f, shotNos))
 }
 const KIND_LABEL: Record<string, string> = { still: '关键帧', clip: '运动', voice: '配音', bgm: '配乐' }
 
 /** P7：逐镜配音（自托管 CosyVoice） */
-async function startVoice(): Promise<void> {
+async function startVoice(shotNos?: number[] | null): Promise<void> {
   const revId = genRevisionId()
   if (!revId) return
   focusJobTab('voice')
   if (dirty.value && !(await handleSave())) return
   genBusy.value = true
   try {
-    const created = await createJobs(workspaceId.value, projectId.value, { revisionId: revId, kind: 'voice' })
+    const created = await createJobs(workspaceId.value, projectId.value, {
+      revisionId: revId,
+      kind: 'voice',
+      ...(shotNos && shotNos.length ? { shotNos } : {}),
+    })
     await queryClient.invalidateQueries({ queryKey: ['jobs'] })
     message.success(`已创建 ${created.length} 个配音任务（逐镜旁白）`)
   } catch (e) {
@@ -1479,7 +1572,7 @@ async function startBgm(): Promise<void> {
   }
 }
 
-async function startMotion(frames?: number): Promise<void> {
+async function startMotion(frames?: number, shotNos?: number[] | null): Promise<void> {
   const revId = genRevisionId()
   if (!revId) return
   if (dirty.value && !(await handleSave())) return
@@ -1489,6 +1582,7 @@ async function startMotion(frames?: number): Promise<void> {
       revisionId: revId,
       kind: 'clip',
       ...(frames ? { frames } : {}),
+      ...(shotNos && shotNos.length ? { shotNos } : {}),
     })
     await queryClient.invalidateQueries({ queryKey: ['jobs'] })
     message.success(`已创建 ${created.length} 个运动任务（关键帧→motion · 基于确认稿 v${approvedRev.value?.revisionNo ?? '?'}）`)
@@ -2271,6 +2365,8 @@ const shotTotal = computed(() => {
                   :preview-busy="previewBusy"
                   :audio-preview="audioPreview"
                   :durations="durations"
+                  :locked-shots="lockedShots"
+                  @toggle-lock="toggleShotLock"
                   @approve-shot="handleApproveShot"
                   @ai-prompt="openAiRewrite"
                   @ai-sync-all="aiSyncAll"
@@ -2362,7 +2458,7 @@ const shotTotal = computed(() => {
               data-testid="btn-voice-jobs"
               :disabled="!detApproved"
               :title="detApproved ? '自托管 CosyVoice：逐镜台词 → 配音' : '需先确认方案（右上角「确认」）后生成配音；未确认的镜头不能配音'"
-              @click="startVoice"
+              @click="withShotPicker('生成配音(voice)', (nos) => startVoice(nos))"
             >
               生成配音(voice)
             </NButton>
@@ -2378,7 +2474,7 @@ const shotTotal = computed(() => {
             >
               生成配乐(bgm)
             </NButton>
-            <NButton size="small" type="primary" :loading="genBusy" data-testid="btn-gen-jobs" @click="startGeneration">
+            <NButton size="small" type="primary" :loading="genBusy" data-testid="btn-gen-jobs" @click="withShotPicker(isVideoNow ? '生成关键帧(still)' : '开始生成', (nos) => startGeneration(nos))">
               {{ isVideoNow ? '生成关键帧(still)' : '开始生成' }}
             </NButton>
           </div>
@@ -2730,6 +2826,16 @@ const shotTotal = computed(() => {
       </div>
 
       <!-- 底：版本条 + 确认闸门（§9.1/§9.5） -->
+      <!-- P12：分镜勾选弹窗（>3 镜时生成前先选镜 + 可顺手封版） -->
+      <ShotPickerDialog
+        v-model:show="pickOpen"
+        :title="pickCtx?.title ?? '选择分镜'"
+        :shots="pickerShots"
+        :locked="lockedShots"
+        :busy="pickBusy"
+        @confirm="onShotPicked"
+      />
+
       <!-- P9：克隆配音弹窗（放在页面级，方案区与分镜共用同一个） -->
       <VoiceCloneDialog
         v-model:show="cloneOpen"

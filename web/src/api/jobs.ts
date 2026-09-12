@@ -16,6 +16,10 @@ export async function createJobs(
     preview?: boolean
     /** P8：voice 任务只重生成该镜的第 N 段语音（不传=全部段落） */
     lineIndex?: number | null
+    /** P12：只生成这些镜（不传=全部；显式列出时可包含已封版镜） */
+    shotNos?: number[] | null
+    /** P12：true = 连已封版镜一起生成 */
+    includeLocked?: boolean
   },
 ): Promise<JobRecord[]> {
   return request<JobRecord[]>(`/api/v1/projects/${projectId}/jobs`, {

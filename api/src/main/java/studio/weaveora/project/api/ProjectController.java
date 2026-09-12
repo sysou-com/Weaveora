@@ -33,9 +33,43 @@ public class ProjectController {
     public static final String WORKSPACE_HEADER = "X-Workspace-Id";
 
     private final ProjectService projectService;
+    private final studio.weaveora.project.ShotLockService shotLockService;
 
-    public ProjectController(ProjectService projectService) {
+    public ProjectController(ProjectService projectService,
+                             studio.weaveora.project.ShotLockService shotLockService) {
         this.projectService = projectService;
+        this.shotLockService = shotLockService;
+    }
+
+    /** P12 分镜封版：已封版镜号（升序）。 */
+    @GetMapping("/{projectId}/shot-locks")
+    public ResponseEntity<Map<String, Object>> shotLocks(
+            HttpServletRequest request,
+            @RequestHeader(value = WORKSPACE_HEADER, required = false) String workspaceId,
+            @PathVariable UUID projectId) {
+        return ResponseEntity.ok(Map.of("shotNos",
+                shotLockService.lockedShotNos(uid(request), ws(workspaceId), projectId)));
+    }
+
+    /**
+     * P12 分镜封版：批量设置/取消。
+     *
+     * <p>封版 = 该镜资源已满足要求 → 后续**批量**生成自动跳过（单镜显式生成不受限）。
+     */
+    @PostMapping("/{projectId}/shot-locks")
+    public ResponseEntity<Map<String, Object>> setShotLocks(
+            HttpServletRequest request,
+            @RequestHeader(value = WORKSPACE_HEADER, required = false) String workspaceId,
+            @PathVariable UUID projectId,
+            @RequestBody(required = false) ShotLockRequest body) {
+        List<Integer> shotNos = body == null ? List.of() : body.shotNos();
+        boolean locked = body == null || body.locked() == null || Boolean.TRUE.equals(body.locked());
+        String note = body == null ? null : body.note();
+        return ResponseEntity.ok(Map.of("shotNos", shotLockService.setLocked(
+                uid(request), ws(workspaceId), projectId, shotNos, locked, note)));
+    }
+
+    public record ShotLockRequest(List<Integer> shotNos, Boolean locked, String note) {
     }
 
     @GetMapping

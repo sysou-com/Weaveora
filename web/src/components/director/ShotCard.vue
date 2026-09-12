@@ -16,11 +16,18 @@ const props = withDefaults(
     busy?: boolean
     /** 配音试听中（父级统一 busy） */
     previewBusy?: boolean
+    /** P12：该镜已封版（资源达标，批量生成会跳过） */
+    locked?: boolean
   }>(),
-  { status: 'draft', disabled: false, busy: false, previewBusy: false },
+  { status: 'draft', disabled: false, busy: false, previewBusy: false, locked: false },
 )
 
-const emit = defineEmits<{ approve: [shotNo: number]; previewVoice: [shotNo: number] }>()
+const emit = defineEmits<{
+  approve: [shotNo: number]
+  previewVoice: [shotNo: number]
+  /** P12：切换封版 */
+  toggleLock: [shotNo: number, locked: boolean]
+}>()
 
 const approved = computed(() => props.status === 'approved')
 
@@ -43,7 +50,7 @@ const sizeOptions = [
 </script>
 
 <template>
-  <article :class="['shot-card', { approved, locked: disabled }]" :data-testid="`shot-card-${shot.shot_no}`">
+  <article :class="['shot-card', { approved, locked: disabled, sealed: locked }]" :data-testid="`shot-card-${shot.shot_no}`">
     <header class="shot-head">
       <div class="shot-tag font-mono">
         <span class="dot" :class="{ on: approved }" />
@@ -51,6 +58,19 @@ const sizeOptions = [
         <span class="dur">{{ Number(shot.duration_sec).toFixed(2) }}s</span>
         <span v-if="shot.keyframes && shot.keyframes.length" class="dur kf-hint">运镜 {{ shot.keyframes.length }} 帧</span>
       </div>
+      <NButton
+        size="tiny"
+        :type="locked ? 'warning' : 'default'"
+        :secondary="locked"
+        quaternary
+        :data-testid="`shot-lock-${shot.shot_no}`"
+        :title="locked
+          ? '已封版：批量生成会跳过本镜（点一下取消封版）'
+          : '封版：本镜资源已达标，之后批量生成自动跳过'"
+        @click="emit('toggleLock', shot.shot_no, !locked)"
+      >
+        {{ locked ? '🔒 已封版' : '封版' }}
+      </NButton>
       <NButton
         v-if="shotHasText(shot)"
         size="tiny"
@@ -188,6 +208,10 @@ const sizeOptions = [
 }
 .shot-card.locked {
   opacity: 0.85;
+}
+/* P12：已封版的分镜——左侧一道金色标记 + 徽标，一眼看出“这镜不再动” */
+.shot-card.sealed {
+  border-left: 3px solid var(--wv-accent, #d0a24e);
 }
 
 .shot-head {
