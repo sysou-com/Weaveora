@@ -216,8 +216,8 @@ def _refs_spec(mapping, model, fields=None):
     ml = (model or "").lower()
     if "flux-2" in ml or "klein" in ml:
         return "images", True, 5
-    if "nano-banana" in ml:
-        return "image_input", True, 0
+    if "seedream" in ml or "nano-banana" in ml or "seededit" in ml:
+        return "image_input", True, 10
     if "flux" in ml or "kontext" in ml:
         return "input_images", True, 0
     return "image", False, 0
@@ -371,10 +371,12 @@ def replicate_image(payload, token, model, progress_fn=None, cfg=None):
     if refs:
         refs_field, refs_is_array, refs_max = _refs_spec(mp, model, fields)
         if not refs_field:
-            print("[cloud-image] 警告：模型 %s 的 schema 里没有参考图字段，本镜 %d 张参考图无法使用"
-                  "（人物/场景一致性会变差，建议换支持参考图的模型，如 FLUX.2 系）"
-                  % (model, len(refs)), flush=True)
-            refs = []
+            # 不能默默丢掉参考图去出图（那会直接毁掉人物一致性，而用户看不出原因）
+            raise CloudError(
+                "模型 %s 的参数里没有可用的参考图字段，但本镜带了 %d 张参考图（%s）；本镜已中止。"
+                "请换支持参考图的模型（如 bytedance/seedream-4 → image_input、"
+                "black-forest-labs/flux-2-pro → input_images、google/nano-banana → image_input），"
+                "或在分镜里取消这些参考图绑定" % (model, len(refs), ",".join([s for s in subjects if s]) or "-"))
     if refs:
         picked_idx = list(range(len(refs)))
         if len(refs) > 1 and not refs_is_array:
@@ -433,6 +435,7 @@ def replicate_image(payload, token, model, progress_fn=None, cfg=None):
     if fields or mp:
         aspect_field = (mp.get("aspect") or "").strip()
         w_field, h_field = (mp.get("width") or "").strip(), (mp.get("height") or "").strip()
+        size_field = (mp.get("size") or "").strip()
         if ar in ("16:9", "9:16", "1:1", "3:2", "2:3"):
             if _model_has(fields, aspect_field):
                 inp[aspect_field] = ar
@@ -441,6 +444,9 @@ def replicate_image(payload, token, model, progress_fn=None, cfg=None):
                 pw, ph = _wh_for(ar, int(params.get("width") or 0), int(params.get("height") or 0))
                 inp[w_field] = _fit_enum_side(fields, w_field, pw) or pw
                 inp[h_field] = _fit_enum_side(fields, h_field, ph) or ph
+                # 像 seedream 这种 size='custom' 才读 width/height 的，必须显式置 custom
+                if size_field and _model_has(fields, size_field) and "custom" in (fields.get(size_field, {}).get("enum") or []):
+                    inp[size_field] = "custom"
         elif _model_has(fields, w_field) and _model_has(fields, h_field):
             pw, ph = _wh_for("", int(params.get("width") or 1024), int(params.get("height") or 1024))
             inp[w_field] = _fit_enum_side(fields, w_field, pw) or pw

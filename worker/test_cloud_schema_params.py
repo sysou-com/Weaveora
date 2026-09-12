@@ -162,15 +162,33 @@ cloud_client.replicate_image(dict(PAYLOAD), "fake-token", "black-forest-labs/flu
 inp = CAPTURED[-1]["input"]
 check("兜底字段 = images", "images" in inp and "input_images" not in inp)
 
-print("[4] 没有参考图字段的模型：不发参考图字段（并给出警告）")
+print("[4] 模型没有参考图字段却带了参考图 → 必须报错中止（不能静默出图）")
 CAPTURED.clear()
 no_ref_cfg = {
     "mapping": {"m": {"prompt": "prompt"}},
     "schemaParams": [{"name": "prompt", "type": "string", "group": "prompt", "userEditable": False}],
 }
-cloud_client.replicate_image(dict(PAYLOAD), "fake-token", "some/text2img-only", cfg=no_ref_cfg)
+try:
+    cloud_client.replicate_image(dict(PAYLOAD), "fake-token", "some/text2img-only", cfg=no_ref_cfg)
+    check("应抛异常", False, "却正常返回（静默降级）")
+except Exception as e:
+    check("抛出可操作错误", "没有可用的参考图字段" in str(e), str(e)[:70])
+    check("没有发预测请求", len(CAPTURED) == 0)
+
+print("[4b] seedream-4：字段 image_input + 数量上限 10")
+CAPTURED.clear()
+sd_cfg = {
+    "mapping": {"m": {"refs": "image_input", "refsIsArray": True, "refsMax": 10,
+                      "prompt": "prompt", "aspect": "aspect_ratio", "size": "size"}},
+    "schemaParams": [{"name": "prompt"}, {"name": "image_input", "type": "array", "group": "refs"},
+                      {"name": "aspect_ratio", "type": "enum", "enum": ["1:1", "16:9", "9:16"]},
+                      {"name": "size", "type": "enum", "enum": ["1K", "2K", "4K", "custom"]}],
+}
+cloud_client.replicate_image(dict(PAYLOAD), "fake-token", "bytedance/seedream-4", cfg=dict(sd_cfg))
 inp = CAPTURED[-1]["input"]
-check("不发任何参考图字段", not any(k in inp for k in ("images", "input_images", "image")))
+check("参考图发到 image_input", len(inp.get("image_input") or []) == 2)
+check("不发 images（那是 flux 的字段）", "images" not in inp)
+check("画幅 aspect_ratio=9:16", inp.get("aspect_ratio") == "9:16")
 
 print("[5] 视频：参考帧字段同样按 schema（start_image）")
 CAPTURED.clear()

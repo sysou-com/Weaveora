@@ -158,6 +158,60 @@ class ModelSchemaServiceTest {
     }
 
     @Test
+    void detectsImageInputStyleRefsField() throws Exception {
+        // 回归：bytedance/seedream-4 与 google/nano-banana 用 `image_input`，早期名单里没有它
+        // → 界面错报「该模型没有参考图入口」，而模型明明支持 1-10 张参考图。
+        String raw = """
+                {"latest_version":{"id":"cf7d43199143","openapi_schema":{"components":{"schemas":{
+                  "Input":{"type":"object","properties":{
+                    "prompt":{"type":"string"},
+                    "size":{"enum":["1K","2K","4K","custom"],"default":"2K"},
+                    "width":{"type":"integer","default":2048},
+                    "height":{"type":"integer","default":2048},
+                    "max_images":{"type":"integer","default":1,
+                                   "description":"Maximum number of images to generate"},
+                    "image_input":{"type":"array","items":{"type":"string"},"default":[],
+                                   "description":"Input image(s) for image-to-image generation. List of 1-10 images for single or multi-reference generation."},
+                    "aspect_ratio":{"type":"string","default":"match_input_image"},
+                    "enhance_prompt":{"type":"boolean","default":true}
+                  }}}}}}}
+                """;
+        var s = new ModelSchemaService().normalize("bytedance/seedream-4",
+                new ObjectMapper().readTree(raw));
+        var m = s.path("mapping");
+        assertEquals("image_input", m.path("refs").asText(), "必须认出 image_input");
+        assertTrue(m.path("refsIsArray").asBoolean());
+        assertEquals("size", m.path("size").asText(), "分辨率档位也要能识别");
+        assertEquals("aspect_ratio", m.path("aspect").asText());
+        assertTrue(s.path("notes").toString().indexOf("没有可识别的参考图") < 0,
+                "不该再报「没有参考图入口」：" + s.path("notes"));
+
+        // max_images 是“生成几张图”，不能被当成参考图字段
+        var byName = new ObjectMapper().createObjectNode();
+        s.path("params").forEach(p -> byName.set(p.path("name").asText(), (ObjectNode) p));
+        assertEquals("refs", byName.path("image_input").path("group").asText());
+        assertFalse(byName.path("image_input").path("userEditable").asBoolean());
+    }
+
+    @Test
+    void guessesRefsFieldWhenNotInCandidateList() throws Exception {
+        // 通用兜底：名单没命中也要能从 schema 里找出「收图的数组字段」（防止又漏一个新名字）
+        String raw = """
+                {"latest_version":{"id":"v1","openapi_schema":{"components":{"schemas":{
+                  "Input":{"type":"object","properties":{
+                    "prompt":{"type":"string"},
+                    "num_images":{"type":"integer","default":1},
+                    "source_photos":{"type":"array","items":{"type":"string"},
+                                      "description":"reference photos of the character"}
+                  }}}}}}}
+                """;
+        var s = new ModelSchemaService().normalize("acme/unknown-model",
+                new ObjectMapper().readTree(raw));
+        assertEquals("source_photos", s.path("mapping").path("refs").asText());
+        assertTrue(s.path("mapping").path("refsGuessed").asBoolean());
+    }
+
+    @Test
     void textToImageModelHasNoRefsMapping() throws Exception {
         String t2i = """
                 {"latest_version":{"id":"v1","openapi_schema":{"components":{"schemas":{"Input":{

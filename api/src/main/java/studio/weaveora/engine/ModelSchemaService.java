@@ -42,8 +42,9 @@ public class ModelSchemaService {
 
     /** 候选字段名（越靠前越优先）。顺序来自各模型实际 schema 的观察，避免"猜一个名字"。 */
     private static final List<String> REFS_CANDIDATES = List.of(
-            "input_images", "images", "reference_images", "ref_images", "image",
-            "init_image", "input_image", "image_prompt", "start_image", "first_frame_image");
+            "input_images", "image_input", "images", "reference_images", "ref_images",
+            "input_image", "image", "init_image", "image_prompt", "reference_image",
+            "start_image", "first_frame_image");
     private static final List<String> PROMPT_CANDIDATES = List.of("prompt", "text", "positive_prompt", "caption");
     private static final List<String> NEGATIVE_CANDIDATES = List.of("negative_prompt", "negative");
     private static final List<String> ASPECT_CANDIDATES = List.of("aspect_ratio", "aspect", "ratio");
@@ -54,6 +55,11 @@ public class ModelSchemaService {
     private static final List<String> CFG_CANDIDATES = List.of("guidance_scale", "guidance", "cfg");
     private static final List<String> QUALITY_CANDIDATES = List.of(
             "megapixels", "output_quality", "quality", "resolution", "num_frames", "fps");
+    /** 分辨率/尺寸档位字段（如 seedream 的 size=1K/2K/4K） */
+    private static final List<String> SIZE_CANDIDATES = List.of("size", "image_size", "resolution");
+    /** 名字里带这些词但**不是**参考图的（防止通用兜底误判） */
+    private static final List<String> REFS_LOOKALIKE = List.of(
+            "max_images", "num_images", "num_outputs", "min_images", "output_images", "image_count");
     private static final List<String> LAST_FRAME_CANDIDATES = List.of(
             "last_frame_image", "end_image", "tail_image", "last_image");
 
@@ -161,6 +167,18 @@ public class ModelSchemaService {
         // 参数映射：worker 按它填参数（这是修「参考图没生效」的关键）
         ObjectNode mapping = out.putObject("mapping");
         putIfFound(mapping, "refs", byName, REFS_CANDIDATES);
+        if (mapping.path("refs").asText("").isEmpty()) {
+            // 通用兜底：schema 里没命中名单时，自己找「能收图的数组字段」。
+            // 踩过的坑：bytedance/seedream-4 与 google/nano-banana 用 image_input，
+            // 早期名单里没有它 → 界面报「该模型没有参考图入口」而模型明明支持。
+            String guess = guessRefsField(byName);
+            if (!guess.isEmpty()) {
+                mapping.put("refs", guess);
+                mapping.put("refsGuessed", true);
+                log.info("参考图字段未命中名单，按通用规则推得：{}（模型 {}）", guess, model);
+            }
+        }
+        putIfFound(mapping, "size", byName, SIZE_CANDIDATES);
         putIfFound(mapping, "prompt", byName, PROMPT_CANDIDATES);
         putIfFound(mapping, "negative", byName, NEGATIVE_CANDIDATES);
         putIfFound(mapping, "aspect", byName, ASPECT_CANDIDATES);
@@ -187,12 +205,12 @@ public class ModelSchemaService {
         }
         ArrayNode notes = out.putArray("notes");
         if (refsField.isEmpty()) {
-            notes.add("该模型没有可识别的参考图字段：人物一致性不会生效（可换支持参考图的模型，如 FLUX.2 系）");
+            notes.add("该模型没有可识别的参考图字段：人物一致性不会生效（可换支持参考图的模型，如 seedream-4 / nano-banana / FLUX.2 系）");
         } else if (!mapping.path("refsIsArray").asBoolean(false)) {
             notes.add("参考图字段 " + refsField + " 只收单张：多主体镜只会用「主主体」那一张");
         }
         if (mapping.path("negative").asText("").isEmpty()) {
-            notes.add("该模型不支持 negative_prompt（FLUX.2 系即是如此），负向提示词会被忽略");
+            notes.add("该模型没有 negative_prompt 参数：负向提示词会被忽略（FLUX.2 / seedream 等新模型普遍如此）");
         }
         return out;
     }
@@ -204,6 +222,50 @@ public class ModelSchemaService {
                 return;
             }
         }
+    }
+
+    /**
+     * 通用「参考图字段」推断：找类型为字符串数组、名字像图片入参、且不是图片数量类参数的字段。
+     *
+     * <p>打分：名字含 input/reference/ref>含 image/img；单个字符串字段只在完全没数组候选时才考虑。
+     */
+    static String guessRefsField(Map<String, JsonNode> byName) {
+        String best = "";
+        int bestScore = 0;
+        String bestScalar = "";
+        for (Map.Entry<String, JsonNode> e : byName.entrySet()) {
+            String name = e.getKey();
+            String lower = name.toLowerCase(Locale.ROOT);
+            if (REFS_LOOKALIKE.contains(lower) || name.startsWith("output_")) {
+                continue;
+            }
+            boolean looksLikeImage = lower.contains("image") || lower.contains("img") || lower.contains("photo");
+            if (!looksLikeImage) {
+                continue;
+            }
+            boolean negative = lower.contains("negative") || lower.contains("mask") || lower.contains("disable");
+            if (negative) {
+                continue;
+            }
+            boolean isArray = "array".equals(typeOf(e.getValue()));
+            int score = 0;
+            if (lower.contains("input")) score += 4;
+            if (lower.contains("reference") || lower.contains("ref")) score += 4;
+            if (lower.equals("image_input") || lower.equals("input_image")) score += 3;
+            if (isArray) score += 2;
+            if (!isArray) score -= 1;
+            if (score > bestScore && isArray) {
+                bestScore = score;
+                best = name;
+            }
+            if (isArray && best.isEmpty()) {
+                best = name;
+            }
+            if (!isArray && bestScalar.isEmpty() && score > 0) {
+                bestScalar = name;
+            }
+        }
+        return best.isEmpty() ? bestScalar : best;
     }
 
     /**
@@ -266,19 +328,21 @@ public class ModelSchemaService {
     /** 参数分组：refs / prompt / quality / control / other（前端据此分组显示）。 */
     static String groupOf(String name) {
         String n = name.toLowerCase(Locale.ROOT);
-        if (REFS_CANDIDATES.contains(name)) {
+        if (REFS_CANDIDATES.contains(name) || n.equals("image_input") || n.equals("input_image")) {
             return "refs";
         }
-        if (n.contains("prompt") || n.equals("text") || n.equals("caption")) {
+        if (n.contains("prompt") && !n.endsWith("_prompt") && !n.endsWith("_prompts")) {
             return "prompt";
         }
         if (QUALITY_CANDIDATES.contains(name) || n.contains("quality") || n.contains("resolution")
                 || n.contains("megapixel") || n.contains("frame") || n.equals("fps")
-                || n.contains("aspect") || n.contains("format") || n.contains("size")) {
+                || n.contains("aspect") || n.contains("format") || n.contains("size")
+                || n.equals("width") || n.equals("height")) {
             return "quality";
         }
         if (n.contains("seed") || n.contains("step") || n.contains("guidance") || n.contains("safety")
-                || n.contains("go_fast") || n.equals("cfg")) {
+                || n.contains("go_fast") || n.equals("cfg")
+                || n.contains("upsampl") || n.contains("enhance")) {
             return "control";
         }
         return "other";
