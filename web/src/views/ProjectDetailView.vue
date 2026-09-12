@@ -555,14 +555,14 @@ function filteredSubjects(): PlanSubject[] {
   )
 }
 
-/** 可作为定妆照的参考图：该主体名下 + 未标主体的（界面当前点选的优先） */
+/** 可作为定妆照的参考图：**该主体名下命名的图优先**，其次界面当前点选（未命名）的图 */
 function subjectRefCandidates(name: string): string[] {
   const inPlan = (planSubjects().find((x) => x.name === name)?.refs ?? []).map((r) => r.assetId)
-  const picked = refSelected.value.filter((id) => {
-    const subj = (refSubjects.value[id] ?? '').trim()
-    return subj === '' || subj === name
-  })
-  return Array.from(new Set([...picked, ...inPlan]))
+  const named = Object.keys(refSubjects.value).filter(
+    (id) => (refSubjects.value[id] ?? '').trim() === name && refSelected.value.includes(id),
+  )
+  const unnamed = refSelected.value.filter((id) => (refSubjects.value[id] ?? '').trim() === '')
+  return Array.from(new Set([...named, ...inPlan, ...unnamed]))
 }
 /** P13：把所选参考图**直接设为定妆照**（免生成，就地生效） */
 function useRefAsPortrait(name: string): void {
@@ -772,11 +772,25 @@ const enabledSubjects = computed<PlanSubject[]>(() =>
   planSubjects().filter((s) => s.enabled !== false && (s.name ?? '').trim() !== ''),
 )
 /** 该主体显示的图：定妆照优先，其次第一张勾选素材图 */
-/** 已选主体里显示的图 = **只显示定妆照**（素材图仅作定妆参照，不作为定妆图展示） */
+/** 已选主体里显示的图 = **只显示定妆照**；图片未加载时按需拉取（否则会误显示「未定妆」） */
 function subjectThumb(sub: PlanSubject): string {
-  if (sub.portraitAssetId && galUrls.value[sub.portraitAssetId]) return galUrls.value[sub.portraitAssetId]
+  const id = sub.portraitAssetId
+  if (!id) return ''
+  const cached = galUrls.value[id] ?? thumbUrls.value[id]
+  if (cached) return cached
+  // 定妆照可能是 kind=reference（把参考图直接设为定妆照）或旧数据 kind=still，
+  // 而缩略图只会在对应 Tab 被浏览时加载 → 这里补一次按需加载
+  if (!loadTried.value.includes(id)) {
+    loadTried.value = [...loadTried.value, id]
+    void assetBlob(id).then((blob) => {
+      if (blob) galUrls.value[id] = URL.createObjectURL(blob)
+    })
+  }
   return ''
 }
+
+/** 已按需加载过的资产 id（防止重复请求） */
+const loadTried = ref<string[]>([])
 /** 主体区域（优先取该主体当前的区��输入，其次取方案里存的 region） */
 function subjectRegion(sub: PlanSubject, k: 'x' | 'y' | 'w' | 'h'): string {
   const id = sub.portraitAssetId || (sub.refs ?? []).find((x) => x.checked !== false)?.assetId || ''
