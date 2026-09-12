@@ -502,6 +502,7 @@ function subjectActions(sub: PlanSubject): Array<{ label: string; key: string; d
   return [
     { label: sub.portraitAssetId ? '换一版定妆照' : '生成定妆照', key: 'gen' },
     { label: '把最新定妆照设为锚定图', key: 'pick', disabled: !portraitsOf(sub.name).length },
+    { label: '把所选参考图设为定妆照', key: 'useRef', disabled: subjectRefCandidates(sub.name).length === 0 },
     { label: '管理别名…', key: 'alias' },
     { label: '删除该主体', key: 'del' },
   ]
@@ -511,6 +512,7 @@ function onSubjectAction(key: string, name: string): void {
   else if (key === 'pick') pickPortrait(name)
   else if (key === 'del') removeSubject(name)
   else if (key === 'alias') openAlias(name)
+  else if (key === 'useRef') useRefAsPortrait(name)
 }
 
 /** 别名管理：LLM 抽的别名可能张冠李戴（如把「浅蔷薇色纱衣女子」当成秦可卿），要能删 */
@@ -553,6 +555,31 @@ function filteredSubjects(): PlanSubject[] {
   )
 }
 
+/** 可作为定妆照的参考图：该主体名下 + 未标主体的（界面当前点选的优先） */
+function subjectRefCandidates(name: string): string[] {
+  const inPlan = (planSubjects().find((x) => x.name === name)?.refs ?? []).map((r) => r.assetId)
+  const picked = refSelected.value.filter((id) => {
+    const subj = (refSubjects.value[id] ?? '').trim()
+    return subj === '' || subj === name
+  })
+  return Array.from(new Set([...picked, ...inPlan]))
+}
+/** P13：把所选参考图**直接设为定妆照**（免生成，就地生效） */
+function useRefAsPortrait(name: string): void {
+  const cand = subjectRefCandidates(name)
+  if (!cand.length) {
+    message.warning(`先点选一张参考图（或给图填「${name}」主体名），再设为定妆照`)
+    return
+  }
+  const assetId = cand[0]
+  const ver = (planSubjects().find((x) => x.name === name)?.portraitVersion ?? 0) + 1
+  setPlanSubjects(planSubjects().map((x) => (x.name === name
+    ? { ...x, portraitAssetId: assetId, portraitVersion: ver }
+    : x)))
+  void saveSubjectMeta()
+  message.success(`已把所选参考图设为「${name}」的定妆照（v${ver}，已就地保存，无需确认）`)
+}
+
 /** 删除主体：连同它在参考图上的主体标记一起清掉（否则会残留成无主参考图） */
 function removeSubject(name: string): void {
   const target = planSubjects().find((s) => s.name === name)
@@ -578,10 +605,16 @@ async function saveSubjectMeta(): Promise<void> {
   if (!revId || !subs.length) return
   try {
     await patchSubjectMeta(workspaceId.value, projectId.value, revId,
-      subs.map((x) => ({ name: x.name, aliases: x.aliases ?? [], enabled: x.enabled !== false })))
+      subs.map((x) => ({
+        name: x.name,
+        aliases: x.aliases ?? [],
+        enabled: x.enabled !== false,
+        portraitAssetId: x.portraitAssetId ?? '',
+        portraitVersion: x.portraitVersion ?? 0,
+      })))
     // 元数据已落库 → 不置脏（避免又要求“保存 + 确认”）
     metaSyncedAt.value = Date.now()
-    message.info('主体别名/勾选已就地保存（无需重新确认）')
+    message.info('主体元数据已就地保存（别名/勾选/定妆照，无需重新确认）')
   } catch (e) {
     message.warning(e instanceof Error ? e.message : '元数据保存失败（不影响其它改动）')
   }

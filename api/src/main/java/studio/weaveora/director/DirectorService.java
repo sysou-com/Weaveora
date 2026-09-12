@@ -366,10 +366,15 @@ public class DirectorService {
                         aliases.add(v);
                     }
                 }
+                // P13：除别名/勾选，也支持「把选定参考图直接设为定妆照」——就地写 portraitAssetId/Version
+                String portraitId = in.has("portraitAssetId")
+                        ? in.path("portraitAssetId").asText("") : cur.portraitAssetId();
+                int portraitVer = in.has("portraitVersion")
+                        ? in.path("portraitVersion").asInt(cur.portraitVersion()) : cur.portraitVersion();
                 subs.set(i, new studio.weaveora.director.plan.PlanSubjects.Subject(
                         cur.name(), cur.kind(), in.has("aliases") ? aliases : cur.aliases(),
                         in.has("enabled") ? in.path("enabled").asBoolean(true) : cur.enabled(),
-                        cur.locked(), cur.refs(), cur.portraitAssetId(), cur.portraitVersion()));
+                        cur.locked(), cur.refs(), portraitId, portraitVer));
             }
         }
         studio.weaveora.director.plan.PlanSubjects.write(obj, subs);

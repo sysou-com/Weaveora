@@ -172,7 +172,7 @@ export async function patchSubjectMeta(
   workspaceId: string,
   projectId: string,
   revisionId: string,
-  subjects: Array<{ name: string; aliases?: string[]; enabled?: boolean }>,
+  subjects: Array<{ name: string; aliases?: string[]; enabled?: boolean; portraitAssetId?: string; portraitVersion?: number }>,
 ): Promise<RevisionDetail> {
   return request<RevisionDetail>(`/api/v1/projects/${projectId}/revisions/${revisionId}/subjects/meta`, {
     method: 'POST',
