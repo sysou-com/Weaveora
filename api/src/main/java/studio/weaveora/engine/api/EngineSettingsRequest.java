@@ -18,6 +18,8 @@ public record EngineSettingsRequest(
         Integer gpuServerPort,
         /** P12：全局参数（画质等），键须在模型 schema 里存在；null=不改 */
         com.fasterxml.jackson.databind.JsonNode imageParams,
-        com.fasterxml.jackson.databind.JsonNode videoParams
+        com.fasterxml.jackson.databind.JsonNode videoParams,
+        /** 网关通道：本模型单次最多参考图张数（按官方文档填，如方舟 doubao-seedream-5 = 14） */
+        Integer gatewayRefsMax
 ) {
 }

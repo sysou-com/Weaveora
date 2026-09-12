@@ -77,6 +77,17 @@ public class UserEngineSettings {
     @Column(name = "video_params")
     private com.fasterxml.jackson.databind.JsonNode videoParams;
 
+    /** 拉取模型参数说明失败的原因（有值时界面应提示“需重新刷新”，而不是继续显示旧 schema） */
+    @Column(name = "image_model_schema_error")
+    private String imageModelSchemaError;
+
+    @Column(name = "video_model_schema_error")
+    private String videoModelSchemaError;
+
+    /** 网关通道（OpenAI Images 兼容）单次最多参考图张数；0/空 = 未知 */
+    @Column(name = "gateway_refs_max")
+    private Integer gatewayRefsMax;
+
     @UpdateTimestamp
     @Column(name = "updated_at", nullable = false)
     private OffsetDateTime updatedAt;
@@ -125,6 +136,12 @@ public class UserEngineSettings {
     public void setImageParams(com.fasterxml.jackson.databind.JsonNode v) { this.imageParams = v; }
     public com.fasterxml.jackson.databind.JsonNode videoParams() { return videoParams; }
     public void setVideoParams(com.fasterxml.jackson.databind.JsonNode v) { this.videoParams = v; }
+    public String imageModelSchemaError() { return imageModelSchemaError; }
+    public void setImageModelSchemaError(String v) { this.imageModelSchemaError = v; }
+    public String videoModelSchemaError() { return videoModelSchemaError; }
+    public void setVideoModelSchemaError(String v) { this.videoModelSchemaError = v; }
+    public Integer gatewayRefsMax() { return gatewayRefsMax; }
+    public void setGatewayRefsMax(Integer v) { this.gatewayRefsMax = v; }
     public Integer gpuServerPort() { return gpuServerPort; }
     public void setGpuServerPort(Integer v) { this.gpuServerPort = v; }
 

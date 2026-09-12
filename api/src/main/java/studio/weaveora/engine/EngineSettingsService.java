@@ -60,7 +60,8 @@ public class EngineSettingsService {
                                 : java.util.Map.of("m", s.imageModelSchema().path("mapping")),
                         "params", s.imageParams() == null ? java.util.Map.of() : s.imageParams(),
                         "schemaParams", s.imageModelSchema() == null ? java.util.List.of()
-                                : s.imageModelSchema().path("params")),
+                                : s.imageModelSchema().path("params"),
+                        "refsMax", s.gatewayRefsMax() == null ? 0 : s.gatewayRefsMax()),
                 "video", java.util.Map.of(
                         "apiKey", str(AesGcm.decrypt(storeKey, s.videoCloudApiKeyCipher())),
                         "model", str(s.videoCloudModel()),
@@ -77,6 +78,7 @@ public class EngineSettingsService {
     @Transactional(readOnly = true)
     public EngineSettingsResponse toResponse(UUID userId) {
         UserEngineSettings s = load(userId);
+        this.current = s;
         String imgKey = AesGcm.decrypt(storeKey, s.imageCloudApiKeyCipher());
         String vidKey = AesGcm.decrypt(storeKey, s.videoCloudApiKeyCipher());
         boolean pwdSet = AesGcm.decrypt(storeKey, s.imageCloudPasswordCipher()) != null;
@@ -86,30 +88,72 @@ public class EngineSettingsService {
                 AesGcm.mask(imgKey), s.imageCloudUsername(), pwdSet,
                 s.videoCloudModel(), AesGcm.mask(vidKey),
                 s.gpuServerUrl(), s.gpuServerPort(),
-                s.imageModelSchema(), s.videoModelSchema(), s.imageParams(), s.videoParams());
+                fresh(true) ? s.imageModelSchema() : null,
+                fresh(false) ? s.videoModelSchema() : null,
+                s.imageParams(), s.videoParams(),
+                s.imageModelSchemaError(), s.videoModelSchemaError(), s.gatewayRefsMax());
     }
+
+    /** 网关通道（OpenAI Images 兼容）？网关不是 Replicate，无法自动拉 schema。 */
+    private static boolean isGateway(String baseUrl) {
+        return baseUrl != null && !baseUrl.isBlank();
+    }
+
+    /**
+     * 缓存的 schema 是否仍然适用于当前配置的模型。
+     *
+     * <p>换了模型但拉取失败时，旧 schema 会误导用户（实测：换成方舟模型后界面还在显示
+     * comfyui/any-comfyui-workflow 的「input_file 只收单张 / 7 个参数」）。模型名对不上就不返回。
+     */
+    private boolean fresh(boolean image) {
+        UserEngineSettings s = current;
+        if (s == null) {
+            return false;
+        }
+        com.fasterxml.jackson.databind.JsonNode sch = image ? s.imageModelSchema() : s.videoModelSchema();
+        String model = image ? s.imageCloudModel() : s.videoCloudModel();
+        if (sch == null || model == null || model.isBlank()) {
+            return false;
+        }
+        return model.trim().equals(sch.path("model").asText(""));
+    }
+
+    private UserEngineSettings current;
 
     /**
      * P12：主动刷新模型调用参数说明（配了/换了模型就该知道它认哪些参数）。
      *
-     * <p>失败只记日志不抛（保存配置不该被外部接口拖挂）；返回值里 schema 仍为旧值。
+     * <p>失败时**清空旧 schema 并记录原因**（不能让上一个模型的参数说明继续误导用户）；
+     * 网关通道（方舟等 OpenAI 兼容）不拉 Replicate schema，直接给提示。
      */
     @Transactional
     public EngineSettingsResponse refreshSchemas(UUID userId, boolean image, boolean video) {
         UserEngineSettings s = repo.findByUserId(userId).orElseGet(() -> UserEngineSettings.defaults(userId));
+        this.current = s;
         if (image && s.imageCloudModel() != null && !s.imageCloudModel().isBlank()) {
-            try {
-                var schema = schemaService.fetchReplicate(s.imageCloudModel(),
-                        AesGcm.decrypt(storeKey, s.imageCloudApiKeyCipher()));
-                if (schema != null) {
-                    s.setImageModelSchema(schema);
-                    s.setImageModelSchemaAt(java.time.OffsetDateTime.now());
-                    log.info("model schema refreshed user={} kind=image model={} params={} refsField={}",
-                            userId, s.imageCloudModel(), schema.path("params").size(),
-                            schema.path("mapping").path("refs").asText("-"));
+            if (isGateway(s.imageCloudBaseUrl())) {
+                // 网关通道（方舟等）：模型 id 不是 Replicate 模型，拉取无意义
+                s.setImageModelSchema(null);
+                s.setImageModelSchemaError("当前用的是 OpenAI Images 兼容网关通道（BaseURL 已填），"
+                        + "无法自动获取参数说明；参考图按 image 字段发送，张数上限请按官方文档填写「参考图上限」");
+            } else {
+                try {
+                    var schema = schemaService.fetchReplicate(s.imageCloudModel(),
+                            AesGcm.decrypt(storeKey, s.imageCloudApiKeyCipher()));
+                    if (schema != null) {
+                        s.setImageModelSchema(schema);
+                        s.setImageModelSchemaAt(java.time.OffsetDateTime.now());
+                        s.setImageModelSchemaError(null);
+                        log.info("model schema refreshed user={} kind=image model={} params={} refsField={}",
+                                userId, s.imageCloudModel(), schema.path("params").size(),
+                                schema.path("mapping").path("refs").asText("-"));
+                    }
+                } catch (RuntimeException e) {
+                    // 关键：失败要清空旧 schema，否则界面会用上一个模型的参数说明误导用户
+                    s.setImageModelSchema(null);
+                    s.setImageModelSchemaError(e.getMessage());
+                    log.warn("拉取图片模型参数失败 user={} model={}: {}", userId, s.imageCloudModel(), e.getMessage());
                 }
-            } catch (RuntimeException e) {
-                log.warn("拉取图片模型参数失败 user={} model={}: {}", userId, s.imageCloudModel(), e.getMessage());
             }
         }
         if (video && s.videoCloudModel() != null && !s.videoCloudModel().isBlank()) {
@@ -119,11 +163,14 @@ public class EngineSettingsService {
                 if (schema != null) {
                     s.setVideoModelSchema(schema);
                     s.setVideoModelSchemaAt(java.time.OffsetDateTime.now());
+                    s.setVideoModelSchemaError(null);
                     log.info("model schema refreshed user={} kind=video model={} params={} refsField={}",
                             userId, s.videoCloudModel(), schema.path("params").size(),
                             schema.path("mapping").path("refs").asText("-"));
                 }
             } catch (RuntimeException e) {
+                s.setVideoModelSchema(null);
+                s.setVideoModelSchemaError(e.getMessage());
                 log.warn("拉取视频模型参数失败 user={} model={}: {}", userId, s.videoCloudModel(), e.getMessage());
             }
         }
@@ -134,6 +181,7 @@ public class EngineSettingsService {
     @Transactional
     public EngineSettingsResponse update(UUID userId, EngineSettingsRequest req) {
         UserEngineSettings s = repo.findByUserId(userId).orElseGet(() -> UserEngineSettings.defaults(userId));
+        this.current = s;
         if (req.imageEngine() != null) s.setImageEngine(req.imageEngine());
         if (req.videoEngine() != null) s.setVideoEngine(req.videoEngine());
         if (req.imageCloudBaseUrl() != null) s.setImageCloudBaseUrl(req.imageCloudBaseUrl());
@@ -156,6 +204,7 @@ public class EngineSettingsService {
         if (req.videoCloudModel() != null) s.setVideoCloudModel(req.videoCloudModel());
         if (req.gpuServerUrl() != null) s.setGpuServerUrl(req.gpuServerUrl());
         if (req.gpuServerPort() != null) s.setGpuServerPort(req.gpuServerPort());
+        if (req.gatewayRefsMax() != null) s.setGatewayRefsMax(req.gatewayRefsMax() >= 0 ? req.gatewayRefsMax() : null);
         // P12：全局参数（画质等）按 schema 收口——只留该模型真认识的键，防手改坏调用
         if (req.imageParams() != null) {
             s.setImageParams(schemaService.sanitizeParams(s.imageModelSchema(), req.imageParams()));

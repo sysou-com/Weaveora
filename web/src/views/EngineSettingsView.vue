@@ -35,6 +35,10 @@ const gpuServerPort = ref<number | null>(null)
 
 // P12：模型调用参数说明 + 全局参数（画质等）
 const imageSchema = ref<ModelSchema | null>(null)
+const imageSchemaError = ref<string | null>(null)
+const gatewayRefsMax = ref<number | null>(null)
+/** 网关通道（填了 BaseURL）= 非 Replicate，无法自动拉参数说明 */
+const isGateway = computed(() => (imageCloudBaseUrl.value ?? '').trim().startsWith('http'))
 const videoSchema = ref<ModelSchema | null>(null)
 const imageParams = ref<Record<string, unknown>>({})
 const videoParams = ref<Record<string, unknown>>({})
@@ -42,6 +46,8 @@ const videoParams = ref<Record<string, unknown>>({})
 /** 后端返回的配置 → 回填本地（保存/刷新后共用） */
 function applySettings(s: EngineSettings): void {
   imageSchema.value = s.imageModelSchema ?? null
+  imageSchemaError.value = s.imageModelSchemaError ?? null
+  gatewayRefsMax.value = s.gatewayRefsMax ?? null
   videoSchema.value = s.videoModelSchema ?? null
   imageParams.value = (s.imageParams ?? {}) as Record<string, unknown>
   videoParams.value = (s.videoParams ?? {}) as Record<string, unknown>
@@ -103,6 +109,7 @@ async function save(): Promise<void> {
       gpuServerPort: gpuServerPort.value,
       imageParams: imageParams.value,
       videoParams: videoParams.value,
+      gatewayRefsMax: gatewayRefsMax.value,
     })
     message.success('已保存生成引擎配置')
     imageEngine.value = s.imageEngine
@@ -173,8 +180,26 @@ onMounted(load)
         <NFormItem label="模型名">
           <NInput v-model:value="imageCloudModel" placeholder="如 black-forest-labs/flux-2-klein-9b（留空用默认）" data-testid="img-model" />
         </NFormItem>
+        <!-- P12：网关通道（方舟等）不是 Replicate，自动拉不到参数说明 → 只提示关键信息 + 让用户填上限 -->
+        <div v-if="isGateway" class="gw-hint" data-testid="gateway-hint">
+          <p class="gw-title font-mono">网关通道（OpenAI Images 兼容）</p>
+          <p class="gw-text">
+            参考图按 <code>image</code> 字段发送（单张=字符串，多张=数组，值用 data URI）；
+            该通道无法自动获取模型参数说明，请按官方文档确认「参考图上限」并填写。
+          </p>
+          <div class="gw-row">
+            <span class="gw-label">参考图上限（张）</span>
+            <NInputNumber v-model:value="gatewayRefsMax" :min="0" :max="50" size="small"
+                          style="width: 130px" placeholder="如 14" />
+            <span class="gw-note text-secondary">超出会被自动裁剪并告警；0/空 = 用内置默认</span>
+          </div>
+          <NAlert v-if="imageSchemaError" type="warning" :show-icon="false" class="gw-alert">
+            {{ imageSchemaError }}
+          </NAlert>
+        </div>
         <!-- P12：该模型认哪些参数（参考图字段名是关键）、以及可全局调整的画质等 -->
         <ModelSchemaPanel
+          v-else
           kind="image"
           :schema="imageSchema"
           :params="imageParams"

@@ -1244,8 +1244,14 @@ async function deleteJobsSel(): Promise<void> {
   try {
     const r = await deleteJobs(workspaceId.value, projectId.value, ids)
     await queryClient.invalidateQueries({ queryKey: ['jobs'] })
+    await jobs.refetch()
     jobSel.value = []
-    message.success(`已删除 ${r.deleted} 条记录`)
+    if (r.deleted > 0) {
+      message.success(`已删除 ${r.deleted} 条记录`)
+    } else {
+      // 只有失败/已取消可删；同一位若有更旧的失败记录，删掉最新那条后列表会顶上来 → 看着像“没反应”
+      message.warning('没有记录被删除：该任务可能已被删除，或状态已不是「失败/已取消」；同一位若有更早的失败记录，会继续显示')
+    }
   } catch (e) {
     message.error(e instanceof Error ? e.message : '删除失败')
   } finally {

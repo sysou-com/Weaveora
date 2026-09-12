@@ -131,10 +131,13 @@ def generate(positive, params, cfg, timeout=300, ref_blobs=None):
     if model:
         body["model"] = model
     if ref_blobs:
-        if _is_ark(base) and len(ref_blobs) > ARK_MAX_REFS:
-            print("[cloud-image] 警告：方舟单次最多 %d 张参考图，已裁掉 %d 张"
-                  % (ARK_MAX_REFS, len(ref_blobs) - ARK_MAX_REFS), flush=True)
-            ref_blobs = ref_blobs[:ARK_MAX_REFS]
+        # 上限：优先用用户在引擎配置里按官方文档填的值（如方舟 doubao-seedream-5 = 14），
+        # 否则方舟通道用内置默认，其它网关不限制（由对方报错）
+        cap = int((cfg or {}).get("refsMax") or 0) or (ARK_MAX_REFS if _is_ark(base) else 0)
+        if cap > 0 and len(ref_blobs) > cap:
+            print("[cloud-image] 警告：本模型单次最多 %d 张参考图，已裁掉 %d 张"
+                  % (cap, len(ref_blobs) - cap), flush=True)
+            ref_blobs = ref_blobs[:cap]
         uris = [_data_uri(b) for b in ref_blobs]
         body["image"] = uris if len(uris) > 1 else uris[0]
     if _is_ark(base):

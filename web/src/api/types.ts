@@ -372,6 +372,11 @@ export interface EngineSettings {
   /** 用户全局参数（画质等） */
   imageParams: Record<string, unknown> | null
   videoParams: Record<string, unknown> | null
+  /** P12：拉取参数说明的失败原因（有值时不要显示可能过期的说明） */
+  imageModelSchemaError: string | null
+  videoModelSchemaError: string | null
+  /** P12：网关通道单次最多参考图张数（0/空=未知） */
+  gatewayRefsMax: number | null
 }
 
 /** P12：云模型 input schema 归一化结果（后端 ModelSchemaService 产出） */
@@ -417,6 +422,7 @@ export interface EngineSettingsInput {
   /** P12：全局参数（画质等），键须在模型 schema 里存在 */
   imageParams?: Record<string, unknown> | null
   videoParams?: Record<string, unknown> | null
+  gatewayRefsMax?: number | null
 }
 
 /** 统一错误体（§17）：{ code, message, traceId } */
