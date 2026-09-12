@@ -158,6 +158,26 @@ export interface PlanAudio {
 }
 
 /** 导演方案（§10.2，前后端共享 packages/schemas/director.schema.json；key 为 snake_case） */
+/** P13 剧情主体（参考图升级：勾选=参与锚定；定妆图=一致性锚定图） */
+export interface PlanSubjectRef {
+  assetId: string
+  /** false = 不作为参考（替代原来的“删除才取消”） */
+  checked?: boolean
+  region?: { x: number; y: number; w: number; h: number } | null
+}
+
+export interface PlanSubject {
+  name: string
+  kind?: 'person' | 'vehicle' | 'object' | 'scene'
+  aliases?: string[]
+  enabled?: boolean
+  locked?: boolean
+  refs?: PlanSubjectRef[]
+  /** 定妆图（由素材图生成，优先用于分镜锚定） */
+  portraitAssetId?: string
+  portraitVersion?: number
+}
+
 export interface DirectorShot {
   shot_no: number
   duration_sec: number
@@ -291,6 +311,8 @@ export interface AssetRef {
   mime: string
   width: number | null
   height: number | null
+  /** 产物快照（定妆图用它记录 subject / portrait_version） */
+  promptSnapshot?: Record<string, unknown> | null
   /** P10：产物真实时长（毫秒）—— 配音靠它对齐字幕、判定超长 */
   durationMs?: number | null
   /** P10：配音在镜内的段号（null = 非配音产物） */

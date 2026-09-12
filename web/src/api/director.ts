@@ -154,3 +154,15 @@ export async function aiGenerateMusic(
     headers: { [WORKSPACE_HEADER]: workspaceId },
   })
 }
+
+/** P13：一键抽取剧情主体（人物/载具/物件/场景）；已有主体保留、只补新的 */
+export async function extractSubjects(
+  workspaceId: string,
+  projectId: string,
+  revisionId: string,
+): Promise<{ source: string; added: string[]; subjects: Array<{ name: string; kind: string; aliases: string[] }> }> {
+  return request(`/api/v1/projects/${projectId}/revisions/${revisionId}/subjects/extract`, {
+    method: 'POST',
+    headers: { [WORKSPACE_HEADER]: workspaceId },
+  })
+}

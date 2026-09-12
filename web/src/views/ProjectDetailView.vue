@@ -27,11 +27,11 @@ import { createJobs, listJobs, cancelJob, rerunJob, retryJobs, deleteJobs, JOB_S
 import { shareProject } from '@/api/market'
 import { listAssets, uploadReference, fetchAssetBlob, deleteAssets, uploadVoiceLine, useSampleAsLineVoice, deleteVoicePreset, auditionVoicePreset } from '@/api/assets'
 import { createExport, fetchExportBlob, renderMaster, timecode } from '@/api/export'
-import { aiGenerateLines, aiGenerateMusic } from '@/api/director'
+import { aiGenerateLines, aiGenerateMusic, extractSubjects } from '@/api/director'
 import { getEngineSettings } from '@/api/engineSettings'
 import { getProject, updateProjectDuration } from '@/api/projects'
 import { listShotLocks, setShotLocks } from '@/api/shotLocks'
-import type { AssetRef, DirectorPlan, DirectorShot, JobRecord } from '@/api/types'
+import type { AssetRef, DirectorPlan, DirectorShot, JobRecord, PlanSubject, PlanSubjectRef } from '@/api/types'
 import BriefComposer from '@/components/director/BriefComposer.vue'
 import ImagePlanEditor from '@/components/director/ImagePlanEditor.vue'
 import RevisionRail from '@/components/director/RevisionRail.vue'
@@ -417,6 +417,10 @@ function shortTime(iso: string): string {
   return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
 }
 const refSelected = ref<string[]>([])
+/** P13：未勾选 = 不作为参考（默认全部参与） */
+const refUnchecked = ref<string[]>([])
+const subjectBusy = ref('')
+const portraitBusy = ref(false)
 
 /** P4 参考主体标注：assetId → 主体名（如 唐僧）；随方案 referenceAssets 落库，生成时按镜文本自动绑定 */
 const refSubjects = ref<Record<string, string>>({})
@@ -440,6 +444,99 @@ const refLibrary = computed<AssetRef[]>(() => {
   for (const a of selectedRefAssets.value) if (!known.has(a.id)) lib.push(a)
   return lib
 })
+
+/** P13：当前方案里的剧情主体（含定妆图状态） */
+function planSubjects(): PlanSubject[] {
+  const plan = draft.value
+  if (!plan) return []
+  const subs = (plan as unknown as { subjects?: PlanSubject[] }).subjects
+  return Array.isArray(subs) ? subs : []
+}
+/** 写回 plan.subjects（就地改 draft，触发脏标记） */
+function setPlanSubjects(subs: PlanSubject[]): void {
+  const plan = draft.value
+  if (!plan) return
+  ;(plan as unknown as { subjects?: PlanSubject[] }).subjects = subs
+  syncReferenceAssets()
+}
+/** 主体 → 该主体的定妆图资产（同主体多版时取最新） */
+function portraitsOf(name: string): Array<{ id: string; url?: string; width?: number | null; height?: number | null }> {
+  return (assets.data.value ?? [])
+    .filter((a) => a.kind === 'portrait' && (a.promptSnapshot as Record<string, unknown> | undefined)?.subject === name)
+    .map((a) => ({ id: a.id, url: galUrls.value[a.id], width: a.width, height: a.height }))
+}
+/** 一键生成主体（LLM 抽取；已有主体保留，只补新的） */
+async function onExtractSubjects(): Promise<void> {
+  const revId = genRevisionId()
+  if (!revId) return
+  if (dirty.value && !(await handleSave())) return
+  subjectBusy.value = 'extract'
+  try {
+    const r = await extractSubjects(workspaceId.value, projectId.value, revId)
+    const subs = planSubjects()
+    const byName = new Map(subs.map((x) => [x.name, x]))
+    for (const p of r.subjects ?? []) {
+      const old = byName.get(p.name)
+      if (old) {
+        // 已存在：只补别名，不动勾选/定妆图
+        const aliases = Array.from(new Set([...(old.aliases ?? []), ...(p.aliases ?? [])]))
+        byName.set(p.name, { ...old, aliases })
+      } else {
+        byName.set(p.name, { name: p.name, kind: (p.kind as PlanSubject['kind']) ?? 'person', aliases: p.aliases ?? [], enabled: true, locked: false, refs: [], portraitAssetId: '', portraitVersion: 0 })
+      }
+    }
+    setPlanSubjects([...byName.values()])
+    message.success(r.added?.length ? `新增主体：${r.added.join('、')}（记得确认方案）` : '没有新主体（已有列表已是最新）')
+  } catch (e) {
+    message.error(e instanceof Error ? e.message : '抽取主体失败')
+  } finally {
+    subjectBusy.value = ''
+  }
+}
+/** 主体参与锚定开关 */
+function toggleSubject(name: string, on: boolean): void {
+  setPlanSubjects(planSubjects().map((s) => (s.name === name ? { ...s, enabled: on } : s)))
+}
+/** 生成该主体的定妆图（kind=portrait） */
+async function genPortrait(name: string): Promise<void> {
+  const revId = genRevisionId()
+  if (!revId) return
+  if (dirty.value && !(await handleSave())) return
+  portraitBusy.value = true
+  try {
+    const created = await createJobs(workspaceId.value, projectId.value, {
+      revisionId: revId,
+      kind: 'portrait',
+      subject: name,
+    } as never)
+    const jobId = created[0]?.id
+    if (!jobId) throw new Error('未创建定妆图任务')
+    message.info(`「${name}」定妆图合成中…`)
+    const job = await waitJobDone(jobId, 600000)
+    if (job.state !== 'succeeded') throw new Error(job.errorMessage || `任务${job.state}`)
+    await queryClient.invalidateQueries({ queryKey: ['assets'] })
+    await queryClient.invalidateQueries({ queryKey: ['jobs'] })
+    await refreshGallery()
+    message.success(`「${name}」定妆图已生成 —— 点「选图」把它设为该主体的锚定图`)
+  } catch (e) {
+    message.error(e instanceof Error ? e.message : '生成定妆图失败')
+  } finally {
+    portraitBusy.value = false
+  }
+}
+/** 选图：把最新一版定妆图写回该主体（供分镜锚定） */
+function pickPortrait(name: string): void {
+  const list = portraitsOf(name)
+  if (!list.length) {
+    message.warning(`「${name}」还没有定妆图，先点「生成图像」`)
+    return
+  }
+  const newest = list[0]
+  setPlanSubjects(planSubjects().map((s) => (s.name === name
+    ? { ...s, portraitAssetId: newest.id, portraitVersion: (s.portraitVersion ?? 0) + 1 }
+    : s)))
+  message.success(`「${name}」已锚定最新定妆图（v${(planSubjects().find((x) => x.name === name)?.portraitVersion ?? 1)}）—— 记得确认方案后再生成分镜，否则读的是旧稿`)
+}
 
 function buildRefAssets(): Array<{
   assetId: string
@@ -469,7 +566,30 @@ function buildRefAssets(): Array<{
 
 function syncReferenceAssets(): void {
   if (!draft.value) return
-  ;(draft.value as unknown as { referenceAssets?: unknown }).referenceAssets = buildRefAssets()
+  const refs = buildRefAssets()
+  ;(draft.value as unknown as { referenceAssets?: unknown }).referenceAssets = refs
+  // P13：按主体聚合写回 subjects[]（勾选状态与定妆图一起落库）
+  const prev = planSubjects()
+  const byName = new Map(prev.map((s) => [s.name, s]))
+  const grouped = new Map<string, PlanSubjectRef[]>()
+  for (const r of refs) {
+    const key = (r.subject ?? '').trim() || '（未命名）'
+    grouped.set(key, [...(grouped.get(key) ?? []), { assetId: r.assetId, checked: !refUnchecked.value.includes(r.assetId), region: r.region ?? null }])
+  }
+  const out: PlanSubject[] = []
+  for (const [name, refsOf] of grouped) {
+    const old = byName.get(name)
+    out.push({ name, kind: old?.kind ?? 'person', aliases: old?.aliases ?? [], enabled: old?.enabled ?? true, locked: old?.locked ?? false, refs: refsOf, portraitAssetId: old?.portraitAssetId ?? '', portraitVersion: old?.portraitVersion ?? 0 })
+    byName.delete(name)
+  }
+  // 没有素材图但有定妆图/别名的主体也要保留（否则一键抽取的结果会丢）
+  for (const s of byName.values()) out.push({ ...s, refs: [] })
+  ;(draft.value as unknown as { subjects?: PlanSubject[] }).subjects = out
+}
+/** 勾选/取消某张参考图参与锚定 */
+function toggleRefChecked(id: string, on: boolean): void {
+  refUnchecked.value = on ? refUnchecked.value.filter((x) => x !== id) : [...new Set([...refUnchecked.value, id])]
+  syncReferenceAssets()
 }
 
 function setRefRegion(id: string, k: 'x' | 'y' | 'w' | 'h', v: string): void {
@@ -887,6 +1007,9 @@ function onPickFile(e: Event): void {
     }
   })()
 }
+function pruneUnchecked(): void {
+  refUnchecked.value = refUnchecked.value.filter((x) => refSelected.value.includes(x))
+}
 function toggleRef(id: string, on: boolean): void {
   if (on) {
     if (refSelected.value.length >= MAX_REFS) {
@@ -898,6 +1021,7 @@ function toggleRef(id: string, on: boolean): void {
     refSelected.value = refSelected.value.filter((x) => x !== id)
     delete refSubjects.value[id]
     delete refRegions.value[id]
+    pruneUnchecked()
   }
   syncReferenceAssets()
 }
@@ -2241,24 +2365,70 @@ const shotTotal = computed(() => {
         <div class="ref-row">
           <div class="refs-panel" data-testid="refs-panel">
             <div class="brief-head">
-              <span class="font-mono eyebrow">参考图</span>
-              <label class="upload-link" :class="{ busy: uploadingRef }">
-                <input type="file" accept="image/png,image/jpeg,image/webp" :disabled="uploadingRef" @change="onPickFile" />
-                <span v-if="uploadingRef">上传中…</span>
-                <span v-else>+ 上传</span>
-              </label>
+              <span class="font-mono eyebrow">参考图 / 剧情主体</span>
+              <div class="ref-head-ops">
+                <button type="button" class="op" :disabled="subjectBusy === 'extract' || !canEdit"
+                        data-testid="btn-extract-subjects" @click="onExtractSubjects">
+                  {{ subjectBusy === 'extract' ? '抽取中…' : '一键生成主体' }}
+                </button>
+                <label class="upload-link" :class="{ busy: uploadingRef }">
+                  <input type="file" accept="image/png,image/jpeg,image/webp" :disabled="uploadingRef" @change="onPickFile" />
+                  <span v-if="uploadingRef">上传中…</span>
+                  <span v-else>+ 上传</span>
+                </label>
+              </div>
+            </div>
+
+            <!-- P13：剧情主体列表（勾选=参与锚定；定妆图=一致性锚定图） -->
+            <div v-if="planSubjects().length" class="subj-list" data-testid="subject-list">
+              <div v-for="sub in planSubjects()" :key="sub.name" class="subj-row" :data-testid="`subj-${sub.name}`">
+                <label class="subj-check" :title="sub.enabled === false ? '未勾选 = 不参与锚定' : '参与锚定'">
+                  <input type="checkbox" :checked="sub.enabled !== false"
+                         @change="toggleSubject(sub.name, ($event.target as HTMLInputElement).checked)" />
+                </label>
+                <span class="subj-name">{{ sub.name }}</span>
+                <span v-if="sub.aliases?.length" class="subj-alias font-mono" :title="sub.aliases?.join('、')">
+                  {{ sub.aliases?.slice(0, 2).join('/') }}<template v-if="(sub.aliases?.length ?? 0) > 2">…</template>
+                </span>
+                <span :class="['subj-portrait', 'font-mono', { on: !!sub.portraitAssetId }]">
+                  {{ sub.portraitAssetId ? `定妆图 v${sub.portraitVersion ?? 1}` : '定妆图 ✗' }}
+                </span>
+                <span class="subj-refs font-mono" :title="'该主体的素材参考图张数'">
+                  {{ (sub.refs ?? []).length }} 图
+                </span>
+                <NButton size="tiny" secondary :loading="portraitBusy" :disabled="!canEdit"
+                         :data-testid="`subj-gen-${sub.name}`" title="用该主体勾选的素材图生成标准定妆图"
+                         @click="genPortrait(sub.name)">
+                  {{ sub.portraitAssetId ? '换一版' : '生成图像' }}
+                </NButton>
+                <NButton size="tiny" quaternary :disabled="!portraitsOf(sub.name).length"
+                         :data-testid="`subj-pick-${sub.name}`" title="把最新一版定妆图设为该主体的锚定图"
+                         @click="pickPortrait(sub.name)">
+                  选图
+                </NButton>
+              </div>
+              <p class="subj-hint text-secondary">
+                勾选 = 参与锚定；分镜锚定用「定妆图」优先，没有定妆图才用素材图。改动后请<b>保存并重新确认</b>，否则生成仍读旧稿。
+              </p>
             </div>
             <div v-if="refLibrary.length" class="refs-grid">
               <div
                 v-for="a in refLibrary.slice(0, 8)"
                 :key="a.id"
-                :class="['ref-thumb', { sel: refSelected.includes(a.id) }]"
-                :title="refSelected.includes(a.id) ? '点击取消' : '点击用作参考'"
+                :class="['ref-thumb', { sel: refSelected.includes(a.id), off: refUnchecked.includes(a.id) }]"
+                :title="refSelected.includes(a.id) ? '点击取消加入' : '点击用作参考'"
                 @click="toggleRef(a.id, !refSelected.includes(a.id))"
               >
                 <img v-if="thumbUrls[a.id]" :src="thumbUrls[a.id]" alt="参考图" loading="lazy" />
                 <span v-else class="ref-empty">…</span>
-                <i v-if="refSelected.includes(a.id)" class="ref-badge font-mono">REF</i>
+                <!-- P13：勾选=参与参考（未勾选视为不作为参考） -->
+                <label v-if="refSelected.includes(a.id)" class="ref-check" title="勾选=参与参考；取消勾选=不参与（不必删除）"
+                       @click.stop>
+                  <input type="checkbox" :checked="!refUnchecked.includes(a.id)"
+                         :data-testid="`ref-check-${a.id.slice(0, 8)}`"
+                         @change="toggleRefChecked(a.id, ($event.target as HTMLInputElement).checked)" />
+                </label>
+                <i v-else class="ref-badge font-mono">REF</i>
                 <span class="ref-time font-mono">{{ shortTime(a.createdAt) }}</span>
                 <button
                   v-if="a.kind === 'reference'"
@@ -2961,6 +3131,29 @@ const shotTotal = computed(() => {
 </template>
 
 <style scoped>
+.ref-head-ops { display: inline-flex; align-items: center; gap: 6px; }
+.subj-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 6px 0 8px;
+  padding: 6px 8px;
+  border: 1px solid var(--wv-line);
+  border-radius: 8px;
+  background: var(--wv-surface-sunken);
+}
+.subj-row { display: flex; align-items: center; gap: 8px; font-size: 12.5px; flex-wrap: wrap; }
+.subj-check { display: inline-flex; align-items: center; }
+.subj-name { font-weight: 500; }
+.subj-alias { font-size: 10.5px; color: var(--wv-text-4); }
+.subj-portrait { font-size: 10.5px; color: var(--wv-text-4); }
+.subj-portrait.on { color: var(--wv-success, #7BC47F); }
+.subj-refs { font-size: 10.5px; color: var(--wv-text-4); margin-right: auto; }
+.subj-hint { margin: 2px 0 0; font-size: 11px; line-height: 1.6; }
+.ref-thumb.off img { opacity: 0.35; filter: grayscale(0.7); }
+.ref-check { position: absolute; top: 4px; left: 4px; z-index: 2; }
+.ref-check input { width: 14px; height: 14px; }
+
 .studio-page {
   display: flex;
   flex-direction: column;
