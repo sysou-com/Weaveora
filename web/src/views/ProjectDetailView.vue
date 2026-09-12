@@ -473,7 +473,7 @@ function portraitsOf(name: string): Array<{ id: string; url?: string; width?: nu
 async function onExtractSubjects(): Promise<void> {
   const revId = genRevisionId()
   if (!revId) return
-  if (dirty.value && !(await handleSave())) return
+  if (!(await ensureApprovedForGenerate('AI 台词'))) return
   subjectBusy.value = 'extract'
   try {
     const r = await extractSubjects(workspaceId.value, projectId.value, revId)
@@ -637,7 +637,7 @@ function toggleSubject(name: string, on: boolean): void {
 async function genPortrait(name: string): Promise<void> {
   const revId = genRevisionId()
   if (!revId) return
-  if (dirty.value && !(await handleSave())) return
+  if (!(await ensureApprovedForGenerate('生成定妆照'))) return
   portraitBusy.value = true
   try {
     // 用界面上“当前点选的参考图”直接生成 —— 不必先保存/确认方案
@@ -1476,7 +1476,7 @@ async function startGeneration(shotNos?: number[] | null): Promise<void> {
   // P12：生成后自动切到对应 Tab（顺手解锁），否则用户看不到刚发起任务的进度
   focusJobTab('still')
   // P4：先把当前草稿（含参考图/主体标注/提示词改动）落库，再发起生成
-  if (dirty.value && !(await handleSave())) return
+  if (!(await ensureApprovedForGenerate('AI 配乐'))) return
   genBusy.value = true
   try {
     const isVideo = draft.value?.mode === 'video'
@@ -1768,7 +1768,7 @@ async function previewVoice(shotNo?: number): Promise<void> {
   }
   const revId = genRevisionId()
   if (!revId) return
-  if (dirty.value && !(await handleSave())) return
+  if (!(await ensureApprovedForGenerate('试听配音'))) return
   const plan = draft.value
   const shots = plan && isVideoPlan(plan) ? plan.shots : []
   if (!shots.length) {
@@ -1828,7 +1828,7 @@ async function previewVoice(shotNo?: number): Promise<void> {
 async function genVoiceLine(shotNo: number, lineIndex: number): Promise<void> {
   const revId = genRevisionId()
   if (!revId) return
-  if (dirty.value && !(await handleSave())) return     // 先落盘，否则服务端拿到的是旧段落
+  if (!(await ensureApprovedForGenerate('重新生成配音'))) return     // 先落盘，否则服务端拿到的是旧段落
   const rec = (detail.data.value?.shots ?? []).find((r) => r.shotNo === shotNo)
   previewBusy.value = true
   try {
@@ -1858,7 +1858,7 @@ async function genVoiceLine(shotNo: number, lineIndex: number): Promise<void> {
 async function previewVoiceLine(shotNo: number, lineIndex: number): Promise<void> {
   const revId = genRevisionId()
   if (!revId) return
-  if (dirty.value && !(await handleSave())) return
+  if (!(await ensureApprovedForGenerate('试听该条配音'))) return
   const rec = (detail.data.value?.shots ?? []).find((r) => r.shotNo === shotNo)
   previewBusy.value = true
   try {
@@ -1922,7 +1922,7 @@ async function importVoiceLine(
 async function previewBgm(): Promise<void> {
   const revId = genRevisionId()
   if (!revId) return
-  if (dirty.value && !(await handleSave())) return
+  if (!(await ensureApprovedForGenerate('试听配乐'))) return
   previewBusy.value = true
   try {
     const created = await createJobs(workspaceId.value, projectId.value, {
@@ -2528,6 +2528,7 @@ function revLabel(rev: { revisionNo: number; source: string; approved: boolean }
  *
  * @return true = 可以继续生成；false = 用户取消
  */
+/* GEN_PREFLIGHT_DONE */
 async function ensureApprovedForGenerate(action: string): Promise<boolean> {
   // 只在意“影响生成”的差异：纯元数据（别名/勾选/定妆照）已就地写到当前版本，不必打扰
   const diffs = changeSummary.value.filter((x) => !x.startsWith('（仅有'))
