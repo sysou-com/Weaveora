@@ -9,7 +9,7 @@ import {
   WandSparkles,
 } from 'lucide-vue-next'
 import { NAlert, NButton, NDropdown, NInput, NIcon, NInputNumber, NModal, NSkeleton, NTag, useDialog, useMessage } from 'naive-ui'
-import { computed, onErrorCaptured, ref, watch } from 'vue'
+import { computed, h, onErrorCaptured, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import {
@@ -1263,10 +1263,12 @@ const pickCtx = ref<{ title: string; run: (shotNos: number[] | null) => Promise<
  * 分镜多于 3 镜 → 先弹勾选窗（选部分镜还是全部，顺便可封版）；
  * ≤ 3 镜直接跑（不传 shotNos = 全部，后端会自动跳过已封版镜）。
  */
-function withShotPicker(
+async function withShotPicker(
   title: string,
   run: (shotNos: number[] | null) => Promise<void> | void,
-): void {
+): Promise<void> {
+  // P13：生成前预检（未确认改动 → 先问）
+  if (!(await ensureApprovedForGenerate(title))) return
   if (pickerShots.value.length <= 3) {
     void run(null)
     return
@@ -1649,6 +1651,7 @@ const KIND_LABEL: Record<string, string> = { still: '关键帧', clip: '运动',
 async function startVoice(shotNos?: number[] | null): Promise<void> {
   const revId = genRevisionId()
   if (!revId) return
+  if (!(await ensureApprovedForGenerate('生成配音'))) return
   focusJobTab('voice')
   if (dirty.value && !(await handleSave())) return
   genBusy.value = true
@@ -1950,6 +1953,7 @@ async function previewBgm(): Promise<void> {
 async function startBgm(): Promise<void> {
   const revId = genRevisionId()
   if (!revId) return
+  if (!(await ensureApprovedForGenerate('生成配乐'))) return
   focusJobTab('bgm')
   if (dirty.value && !(await handleSave())) return
   genBusy.value = true
@@ -2022,6 +2026,7 @@ function showMoreTl(): void {
 }
 async function doExport(): Promise<void> {
   if (!selectedRevId.value) return
+  if (!(await ensureApprovedForGenerate('导出成片包'))) return
   exportBusy.value = true
   try {
     const info = await createExport(workspaceId.value, projectId.value, selectedRevId.value)
@@ -2044,6 +2049,7 @@ async function doExport(): Promise<void> {
 const renderBusy = ref(false)
 async function doRender(): Promise<void> {
   if (!selectedRevId.value) return
+  if (!(await ensureApprovedForGenerate('渲染成片'))) return
   focusJobTab('master')
   renderBusy.value = true
   try {
@@ -2504,6 +2510,50 @@ const summaryChips = computed(() => {
 
 function revLabel(rev: { revisionNo: number; source: string; approved: boolean }): string {
   return `v${rev.revisionNo} · ${SOURCE_LABEL[rev.source] ?? rev.source}${rev.approved ? ' ✓已确认' : ''}`
+}
+
+/**
+ * P13：生成前预检（解决「忘记保存+确认，于是生成还读旧稿」的坑）。
+ *
+ * 生成永远以**已确认稿**为准；如果界面上还有未保存的改动、或当前版本尚未确认，
+ * 就在这里把差异摊给你看并让你决定：保存并确认后再生成 / 就用已确认稿生成。
+ *
+ * @return true = 可以继续生成；false = 用户取消
+ */
+async function ensureApprovedForGenerate(action: string): Promise<boolean> {
+  // 只在意“影响生成”的差异：纯元数据（别名/勾选/定妆照）已就地写到当前版本，不必打扰
+  const diffs = changeSummary.value.filter((x) => !x.startsWith('（仅有'))
+  const pending = !detApproved.value || diffs.length > 0
+  if (!pending) return true
+  return await new Promise<boolean>((resolve) => {
+    dialog.warning({
+      title: `${action}：方案有未确认的改动`,
+      content: () => h('div', { style: 'line-height:1.9;font-size:13px' }, [
+        h('p', { style: 'margin:0 0 6px' }, [
+          '生成/渲染只认**已确认稿**。当前改动：',
+          h('b', diffs.length ? diffs.join('、') : '（元数据/未保存内容）'),
+        ]),
+        h('p', { style: 'margin:0;color:#8a94a6' },
+          detApproved.value
+            ? '点「保存并确认」会先保存当前草稿，再把它设为生成基准。'
+            : '当前版本尚未确认；点「保存并确认」会把它设为生成基准。'),
+      ]),
+      positiveText: '保存并确认后生成',
+      negativeText: '用已确认稿生成',
+      onPositiveClick: async () => {
+        if (dirty.value && !(await handleSave())) {
+          resolve(false)
+          return false
+        }
+        await handleApprove()
+        resolve(true)
+        return true
+      },
+      onNegativeClick: () => resolve(true),
+      onClose: () => resolve(false),
+      onMaskClick: () => resolve(false),
+    })
+  })
 }
 
 /** P13：是否需要「确认」（当前是未确认版本，或草稿有未保存的改动） */
