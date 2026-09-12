@@ -881,7 +881,7 @@ public class JobService {
         job.succeed();
         jobs.save(job);
         metrics.jobSucceeded();
-        String kind = List.of("clip", "still", "voice", "bgm").contains(job.kind()) ? job.kind() : "still";
+        String kind = List.of("clip", "still", "voice", "bgm", "portrait").contains(job.kind()) ? job.kind() : "still";
         // 试听产物单独 kind（voice_preview/bgm_preview），避免被正式渲染/导出选中
         boolean previewJob = job.payload() != null && job.payload().path("preview").asBoolean(false);
         if (previewJob && ("voice".equals(kind) || "bgm".equals(kind))) {
@@ -1536,7 +1536,9 @@ public class JobService {
     private AssetResponse toAssetResponse(studio.weaveora.asset.domain.Asset a) {
         return new AssetResponse(a.id(), a.projectId(), a.jobId(), a.shotId(), a.shotNo(), a.kind(), a.mime(),
                 a.width(), a.height(), a.durationMs(),
-                studio.weaveora.asset.AssetService.lineIndexOf(a), a.createdAt());
+                studio.weaveora.asset.AssetService.lineIndexOf(a),
+                studio.weaveora.asset.AssetService.subjectOf(a), null,
+                studio.weaveora.asset.AssetService.snapshotKindOf(a), a.createdAt());
     }
 
     private static long randomSeed() {

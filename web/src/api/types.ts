@@ -313,6 +313,12 @@ export interface AssetRef {
   height: number | null
   /** 产物快照（定妆图用它记录 subject / portrait_version） */
   promptSnapshot?: Record<string, unknown> | null
+  /** P13：该产物对应的剧情主体（定妆图按它归类） */
+  subject?: string | null
+  /** P13：定妆图版本号 */
+  portraitVersion?: number | null
+  /** P13：快照里的产物类别（portrait=定妆图；兼容历史 kind=still） */
+  snapshotKind?: string | null
   /** P10：产物真实时长（毫秒）—— 配音靠它对齐字幕、判定超长 */
   durationMs?: number | null
   /** P10：配音在镜内的段号（null = 非配音产物） */

@@ -747,7 +747,9 @@ public class ConcatService {
     private AssetResponse toAssetResponse(Asset a) {
         return new AssetResponse(a.id(), a.projectId(), a.jobId(), a.shotId(), a.shotNo(), a.kind(), a.mime(),
                 a.width(), a.height(), a.durationMs(),
-                studio.weaveora.asset.AssetService.lineIndexOf(a), a.createdAt());
+                studio.weaveora.asset.AssetService.lineIndexOf(a),
+                studio.weaveora.asset.AssetService.subjectOf(a), null,
+                studio.weaveora.asset.AssetService.snapshotKindOf(a), a.createdAt());
     }
 
     /** 一个字幕段（镜内相对秒）。 */

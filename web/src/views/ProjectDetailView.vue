@@ -461,8 +461,10 @@ function setPlanSubjects(subs: PlanSubject[]): void {
 }
 /** 主体 → 该主体的定妆图资产（同主体多版时取最新） */
 function portraitsOf(name: string): Array<{ id: string; url?: string; width?: number | null; height?: number | null }> {
+  // 定妆图判定：接口现在会回 subject / snapshotKind（新数据 kind=portrait；老数据 kind 被写成 still，
+  // 靠 snapshotKind 兜住），因此已生成的定妆图能被「选图」正确识别
   return (assets.data.value ?? [])
-    .filter((a) => a.kind === 'portrait' && (a.promptSnapshot as Record<string, unknown> | undefined)?.subject === name)
+    .filter((a) => (a.kind === 'portrait' || a.snapshotKind === 'portrait') && a.subject === name)
     .map((a) => ({ id: a.id, url: galUrls.value[a.id], width: a.width, height: a.height }))
 }
 /** 一键生成主体（LLM 抽取；已有主体保留，只补新的） */

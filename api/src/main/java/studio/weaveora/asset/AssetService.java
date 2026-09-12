@@ -186,7 +186,33 @@ public class AssetService {
 
     private AssetResponse toResponse(Asset a) {
         return new AssetResponse(a.id(), a.projectId(), a.jobId(), a.shotId(), a.shotNo(), a.kind(), a.mime(),
-                a.width(), a.height(), a.durationMs(), lineIndexOf(a), a.createdAt());
+                a.width(), a.height(), a.durationMs(), lineIndexOf(a),
+                snapText(a, "subject"),
+                snapInt(a, "portrait_version"),
+                snapText(a, "kind"),
+                a.createdAt());
+    }
+
+    /** P13：产物的主体名（快照 subject）；非定妆图为 null。 */
+    public static String subjectOf(Asset a) {
+        return snapText(a, "subject");
+    }
+
+    /** P13：快照里的产物类别（portrait = 定妆图）；兼容历史数据 kind 被写成 still 的情况。 */
+    public static String snapshotKindOf(Asset a) {
+        return snapText(a, "kind");
+    }
+
+    /** 快照里的字符串字段（取不到返回 null）。 */
+    private static String snapText(Asset a, String field) {
+        var snap = a.promptSnapshot();
+        return snap != null && snap.hasNonNull(field) ? snap.path(field).asText("") : null;
+    }
+
+    /** 快照里的整数字段（取不到返回 null）。 */
+    private static Integer snapInt(Asset a, String field) {
+        var snap = a.promptSnapshot();
+        return snap != null && snap.hasNonNull(field) ? snap.path(field).asInt() : null;
     }
 
     /** P10：配音产物在镜内的段号（写产生它的 job payload 快照里）；非配音为空。 */

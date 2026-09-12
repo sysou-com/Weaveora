@@ -20,6 +20,15 @@ public record AssetResponse(
         Integer durationMs,
         /** P10：配音在镜内的段号（来自 prompt_snapshot.line_index）；非配音产物为空 */
         Integer lineIndex,
+        /**
+         * P13：该产物对应的剧情主体（来自 prompt_snapshot.subject）—— 定妆图靠它按主体归类。
+         * 父与子以前没暴露快照，前端**根本看不到哪张是定妆图**，于是「选图」永远灰着（实测踩过）。
+         */
+        String subject,
+        /** P13：定妆图版本号（来自 prompt_snapshot.portrait_version）；非定妆图为空 */
+        Integer portraitVersion,
+        /** P13：快照里的产物类别（portrait = 定妆图），兼容历史数据 kind 被写成 still 的情况 */
+        String snapshotKind,
         OffsetDateTime createdAt
 ) {
 }
