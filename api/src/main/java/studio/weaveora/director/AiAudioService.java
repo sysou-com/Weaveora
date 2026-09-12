@@ -120,8 +120,8 @@ public class AiAudioService {
         List<ShotLines> out = new ArrayList<>();
         // P12：AI 台词只写角色对白 —— 一个角色都没绑定时不必白调 LLM
         if (boundSubjects.isEmpty()) {
-            notes.add("本项目还没有绑定角色（在「角色音色绑定」里先加一行角色与音色）："
-                    + "AI 台词只写角色对白，因此本次未生成台词；旁白可手动新增一段。");
+            notes.add("本项目还没有绑定角色：请在「② 角色音色绑定」里点「按剧情主体补全」"
+                    + "（或「加一个角色」）后重试 —— AI 台词只写角色对白；旁白可手动新增一段。");
             return new LinesResult(llm.source(), out, notes);
         }
 

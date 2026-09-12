@@ -38,6 +38,22 @@ function commit(): void {
   emit('update:plan', props.plan)
 }
 
+/** P13：按「剧情主体」一键补全绑定行（缺哪个补哪个，默认用当前默认音色） */
+function fillFromSubjects(): void {
+  const rows = props.plan.audio?.voiceBindings
+  if (!Array.isArray(rows)) return
+  const have = new Set(rows.map((r) => (r.subject ?? '').trim()).filter(Boolean))
+  const defVoice = (props.plan.audio?.voice ?? '').trim() || props.voices?.[0]?.value || '中文女'
+  let added = 0
+  for (const name of props.knownSubjects ?? []) {
+    const n = (name ?? '').trim()
+    if (!n || have.has(n)) continue
+    rows.push({ subject: n, voice: defVoice, speed: 1 })
+    added++
+  }
+  if (added) commit()
+}
+
 function add(): void {
   rows.value.push({ subject: '', voice: props.voices[0]?.value ?? '中文女', speed: 1 })
   commit()
@@ -140,6 +156,17 @@ function usage(subject: string): number {
       <NButton size="tiny" secondary :disabled="disabled" data-testid="binding-add" @click="add">
         <template #icon><NIcon><Plus :size="12" /></NIcon></template>
         加一个角色
+      </NButton>
+      <NButton
+        v-if="(knownSubjects ?? []).length"
+        size="tiny"
+        secondary
+        data-testid="binding-fill-subjects"
+        title="把「剧情主体」里还没绑定的角色一次补齐（默认用当前默认音色）"
+        :disabled="disabled"
+        @click="fillFromSubjects"
+      >
+        按剧情主体补全
       </NButton>
       <span class="text-secondary" style="font-size: 12px">
         发音人要和分镜里的「说话人」一致才会关联；未绑定的走默认音色

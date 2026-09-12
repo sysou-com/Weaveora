@@ -74,6 +74,11 @@ void hasNarration   // 模板里作为提示用，保留导出给后续联动
 /** P8：已知角色名（角色音色绑定 ∪ 参考图主体 ∪ 分镜里的说话人）——给绑定表与分镜面板做下拉 */
 const knownSubjects = computed(() => {
   const out = new Set<string>()
+  // P13：先把「剧情主体」放进来（一键生成主体抽出的 宝玉/秦可卿 等）。
+  // 否则角色绑定表的下拉里**选不到任何角色**，而 AI 台词又提示“请先绑定角色”（自相矛盾）。
+  for (const s of (props.plan as unknown as { subjects?: Array<{ name?: string }> }).subjects ?? []) {
+    if ((s.name ?? '').trim()) out.add(String(s.name).trim())
+  }
   for (const b of props.plan.audio?.voiceBindings ?? []) {
     if ((b.subject ?? '').trim()) out.add(b.subject.trim())
   }
