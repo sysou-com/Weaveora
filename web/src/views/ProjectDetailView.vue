@@ -2440,6 +2440,8 @@ const shotTotal = computed(() => {
                 勾选 = 参与锚定；分镜锚定用「定妆图」优先，没有定妆图才用素材图。改动后请<b>保存并重新确认</b>，否则生成仍读旧稿。
               </p>
             </div>
+            <!-- 参考图：标题（在剧情主体展示框下方、参考图格子之上） -->
+            <p class="ref-group-title font-mono">参考图：</p>
             <div v-if="refLibrary.length" class="refs-grid">
               <div
                 v-for="a in refLibrary.slice(0, 8)"
@@ -2473,8 +2475,6 @@ const shotTotal = computed(() => {
 
             <!-- P13：勾选的主体（显示定妆照，名字只读，只编区域；取消勾选即从显示中移除） -->
 
-            <!-- 参考图：标题 -->
-            <p class="ref-group-title font-mono">参考图：</p>
             <!-- P12：模型一次能收几张参考图（各模型不同）——超出会被丢弃，提前提示 -->
             <p v-if="refOverModelLimit" class="ref-conflict" data-testid="ref-model-limit">
               当前图片模型「{{ modelRefHint.name }}」最多接收 {{ modelRefHint.max }} 张参考图，
@@ -2509,10 +2509,6 @@ const shotTotal = computed(() => {
               </div>
               <p v-if="!refPreviewItems.some((i) => i.region)" class="pos-empty text-secondary">尚无区域：点「自动均分」或拖动下方未设区域的条目</p>
             </div>
-            <p v-if="refPreviewItems.some((i) => !i.region)" class="pos-unset">
-              未设区域（整幅生效）：
-              <span v-for="it in refPreviewItems.filter((i) => !i.region)" :key="it.id" class="pos-chip font-mono">{{ it.label }}</span>
-            </p>
 
             <p class="ref-hint text-secondary">
               拖动色块移动、右下角拖动缩放；也可在上方「区域%」精确填写（x/y=左上角，w/h=宽高，0–100）。填了区域后，GPU(Comfy) 会按区域分别注入参考图（彻底解耦多角色）；云模型无遮罩能力，会把方位写进提示词。
