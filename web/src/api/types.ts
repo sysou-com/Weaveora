@@ -366,6 +366,39 @@ export interface EngineSettings {
   videoCloudApiKeyMask: string
   gpuServerUrl: string | null
   gpuServerPort: number | null
+  /** P12：模型调用参数说明（拉取缓存） */
+  imageModelSchema: ModelSchema | null
+  videoModelSchema: ModelSchema | null
+  /** 用户全局参数（画质等） */
+  imageParams: Record<string, unknown> | null
+  videoParams: Record<string, unknown> | null
+}
+
+/** P12：云模型 input schema 归一化结果（后端 ModelSchemaService 产出） */
+export interface ModelSchema {
+  provider: string
+  model: string
+  version: string
+  versionCreatedAt?: string
+  fetchedAt?: string
+  /** 精简调用说明：名字/类型/默认值/枚举/说明/是否可被用户改 */
+  params: ModelSchemaParam[]
+  /** 归一化参数映射（worker 按它填参）：refs/prompt/aspect/seed/width/height/negative/lastFrame… */
+  mapping: Record<string, string | number | boolean>
+  notes: string[]
+}
+
+export interface ModelSchemaParam {
+  name: string
+  type: string
+  default?: unknown
+  enum?: string[]
+  max?: number
+  maxItems?: number
+  required?: boolean
+  desc?: string
+  group?: 'refs' | 'prompt' | 'quality' | 'control' | 'other'
+  userEditable?: boolean
 }
 
 export interface EngineSettingsInput {
@@ -381,6 +414,9 @@ export interface EngineSettingsInput {
   videoCloudModel?: string | null
   gpuServerUrl?: string | null
   gpuServerPort?: number | null
+  /** P12：全局参数（画质等），键须在模型 schema 里存在 */
+  imageParams?: Record<string, unknown> | null
+  videoParams?: Record<string, unknown> | null
 }
 
 /** 统一错误体（§17）：{ code, message, traceId } */

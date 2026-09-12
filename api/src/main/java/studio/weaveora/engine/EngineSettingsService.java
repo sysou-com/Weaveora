@@ -16,12 +16,16 @@ import java.util.UUID;
 @Service
 public class EngineSettingsService {
 
+    private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(EngineSettingsService.class);
+
     private final UserEngineSettingsRepository repo;
+    private final ModelSchemaService schemaService;
     private final String storeKey;
 
-    public EngineSettingsService(UserEngineSettingsRepository repo,
+    public EngineSettingsService(UserEngineSettingsRepository repo, ModelSchemaService schemaService,
                                  @Value("${weaveora.store-key:}") String storeKey) {
         this.repo = repo;
+        this.schemaService = schemaService;
         this.storeKey = storeKey;
     }
 
@@ -49,10 +53,22 @@ public class EngineSettingsService {
                         "apiKey", str(AesGcm.decrypt(storeKey, s.imageCloudApiKeyCipher())),
                         "username", str(s.imageCloudUsername()),
                         "password", str(AesGcm.decrypt(storeKey, s.imageCloudPasswordCipher())),
-                        "model", str(s.imageCloudModel())),
+                        "model", str(s.imageCloudModel()),
+                        // P12：把 schema 归一化出的参数映射 + 用户全局参数一并下发，
+                        // worker 才能按「这个模型真正认识的字段名」填参（参考图字段名各模型不同）
+                        "mapping", s.imageModelSchema() == null ? java.util.Map.of()
+                                : java.util.Map.of("m", s.imageModelSchema().path("mapping")),
+                        "params", s.imageParams() == null ? java.util.Map.of() : s.imageParams(),
+                        "schemaParams", s.imageModelSchema() == null ? java.util.List.of()
+                                : s.imageModelSchema().path("params")),
                 "video", java.util.Map.of(
                         "apiKey", str(AesGcm.decrypt(storeKey, s.videoCloudApiKeyCipher())),
-                        "model", str(s.videoCloudModel())));
+                        "model", str(s.videoCloudModel()),
+                        "mapping", s.videoModelSchema() == null ? java.util.Map.of()
+                                : java.util.Map.of("m", s.videoModelSchema().path("mapping")),
+                        "params", s.videoParams() == null ? java.util.Map.of() : s.videoParams(),
+                        "schemaParams", s.videoModelSchema() == null ? java.util.List.of()
+                                : s.videoModelSchema().path("params")));
     }
 
     private static String str(String v) {
@@ -69,7 +85,50 @@ public class EngineSettingsService {
                 s.imageCloudBaseUrl(), s.imageCloudAuthType(), s.imageCloudModel(),
                 AesGcm.mask(imgKey), s.imageCloudUsername(), pwdSet,
                 s.videoCloudModel(), AesGcm.mask(vidKey),
-                s.gpuServerUrl(), s.gpuServerPort());
+                s.gpuServerUrl(), s.gpuServerPort(),
+                s.imageModelSchema(), s.videoModelSchema(), s.imageParams(), s.videoParams());
+    }
+
+    /**
+     * P12：主动刷新模型调用参数说明（配了/换了模型就该知道它认哪些参数）。
+     *
+     * <p>失败只记日志不抛（保存配置不该被外部接口拖挂）；返回值里 schema 仍为旧值。
+     */
+    @Transactional
+    public EngineSettingsResponse refreshSchemas(UUID userId, boolean image, boolean video) {
+        UserEngineSettings s = repo.findByUserId(userId).orElseGet(() -> UserEngineSettings.defaults(userId));
+        if (image && s.imageCloudModel() != null && !s.imageCloudModel().isBlank()) {
+            try {
+                var schema = schemaService.fetchReplicate(s.imageCloudModel(),
+                        AesGcm.decrypt(storeKey, s.imageCloudApiKeyCipher()));
+                if (schema != null) {
+                    s.setImageModelSchema(schema);
+                    s.setImageModelSchemaAt(java.time.OffsetDateTime.now());
+                    log.info("model schema refreshed user={} kind=image model={} params={} refsField={}",
+                            userId, s.imageCloudModel(), schema.path("params").size(),
+                            schema.path("mapping").path("refs").asText("-"));
+                }
+            } catch (RuntimeException e) {
+                log.warn("拉取图片模型参数失败 user={} model={}: {}", userId, s.imageCloudModel(), e.getMessage());
+            }
+        }
+        if (video && s.videoCloudModel() != null && !s.videoCloudModel().isBlank()) {
+            try {
+                var schema = schemaService.fetchReplicate(s.videoCloudModel(),
+                        AesGcm.decrypt(storeKey, s.videoCloudApiKeyCipher()));
+                if (schema != null) {
+                    s.setVideoModelSchema(schema);
+                    s.setVideoModelSchemaAt(java.time.OffsetDateTime.now());
+                    log.info("model schema refreshed user={} kind=video model={} params={} refsField={}",
+                            userId, s.videoCloudModel(), schema.path("params").size(),
+                            schema.path("mapping").path("refs").asText("-"));
+                }
+            } catch (RuntimeException e) {
+                log.warn("拉取视频模型参数失败 user={} model={}: {}", userId, s.videoCloudModel(), e.getMessage());
+            }
+        }
+        repo.save(s);
+        return toResponse(userId);
     }
 
     @Transactional
@@ -86,14 +145,29 @@ public class EngineSettingsService {
         if (req.imageCloudPassword() != null && !req.imageCloudPassword().isBlank()) {
             s.setImageCloudPasswordCipher(AesGcm.encrypt(storeKey, req.imageCloudPassword()));
         }
+        boolean imageModelChanged = req.imageCloudModel() != null
+                && !req.imageCloudModel().trim().equals(str(s.imageCloudModel()));
         if (req.imageCloudModel() != null) s.setImageCloudModel(req.imageCloudModel());
         if (req.videoCloudApiKey() != null && !req.videoCloudApiKey().isBlank()) {
             s.setVideoCloudApiKeyCipher(AesGcm.encrypt(storeKey, req.videoCloudApiKey().trim()));
         }
+        boolean videoModelChanged = req.videoCloudModel() != null
+                && !req.videoCloudModel().trim().equals(str(s.videoCloudModel()));
         if (req.videoCloudModel() != null) s.setVideoCloudModel(req.videoCloudModel());
         if (req.gpuServerUrl() != null) s.setGpuServerUrl(req.gpuServerUrl());
         if (req.gpuServerPort() != null) s.setGpuServerPort(req.gpuServerPort());
+        // P12：全局参数（画质等）按 schema 收口——只留该模型真认识的键，防手改坏调用
+        if (req.imageParams() != null) {
+            s.setImageParams(schemaService.sanitizeParams(s.imageModelSchema(), req.imageParams()));
+        }
+        if (req.videoParams() != null) {
+            s.setVideoParams(schemaService.sanitizeParams(s.videoModelSchema(), req.videoParams()));
+        }
         repo.save(s);
+        // 换了模型 → 主动拉一次它的调用说明（失败不阻塞保存）
+        if (imageModelChanged || videoModelChanged) {
+            return refreshSchemas(userId, imageModelChanged, videoModelChanged);
+        }
         return toResponse(userId);
     }
 }

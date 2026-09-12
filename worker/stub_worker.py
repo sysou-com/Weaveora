@@ -245,6 +245,7 @@ def execute_job(job):
                 vcfg = cfg.get("video") or {}
                 outs = cloud.generate_motion_via_replicate(
                     payload, vcfg.get("apiKey") or "", vcfg.get("model") or "",
+                    cfg=vcfg,
                     progress_fn=lambda p, st: _req(
                         "POST", "/internal/jobs/%s/progress" % jid,
                         {"progress": p, "stage": st}))
@@ -267,10 +268,11 @@ def execute_job(job):
                     params = payload.get("params") or {}
                     outs = cloud.replicate_image(
                         payload, icfg.get("apiKey") or "", icfg.get("model") or "",
+                        cfg=icfg,
                         progress_fn=lambda p, st: _req(
                             "POST", "/internal/jobs/%s/progress" % jid,
                             {"progress": p, "stage": st}))
-                    media = [(o[0], "image/png",
+                    media = [(o[0], o[1],
                               int(params.get("width") or 1024), int(params.get("height") or 1024), None)
                              for o in outs]
             return _complete(jid, payload, media)

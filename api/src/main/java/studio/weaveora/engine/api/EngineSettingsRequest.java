@@ -15,6 +15,9 @@ public record EngineSettingsRequest(
         String videoCloudApiKey,
         String videoCloudModel,
         String gpuServerUrl,
-        Integer gpuServerPort
+        Integer gpuServerPort,
+        /** P12：全局参数（画质等），键须在模型 schema 里存在；null=不改 */
+        com.fasterxml.jackson.databind.JsonNode imageParams,
+        com.fasterxml.jackson.databind.JsonNode videoParams
 ) {
 }

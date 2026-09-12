@@ -36,6 +36,16 @@ public class EngineSettingsController {
         return service.update(uid(request), body);
     }
 
+    /** P12：主动刷新模型调用参数说明（配/换模型后拉取；也可手动点「刷新参数说明」）。 */
+    @org.springframework.web.bind.annotation.PostMapping("/refresh-models")
+    public EngineSettingsResponse refresh(HttpServletRequest request,
+                                          @org.springframework.web.bind.annotation.RequestParam(value = "kind", required = false)
+                                          String kind) {
+        boolean image = kind == null || kind.isBlank() || "image".equals(kind);
+        boolean video = kind == null || kind.isBlank() || "video".equals(kind);
+        return service.refreshSchemas(uid(request), image, video);
+    }
+
     private UUID uid(HttpServletRequest request) {
         String uid = (String) request.getAttribute(JwtAuthFilter.ATTR_USER_ID);
         if (uid == null) {

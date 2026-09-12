@@ -13,3 +13,9 @@ export async function saveEngineSettings(input: EngineSettingsInput): Promise<En
     body: input,
   })
 }
+
+/** P12：主动刷新模型调用参数说明（配/换模型后拉取；kind 省略=图片+视频都刷） */
+export async function refreshModelSchemas(kind?: 'image' | 'video'): Promise<EngineSettings> {
+  const q = kind ? `?kind=${kind}` : ''
+  return request<EngineSettings>(`/api/v1/me/engine-settings/refresh-models${q}`, { method: 'POST' })
+}

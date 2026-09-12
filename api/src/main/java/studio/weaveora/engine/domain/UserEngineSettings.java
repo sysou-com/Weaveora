@@ -53,6 +53,30 @@ public class UserEngineSettings {
     @Column(name = "gpu_server_port")
     private Integer gpuServerPort;
 
+    // P12：模型 input schema 缓存（展示「调用说明」+ 归一化参数映射给 worker）
+    @org.hibernate.annotations.JdbcTypeCode(org.hibernate.type.SqlTypes.JSON)
+    @Column(name = "image_model_schema")
+    private com.fasterxml.jackson.databind.JsonNode imageModelSchema;
+
+    @org.hibernate.annotations.JdbcTypeCode(org.hibernate.type.SqlTypes.JSON)
+    @Column(name = "video_model_schema")
+    private com.fasterxml.jackson.databind.JsonNode videoModelSchema;
+
+    @Column(name = "image_model_schema_at")
+    private OffsetDateTime imageModelSchemaAt;
+
+    @Column(name = "video_model_schema_at")
+    private OffsetDateTime videoModelSchemaAt;
+
+    /** 用户可改的全局参数（画质等），键需在 schema 里存在 */
+    @org.hibernate.annotations.JdbcTypeCode(org.hibernate.type.SqlTypes.JSON)
+    @Column(name = "image_params")
+    private com.fasterxml.jackson.databind.JsonNode imageParams;
+
+    @org.hibernate.annotations.JdbcTypeCode(org.hibernate.type.SqlTypes.JSON)
+    @Column(name = "video_params")
+    private com.fasterxml.jackson.databind.JsonNode videoParams;
+
     @UpdateTimestamp
     @Column(name = "updated_at", nullable = false)
     private OffsetDateTime updatedAt;
@@ -89,6 +113,18 @@ public class UserEngineSettings {
     public void setVideoCloudModel(String v) { this.videoCloudModel = blankToNull(v); }
     public String gpuServerUrl() { return gpuServerUrl; }
     public void setGpuServerUrl(String v) { this.gpuServerUrl = blankToNull(v); }
+    public com.fasterxml.jackson.databind.JsonNode imageModelSchema() { return imageModelSchema; }
+    public void setImageModelSchema(com.fasterxml.jackson.databind.JsonNode v) { this.imageModelSchema = v; }
+    public com.fasterxml.jackson.databind.JsonNode videoModelSchema() { return videoModelSchema; }
+    public void setVideoModelSchema(com.fasterxml.jackson.databind.JsonNode v) { this.videoModelSchema = v; }
+    public OffsetDateTime imageModelSchemaAt() { return imageModelSchemaAt; }
+    public void setImageModelSchemaAt(OffsetDateTime v) { this.imageModelSchemaAt = v; }
+    public OffsetDateTime videoModelSchemaAt() { return videoModelSchemaAt; }
+    public void setVideoModelSchemaAt(OffsetDateTime v) { this.videoModelSchemaAt = v; }
+    public com.fasterxml.jackson.databind.JsonNode imageParams() { return imageParams; }
+    public void setImageParams(com.fasterxml.jackson.databind.JsonNode v) { this.imageParams = v; }
+    public com.fasterxml.jackson.databind.JsonNode videoParams() { return videoParams; }
+    public void setVideoParams(com.fasterxml.jackson.databind.JsonNode v) { this.videoParams = v; }
     public Integer gpuServerPort() { return gpuServerPort; }
     public void setGpuServerPort(Integer v) { this.gpuServerPort = v; }
 

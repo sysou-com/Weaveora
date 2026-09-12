@@ -5,7 +5,8 @@ import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 
 import { getEngineSettings, saveEngineSettings } from '@/api/engineSettings'
-import type { EngineKind } from '@/api/types'
+import type { EngineKind, EngineSettings, ModelSchema } from '@/api/types'
+import ModelSchemaPanel from '@/components/engine/ModelSchemaPanel.vue'
 
 const router = useRouter()
 const message = useMessage()
@@ -31,6 +32,22 @@ const videoCloudApiKeyMask = ref('')
 
 const gpuServerUrl = ref('')
 const gpuServerPort = ref<number | null>(null)
+
+// P12：模型调用参数说明 + 全局参数（画质等）
+const imageSchema = ref<ModelSchema | null>(null)
+const videoSchema = ref<ModelSchema | null>(null)
+const imageParams = ref<Record<string, unknown>>({})
+const videoParams = ref<Record<string, unknown>>({})
+
+/** 后端返回的配置 → 回填本地（保存/刷新后共用） */
+function applySettings(s: EngineSettings): void {
+  imageSchema.value = s.imageModelSchema ?? null
+  videoSchema.value = s.videoModelSchema ?? null
+  imageParams.value = (s.imageParams ?? {}) as Record<string, unknown>
+  videoParams.value = (s.videoParams ?? {}) as Record<string, unknown>
+  imageCloudModel.value = s.imageCloudModel ?? ''
+  videoCloudModel.value = s.videoCloudModel ?? ''
+}
 
 const engineOptions = [
   { label: '云 API（配置下方云服务）', value: 'cloud' },
@@ -59,6 +76,7 @@ async function load(): Promise<void> {
     videoCloudApiKeyMask.value = s.videoCloudApiKeyMask
     gpuServerUrl.value = s.gpuServerUrl ?? ''
     gpuServerPort.value = s.gpuServerPort
+    applySettings(s)
     ready.value = true
   } catch (e) {
     message.error(e instanceof Error ? e.message : '配置读取失败')
@@ -83,6 +101,8 @@ async function save(): Promise<void> {
       videoCloudModel: videoCloudModel.value || null,
       gpuServerUrl: gpuServerUrl.value || null,
       gpuServerPort: gpuServerPort.value,
+      imageParams: imageParams.value,
+      videoParams: videoParams.value,
     })
     message.success('已保存生成引擎配置')
     imageEngine.value = s.imageEngine
@@ -93,6 +113,7 @@ async function save(): Promise<void> {
     imageCloudApiKey.value = ''
     imageCloudPassword.value = ''
     videoCloudApiKey.value = ''
+    applySettings(s)   // 换模型后后端已主动拉取参数说明 → 立即展示
   } catch (e) {
     message.error(e instanceof Error ? e.message : '保存失败')
   } finally {
@@ -150,8 +171,16 @@ onMounted(load)
           </NFormItem>
         </template>
         <NFormItem label="模型名">
-          <NInput v-model:value="imageCloudModel" placeholder="如 dall-e-3 / sd-xl / 网关模型名（留空用默认）" />
+          <NInput v-model:value="imageCloudModel" placeholder="如 black-forest-labs/flux-2-klein-9b（留空用默认）" data-testid="img-model" />
         </NFormItem>
+        <!-- P12：该模型认哪些参数（参考图字段名是关键）、以及可全局调整的画质等 -->
+        <ModelSchemaPanel
+          kind="image"
+          :schema="imageSchema"
+          :params="imageParams"
+          @update:params="(v: Record<string, unknown>) => (imageParams = v)"
+          @refreshed="applySettings"
+        />
       </section>
 
       <section v-if="videoEngine === 'cloud'" class="card">
@@ -163,8 +192,15 @@ onMounted(load)
           <NInput v-model:value="videoCloudApiKey" type="password" show-password-on="click" placeholder="r8_…" data-testid="vid-key" />
         </NFormItem>
         <NFormItem label="视频模型">
-          <NInput v-model:value="videoCloudModel" placeholder="如 minimax/video-01（留空用默认）" />
+          <NInput v-model:value="videoCloudModel" placeholder="如 minimax/video-01（留空用默认）" data-testid="vid-model" />
         </NFormItem>
+        <ModelSchemaPanel
+          kind="video"
+          :schema="videoSchema"
+          :params="videoParams"
+          @update:params="(v: Record<string, unknown>) => (videoParams = v)"
+          @refreshed="applySettings"
+        />
       </section>
 
       <section class="card">

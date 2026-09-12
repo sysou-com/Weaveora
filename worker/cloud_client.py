@@ -174,9 +174,100 @@ def generate_still(payload, progress_fn=None):
     return [(data, "image/png", w, h, None)]
 
 
+# ---------- P12：按模型 schema 填参数（修「参考图字段名猜错 → 静默忽略」） ----------
+
+def _wh_for(ar, base_w=1024, base_h=1024):
+    """按画幅返回 16 的倍数宽高（给只认 width/height 的模型）。"""
+    m = {"16:9": (1280, 720), "9:16": (720, 1280), "1:1": (1024, 1024),
+         "3:2": (1152, 768), "2:3": (768, 1152)}
+    w, h = m.get(ar, (int(base_w), int(base_h)))
+    return _round64(w), _round64(h)
+
+
+def _mapping(cfg):
+    """取出 API 侧归一化好的参数映射（Java 用 Map.of("m", …) 包了一层，两种形状都兼容）。"""
+    m = (cfg or {}).get("mapping") or {}
+    if isinstance(m, dict) and isinstance(m.get("m"), dict):
+        return m["m"]
+    return m if isinstance(m, dict) else {}
+
+
+def _fields(cfg):
+    """schema 声明的参数：name -> {type,default,enum,...}（用于只发模型认识的字段）。"""
+    out = {}
+    raw = (cfg or {}).get("schemaParams")
+    if not isinstance(raw, list):
+        raw = ((cfg or {}).get("schema") or {}).get("params") or []
+    for x in raw or []:
+        if isinstance(x, dict) and x.get("name"):
+            out[x["name"]] = x
+    return out
+
+
+def _refs_spec(mapping, model, fields=None):
+    """参考图字段：优先 schema 映射；无 schema 时退回“按模型名”的保守兜底。
+
+    实测踩坑：flux-2-klein-9b 的参考图字段是 images，早期按 'flux' 猜成 input_images，
+    Replicate 对未知字段**静默忽略** → 图根本没传进去（参考图完全不生效）。
+    因此：**有 schema 就以 schema 为准，没有参考图字段就宁可不发**（不凭空造字段）。
+    返回 (field, is_array, max_items)；field=None 表示该模型不支持参考图。
+    """
+    field = (mapping.get("refs") or "").strip()
+    if field:
+        return field, bool(mapping.get("refsIsArray")), int(mapping.get("refsMax") or 0)
+    if fields:
+        return None, False, 0          # 有 schema 且没有参考图字段：不要猜
+    ml = (model or "").lower()
+    if "flux-2" in ml or "klein" in ml:
+        return "images", True, 5
+    if "nano-banana" in ml:
+        return "image_input", True, 0
+    if "flux" in ml or "kontext" in ml:
+        return "input_images", True, 0
+    return "image", False, 0
+
+
+def _put_user_params(inp, mapping, cfg, fields):
+    """合并用户全局参数（画质等）：只在 schema 认识该字段时下发，防手改坏调用。"""
+    params = (cfg or {}).get("params") or {}
+    if not isinstance(params, dict):
+        return
+    keep = set(fields.keys()) if fields else set()
+    for k, v in params.items():
+        if keep and k not in keep:
+            continue
+        if k in (mapping.get("refs"), mapping.get("prompt"), mapping.get("seed")):
+            continue          # 系统独占字段不让全局参数覆盖
+        inp[k] = v
+
+
+def _model_has(fields, name):
+    """该模型是否有这个参数字段（没 schema 时不限制）。"""
+    return bool(name) and (not fields or name in fields)
+
+
+def _sniff_image_mime(data):
+    """按字节头判断真实图片类型。
+
+    模型的 output_format 默认可能是 jpg（flux-2-klein-9b 就是），早期我们把 mime 写死成
+    image/png → 资产类型与实际字节不一致（下游预览/视频首帧会踩）。
+    """
+    if not data or len(data) < 12:
+        return "image/png"
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png"
+    if data[:2] == b"\xff\xd8":
+        return "image/jpeg"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    if data[:3] == b"GIF":
+        return "image/gif"
+    return "image/png"
+
+
 # ---------- 云图片（Replicate 通道：模型如 black-forest-labs/flux-2-pro） ----------
 
-def replicate_image(payload, token, model, progress_fn=None):
+def replicate_image(payload, token, model, progress_fn=None, cfg=None):
     """Replicate 通用 txt2img（model=owner/name 或 owner/name:version）。返回 [(bytes,'image/png',w,h,None)]。
 
     §11.6：model 为空时用测试固定版本 stability-ai/stable-diffusion:ac732df8…；
@@ -189,30 +280,40 @@ def replicate_image(payload, token, model, progress_fn=None):
                          "调试可设 WEAVEORA_REPLICATE_TEST_MODELS=1 使用 §11.6 测试模型")
     positive = payload.get("positive_prompt", "")
     params = payload.get("params") or {}
-    inp = {"prompt": positive}
+    mp = _mapping(cfg)
+    fields = _fields(cfg)
+    prompt_field = (mp.get("prompt") or "prompt").strip() or "prompt"
+    inp = {prompt_field: positive}
     # 参考图：多主体必须带全 + 保留“第 i 张=哪个主体”的映射；单图模型不得拿多图当 img2img（会整图串脸）
     refs = payload.get("referenceKeys") or []
     subjects = payload.get("referenceSubjects") or []
     primary = payload.get("primarySubject") or ""
-    ml_lower = (model or "").lower()
+    if refs:
+        refs_field, refs_is_array, refs_max = _refs_spec(mp, model, fields)
+        if not refs_field:
+            print("[cloud-image] 警告：模型 %s 的 schema 里没有参考图字段，本镜 %d 张参考图无法使用"
+                  "（人物/场景一致性会变差，建议换支持参考图的模型，如 FLUX.2 系）"
+                  % (model, len(refs)), flush=True)
+            refs = []
     if refs:
         picked_idx = list(range(len(refs)))
-        if len(refs) > 1:
+        if len(refs) > 1 and not refs_is_array:
             # 单图/img2img 系模型：只允许用“该镜主主体”对应的那张，其余不挂（避免两张脸互相带偏）
-            multi_ok = ("flux" in ml_lower) or ("kontext" in ml_lower) or ("nano-banana" in ml_lower)
-            if not multi_ok:
-                chosen = None
-                for i, s in enumerate(subjects):
-                    if primary and s == primary:
-                        chosen = i
-                        break
-                if chosen is None:
-                    chosen = 0
-                picked_idx = [chosen]
-                print("[cloud-image] 模型 %s 不支持多图，只用主主体图 idx=%d subject=%s"
-                      % (model, chosen, (subjects[chosen] if chosen < len(subjects) else "-")), flush=True)
+            chosen = None
+            for i, subj in enumerate(subjects):
+                if primary and subj == primary:
+                    chosen = i
+                    break
+            if chosen is None:
+                chosen = 0
+            picked_idx = [chosen]
+            print("[cloud-image] 模型 %s 的 %s 只收单图，只用主主体图 idx=%d subject=%s"
+                  % (model, refs_field, chosen, (subjects[chosen] if chosen < len(subjects) else "-")), flush=True)
+        if refs_max > 0 and len(picked_idx) > refs_max:
+            print("[cloud-image] 模型 %s 最多 %d 张参考图，裁到前 %d 张" % (model, refs_max, refs_max), flush=True)
+            picked_idx = picked_idx[:refs_max]
         urls = []
-        mapping = []
+        subj_map = []
         for i in picked_idx:
             try:
                 blob = _fetch_asset(refs[i])
@@ -220,29 +321,59 @@ def replicate_image(payload, token, model, progress_fn=None):
                 urls.append(u)
                 subj = subjects[i] if i < len(subjects) else ""
                 if subj:
-                    mapping.append("%d) %s" % (len(urls), subj))
+                    subj_map.append("%d) %s" % (len(urls), subj))
             except Exception as e:
                 print("[cloud-image] ref#%d 上传失败，跳过: %s" % (i, e), flush=True)
         if urls:
-            if "flux" in ml_lower or len(urls) > 1:
-                inp["input_images"] = urls
-            else:
-                inp["image"] = urls[0]
-            if len(urls) > 1 and mapping:
+            # 按 schema 给的字段名填（数组字段给全，标量字段给主主体那张）
+            inp[refs_field] = urls if refs_is_array else urls[0]
+            if len(urls) > 1 and subj_map:
                 # 把“图序→主体”写进 prompt，降低串脸
-                inp["prompt"] = "Reference images in order: " + "; ".join(mapping) + ". " + positive
-            print("[cloud-image] refs=%d subjects=%s model=%s" % (len(urls), mapping, model), flush=True)
+                inp[prompt_field] = "Reference images in order: " + "; ".join(subj_map) + ". " + positive
+            print("[cloud-image] refs=%d field=%s subjects=%s model=%s"
+                  % (len(urls), refs_field, subj_map, model), flush=True)
+        else:
+            print("[cloud-image] 警告：%d 张参考图全部上传失败，本次无参考图（一致性会变差）"
+                  % len(picked_idx), flush=True)
+    elif fields and not any(f.get("group") == "refs" for f in fields.values()):
+        print("[cloud-image] 警告：模型 %s 没有参考图字段，本镜一致性无法保证" % model, flush=True)
     ar = payload.get("aspect_ratio")
-    if (model or "").lower().startswith("stability-ai/") or "sdxl" in (model or "").lower():
+    # 尺寸/画幅/采样：有 schema 就按 schema 填；没有则走老的模型名判断
+    if fields or mp:
+        aspect_field = (mp.get("aspect") or "").strip()
+        w_field, h_field = (mp.get("width") or "").strip(), (mp.get("height") or "").strip()
+        if ar in ("16:9", "9:16", "1:1", "3:2", "2:3"):
+            if _model_has(fields, aspect_field):
+                inp[aspect_field] = ar
+            elif _model_has(fields, w_field) and _model_has(fields, h_field):
+                w, h = _wh_for(ar, int(params.get("width") or 1024), int(params.get("height") or 1024))
+                inp[w_field], inp[h_field] = w, h
+        elif _model_has(fields, w_field) and _model_has(fields, h_field):
+            inp[w_field] = _round64(params.get("width") or 1024)
+            inp[h_field] = _round64(params.get("height") or 1024)
+        neg = payload.get("negative_prompt") or ""
+        if neg and _model_has(fields, (mp.get("negative") or "").strip()):
+            inp[mp.get("negative")] = neg
+        steps_field = (mp.get("steps") or "").strip()
+        if _model_has(fields, steps_field):
+            inp[steps_field] = max(1, min(100, int(params.get("steps") or 28)))
+        cfg_field = (mp.get("cfg") or "").strip()
+        if _model_has(fields, cfg_field) and isinstance(params.get("cfg"), (int, float)):
+            inp[cfg_field] = float(params["cfg"])
+        seed_field = (mp.get("seed") or "").strip()
+        if _model_has(fields, seed_field):
+            inp[seed_field] = int(payload.get("seed") or int(time.time() % 10 ** 9))
+        _put_user_params(inp, mp, cfg, fields)   # 用户全局参数（画质等）
+    elif (model or "").lower().startswith("stability-ai/") or "sdxl" in (model or "").lower():
         # SD 系按 width/height 出图（aspect_ratio 不生效；尺寸必须为 64 倍数）
         inp["width"] = _round64(params.get("width") or 1024)
         inp["height"] = _round64(params.get("height") or 1024)
         inp["num_outputs"] = 1
         steps = int(params.get("steps") or 30)
         inp["num_inference_steps"] = max(10, min(100, steps))
-        cfg = params.get("cfg")
-        if isinstance(cfg, (int, float)):
-            inp["guidance_scale"] = float(cfg)
+        cfgv = params.get("cfg")
+        if isinstance(cfgv, (int, float)):
+            inp["guidance_scale"] = float(cfgv)
         neg = payload.get("negative_prompt") or ""
         if neg:
             inp["negative_prompt"] = neg
@@ -300,7 +431,7 @@ def replicate_image(payload, token, model, progress_fn=None):
     data = _download(url)
     w = int(params.get("width") or 1024)
     h = int(params.get("height") or 1024)
-    return [(data, "image/png", w, h, None)]
+    return [(data, _sniff_image_mime(data), w, h, None)]
 
 
 # ---------- 云视频（Replicate 通道，每用户 token/model） ----------
@@ -360,14 +491,23 @@ def _round64(v):
     return max(64, int(round(n / 64.0)) * 64)
 
 
-def _video_input(model, positive, image_url):
+def _video_input(model, positive, image_url, mapping=None, fields=None):
+    """图生视频输入：参考帧字段以 schema 为准（image / input_image / start_image …）。"""
+    mp = mapping or {}
+    prompt_field = (mp.get("prompt") or "prompt").strip() or "prompt"
     ml = (model or "").lower()
-    if "minimax" in ml:
-        return {"prompt": positive}          # minimax/video-01 文生视频
-    return {"prompt": positive, "image": image_url}  # 图生视频（默认）
+    inp = {prompt_field: positive}
+    if "minimax" in ml and not mp.get("refs"):
+        return inp                          # minimax/video-01 文生视频（无参考帧字段）
+    ref_field = (mp.get("refs") or "").strip()
+    if not ref_field:
+        ref_field = "image"                 # 无 schema 时的保守兜底（多数图生视频模型如此）
+    if image_url and _model_has(fields, ref_field):
+        inp[ref_field] = image_url
+    return inp
 
 
-def generate_motion_via_replicate(payload, token, model, progress_fn=None):
+def generate_motion_via_replicate(payload, token, model, progress_fn=None, cfg=None):
     """云视频：参考帧上传 → 模型预测 → 轮询 → 下载 mp4。返回 [(bytes,'video/mp4',w,h,None)]。
 
     §11.6 测试口径（仅 WEAVEORA_REPLICATE_TEST_MODELS=1 时生效）：model 为空 → prunaai/p-video，
@@ -385,9 +525,34 @@ def generate_motion_via_replicate(payload, token, model, progress_fn=None):
             if "minimax" not in (model or "").lower():
                 raise CloudError("参考帧上传失败: %s" % e)
     positive = payload.get("positive_prompt", "")
-    inp = _video_input(model, positive, img_url)
+    mp = _mapping(cfg)
+    fields = _fields(cfg)
+    inp = _video_input(model, positive, img_url, mp, fields)
     ml = (model or "").lower()
-    if "p-video" in ml:
+    if fields:
+        # P12：模型 schema 为准 —— 只填它真有的字段（不再按模型名猜）
+        ar = payload.get("aspect_ratio")
+        aspect_field = (mp.get("aspect") or "").strip()
+        if ar in ("16:9", "9:16", "1:1", "3:2", "2:3") and _model_has(fields, aspect_field):
+            inp[aspect_field] = ar
+        neg = payload.get("negative_prompt") or ""
+        if neg and _model_has(fields, (mp.get("negative") or "").strip()):
+            inp[mp.get("negative")] = neg
+        # 时长/帧数：README 式的 duration/frames/fps 只在 schema 里有才发
+        dur = payload.get("duration_sec")
+        if dur is not None:
+            for cand in ("duration", "duration_seconds", "seconds", "length"):
+                if _model_has(fields, cand):
+                    try:
+                        inp[cand] = max(1, min(20, int(round(float(dur)))))
+                    except (TypeError, ValueError):
+                        pass
+                    break
+        seed_field = (mp.get("seed") or "").strip()
+        if _model_has(fields, seed_field):
+            inp[seed_field] = int(payload.get("seed") or int(time.time() % 10 ** 9))
+        _put_user_params(inp, mp, cfg, fields)   # 用户全局参数（分辨率/画质等）
+    elif "p-video" in ml:
         inp["fps"] = 24
         try:
             dur = int(round(float(payload.get("duration_sec") or 5)))
@@ -415,14 +580,15 @@ def generate_motion_via_replicate(payload, token, model, progress_fn=None):
         neg = payload.get("negative_prompt") or ""
         if neg:
             inp["negative_prompt"] = neg
-    # P2 尾帧引导（双关键帧）：按模型参数名可选注入
+    # P2 尾帧引导（双关键帧）：按 schema/参数名可选注入
     tail = payload.get("tailKey")
-    if tail and VIDEO_LAST_FRAME_PARAM:
+    tail_param = (mp.get("lastFrame") or "").strip() or VIDEO_LAST_FRAME_PARAM
+    if tail and tail_param and _model_has(fields, tail_param):
         try:
             tdata = _fetch_asset(tail)
             turl = _upload_file(token, tail.split("/")[-1] or "tail.png", tdata)
-            inp[VIDEO_LAST_FRAME_PARAM] = turl
-            print("[cloud-video] last frame attached param=%s" % VIDEO_LAST_FRAME_PARAM, flush=True)
+            inp[tail_param] = turl
+            print("[cloud-video] last frame attached param=%s" % tail_param, flush=True)
         except Exception as e:
             print("[cloud-video] tailKey 上传失败，忽略: %s" % e, flush=True)
     elif tail:
