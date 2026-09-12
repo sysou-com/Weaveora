@@ -406,8 +406,20 @@ public class EngineSettingsService {
         repo.save(s);
         // 换了模型 → 主动拉一次它的调用说明（失败不阻塞保存）
         if (imageModelChanged || videoModelChanged) {
-            return refreshSchemas(userId, imageModelChanged, videoModelChanged);
+            refreshSchemas(userId, imageModelChanged, videoModelChanged);
         }
+        // P13：保存配置即入库（同 baseUrl+model 覆盖）—— 界面上不再需要「保存到模型库」按钮
+        UserEngineSettings cur = repo.findByUserId(userId).orElse(s);
+        this.current = cur;
+        if (cur.imageCloudModel() != null && !cur.imageCloudModel().isBlank()) {
+            upsertPresetInto(cur, false, cur.imageCloudBaseUrl(), cur.imageCloudModel(),
+                    presetEntry(cur, false, cur.imageCloudBaseUrl(), cur.imageCloudModel()));
+        }
+        if (cur.videoCloudModel() != null && !cur.videoCloudModel().isBlank()) {
+            upsertPresetInto(cur, true, null, cur.videoCloudModel(),
+                    presetEntry(cur, true, null, cur.videoCloudModel()));
+        }
+        repo.save(cur);
         return toResponse(userId);
     }
 }

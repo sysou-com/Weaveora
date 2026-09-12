@@ -4,7 +4,7 @@ import { NAlert, NButton, NForm, NFormItem, NIcon, NInput, NInputNumber, NRadio,
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 
-import { getEngineSettings, refreshModelPreset, saveEngineSettings, saveModelPreset } from '@/api/engineSettings'
+import { getEngineSettings, refreshModelPreset, saveEngineSettings } from '@/api/engineSettings'
 import type { EngineKind, EngineSettings, ModelPreset, ModelSchema } from '@/api/types'
 import ModelSchemaPanel from '@/components/engine/ModelSchemaPanel.vue'
 
@@ -87,43 +87,6 @@ function onPickModel(kind: 'image' | 'video', model: string): void {
     videoSchema.value = p.schema ?? null
   }
   message.success(`已载入模型「${p.model}」的配置与参数说明`)
-}
-
-/** 把当前配置存进模型库（并设为当前生效） */
-async function savePreset(kind: 'image' | 'video'): Promise<void> {
-  const model = kind === 'image' ? imageCloudModel.value : videoCloudModel.value
-  if (!model) {
-    message.warning('先填/选一个模型名')
-    return
-  }
-  presetBusy.value = true
-  try {
-    // 先把界面上的参数与网关设置落库，再存条目（条目里会带上最新参数与参数说明）
-    await saveEngineSettings({
-      imageCloudBaseUrl: kind === 'image' ? imageCloudBaseUrl.value || null : undefined,
-      imageCloudModel: kind === 'image' ? imageCloudModel.value || null : undefined,
-      videoCloudModel: kind === 'video' ? videoCloudModel.value || null : undefined,
-      imageParams: kind === 'image' ? imageParams.value : undefined,
-      videoParams: kind === 'video' ? videoParams.value : undefined,
-      gatewayRefsMax: kind === 'image' ? gatewayRefsMax.value : undefined,
-      gatewaySample: kind === 'image' ? gatewaySample.value || null : undefined,
-    })
-    const s = await saveModelPreset({
-      kind,
-      baseUrl: kind === 'image' ? imageCloudBaseUrl.value : null,
-      model,
-      params: kind === 'image' ? imageParams.value : videoParams.value,
-      gatewayRefsMax: kind === 'image' ? gatewayRefsMax.value : null,
-      gatewaySample: kind === 'image' ? gatewaySample.value : null,
-      apply: true,
-    })
-    applySettings(s)
-    message.success(`已保存到模型库：${model}`)
-  } catch (e) {
-    message.error(e instanceof Error ? e.message : '保存失败')
-  } finally {
-    presetBusy.value = false
-  }
 }
 
 /** 刷新（重新解析/拉取）某模型的参数说明 */
@@ -308,10 +271,9 @@ onMounted(load)
               data-testid="img-model"
               @update:value="(v: string | null) => { imageCloudModel = v ?? ''; if (v) onPickModel('image', v) }"
             />
-            <NButton size="small" :loading="presetBusy" data-testid="btn-save-model"
-                     @click="savePreset('image')">保存到模型库</NButton>
-            <NButton size="small" secondary :loading="presetBusy" data-testid="btn-refresh-model"
-                     @click="refreshPreset('image')">刷新参数说明</NButton>
+            <NButton size="small" secondary :loading="presetBusy" data-testid="btn-parse-sample"
+                     title="把示例请求里的字段解析成参数模板（保存配置时自动入库）"
+                     @click="refreshPreset('image')">解析参数</NButton>
           </div>
           <p v-if="imagePresets.length" class="mdl-hint text-secondary">
             库里已存：{{ imagePresets.map((p) => p.model).join('、') }}
@@ -339,10 +301,21 @@ onMounted(load)
           <NInput v-model:value="gatewaySample" type="textarea" :autosize="{ minRows: 3, maxRows: 8 }"
                   placeholder="例：curl https://ark.cn-beijing.volces.com/api/v3/images/generations -H 'Authorization: Bearer …' -d '{&quot;model&quot;:&quot;doubao-seedream-5-0-260128&quot;,&quot;prompt&quot;:&quot;a cat&quot;,&quot;image&quot;:[&quot;data:image/jpeg;base64,…&quot;],&quot;size&quot;:&quot;2K&quot;,&quot;watermark&quot;:false}'" />
           <div class="gw-row">
-            <NButton size="small" type="primary" :loading="saving" data-testid="btn-parse-sample"
-                     @click="save">保存并解析示例</NButton>
-            <span class="gw-note text-secondary">保存后自动探测网关模型信息 + 解析示例生成的参数表</span>
+            <NButton size="small" type="primary" :loading="saving" data-testid="btn-parse-sample-apply"
+                     @click="save">解析参数并保存</NButton>
+            <span class="gw-note text-secondary">
+              解析后可在下方直接改参数值；生成时会**按保存的参数模板填充**，接口未传的字段以模板为准
+            </span>
           </div>
+          <!-- 参数模板：可直接编辑值（保存配置时一起落库，供生成时填充） -->
+          <ModelSchemaPanel
+            v-if="imageSchema && imageSchema.params.length"
+            kind="image"
+            :schema="imageSchema"
+            :params="imageParams"
+            @update:params="(v: Record<string, unknown>) => (imageParams = v)"
+            @refreshed="applySettings"
+          />
 
           <NAlert v-if="imageSchemaError" type="warning" :show-icon="false" class="gw-alert">
             {{ imageSchemaError }}
@@ -397,8 +370,8 @@ onMounted(load)
               data-testid="vid-model"
               @update:value="(v: string | null) => { videoCloudModel = v ?? ''; if (v) onPickModel('video', v) }"
             />
-            <NButton size="small" :loading="presetBusy" @click="savePreset('video')">保存到模型库</NButton>
-            <NButton size="small" secondary :loading="presetBusy" @click="refreshPreset('video')">刷新参数说明</NButton>
+            <NButton size="small" secondary :loading="presetBusy" title="解析该模型的调用参数（保存配置时自动入库）"
+                     @click="refreshPreset('video')">解析参数</NButton>
           </div>
         </NFormItem>
         <ModelSchemaPanel

@@ -420,8 +420,12 @@ public class ModelSchemaService {
     /** 从 schema 里挑出「用户改过的全局参数」，只保留 schema 认识的键（防手改坏调用）。 */
     JsonNode sanitizeParams(JsonNode schema, JsonNode userParams) {
         ObjectNode out = mapper.createObjectNode();
-        if (schema == null || userParams == null || !userParams.isObject()) {
+        if (userParams == null || !userParams.isObject()) {
             return out;
+        }
+        // 网关未解析出参数表（没贴示例）时无法校验 —— 原样保留用户模板，作为调用时的默认值
+        if (schema == null || !schema.path("params").isArray() || schema.path("params").isEmpty()) {
+            return userParams.deepCopy();
         }
         JsonNode params = schema.path("params");
         for (JsonNode p : params) {
