@@ -170,6 +170,16 @@ const speedHints = computed(() => {
 /** 成片总时长 = 各镜时长之和；修改镜头时长后同步 plan.duration_sec。 */
 const totalDur = computed(() =>
   (props.plan.shots ?? []).reduce((a, s) => a + (Number(s.duration_sec) || 0), 0))
+
+// P12：逐镜的三个长列表（分镜表 / 镜头时长 / 配音时间轴）默认只展示 5 行，各自可展开
+const LIST_PAGE = 5
+const shotShown = ref(LIST_PAGE)
+const durShown = ref(LIST_PAGE)
+const ntShown = ref(LIST_PAGE)
+const allShots = computed(() => props.plan.shots ?? [])
+const visibleShots = computed(() => allShots.value.slice(0, shotShown.value))
+const visibleDurShots = computed(() => allShots.value.slice(0, durShown.value))
+const visibleNtShots = computed(() => allShots.value.slice(0, ntShown.value))
 watch(
   () => (props.plan.shots ?? []).map((s) => s.duration_sec).join(','),
   () => {
@@ -216,7 +226,7 @@ const transitions = ['cut', 'dissolve', 'fade', 'wipe'].map((v) => ({ label: v, 
       </div>
       <div class="shot-list">
         <ShotCard
-          v-for="shot in props.plan.shots"
+          v-for="shot in visibleShots"
           :key="shot.shot_no"
           :shot="shot"
           :status="statusOf(shot.shot_no)"
@@ -228,6 +238,15 @@ const transitions = ['cut', 'dissolve', 'fade', 'wipe'].map((v) => ({ label: v, 
           @approve="emit('approveShot', $event)"
           @preview-voice="emit('previewVoice', $event)"
         />
+        <button
+          v-if="allShots.length > shotShown"
+          type="button"
+          class="more-btn"
+          data-testid="btn-more-shots"
+          @click="shotShown += LIST_PAGE"
+        >
+          查看更多（余 {{ allShots.length - shotShown }} 镜）
+        </button>
       </div>
     </section>
 
@@ -259,7 +278,7 @@ const transitions = ['cut', 'dissolve', 'fade', 'wipe'].map((v) => ({ label: v, 
         逐镜调节时长后「保存方案」即生效；云端按镜头计费，短镜更省。留空镜将跳过字幕，时长需 ≥1s。
       </p>
       <div class="dur-grid">
-        <label v-for="shot in props.plan.shots" :key="shot.shot_no" class="dur-cell">
+        <label v-for="shot in visibleDurShots" :key="shot.shot_no" class="dur-cell">
           <span class="dur-no font-mono">第 {{ shot.shot_no }} 镜</span>
           <span class="dur-input">
             <NInputNumber
@@ -275,6 +294,15 @@ const transitions = ['cut', 'dissolve', 'fade', 'wipe'].map((v) => ({ label: v, 
           </span>
         </label>
       </div>
+      <button
+        v-if="allShots.length > durShown"
+        type="button"
+        class="more-btn"
+        data-testid="btn-more-durs"
+        @click="durShown += LIST_PAGE"
+      >
+        查看更多（余 {{ allShots.length - durShown }} 镜）
+      </button>
     </section>
 
     <!-- P12：声音相关全部收进一张卡片，顺序=音色 → 绑定 → 配音 → 配乐 -->
@@ -430,7 +458,7 @@ const transitions = ['cut', 'dissolve', 'fade', 'wipe'].map((v) => ({ label: v, 
       <p class="hint-line text-secondary">
         拖块改起点；旁白短于镜头就留白（不会为填满而慢放），长于镜头才建议加快语速
       </p>
-      <div v-for="shot in props.plan.shots" :key="shot.shot_no" class="nt-row">
+      <div v-for="shot in visibleNtShots" :key="shot.shot_no" class="nt-row">
         <span class="key narration-key">第 {{ shot.shot_no }} 镜</span>
         <div class="nt-slot">
           <NarrationTimeline
@@ -451,6 +479,15 @@ const transitions = ['cut', 'dissolve', 'fade', 'wipe'].map((v) => ({ label: v, 
           />
         </div>
       </div>
+      <button
+        v-if="allShots.length > ntShown"
+        type="button"
+        class="more-btn"
+        data-testid="btn-more-narrations"
+        @click="ntShown += LIST_PAGE"
+      >
+        查看更多（余 {{ allShots.length - ntShown }} 镜）
+      </button>
       </div>
 
       <div class="sub-block">
@@ -648,6 +685,24 @@ const transitions = ['cut', 'dissolve', 'fade', 'wipe'].map((v) => ({ label: v, 
   flex-wrap: wrap;
   margin: 8px 0;
 }
+/* P12：长列表的「查看更多（余 N 条）」按钮 */
+.more-btn {
+  appearance: none;
+  width: 100%;
+  margin-top: 8px;
+  padding: 6px 10px;
+  font-size: 12px;
+  color: var(--wv-text-3);
+  background: var(--wv-surface-sunken);
+  border: 1px dashed var(--wv-line);
+  border-radius: 8px;
+  cursor: pointer;
+}
+.more-btn:hover {
+  color: var(--wv-text-2);
+  border-color: var(--wv-line-strong, var(--wv-line));
+}
+
 /* ---------- P12：试听播放器（就在触发它的按钮下一行） ---------- */
 .voice-preview {
   display: flex;

@@ -634,6 +634,9 @@ async function refreshThumbs(): Promise<void> {
 }
 watch(() => [...refLibrary.value.map((a) => a.id)].join(','), () => { void refreshThumbs() }, { immediate: true })
 
+/** P12：项目详情各长列表默认只展示这么多行（分镜/镜头时长/音色绑定/配音/任务/时间线…） */
+const LIST_PAGE = 5
+
 /* ---------------- P12 任务 / 资产按类型分 Tab（避免一次刷一堆） ---------------- */
 type AudioTab = 'master' | 'voice' | 'bgm' | 'still' | 'clip' | 'all'
 /**
@@ -696,7 +699,7 @@ const galTab = ref<AudioTab>(savedTab(GAL_TAB_KEY, GAL_TABS) ?? 'master')
 function pickJobTab(t: AudioTab): void {
   jobTab.value = t
   jobTabPinned.value = true
-  jobLimit.value = 10
+  jobLimit.value = LIST_PAGE
   rememberTab(JOB_TAB_KEY, t)
 }
 function pickGalTab(t: AudioTab): void {
@@ -1001,8 +1004,8 @@ const imgCount = ref(1)
 const genBusy = ref(false)
 const cancelBusy = ref<string | null>(null)
 
-// 任务默认展示 10 条，点“查看更多”逐次再展示 10 条
-const jobLimit = ref(10)
+// P12：长列表默认只展示 5 行，点「查看更多（余 N 条）」逐次再展开 5 条
+const jobLimit = ref(LIST_PAGE)
 const filterLatest = ref(true)
 /**
  * 一个任务对应的「产物位」：**同一位同类型的重复生成才互相覆盖**。
@@ -1051,7 +1054,7 @@ const latestJobs = computed(() => {
 })
 const visibleJobs = computed(() => jobsForTab.value.slice(0, jobLimit.value))
 function showMoreJobs(): void {
-  jobLimit.value += 10
+  jobLimit.value += LIST_PAGE
 }
 
 /* ---------------- P12：任务列表按类型分 Tab（定义在上文 W4 之前，这里只用） ---------------- */
@@ -1618,11 +1621,11 @@ const exportTotalSec = computed(() => {
   return last ? last.start + last.dur : 0
 })
 const exportTotal = computed(() => timecode(exportTotalSec.value))
-// 成片时间线同样默认 10 条 + 查看更多
-const tlLimit = ref(10)
+// 成片时间线同样默认 5 条 + 查看更多
+const tlLimit = ref(LIST_PAGE)
 const visibleExportRows = computed(() => exportRows.value.slice(0, tlLimit.value))
 function showMoreTl(): void {
-  tlLimit.value += 10
+  tlLimit.value += LIST_PAGE
 }
 async function doExport(): Promise<void> {
   if (!selectedRevId.value) return

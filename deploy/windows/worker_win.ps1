@@ -16,7 +16,7 @@ $env:WEAVEORA_API_BASE = "http://127.0.0.1:18080"
 $env:WEAVEORA_COMFY_URL = "http://127.0.0.1:8188"
 $env:WEAVEORA_COMFY_FALLBACK_TXT2IMG = "0"
 $env:WEAVEORA_WORKER_NAME = "win-comfy-worker"
-$env:WEAVEORA_WORKER_TOKEN = "dev-worker-token"
+$env:WEAVEORA_WORKER_TOKEN = "yIMVaL8M35aAqsvdy2oTbqjeukM75FD-IQnuFr0OdmI"
 # P7 配乐：ACE-Step 1.5 走本机 ComfyUI 原生节点（all-in-one 权重）
 $env:WEAVEORA_MUSIC_ENGINE = "comfy"
 $env:WEAVEORA_MUSIC_CKPT_NAME = "ace_step_1.5_turbo_aio.safetensors"

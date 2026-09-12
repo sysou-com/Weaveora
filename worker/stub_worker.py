@@ -272,9 +272,8 @@ def execute_job(job):
                         progress_fn=lambda p, st: _req(
                             "POST", "/internal/jobs/%s/progress" % jid,
                             {"progress": p, "stage": st}))
-                    media = [(o[0], o[1],
-                              int(params.get("width") or 1024), int(params.get("height") or 1024), None)
-                             for o in outs]
+                    # 尺寸用云端返回的**真实**尺寸（模型可能按画幅自己定尺，如 768x1360）
+                    media = [(o[0], o[1], o[2], o[3], None) for o in outs]
             return _complete(jid, payload, media)
         except Exception as e:
             import traceback as _tb

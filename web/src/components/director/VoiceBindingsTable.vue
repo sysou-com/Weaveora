@@ -5,7 +5,7 @@
  */
 import { Delete, Plus } from 'lucide-vue-next'
 import { NButton, NIcon, NInputNumber, NSelect, NTooltip } from 'naive-ui'
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 
 import type { VideoPlan, VoiceBinding } from '@/api/types'
 
@@ -28,6 +28,11 @@ const rows = computed<VoiceBinding[]>(() => {
   if (!Array.isArray(props.plan.audio.voiceBindings)) props.plan.audio.voiceBindings = []
   return props.plan.audio.voiceBindings
 })
+
+// P12：超过 5 行只展示 5 行（行多时页面很长），点「查看更多（余 N 条）」再展开
+const LIST_PAGE = 5
+const shown = ref(LIST_PAGE)
+const visibleRows = computed(() => rows.value.slice(0, shown.value))
 
 function commit(): void {
   emit('update:plan', props.plan)
@@ -69,7 +74,7 @@ function usage(subject: string): number {
       <span class="vb-h" style="width: 108px">语速倍率</span>
       <span class="vb-h-usage" />
     </div>
-    <div v-for="(b, i) in rows" :key="i" class="vb-row">
+    <div v-for="(b, i) in visibleRows" :key="i" class="vb-row">
       <NSelect
         v-model:value="b.subject"
         size="small"
@@ -121,6 +126,16 @@ function usage(subject: string): number {
       </NButton>
     </div>
 
+    <button
+      v-if="rows.length > shown"
+      type="button"
+      class="vb-more"
+      data-testid="binding-more"
+      @click="shown += LIST_PAGE"
+    >
+      查看更多（余 {{ rows.length - shown }} 条）
+    </button>
+
     <div class="vb-bar">
       <NButton size="tiny" secondary :disabled="disabled" data-testid="binding-add" @click="add">
         <template #icon><NIcon><Plus :size="12" /></NIcon></template>
@@ -136,6 +151,17 @@ function usage(subject: string): number {
 </template>
 
 <style scoped>
+.vb-more {
+  appearance: none;
+  margin-top: 6px;
+  padding: 5px 10px;
+  font-size: 12px;
+  color: var(--wv-text-3);
+  background: var(--wv-surface-sunken);
+  border: 1px dashed var(--wv-line);
+  border-radius: 8px;
+  cursor: pointer;
+}
 .vb {
   display: flex;
   flex-direction: column;

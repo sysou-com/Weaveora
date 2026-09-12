@@ -171,17 +171,10 @@ def generate_still(payload, progress_fn=None):
     data = _download(out0)
     w = int(params.get("width") or 1024)
     h = int(params.get("height") or 1024)
-    return [(data, "image/png", w, h, None)]
+    return [(data, _sniff_image_mime(data), w, h, None)]
 
 
 # ---------- P12：按模型 schema 填参数（修「参考图字段名猜错 → 静默忽略」） ----------
-
-def _wh_for(ar, base_w=1024, base_h=1024):
-    """按画幅返回 16 的倍数宽高（给只认 width/height 的模型）。"""
-    m = {"16:9": (1280, 720), "9:16": (720, 1280), "1:1": (1024, 1024),
-         "3:2": (1152, 768), "2:3": (768, 1152)}
-    w, h = m.get(ar, (int(base_w), int(base_h)))
-    return _round64(w), _round64(h)
 
 
 def _mapping(cfg):
@@ -244,6 +237,71 @@ def _put_user_params(inp, mapping, cfg, fields):
 def _model_has(fields, name):
     """该模型是否有这个参数字段（没 schema 时不限制）。"""
     return bool(name) and (not fields or name in fields)
+
+
+def _wh_for(ar, base_w=0, base_h=0):
+    """按画幅给出生成尺寸（16 的倍数）。
+
+    **尺寸不能写死**：同一个项目里把模型从「认 aspect_ratio 的」换成「只认 width/height 的」，
+    如果这里回一张自己的硬编码表（1280x720 / 720x1280…），同一项目在不同模型间就会得到不同画幅
+    （实测：项目是 16:9 = 1280x704，硬编码却给 1280x720）。
+    因此：调用方给了尺寸（来自**项目画幅**）就用它，只在没给时才回落。
+    """
+    if base_w and base_h and int(base_w) > 0 and int(base_h) > 0:
+        return _round64(int(base_w)), _round64(int(base_h))
+    m = {"16:9": (1280, 720), "9:16": (720, 1280), "1:1": (1024, 1024),
+         "3:2": (1152, 768), "2:3": (768, 1152)}
+    w, h = m.get(ar, (1024, 1024))
+    return _round64(w), _round64(h)
+
+
+def _fit_enum_side(fields, name, want):
+    """若 schema 把尺寸写成了枚举（如 width: ["1024","1280","1920"]），挑最接近的允许值。
+
+    切换模型时这个很关键：新模型的尺寸枚举与上一个模型不同，直接发项目尺寸会被拒。
+    """
+    p = (fields or {}).get(name) or {}
+    vals = []
+    for v in (p.get("enum") or []):
+        sv = str(v)
+        if sv.isdigit():
+            vals.append(int(sv))
+    if not vals:
+        return None
+    return min(vals, key=lambda x: abs(x - int(want)))
+
+
+def _image_size(data):
+    """从图片字节里读出真实尺寸（写回资产元数据，避免记录与产物不符）。"""
+    try:
+        if data[:8] == b"\x89PNG\r\n\x1a\n":
+            return (int.from_bytes(data[16:20], "big"), int.from_bytes(data[20:24], "big"))
+        if data[:2] == b"\xff\xd8":          # JPEG：扫 SOF 段
+            i = 2
+            n = len(data)
+            while i < n - 9:
+                if data[i] != 0xFF:
+                    i += 1
+                    continue
+                m = data[i + 1]
+                if m in (0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF):
+                    h = int.from_bytes(data[i + 5:i + 7], "big")
+                    w = int.from_bytes(data[i + 7:i + 9], "big")
+                    return (w, h)
+                if m in (0xD8, 0xD9) or 0xD0 <= m <= 0xD7:
+                    i += 2
+                    continue
+                i += 2 + int.from_bytes(data[i + 2:i + 4], "big")
+            return None
+        if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+            fmt = data[12:16]
+            if fmt == b"VP8X":
+                w = int.from_bytes(data[24:27], "little") + 1
+                h = int.from_bytes(data[27:30], "little") + 1
+                return (w, h)
+    except Exception:
+        return None
+    return None
 
 
 def _sniff_image_mime(data):
@@ -346,11 +404,14 @@ def replicate_image(payload, token, model, progress_fn=None, cfg=None):
             if _model_has(fields, aspect_field):
                 inp[aspect_field] = ar
             elif _model_has(fields, w_field) and _model_has(fields, h_field):
-                w, h = _wh_for(ar, int(params.get("width") or 1024), int(params.get("height") or 1024))
-                inp[w_field], inp[h_field] = w, h
+                # 尺寸取**项目画幅**（params 里的 w/h），不写死；模型用枚举限尺寸时挑最接近的
+                pw, ph = _wh_for(ar, int(params.get("width") or 0), int(params.get("height") or 0))
+                inp[w_field] = _fit_enum_side(fields, w_field, pw) or pw
+                inp[h_field] = _fit_enum_side(fields, h_field, ph) or ph
         elif _model_has(fields, w_field) and _model_has(fields, h_field):
-            inp[w_field] = _round64(params.get("width") or 1024)
-            inp[h_field] = _round64(params.get("height") or 1024)
+            pw, ph = _wh_for("", int(params.get("width") or 1024), int(params.get("height") or 1024))
+            inp[w_field] = _fit_enum_side(fields, w_field, pw) or pw
+            inp[h_field] = _fit_enum_side(fields, h_field, ph) or ph
         neg = payload.get("negative_prompt") or ""
         if neg and _model_has(fields, (mp.get("negative") or "").strip()):
             inp[mp.get("negative")] = neg
@@ -429,9 +490,8 @@ def replicate_image(payload, token, model, progress_fn=None, cfg=None):
     if not url or not url.startswith("http"):
         raise CloudError("replicate 图片无有效输出 url（output=%s）" % str(outputs)[:120])
     data = _download(url)
-    w = int(params.get("width") or 1024)
-    h = int(params.get("height") or 1024)
-    return [(data, _sniff_image_mime(data), w, h, None)]
+    actual = _image_size(data) or (int(params.get("width") or 1024), int(params.get("height") or 1024))
+    return [(data, _sniff_image_mime(data), actual[0], actual[1], None)]
 
 
 # ---------- 云视频（Replicate 通道，每用户 token/model） ----------

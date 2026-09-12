@@ -1275,7 +1275,12 @@ public class JobService {
         payload.put("duration_sec", shot.path("duration_sec").asDouble(3));
         payload.put("fps", plan.path("edit_plan").path("fps").asInt(30));
         payload.put("seed", seed);
-        String aspect = plan.path("aspect_ratio").asText(project.aspectRatio());
+        // P12：画幅以**项目的视频格式**（竖屏/宽屏）为准 —— 不能让计划里的 aspect_ratio 覆盖，
+        // 否则同一项目换个模型/换版方案就会出不同画幅（切换模型时尤其明显）。
+        String aspect = project.aspectRatio();
+        if (aspect == null || aspect.isBlank()) {
+            aspect = plan.path("aspect_ratio").asText("16:9");
+        }
         payload.put("aspect_ratio", aspect);
         int[] dd = dimsFor(aspect);
         payload.set("params", mapper().createObjectNode().put("width", dd[0]).put("height", dd[1]));

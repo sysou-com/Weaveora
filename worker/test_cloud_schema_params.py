@@ -193,6 +193,47 @@ except Exception as e:
 finally:
     cloud_client._fetch_asset = saved_fetch
 
+print("[6] 只认 width/height 的模型：尺寸取**项目画幅**（16:9 = 1280x704），不能写死成 1280x720")
+vwh_cfg = {
+    "mapping": {"m": {"prompt": "prompt", "width": "width", "height": "height"}},
+    "schemaParams": [{"name": "prompt"}, {"name": "width"}, {"name": "height"}],
+}
+CAPTURED.clear()
+cloud_client.replicate_image(
+    {"positive_prompt": "村口老樟树", "aspect_ratio": "16:9",
+     "params": {"width": 1280, "height": 704}},          # 来自项目画幅
+    "fake-token", "acme/sdxl-like", cfg=dict(vwh_cfg))
+inp = CAPTURED[-1]["input"]
+print("   提交尺寸 =", inp.get("width"), "x", inp.get("height"))
+check("16:9 项目 → 1280x704（不写死成 1280x720）",
+      (inp.get("width"), inp.get("height")) == (1280, 704))
+
+CAPTURED.clear()
+cloud_client.replicate_image(
+    {"positive_prompt": "竖屏街景", "aspect_ratio": "9:16",
+     "params": {"width": 704, "height": 1280}},
+    "fake-token", "acme/sdxl-like", cfg=dict(vwh_cfg))
+inp = CAPTURED[-1]["input"]
+print("   提交尺寸 =", inp.get("width"), "x", inp.get("height"))
+check("9:16 项目 → 704x1280", (inp.get("width"), inp.get("height")) == (704, 1280))
+
+print("[7] 模型把尺寸写成枚举时，挑最接近的允许值")
+enum_cfg = {
+    "mapping": {"m": {"prompt": "prompt", "width": "width", "height": "height"}},
+    "schemaParams": [
+        {"name": "prompt"},
+        {"name": "width", "enum": ["1024", "1344"]},
+        {"name": "height", "enum": ["768", "1024"]},
+    ],
+}
+CAPTURED.clear()
+cloud_client.replicate_image(
+    {"positive_prompt": "x", "aspect_ratio": "16:9", "params": {"width": 1280, "height": 704}},
+    "fake-token", "acme/enum-size", cfg=dict(enum_cfg))
+inp = CAPTURED[-1]["input"]
+print("   提交尺寸 =", inp.get("width"), "x", inp.get("height"))
+check("枚举内取值", (inp.get("width"), inp.get("height")) == (1344, 768))
+
 srv.shutdown()
 print()
 print("RESULT", "PASS" if not fails else ("FAIL: " + ", ".join(fails)))
