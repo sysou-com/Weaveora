@@ -2507,7 +2507,7 @@ const shotTotal = computed(() => {
                 <span class="pos-label font-mono" :style="{ color: it.color }">{{ it.label }}</span>
                 <span class="pos-resize" @pointerdown.stop="onBoxPointerDown($event, it, 'resize')" />
               </div>
-              <p v-if="!refPreviewItems.some((i) => i.region)" class="pos-empty text-secondary">尚无区域：点「自动均分」或拖动下方未设区域的条目</p>
+              <p v-if="!refPreviewItems.some((i) => i.region)" class="pos-empty text-secondary">尚无区域：点右上「自动均分」，或拖预览框里的色块调整</p>
             </div>
 
             <p class="ref-hint text-secondary">
