@@ -22,6 +22,12 @@ $env:WEAVEORA_MUSIC_ENGINE = "comfy"
 $env:WEAVEORA_MUSIC_CKPT_NAME = "ace_step_1.5_turbo_aio.safetensors"
 # P7 配音：CosyVoice2（WSL2 :8091）。未起服务时 voice 任务会失败并给出提示。
 $env:WEAVEORA_TTS_URL = "http://127.0.0.1:8091"
+# P13 对口型：本机 LatentSync 1.6（ComfyUI-LatentSyncWrapper）工作流，见 docs/lipsync-setup.md
+$env:WEAVEORA_LIPSYNC_WORKFLOW = "D:\ComfyUI\_setup\lipsync_workflow_api.json"
+# 原生 LoadVideo 的输入键是 file（VHS_LoadVideo 才是 video）——不设会用默认 "video" 而注入失败
+$env:WEAVEORA_LIPSYNC_VIDEO_INPUT = "file"
+# 3070 Ti 8GB 实测：512x512 / 16帧一块约 75s，约 2.5 分钟/秒视频；1800s 够 5s 片段
+$env:WEAVEORA_LIPSYNC_TIMEOUT = "1800"
 
 Log "worker supervisor started (mode=comfy api=18080 comfy=8188)"
 while ($true) {

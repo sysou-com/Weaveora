@@ -13,7 +13,7 @@
 
 ## 目录
 
-0. 给实现模型的硬性指令（含 0.1 高效使用本文档）  
+0. 给实现模型的硬性指令（含 0.1 高效使用本文档 / 0.2 大文件下载铁律）  
 1. 命名与品牌  
 2. 要解决的问题  
 3. 目标用户  
@@ -70,6 +70,7 @@
 16. **禁止用同步 HTTP 堵住 API 线程等 GPU 出图。** LLM 导演方案可以同步等 ≤60s；GenerationJob 必须进 **Redis Streams 工作队列**（消费组 + 独立死信流，v1.3 裁定替代 RabbitMQ）。
 17. **ORM 锁定 Spring Data JPA。** 禁止再引入 MyBatis / MyBatis-Plus。
 18. **文档正文不锁模型/引擎的具体版本；一切模型版本走 Model Preset / 配置项（§7.8/§23），由配置决定当前最优，正文只写能力档位。**（v1.9，应对模型与软件快速迭代：2026-09 已出现 DeepSeek V4、FLUX.1-Krea、Wan 2.5/2.6/2.7 等换代，锁死版本会让文档迅速过时。）
+19. **大文件下载一律走「10 路 Range 分片 + 断点续传 + 后台静默 + 只出进度日志」，禁止任何会阻塞会话的长连接下载。** 详见 §0.2，实现模型必须逐条遵守（2026-09-13 因 `huggingface_hub.snapshot_download` 长连接把会话堵死而新增）。
 
 ### 0.1 如何高效使用本文档（实现模型必读，v2.0）
 
@@ -81,6 +82,88 @@
 4. **§33 版本沿革 / §1.2 备选名 / §32 附录为可跳过区**：前两者是历史存档，附录仅在用到负面词种子/示例 Brief 时查。
 5. **模型/引擎一律读 Model Preset 配置（§23）而非本文**：本文只写能力档位；具体版本看 Nacos/env 中 `weaveora.llm.model`、Model Preset 表，不要根据本文历史章节推断版本。
 6. **需要外部事实（模型/价格/竞争）时检索最新信息，不要依赖本文或本模型的记忆**——AI 领域按周迭代，本文已明确不锁版本（§0-18）。
+
+---
+
+### 0.2 大文件下载铁律（2026-09-13 新增，必须逐条遵守）
+
+> **事故背景**：2026-09-13 安装 LatentSync（对口型）时，节点在 `import` 阶段调用 `huggingface_hub.snapshot_download` 拉 4.7 GiB 权重。该调用在 huggingface.co 直连不可达的环境下**建立了一条不返回的长连接**，既没有分片、也没有断点、还没有进度输出，把整轮会话堵死，只能强行终止。此后**任何大文件下载都按本节执行**。
+
+**1）「大文件」定义**：单文件 ≥ 200 MiB（模型权重、数据集、镜像、安装包、音视频素材）。单文件 < 200 MiB 才允许普通 `curl -L -o`。
+
+**2）唯一允许的下载方式**：10 路 Range 分片并发 + 断点续传，统一工具 **`deploy/windows/gpu_model_downloader.js`**。
+
+```bash
+# 单文件模式：<url> <输出绝对路径> [并发数，默认 10]
+node deploy/windows/gpu_model_downloader.js "<URL>" "D:\path\to\file.bin" 10
+```
+
+它已具备：**10 个 curl 子进程**并发拉 Range 分片（真·10 进程，等价格 aria2 `-x10`）、`<file>.meta.json` 逐段 `pos` 断点（重跑自动续传）、`<file>.done` 完成标记、404 立即失败不空转、每 10s 一行进度日志、稀疏预分配。
+
+> 为什么是 curl 子进程而不是 Node `https`：`hf-mirror.com` 的 TLS 握手会让 Node `https` 挂死（`huggingface_hub` 的长连接同理），而 curl 正常；且用户明确要求「10 进程分片」。
+
+**3）禁止的下载方式**（本项目内视为违规）：
+
+| 禁止 | 原因 |
+|---|---|
+| `huggingface_hub.snapshot_download` / `hf_hub_download` | 长连接、无分片、HF 直连不可达时挂死 |
+| `modelscope.snapshot_download` | 同上（且节点自带的自动下载不可控、无进度） |
+| `git lfs clone` / `git clone` 大仓库 | 全量长连接、不可断点续传、无进度 |
+| 裸 `curl -o` / `wget` 下大文件 | 单连接、无断点（分片下载**必须**带 `Range`） |
+| 前台同步等待、`Invoke-RestMethod` 阻塞拉流 | 把会话/终端堵死 |
+| 有 `timeout` 的打包脚本里同步下载 | 超时被 kill 后留下半成品 |
+
+**4）禁止前台阻塞（本事故的直接教训）**：下载**一律后台静默启动**，启动命令必须立即返回；agent 不得等待下载进程结束。
+
+```powershell
+# 正确：后台 + 隐藏窗口 + 输出落到日志（启动即返回）
+Start-Process powershell -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File',\
+  'D:\workspace\Weaveora\deploy\windows\dl_latentsync.ps1' \
+  -WindowStyle Hidden \
+  -RedirectStandardOutput 'D:\model\_dl\<task>.log' \
+  -RedirectStandardError  'D:\model\_dl\<task>.err.log'
+```
+
+**5）日志内容硬性要求**：每 10s 至少输出一行，必须同时含 **百分比 + 文件总大小 + 已下载大小 + 实时速度**（下载器已内置），并有明确的结束标记：
+
+```
+[17:12:03] [1/1] latentsync_unet.pt  42.1%  1.99 GiB/4.72 GiB  41.3 MiB/s
+[17:15:40] [1/1] DONE latentsync_unet.pt  4.72 GiB  用时 3.7 min  均速 21.6 MiB/s
+```
+
+- 成功 = `DONE <file>` + `ALL_DONE`；失败 = `FAIL <file>: <原因>`。
+- 日志固定放 `D:\model\_dl\<task>.log`（便于回看与排障），**下载完成后不要删日志**。
+
+**6）「隔断时间提示去检查进度」——agent 义务**：下载在后台跑时，agent 必须**定期（每个后续回合至少一次，间隔 ≥ 5 分钟）**主动读一次日志并向用户播报一行摘要，格式：
+
+```
+下载进度：latentsync_unet.pt 42.1% / 4.72 GiB / 41.3 MiB/s（日志 D:\model\_dl\latentsync_dl.log）
+```
+
+不得只启动后就不管；也不得为了让用户看进度而改成前台阻塞跑。
+
+**7）可续传判定标准**：只有 **`.meta.json`（记录每段 `pos`）+ 目标文件真实字节数** 算进度。
+
+- ✅ 可续传：`<file>.meta.json` 存在，或目标文件大小 > 0 且 < 服务端总长 → 直接重跑同一命令，自动从断点继续。
+- ❌ 不可续传：`huggingface_hub` 留下的 `<...>.incomplete` / `*.lock`、0 字节占位、`path_provider` 类临时缓存 —— **一律删除重下**，它们不记录分片偏移。
+
+**8）镜像优先级（国内环境）**：
+
+| 目标 | 通道 |
+|---|---|
+| HuggingFace 权重 | **`https://aifasthub.com/...`（2026-09-13 实测：Range 206、单连接 ~1.7 MiB/s、10 进程 ~40–80 MiB/s，回源 `us.aws.cdn.hf.co`）——首选** |
+| HuggingFace 备用 | `https://gh-proxy.com/https://huggingface.co/...`（可达）；`https://hf-mirror.com`（**实测极不稳定：单连接 ~0.08 MiB/s，并发 TLS 握手会被掐掉，不要作为首选/唯一源**） |
+| ModelScope 权重 | `https://www.modelscope.cn/models/<org>/<repo>/resolve/master/<path>`（CDN 快、支持断点） |
+| GitHub 源码/节点 zip | `https://ghfast.top/https://github.com/...` |
+| PyPI 轮子 | 官方源（清华源作备选） |
+
+> 镜像可用性随域名/时段变化。**换镜像前先用 `curl -r 0-0 -D -` 核对能返回 `206` + `content-range`，并跑一次 4 MiB 测速**（`-w '%{speed_download}'`），再决定用哪个；不要盲信历史结论。
+
+`huggingface.co` 直连不可用，**禁止**在代码/脚本里写死 `huggingface.co` 作为权重来源（尤其禁止把 `hf_hub_download` / `snapshot_download` 写进节点初始化逻辑，见第 3/4 条）。
+
+**9）完成即校验**：下载器自动比对 `Content-Range` 总长并写 `<file>.done`；额外自检时用「本地字节数 == 服务端总长」，不一致就重跑（会自动续传剩余段）。
+
+**10）下载与其它任务并行**：下载是后台进程，**不要「等它跑完再干别的」**；在下载进行时继续推进其它工作，按第 6 条周期性播报进度即可。
 
 ---
 

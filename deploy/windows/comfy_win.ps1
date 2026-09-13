@@ -14,6 +14,11 @@ function Log($m) { Add-Content -Path $log -Value ("[{0}] {1}" -f (Get-Date -Form
 Log "comfy supervisor started (:8188)"
 while ($true) {
     Log "starting ComfyUI main.py --port 8188 ..."
+    # UTF-8 stdio: Windows Python defaults to GBK (cp936) and several node scripts print
+    # non-ASCII (e.g. LatentSync prints "\u2713"), which raised UnicodeEncodeError and
+    # killed ComfyUI's prompt_worker thread (2026-09-13). See Weaveora.md section 0.2.
+    $env:PYTHONUTF8 = "1"
+    $env:PYTHONIOENCODING = "utf-8"
     $p = Start-Process -FilePath $python -ArgumentList 'main.py', '--port', '8188' `
         -WorkingDirectory $dir -WindowStyle Hidden `
         -RedirectStandardOutput (Join-Path $dir "comfy.log") `

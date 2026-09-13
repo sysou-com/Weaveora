@@ -1,24 +1,34 @@
 #!/usr/bin/env node
 /**
- * Weaveora 模型批量下载器（ModelScope 国内源）
- * 特性：
- *  - 每文件 10 路 Range 并发分片
- *  - 断点续传：.meta.json 记录每段进度，中断后从断点续传
- *  - ModelScope 签名 URL 过期自动刷新（403/401/416 时重新 resolve）
- *  - 稀疏预分配目标文件（不占实写空间，NTFS 瞬时完成）
- * 用法：node download_models.js
+ * Weaveora 大文件分片下载器（10 进程 Range 分片 + 断点续传 + 进度日志）
+ *
+ * 设计要点（遵守 Weaveora.md §0.2「大文件下载铁律」）：
+ *  - 每文件 **10 个 curl 子进程**并发拉取 Range 分片（等价格 aria2 -x10）
+ *  - 断点续传：<file>.meta.json 记录每段 s/e/pos，中断后重跑自动续传
+ *  - 只用短命 Range 请求，不做任何长连接 / snapshot_download / git lfs
+ *  - 每 10s 一行进度：百分比 + 总大小 + 已下载 + 实时速度
+ *  - 完成后写 <file>.done；大小不符视为失败
+ *
+ * 为什么用 curl 子进程而不是 Node https：
+ *  hf-mirror.com 的 TLS 握手会让 Node 的 https 挂死（curl 正常），且用户要求「10 进程」。
+ *
+ * 用法：
+ *   数组模式（内置 FILES 清单）：node gpu_model_downloader.js
+ *   单文件模式：node gpu_model_downloader.js <URL> <输出绝对路径> [并发数，默认 10]
  */
 'use strict';
 const fs = require('fs');
 const fsp = fs.promises;
 const path = require('path');
-const http = require('http');
-const https = require('https');
+const { spawn } = require('child_process');
 
 const ROOT = 'D:/model';
 const THREADS = 10;
-const MAX_REDIRECT = 8;
-const UA = 'weaveora-model-dl/1.0';
+const NULL_DEV = process.platform === 'win32' ? 'NUL' : '/dev/null';
+const CURL = process.env.WEAVEORA_CURL || 'curl.exe';
+const CONNECT_TIMEOUT = 30;   // 建连超时（秒）
+const LOW_SPEED_LIMIT = 1024; // 低于 1 KiB/s 且持续 60s → curl 退出，交给外层重试
+const LOW_SPEED_TIME = 60;
 
 const FILES = [
   {
@@ -26,11 +36,11 @@ const FILES = [
     url: 'https://www.modelscope.cn/models/AI-ModelScope/stable-diffusion-xl-base-1.0/resolve/master/sd_xl_base_1.0.safetensors',
   },
   {
-    name: 'Wan2.2-TI2V-5B-FP16 (8GB显存请用 loader quantization=fp8_e4m3fn_scaled 加载转fp8)', dir: 'diffusion_models', file: 'wan2.2_ti2v_5B_fp16.safetensors',
+    name: 'Wan2.2-TI2V-5B-FP16', dir: 'diffusion_models', file: 'wan2.2_ti2v_5B_fp16.safetensors',
     url: 'https://www.modelscope.cn/models/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/master/split_files/diffusion_models/wan2.2_ti2v_5B_fp16.safetensors',
   },
   {
-    name: 'UMT5-XXL-FP8 (fp8_e4m3fn_scaled, 8GB显存推荐)', dir: 'text_encoders', file: 'umt5_xxl_fp8_e4m3fn_scaled.safetensors',
+    name: 'UMT5-XXL-FP8', dir: 'text_encoders', file: 'umt5_xxl_fp8_e4m3fn_scaled.safetensors',
     url: 'https://www.modelscope.cn/models/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/master/split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors',
   },
   {
@@ -52,59 +62,108 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 const fmt = n => (n >= 1 << 30 ? (n / (1 << 30)).toFixed(2) + ' GiB' : n >= 1 << 20 ? (n / (1 << 20)).toFixed(1) + ' MiB' : n + ' B');
 const fmtSpd = bps => bps >= 1 << 20 ? (bps / (1 << 20)).toFixed(1) + ' MiB/s' : (bps / 1024).toFixed(0) + ' KiB/s';
 
-// ---- 单次请求（手动跟随重定向） ----
-function raw(u, range) {
+// ---- 跑一次 curl，返回 { code, stdout, stderr } ----
+function runCurl(args, onStdout) {
   return new Promise((resolve, reject) => {
-    let mod;
-    try { mod = u.startsWith('https:') ? https : http; } catch (e) { return reject(e); }
-    const headers = { 'User-Agent': UA, Accept: '*/*' };
-    if (range) headers.Range = range;
-    let followed = 0;
-    const go = (url) => {
-      const m = url.startsWith('https:') ? https : http;
-      const req = m.get(url, { headers }, res => {
-        if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-          res.resume();
-          if (++followed > MAX_REDIRECT) return reject(new Error('redirect loop: ' + url));
-          return go(new URL(res.headers.location, url).href);
-        }
-        resolve({ status: res.statusCode, headers: res.headers, stream: res, url });
+    const child = spawn(CURL, args, { windowsHide: true });
+    let stdout = '', stderr = '';
+    if (child.stdout) {
+      child.stdout.on('data', d => {
+        if (onStdout) onStdout(d);
+        else if (stdout.length < 1 << 20) stdout += d.toString('latin1');
       });
-      req.on('error', reject);
-      req.setTimeout(120000, () => req.destroy(new Error('req timeout ' + url)));
-    };
-    go(u);
+    }
+    if (child.stderr) child.stderr.on('data', d => { if (stderr.length < 1 << 16) stderr += d.toString(); });
+    child.on('error', reject);
+    child.on('close', code => resolve({ code, stdout, stderr }));
   });
 }
 
-// ---- 探测最终签名 URL 与总大小（Range bytes=0-0） ----
+// ---- 探测总大小：Range bytes=0-0，解析 content-range / content-length ----
 async function probe(url) {
-  const r = await raw(url, 'bytes=0-0');
-  let total = null;
-  const cr = r.headers['content-range'];
-  if (cr) { const m = cr.match(/\/(\d+)\s*$/); if (m) total = Number(m[1]); }
-  if (total == null) total = Number(r.headers['content-length']);
-  r.stream.destroy();
-  r.stream.resume();
-  if (!total) throw new Error('probe fail: no size from ' + r.url);
-  return { finalUrl: r.url, total };
+  let lastErr = null;
+  for (let i = 1; i <= 3; i++) {
+    try {
+      const r = await runCurl([
+        '-sSL', '--connect-timeout', String(CONNECT_TIMEOUT),
+        '-r', '0-0', '-D', '-', '-o', NULL_DEV, url,
+      ]);
+      const lines = (r.stdout || '').split(/\r?\n/);
+      let total = null, ranged = false;
+      for (const line of lines) {
+        const m1 = /^content-range:\s*bytes\s+\d+-\d+\/(\d+)/i.exec(line);
+        if (m1) { total = Number(m1[1]); ranged = true; }
+      }
+      if (total == null) {
+        for (const line of lines) {
+          const m2 = /^content-length:\s*(\d+)/i.exec(line);
+          if (m2) total = Number(m2[1]);
+        }
+      }
+      if (!total) throw new Error('probe fail: no size (curl code ' + r.code + ') ' + (r.stderr || '').trim());
+      return { total, ranged };
+    } catch (e) {
+      lastErr = e;
+      log('探测失败 ' + i + '/3: ' + e.message);
+      await sleep(3000 * i);
+    }
+  }
+  throw new Error('探测 3 次均失败: ' + lastErr.message);
 }
 
-// ---- 下载单个文件 ----
-async function downloadOne(entry, index, count) {
+// ---- 单段：curl -r 从 pos 拉到 end-1，直接写进 fd 的绝对偏移 ----
+function fetchSegment(url, seg, fh, onBytes, tag) {
+  return new Promise((resolve, reject) => {
+    const args = [
+      '-sSL', '--fail', '--connect-timeout', String(CONNECT_TIMEOUT),
+      '--speed-limit', String(LOW_SPEED_LIMIT), '--speed-time', String(LOW_SPEED_TIME),
+      '-r', seg.pos + '-' + (seg.e - 1), url,
+    ];
+    const child = spawn(CURL, args, { windowsHide: true });
+    let buf = [], bufLen = 0, pending = Promise.resolve(), err = '';
+    child.stdout.on('data', d => {
+      buf.push(d); bufLen += d.length;
+      if (bufLen < 1 << 20) return;
+      const chunk = Buffer.concat(buf, bufLen);
+      buf = []; bufLen = 0;
+      const at = seg.pos;
+      seg.pos += chunk.length;
+      pending = pending.then(() => fh.write(chunk, 0, chunk.length, at)).then(() => onBytes(chunk.length));
+    });
+    child.stderr.on('data', d => { if (err.length < 1 << 14) err += d.toString(); });
+    child.on('error', reject);
+    child.on('close', async code => {
+      try {
+        if (bufLen) {
+          const chunk = Buffer.concat(buf, bufLen);
+          const at = seg.pos;
+          seg.pos += chunk.length;
+          await fh.write(chunk, 0, chunk.length, at);
+          onBytes(chunk.length);
+        }
+        await pending;
+      } catch (e) { return reject(e); }
+      if (code !== 0) return reject(new Error('curl exit ' + code + ' ' + err.trim().slice(0, 200)));
+      resolve();
+    });
+  });
+}
+
+async function downloadOne(entry, index, count, threads) {
   const out = entry.out;
   const metaPath = out + '.meta.json';
   const donePath = out + '.done';
-  const dir = path.dirname(out);
-  await fsp.mkdir(dir, { recursive: true });
+  await fsp.mkdir(path.dirname(out), { recursive: true });
 
-  // 已完整下载（有 .done 标记）
   if (fs.existsSync(donePath)) {
-    const want = fs.readFileSync(donePath, 'utf8');
-    try { if (fs.statSync(out).size === Number(want)) { log(`[${index + 1}/${count}] SKIP(已完成) ${entry.file} (${fmt(Number(want))})`); return; } } catch (e) {}
+    try {
+      if (fs.statSync(out).size === Number(fs.readFileSync(donePath, 'utf8'))) {
+        log(`[${index + 1}/${count}] SKIP(已完成) ${entry.file} (${fmt(fs.statSync(out).size)})`);
+        return;
+      }
+    } catch (e) {}
   }
 
-  // 载入或新建 meta
   let meta = null;
   if (fs.existsSync(metaPath)) {
     try { meta = JSON.parse(fs.readFileSync(metaPath, 'utf8')); } catch (e) { meta = null; }
@@ -112,16 +171,22 @@ async function downloadOne(entry, index, count) {
   if (!meta || !meta.total) {
     log(`[${index + 1}/${count}] ${entry.file} 探测大小…`);
     const p = await probe(entry.url);
-    meta = { url: entry.url, finalUrl: p.finalUrl, total: p.total, refresh: 0, segs: null };
+    meta = { url: entry.url, total: p.total, ranged: p.ranged, segs: null };
   }
-  // 若目标已存在且等于 total 且无 meta 残留成功（历史文件）→ 标 done
-  try { if (fs.statSync(out).size === meta.total) { fs.writeFileSync(donePath, String(meta.total)); fs.unlinkSync(metaPath); log(`[${index + 1}/${count}] SKIP(已完整) ${entry.file}`); return; } } catch (e) {}
+  try {
+    if (fs.statSync(out).size === meta.total && !meta.segs) {
+      fs.writeFileSync(donePath, String(meta.total));
+      fs.unlinkSync(metaPath);
+      log(`[${index + 1}/${count}] SKIP(已完整) ${entry.file}`);
+      return;
+    }
+  } catch (e) {}
 
-  // 初始化分段（每段 s/e/pos）
+  const nSeg = meta.ranged === false ? 1 : threads; // 服务端不支持 Range 时退化为单连接（curl -C - 续传）
   if (!meta.segs) {
     meta.segs = [];
-    const segSize = Math.ceil(meta.total / THREADS);
-    for (let i = 0; i < THREADS; i++) {
+    const segSize = Math.ceil(meta.total / nSeg);
+    for (let i = 0; i < nSeg; i++) {
       const s = i * segSize;
       const e = Math.min(meta.total, s + segSize);
       if (s >= e) break;
@@ -129,78 +194,50 @@ async function downloadOne(entry, index, count) {
     }
   }
 
-  log(`[${index + 1}/${count}] 开始 ${entry.file}  总 ${fmt(meta.total)}  并发 ${meta.segs.length} 路`);
-  if (!fs.existsSync(out)) { const _h = await fsp.open(out, 'w'); await _h.close(); }  // 创建空文件
+  if (!fs.existsSync(out)) { const h = await fsp.open(out, 'w'); await h.close(); }
   const fh = await fsp.open(out, 'r+');
   await fh.truncate(meta.total);
-  meta.fh = fh;
 
-  let done = 0;
-  const t0 = Date.now();
-  let lastLog = t0;
+  const done0 = meta.segs.reduce((a, s) => a + (s.pos - s.s), 0);
+  log(`[${index + 1}/${count}] 开始 ${entry.file}  总 ${fmt(meta.total)}  分片 ${meta.segs.length} 路` +
+      (done0 ? `  续传自 ${fmt(done0)}` : '') + (meta.ranged === false ? '  [服务器不支持 Range，单连接续传]' : ''));
+
+  let got = done0, t0 = Date.now(), lastLog = Date.now();
+  const onBytes = n => { got += n; };
+
+  const saveMeta = () => {
+    fs.writeFile(metaPath, JSON.stringify({ url: meta.url, total: meta.total, ranged: meta.ranged, segs: meta.segs }), () => {});
+  };
+
   const timer = setInterval(() => {
     const now = Date.now();
     if (now - lastLog < 10000) return;
     lastLog = now;
-    const got = meta.segs.reduce((a, s) => a + (s.pos - s.s), 0);
     const pct = (100 * got / meta.total).toFixed(1);
-    const spd = fmtSpd(got * 1000 / (now - t0));
-    log(`[${index + 1}/${count}] ${entry.file}  ${pct}%  ${fmt(got)}/${fmt(meta.total)}  ${spd}`);
+    log(`[${index + 1}/${count}] ${entry.file}  ${pct}%  ${fmt(got)}/${fmt(meta.total)}  ${fmtSpd(got * 1000 / (now - t0))}`);
   }, 1000);
 
-  const refreshFinal = async () => {
-    const p = await probe(meta.url);
-    meta.finalUrl = p.finalUrl;
-    meta.refresh++;
-    if (p.total !== meta.total) throw new Error('服务器总大小变化: ' + p.total + ' != ' + meta.total);
-    log(`[${index + 1}/${count}] 签名已刷新 (第 ${meta.refresh} 次)`);
-  };
-
-  const saveMeta = () => {
-    const { fh: _fh, ...rest } = meta;
-    fs.writeFile(metaPath, JSON.stringify(rest), () => {});
-  };
-
-  // 拉取一段流并写入（支持从中途 pos 断点续传）
   const fetchInto = async (seg) => {
     let attempt = 0;
     while (seg.pos < seg.e) {
       try {
-        const r = await raw(meta.finalUrl, `bytes=${seg.pos}-${seg.e - 1}`);
-        if (r.status === 401 || r.status === 403 || r.status === 416) {
-          r.stream.destroy(); r.stream.resume();
-          if (meta.refresh < 10) { await refreshFinal(); attempt = 0; continue; }
-          throw new Error('签名刷新超限 ' + r.status);
-        }
-        if (r.status !== 206 && r.status !== 200) {
-          r.stream.destroy(); r.stream.resume();
-          throw new Error('HTTP ' + r.status);
-        }
-        for await (const chunk of r.stream) {
-          if (seg.pos >= seg.e) break;
-          const buf = seg.pos + chunk.length > seg.e ? chunk.subarray(0, seg.e - seg.pos) : chunk;
-          await fh.write(buf, 0, buf.length, seg.pos);
-          seg.pos += buf.length;
-        }
-        r.stream.destroy();
+        await fetchSegment(meta.url, seg, fh, onBytes, entry.file);
         attempt = 0;
-      } catch (err) {
+      } catch (e) {
         attempt++;
-        if (attempt > 30) throw new Error('段失败(重试30次): ' + err.message);
+        if (attempt > 30) throw new Error('段失败(重试30次): ' + e.message);
         const wait = Math.min(60000, 2000 * attempt);
-        log(`[${index + 1}/${count}] ${entry.file} 段重试 ${attempt} (${err.message}) ${wait}ms后`);
+        log(`[${index + 1}/${count}] ${entry.file} 段重试 ${attempt} (${e.message}) ${wait}ms后`);
         await sleep(wait);
       }
       saveMeta();
     }
-    return true;
   };
 
   try {
     await Promise.all(meta.segs.map(fetchInto));
     clearInterval(timer);
     await fh.close();
-    // 校验总长
     if (fs.statSync(out).size !== meta.total) throw new Error('最终大小不符');
     fs.writeFileSync(donePath, String(meta.total));
     if (fs.existsSync(metaPath)) fs.unlinkSync(metaPath);
@@ -215,21 +252,21 @@ async function downloadOne(entry, index, count) {
 }
 
 (async () => {
-  // CLI 单文件模式：node download_models.js <url> <输出文件绝对路径> [并发数]
   if (process.argv[2]) {
     const url = process.argv[2];
     const out = path.resolve(process.argv[3]);
     const th = Number(process.argv[4] || THREADS);
-    log('单文件模式下载: ' + url);
-    await downloadOne({ name: path.basename(out), dir: path.dirname(out), file: path.basename(out), url, out }, 0, 1);
+    log('单文件分片下载: ' + url);
+    await downloadOne({ name: path.basename(out), dir: path.dirname(out), file: path.basename(out), url, out }, 0, 1, th);
     log('ALL_DONE');
     process.exit(0);
   }
-  log('Weaveora 模型下载启动 —— 共 ' + FILES.length + ' 个文件, 每文件 ' + THREADS + ' 路并发');
+  const th = Number(process.env.WEAVEORA_DL_THREADS || THREADS);
+  log('Weaveora 模型下载启动 —— 共 ' + FILES.length + ' 个文件, 每文件 ' + th + ' 进程分片');
   let fail = 0;
   for (let i = 0; i < FILES.length; i++) {
-    try { await downloadOne(FILES[i], i, FILES.length); }
-    catch (e) { fail++; log(`FAIL ${FILES[i].file}: ${e.message}（下次重跑自动续传）`); }
+    try { await downloadOne(FILES[i], i, FILES.length, th); }
+    catch (e) { fail++; log(`FAIL ${FILES[i].file}: ${e.message}（重跑自动续传）`); }
   }
   log(fail === 0 ? 'ALL_DONE' : `FINISHED_WITH_ERRORS (${fail})`);
   process.exit(fail === 0 ? 0 : 1);

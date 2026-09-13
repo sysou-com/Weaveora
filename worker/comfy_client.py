@@ -68,6 +68,18 @@ def _comfy(method, path, payload=None, files=None, timeout=120):
         raise ComfyError("comfy %s %s -> %s %s" % (method, path, e.code, e.read()[:300]))
 
 
+def _free_comfy_models():
+    """让 ComfyUI 卸掉自己缓存的模型（SDXL / Wan 等占着 6+ GB），把显存让给 LatentSync。
+
+    8 GiB 卡上很关键：否则 LatentSync 会在 ComfyUI 残留模型之上 OOM。失败不致命。
+    """
+    try:
+        _comfy("POST", "/free", payload={"unload_models": True, "free_memory": True}, timeout=180)
+        print("[comfy] 已请求卸载缓存模型（为 lipsync 腾显存）", flush=True)
+    except Exception as e:
+        print("[comfy] /free 失败（忽略）: %s" % e, flush=True)
+
+
 def fetch_reference_bytes(storage_key):
     """经 weaveora 内部通道取参考图/参考音原始字节（token 鉴权）。
 
@@ -697,6 +709,10 @@ LIPSYNC_TIMEOUT = float(os.environ.get("WEAVEORA_LIPSYNC_TIMEOUT", "1800"))
 # 工作流里承载「视频/音频路径」的节点标题（用户按自己导出的工作流改这两个值即可）
 LIPSYNC_VIDEO_TITLE = os.environ.get("WEAVEORA_LIPSYNC_VIDEO_TITLE", "video").strip()
 LIPSYNC_AUDIO_TITLE = os.environ.get("WEAVEORA_LIPSYNC_AUDIO_TITLE", "audio").strip()
+# 注入到该节点的哪个 **输入键**：不同加载节点键名不同（原生 LoadVideo = file，VHS_LoadVideo = video）。
+# 不设则回退到旧行为（视频键 video / 音频键 audio）。
+LIPSYNC_VIDEO_INPUT = os.environ.get("WEAVEORA_LIPSYNC_VIDEO_INPUT", "").strip()
+LIPSYNC_AUDIO_INPUT = os.environ.get("WEAVEORA_LIPSYNC_AUDIO_INPUT", "").strip()
 
 
 def _upload_any(data, filename, ctype, sub="input"):
@@ -709,16 +725,20 @@ def _upload_any(data, filename, ctype, sub="input"):
         return None
 
 
-def _set_node_input(graph, title, value):
-    """按节点 title 注入输入（只改第一个匹配到的节点，避免误改）。"""
+def _set_node_input(graph, title, value, input_key=None):
+    """按节点 title 注入输入（只改第一个匹配到的节点，避免误改）。
+
+    input_key 指定要写哪个输入键；不传时回退为「视频→video / 音频→audio」。
+    """
     hit = 0
+    key = (input_key or "").strip() or ("video" if "video" in (title or "").lower() else "audio")
     for _nid, node in (graph or {}).items():
         if not isinstance(node, dict):
             continue
         meta = node.get("_meta") or {}
         if (meta.get("title") or "").strip().lower() == (title or "").lower():
             node.setdefault("inputs", {})
-            node["inputs"]["video" if "video" in (title or "").lower() else "audio"] = value
+            node["inputs"][key] = value
             hit += 1
     return hit
 
@@ -751,8 +771,8 @@ def generate_lipsync(client_id, payload, progress_fn=None):
 
     with open(LIPSYNC_WORKFLOW, "r", encoding="utf-8") as fh:
         graph = json.load(fh)
-    vh = _set_node_input(graph, LIPSYNC_VIDEO_TITLE, vname)
-    ah = _set_node_input(graph, LIPSYNC_AUDIO_TITLE, aname)
+    vh = _set_node_input(graph, LIPSYNC_VIDEO_TITLE, vname, LIPSYNC_VIDEO_INPUT)
+    ah = _set_node_input(graph, LIPSYNC_AUDIO_TITLE, aname, LIPSYNC_AUDIO_INPUT)
     if not vh or not ah:
         raise ComfyError(
             "工作流里没找到标题为「%s」/「%s」的节点：请在 ComfyUI 里把承载视频/音频的节点标题改成这两个值"
@@ -763,6 +783,7 @@ def generate_lipsync(client_id, payload, progress_fn=None):
     for node in graph.values():
         if isinstance(node, dict) and "filename_prefix" in (node.get("inputs") or {}):
             node["inputs"]["filename_prefix"] = prefix
+    _free_comfy_models()
     pid = _post_prompt(graph, client_id)
     if progress_fn:
         progress_fn(40, "lipsync")
