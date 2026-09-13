@@ -345,6 +345,43 @@ public class JobService {
                             payload.put("tailKey", last.storageKey());
                         }
                     }
+                    // P13：分段生成 —— 校准后镜头时长可能超过「视频模型单次输出上限」
+                    // （i2v 常见 5s），这时 shot.segments[] 有多段：**每段一个任务**，
+                    // 帧数按段长折算（frames = 段长 × fps，夹在 motion-frames 上下限内），
+                    // 段间续接优先用关键帧序列（段 i 首帧=关键帧 i、尾帧=关键帧 i+1）。
+                    JsonNode segNode = shot.path("segments");
+                    if (segNode.isArray() && segNode.size() > 1) {
+                        int fpsVal = plan.path("edit_plan").path("fps").asInt(30);
+                        int segCount = segNode.size();
+                        for (int si = 0; si < segCount; si++) {
+                            JsonNode seg = segNode.get(si);
+                            double segDur = seg.path("duration_sec").asDouble(0);
+                            if (segDur <= 0) continue;
+                            ObjectNode sp = payload.deepCopy();
+                            int f = (int) Math.round(segDur * Math.max(1, fpsVal));
+                            f = Math.max(motionFramesMin, Math.min(motionFramesMax, f));
+                            sp.put("frames", f);
+                            sp.put("segment_index", si);
+                            sp.put("segment_count", segCount);
+                            sp.put("segment_start_sec", seg.path("start_sec").asDouble(0));
+                            sp.put("segment_duration_sec", segDur);
+                            if (frames.size() > 1) {
+                                studio.weaveora.asset.domain.Asset sf =
+                                        pickKeyframeAsset(kfAssets, Math.min(si, frames.size() - 1));
+                                studio.weaveora.asset.domain.Asset sl =
+                                        pickKeyframeAsset(kfAssets, Math.min(si + 1, frames.size() - 1));
+                                if (sf != null) sp.put("keyframeKey", sf.storageKey());
+                                if (sl != null && sf != null && !sl.id().equals(sf.id())) {
+                                    sp.put("tailKey", sl.storageKey());
+                                }
+                            }
+                            log.info("motion segmented: project={} shot_no={} seg={}/{} dur={}s frames={}",
+                                    projectId, shot.path("shot_no").asInt(), si + 1, segCount, segDur, f);
+                            created.add(createOne(workspaceId, projectId, req.revisionId(), shotId,
+                                    PRESET_CLIP, "clip", sp, userId, engineRoute));
+                        }
+                        continue;   // 已按段建完，不再建整镜任务
+                    }
                 }
                 created.add(createOne(workspaceId, projectId, req.revisionId(), shotId,
                         "clip".equals(req.kind()) ? PRESET_CLIP : PRESET_STILL, req.kind(), payload, userId,

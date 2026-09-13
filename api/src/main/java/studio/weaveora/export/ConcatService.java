@@ -574,6 +574,29 @@ public class ConcatService {
             // 渲染却还按旧快照摆 → 听起来像“生成了新配音但渲染还是旧的”。
             List<studio.weaveora.asset.AudioAssetLookup.VoiceCue> cues =
                     alignCuesWithPlan(shot, voiceCues(workspaceId, projectId, shotNo));
+            // P13：镜头分段（超过模型单次上限）→ 每段一个片段，**同镜内必须 cut** 拼接；
+            //       配音/字幕按段窗口重新定位（否则音频会摆到镜内绝对时间上）。
+            JsonNode segNode = shot.path("segments");
+            if (segNode.isArray() && segNode.size() > 1) {
+                List<Asset> segClips = segmentClips(workspaceId, projectId, shotId, shotNo, segNode.size());
+                if (!segClips.isEmpty()) {
+                    for (int si = 0; si < segNode.size(); si++) {
+                        JsonNode seg = segNode.get(si);
+                        double segDur = seg.path("duration_sec").asDouble(0);
+                        if (segDur <= 0) continue;
+                        double s0 = seg.path("start_sec").asDouble(0);
+                        Asset sa = si < segClips.size() ? segClips.get(si) : segClips.get(segClips.size() - 1);
+                        List<studio.weaveora.asset.AudioAssetLookup.VoiceCue> segCues = sliceVoices(cues, s0, s0 + segDur);
+                        draft.add(new MediaClip(sa.storageKey(), isVideo(sa), segDur, segCues, List.of()));
+                        shotsOfDraft.add(shot);
+                        voicesOfDraft.add(segCues);
+                    }
+                    log.info("render segmented shot: shot_no={} segs={} clips={}",
+                            shotNo, segNode.size(), segClips.size());
+                    continue;
+                }
+                log.warn("render segmented shot without clips: shot_no={} → 回退整镜素材", shotNo);
+            }
             draft.add(new MediaClip(m.storageKey(), isVideo(m), dur, cues, List.of()));
             shotsOfDraft.add(shot);
             voicesOfDraft.add(draft.get(draft.size() - 1).voices());
@@ -653,6 +676,69 @@ public class ConcatService {
             subs.add(new SubCue(a - s0, b - s0, sp.text()));
         }
         return subs;
+    }
+
+    /**
+     * 某镜的**分段**产物（按 `segment_index` 对齐，缺失时按生成时间补位），升序。
+     *
+     * <p>分段任务的 payload 里写了 segment_index（也进了资产快照），所以优先按它排；
+     * 历史/手工产物没有这个字段时，退回“按创建时间升序”取前 N 个（与配音“取最新”口径一致）。
+     */
+    private List<Asset> segmentClips(UUID workspaceId, UUID projectId, UUID shotId, int shotNo, int segCount) {
+        List<Asset> clips = assetRepo.findByProjectIdAndWorkspaceIdAndShotNoAndKindOrderByCreatedAtDesc(
+                projectId, workspaceId, shotNo, "clip");
+        if (clips.isEmpty() && shotId != null) {
+            clips = assetRepo.findByShotIdAndWorkspaceIdAndKindOrderByCreatedAtDesc(shotId, workspaceId, "clip");
+        }
+        if (clips.isEmpty()) {
+            return List.of();
+        }
+        Asset[] out = new Asset[segCount];
+        List<Asset> rest = new ArrayList<>();
+        for (Asset a : clips) {
+            JsonNode snap = a.promptSnapshot();
+            int si = (snap != null && snap.hasNonNull("segment_index")) ? snap.path("segment_index").asInt(-1) : -1;
+            if (si >= 0 && si < segCount && out[si] == null) {
+                out[si] = a;
+            } else {
+                rest.add(a);
+            }
+        }
+        int ri = 0;
+        for (int i = 0; i < segCount; i++) {
+            if (out[i] == null && ri < rest.size()) {
+                out[i] = rest.get(ri++);
+            }
+        }
+        List<Asset> res = new ArrayList<>();
+        for (Asset a : out) {
+            if (a != null) {
+                res.add(a);
+            }
+        }
+        return res;
+    }
+
+    /**
+     * 取某个段窗口内的配音 cue，并把镜内绝对时间**换算成段内相对时间**。
+     * 跨段的长句归到它开始的那一段（允许溢出到下一段，与全局口径一致）。
+     */
+    private List<studio.weaveora.asset.AudioAssetLookup.VoiceCue> sliceVoices(
+            List<studio.weaveora.asset.AudioAssetLookup.VoiceCue> cues, double s0, double s1) {
+        List<studio.weaveora.asset.AudioAssetLookup.VoiceCue> out = new ArrayList<>();
+        if (cues == null) {
+            return out;
+        }
+        for (studio.weaveora.asset.AudioAssetLookup.VoiceCue c : cues) {
+            double at = c.atSec();
+            if (at + 1e-6 >= s0 && at + 1e-6 < s1) {
+                double nAt = Math.max(0, at - s0);
+                double nEnd = c.endSec() > at ? c.endSec() - s0 : 0;
+                out.add(new studio.weaveora.asset.AudioAssetLookup.VoiceCue(
+                        c.asset(), nAt, nEnd, c.lineIndex(), c.lineKind(), c.subject()));
+            }
+        }
+        return out;
     }
 
     /**
