@@ -320,13 +320,17 @@ export function computeShotTiming(
     segs = [{ index: 0, start_sec: 0, duration_sec: need }]
   } else {
     const n = Math.ceil(need / cap)
+    // **平均切分**（而不是先填满第一段、剩下丢给末段）：
+    // 例 5.2s / 上限 4.0 → 2.6 + 2.6（而非 4.0 + 1.2）；短尾段帧数可能低于模型下限、观感也跳
+    const each = Math.round((need / n) * 10) / 10
     let cursor = 0
     for (let i = 0; i < n; i++) {
-      const d = Math.min(cap, r1(need - cursor))
+      const rest = r1(need - cursor)
+      const d = i === n - 1 ? rest : Math.min(r1(each), rest)
       segs.push({ index: i, start_sec: r1(cursor), duration_sec: d })
       cursor = r1(cursor + d)
     }
-    // 末段过短 → 并入上一段（避免 <1s 的碎片段）
+    // 末段过短 → 并入上一段（避免低于模型最小帧数的碎片段）
     if (segs.length > 1 && segs[segs.length - 1].duration_sec < minClip) {
       const last = segs.pop() as ShotSegment
       const prev = segs[segs.length - 1]
@@ -377,9 +381,12 @@ export function calibrateAllShots(
 ): CalibrateDiff[] {
   const cap = modelClipCap(plan)
   const tail = planTailSec(plan)
+  // 段长下限 = 模型最小帧数 / fps（默认 32 帧），避免生成出低于下限的碎片段
+  const fps = Math.max(1, Number((plan as { edit_plan?: { fps?: number } }).edit_plan?.fps ?? 30))
+  const minSeg = Math.max(0.5, 32 / fps)
   const out: CalibrateDiff[] = []
   for (const s of plan.shots ?? []) {
-    const t = computeShotTiming(s, durations, cap, tail)
+    const t = computeShotTiming(s, durations, cap, tail, minSeg)
     const from = Number(s.duration_sec ?? 0)
     const changed = Math.abs(from - t.need) > 0.05 || !shotTimingAligned(s, t)
     if (changed) {
@@ -408,9 +415,11 @@ export function audioVideoHealthCheck(
 ): string[] {
   const cap = modelClipCap(plan)
   const tail = planTailSec(plan)
+  const fps = Math.max(1, Number((plan as { edit_plan?: { fps?: number } }).edit_plan?.fps ?? 30))
+  const minSeg = Math.max(0.5, 32 / fps)
   const issues: string[] = []
   for (const s of plan.shots ?? []) {
-    const t = computeShotTiming(s, durations, cap, tail)
+    const t = computeShotTiming(s, durations, cap, tail, minSeg)
     const dur = Number(s.duration_sec ?? 0)
     if (t.voiceEnd > 0 && dur + 0.05 < t.voiceEnd) {
       issues.push(`第 ${s.shot_no} 镜：配音 ${t.voiceEnd}s 超出镜头 ${dur}s（会被截断）`)

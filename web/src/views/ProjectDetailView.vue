@@ -1713,6 +1713,16 @@ watch(
     MOTION_MAX.value = v.maxFrames
     motionLimitSource.value = v.source
     if (motionFrames.value > v.maxFrames) motionFrames.value = v.maxFrames
+    // 自动把「模型上限(s)」写为后端算出的真实上限（min(配置, 模型 schema)）：
+    // 否则用户会拿一个比模型大的值去校准 → 排出的段仍超过模型能力 → 配音被截断。
+    const p = draft.value
+    if (p && isVideoPlan(p) && v.maxClipSec > 0) {
+      const cur = Number(p.edit_plan?.video_model_max_sec ?? 0)
+      if (Math.abs(cur - v.maxClipSec) > 0.05) {
+        if (p.edit_plan) p.edit_plan.video_model_max_sec = Math.round(v.maxClipSec * 100) / 100
+        if (cur === 0) message.info(`已按模型自动设「模型上限」= ${v.maxClipSec}s（${v.source}）`)
+      }
+    }
   },
   { immediate: true },
 )
