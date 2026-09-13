@@ -1089,7 +1089,11 @@ function newestStamp<T extends { createdAt: string }>(list: T[]): T | undefined 
 }
 
 // ---------- W4 资产库 ----------
-const outputAssets = computed(() => (assets.data.value ?? []).filter((a) => ['still','clip','master','voice','bgm','voice_preview','bgm_preview','portrait'].includes(a.kind)))
+// 注意：这里必须包含**所有**要展示的产物类型 —— GAL_TABS 里有的 kind 若不在白名单，
+// 那个 Tab 会永远是空的（P13 实例：「对口型」Tab 有了，但 lipsync 资产被过滤掉，
+// 任务已 succeeded、mp4 也已落盘，用户却在资源库里看不到）。
+const OUTPUT_KINDS = ['still', 'clip', 'master', 'voice', 'bgm', 'voice_preview', 'bgm_preview', 'portrait', 'lipsync']
+const outputAssets = computed(() => (assets.data.value ?? []).filter((a) => OUTPUT_KINDS.includes(a.kind)))
 
 /** P12：资产库也按类型分 Tab */
 const galTabCounts = computed(() => {

@@ -86,7 +86,7 @@ Invoke-RestMethod "http://127.0.0.1:8188/object_info" |
 
 ---
 
-## 二、本机已排掉的 8 个坑（2026-09-13，都别踩）
+## 二、本机已排掉的 13 个坑（2026-09-13，都别踩）
 
 这些坑的表现都是「**ComfyUI 卡住 / 队列永远 running=1 / GPU 0%**」，实际是软件问题，不是显卡不够。
 
@@ -100,6 +100,11 @@ Invoke-RestMethod "http://127.0.0.1:8188/object_info" |
 | 6 | 峰值显存紧、易 OOM | 上游从未开 VAE 分片 | `scripts/inference.py` 构造 pipeline 后调用 `pipeline.enable_vae_slicing()` |
 | 7 | face detector 静默退回 CPU | `insightface` 的 CUDA EP 找不到 `cublasLt64_12.dll`/`cudnn64_9.dll`（它们在 `torch\lib`） | `face_detector.py` **先 import torch 并 `os.add_dll_directory(torch/lib)`**，再 import insightface |
 | 8 | 注入输入失败 / 一跑就 OOM | ① 原生 `LoadVideo` 的输入键是 **`file`**（不是 `video`）；② ComfyUI 缓存着 SDXL/Wan 占显存 | ① worker 新增 `WEAVEORA_LIPSYNC_VIDEO_INPUT`/`_AUDIO_INPUT`；② 跑 lipsync 前先 `POST /free`（`unload_models+free_memory`） |
+| 9 | 提交后 **70ms 失败**、本机 GPU 全程 0% | 后端把 lipsync 路由到了**云 worker**（该用户 `video_engine=cloud`）。「自托管 kind 固定走 GPU」的规则只写在通用分支，而 lipsync 在那行之前就 return 了 | 抽 `routeForKind()` 统一 4 处（create / createLipsyncJobs / rerun / retry）：自托管 kind 恒 gpu + 3 例单测 |
+| 10 | `expected a bytes-like object, tuple found` | `fetch_reference_bytes()` 返回 `(bytes, ctype)`，lipsync 分支直接当 bytes 用（上传、`_concat_voice` 两处） | 解包；`_concat_voice` 改用 `_ffmpeg_exe()`（原来调裸 `ffmpeg`，本机 PATH 里没有） |
+| 11 | `comfy POST /prompt -> 400 no_prompt` | 导出的「API 格式」工作流是**裸节点图** `{"1":{...}}`，而 `/prompt` 要 `{"prompt": 图, "client_id":...}` | `_post_prompt({"prompt": graph, "client_id": client_id}, client_id)` |
+| 12 | 任务 `succeeded`、mp4 也落盘，但**资源库看不到**；且该资产无宽高/时长 | ① 前端 `outputAssets` 白名单漏了 `lipsync`（`GAL_TABS` 里有 Tab → 那个 Tab 永远空）② worker 没回填 width/height/duration | ① 白名单补 `lipsync`（抽成 `OUTPUT_KINDS` 常量，注释写明「Tab 有的 kind 必须都在白名单」）；② worker 新增 `_probe_video_meta()`（ffmpeg -i 读回 512/512/5000ms）；已产出的那条资产已 SQL 回填 |
+| 13 | 跑到第 **15 分钟**被判 `WORKER_STUCK 执行超时（worker 无心跳完成）`，但 worker 心跳正常、ComfyUI 已 `Doing inference 5/8` | 回收器 `reapStaleRunning()` 只比 `startedAt`、硬编码 `minusMinutes(15)`（注释还写着 30min），完全不看 worker 心跳——对口型一个 5s 镜实测 **25–30 分钟**，必被杀 | 改成「心跳感知 + 硬上限」：`running-timeout-minutes`（默认 60，可配）+ worker `lastSeenAt` 宽限 5min 内不回收 + `max(4×超时, 超时+60min)` 硬上限；回收改按 id 单条 |
 
 ---
 

@@ -754,6 +754,35 @@ def _set_node_input(graph, title, value, input_key=None):
     return hit
 
 
+def _probe_video_meta(mp4_bytes):
+    """用 ffmpeg -i 读 mp4 的宽高与时长（返回 (w, h, duration_ms)）。
+
+    为什么要做：LatentSync 节点只返回帧，不返回元数据；不回填的话资产库里这条
+    对口型产物没有时长/分辨率（卡片显示不完整、导出时也可能被当成未知时长）。
+    """
+    import re
+    import subprocess
+    import tempfile
+    if not mp4_bytes:
+        return None, None, None
+    p = os.path.join(tempfile.mkdtemp(prefix="weaveora_probe_"), "o.mp4")
+    with open(p, "wb") as fh:
+        fh.write(mp4_bytes)
+    try:
+        r = subprocess.run([_ffmpeg_exe(), "-i", p], capture_output=True, text=True, timeout=180)
+        err = r.stderr or ""
+    except Exception:
+        return None, None, None
+    w = h = dur_ms = None
+    m = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", err)
+    if m:
+        dur_ms = int((int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))) * 1000)
+    m2 = re.search(r"Video:.*?,\s*(\d{2,5})x(\d{2,5})", err)
+    if m2:
+        w, h = int(m2.group(1)), int(m2.group(2))
+    return w, h, dur_ms
+
+
 def generate_lipsync(client_id, payload, progress_fn=None):
     """对口型（lipsync 任务）：画面 + 配音 → 嘴型对齐的视频。返回 [{bytes, mime}]。"""
     import uuid as _uuid
@@ -838,8 +867,12 @@ def generate_lipsync(client_id, payload, progress_fn=None):
         raise ComfyError("对口型无输出视频（prefix=%s）" % prefix)
     if progress_fn:
         progress_fn(100, "done")
-    return [{"bytes": o["bytes"], "mime": "video/mp4", "width": o.get("width"),
-             "height": o.get("height"), "duration_ms": None} for o in outs]
+    result = []
+    for o in outs:
+        w, h, dur = _probe_video_meta(o["bytes"])
+        result.append({"bytes": o["bytes"], "mime": "video/mp4", "width": w,
+                       "height": h, "duration_ms": dur})
+    return result
 
 
 def _concat_voice(voice_keys):
