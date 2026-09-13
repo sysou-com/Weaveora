@@ -55,6 +55,19 @@ public class WorkerNode {
         this.lastSeenAt = OffsetDateTime.now();
     }
 
+    /**
+     * 重注册时刷新能力（节点升级后能力会变：例如 win worker 从 stub 变 comfy）。
+     *
+     * <p>不做的话 DB 里永远保留**最早那次**的 capabilities —— 实际发生过：
+     * win-comfy-worker 一直显示 {@code {"gpu":"stub-cpu"}}（连 engine 字段都没有）。
+     */
+    public void refreshCapabilities(JsonNode caps) {
+        if (caps == null || caps.isNull()) {
+            return;
+        }
+        this.capabilities = caps;
+    }
+
     public UUID id() { return id; }
     public UUID workspaceId() { return workspaceId; }
     public String name() { return name; }

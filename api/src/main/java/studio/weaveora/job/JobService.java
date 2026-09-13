@@ -237,9 +237,8 @@ public class JobService {
         }
         // 配音/配乐是自托管音频服务；**对口型也固定走本机 GPU**（音频驱动的后处理跑在 ComfyUI 工作流里，
         // 云端视频模型没有口型能力 —— 之前漏了这条，lipsync 被路由到云 → 掉进云图片分支报错）
-        boolean audioKind = "voice".equals(req.kind()) || "bgm".equals(req.kind())
-                || "lipsync".equals(req.kind());
-        String engineRoute = audioKind ? "gpu" : engineSettings.resolveEngine(userId, req.kind());
+        boolean audioKind = SELF_HOSTED_KINDS.contains(req.kind());
+        String engineRoute = routeForKind(req.kind(), engineSettings.resolveEngine(userId, req.kind()));
 
         if (audioKind) {
             List<GenerationJob> audio = createAudioJobs(workspaceId, projectId, req, plan, revisionNo, userId);
@@ -638,8 +637,12 @@ public class JobService {
                 throw new BizException(ErrorCode.VALIDATION, "仅失败/已取消的任务可重试");
             }
             Retarget t = repointToCurrentApproved(old, project, userId);
+            // 注意：不能直接沿袭 old.engineRoute() —— 若旧任务当初路由错了（例如 lipsync 被
+            // 派到 cloud，云上没有口型工作流），重试会原样复现错误。自托管 kind 一律重算为 gpu，
+            // 其它 kind 仍保留原执行面。
             GenerationJob neu = createOne(old.workspaceId(), old.projectId(), t.revisionId(), t.shotId(),
-                    old.modelPresetId(), old.kind(), reshuffleSeed(t.payload()), userId, old.engineRoute());
+                    old.modelPresetId(), old.kind(), reshuffleSeed(t.payload()), userId,
+                    routeForKind(old.kind(), old.engineRoute()));
             if (!t.revisionId().equals(old.revisionId())) {
                 log.info("job retry re-anchored job={} oldRevision={} -> approvedRevision={} shot={} kind={}",
                         jobId, old.revisionId(), t.revisionId(), t.shotId(), old.kind());
@@ -662,7 +665,7 @@ public class JobService {
             throw new BizException(ErrorCode.VALIDATION, "任务运行中/排队，先取消再重生成");
         }
         ProjectSnapshot project = projects.require(userId, workspaceId, old.projectId());
-        String route = engineSettings.resolveEngine(userId, old.kind());
+        String route = routeForKind(old.kind(), engineSettings.resolveEngine(userId, old.kind()));
         Retarget t = repointToCurrentApproved(old, project, userId);
         GenerationJob neu = createOne(old.workspaceId(), old.projectId(), t.revisionId(), t.shotId(),
                 old.modelPresetId(), old.kind(), reshuffleSeed(t.payload()), userId, route);
@@ -890,6 +893,7 @@ public class JobService {
             return nodes.save(created);
         });
         n.heartbeat();
+        n.refreshCapabilities(capabilities);
         if (workspaceId != null) {
             // BYO 节点只服务自己工作区
         }
@@ -1371,6 +1375,30 @@ public class JobService {
     }
 
     /**
+     * 自托管执行面：配音 / 配乐 / 对口型 都跑在**本机**（ComfyUI + CosyVoice \+ ACE-Step），
+     * 且云节点根本不会认领（调度看 {@code engine_route}）。
+     *
+     * <p>所以这三种 kind 一律落 {@code gpu}，**不受用户 image/video_engine=cloud 的影响**。
+     */
+    static final Set<String> SELF_HOSTED_KINDS = Set.of("voice", "bgm", "lipsync");
+
+    /**
+     * P13 纯函数（便于单测）：决定任务落到哪个执行面。
+     *
+     * <p>背景：对口型曾因在 {@code createLipsyncJobs} 里自己调
+     * {@code resolveEngine(userId,"clip")} 而被路由到云（用户 video_engine=cloud），
+     * 云 worker 没有口型工作流 → 秒失败。配音/配乐的「重生成」也有同样问题。
+     *
+     * @param kind           任务类型
+     * @param resolvedEngine 按用户设置解析出来的引擎（gpu|cloud）
+     * @return 自托管 kind 恒为 gpu；其它 kind 尊重用户设置
+     */
+    static String routeForKind(String kind, String resolvedEngine) {
+        // 注意：Set.of(...).contains(null) 会抛 NPE，故先判 null（kind 非法时按“非自托管”处理）
+        return kind != null && SELF_HOSTED_KINDS.contains(kind) ? "gpu" : resolvedEngine;
+    }
+
+    /**
      * P12 纯函数：按「勾选的镜」与「封版」过滤镜头清单（便于单测）。
      *
      * <ul>
@@ -1418,7 +1446,11 @@ public class JobService {
         if (shotIds.isEmpty()) {
             throw new BizException(ErrorCode.SHOT_NOT_APPROVED, emptyShotReason(workspaceId, projectId, req));
         }
-        String engineRoute = engineSettings.resolveEngine(userId, "clip");
+        // P13：对口型**必须**跑在本机 GPU（ComfyUI + LatentSync 工作流）—— 云 worker 没有
+        // WEAVEORA_LIPSYNC_WORKFLOW，云端视频模型也没有音频通道/口型能力。
+        // 绝不能用 resolveEngine(userId, "clip")：用户 video_engine=cloud 时会被派到云节点，
+        // 秒失败 LIPSYNC_ERROR（2026-09-13 线上实例：那宝玉恍恍惚惚 / 第1镜 / engine_route=cloud）。
+        String engineRoute = routeForKind("lipsync", engineSettings.resolveEngine(userId, "clip"));
         List<GenerationJob> created = new ArrayList<>();
         // 被跳过的镜及原因：显式勾选却没生成时，把原因回给用户（不再只给一句笼统提示）
         List<String> skipped = new ArrayList<>();
