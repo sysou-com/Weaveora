@@ -191,6 +191,7 @@ public class AssetService {
                 snapInt(a, "portrait_version"),
                 snapText(a, "kind"),
                 faceDetectedOf(a),
+                faceFramesOf(a),
                 a.createdAt());
     }
 
@@ -230,6 +231,11 @@ public class AssetService {
      */
     public static Boolean faceDetectedOf(Asset a) {
         return snapBool(a, "faceDetected");
+    }
+
+    /** P13：抽样帧里能检出人脸的帧数（如 "4/6"）；未检测为 null。 */
+    public static String faceFramesOf(Asset a) {
+        return snapText(a, "faceFrames");
     }
 
     /** P10：配音产物在镜内的段号（写产生它的 job payload 快照里）；非配音为空。 */

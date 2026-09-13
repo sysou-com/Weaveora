@@ -1009,11 +1009,16 @@ public class JobService {
             // 供选镜弹窗提前标出「无人脸」的镜——否则要等对口型跑到一半才报 Face not detected。
             // 注意：job.payload() 是共享节点，必须 deepCopy 后再改，否则会污染任务行。
             com.fasterxml.jackson.databind.JsonNode snap = job.payload();
-            if (a.faceDetected() != null) {
+            if (a.faceDetected() != null || a.faceFrames() != null) {
                 com.fasterxml.jackson.databind.node.ObjectNode o = (snap != null && snap.isObject())
                         ? ((com.fasterxml.jackson.databind.node.ObjectNode) snap).deepCopy()
                         : mapper().createObjectNode();
-                o.put("faceDetected", a.faceDetected());
+                if (a.faceDetected() != null) {
+                    o.put("faceDetected", a.faceDetected());
+                }
+                if (a.faceFrames() != null) {
+                    o.put("faceFrames", a.faceFrames());
+                }
                 snap = o;
             }
             AssetResponse resp = toAssetResponse(assets.createOutput(
@@ -1891,7 +1896,8 @@ public class JobService {
                 studio.weaveora.asset.AssetService.lineIndexOf(a),
                 studio.weaveora.asset.AssetService.subjectOf(a), null,
                 studio.weaveora.asset.AssetService.snapshotKindOf(a),
-                studio.weaveora.asset.AssetService.faceDetectedOf(a), a.createdAt());
+                studio.weaveora.asset.AssetService.faceDetectedOf(a),
+                studio.weaveora.asset.AssetService.faceFramesOf(a), a.createdAt());
     }
 
     private static long randomSeed() {
@@ -1904,6 +1910,6 @@ public class JobService {
 
     /** complete 请求中的资产元数据。 */
     public record CompleteAsset(String key, String mime, Integer width, Integer height, Long seed, Integer durationMs,
-                                Boolean faceDetected) {
+                                Boolean faceDetected, String faceFrames) {
     }
 }

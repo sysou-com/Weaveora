@@ -37,6 +37,14 @@ public record AssetResponse(
          * 所以选镜弹窗靠这个字段提前把无人脸的镜标成「不可：无人脸」。
          */
         Boolean faceDetected,
+        /**
+         * P13：「抽样帧里能检出人脸的帧数」如 "6/6" "4/6" "0/6"（来自 prompt_snapshot.faceFrames）。
+         *
+         * <p>为什么要单独给比例：LatentSync 要求**每一帧**都能检出人脸，否则
+         * `affine_transform_video()` 直接抛 Face not detected。所以 4/6 这类
+         * 「部分帧无人脸」同样跑不了，UI 靠它把原因说清楚（而不是只标一句「无人脸」）。
+         */
+        String faceFrames,
         OffsetDateTime createdAt
 ) {
 }

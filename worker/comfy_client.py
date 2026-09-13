@@ -584,17 +584,19 @@ def generate_motion(client_id, payload, progress_fn=None):
     if (pw and int(pw) != int(rw)) or (ph and int(ph) != int(rh)):
         print("[comfy] motion 实际尺寸 %sx%s 与请求 %sx%s 不一致（已按实际上报）"
               % (w, h, rw, rh), flush=True)
-    # P13：顺手做一次人脸检测并随资产上报 —— 对口型只能用在有人脸的镜上，
-    # 选镜弹窗靠这个把「无人脸」的镜提前标出来（否则要等对口型跑到一半才报 Face not detected）。
+    # P13：顺手做一次人脸检测并随资产上报 —— 对口型要求**每一帧**都能检出人脸，
+    # 选镜弹窗靠这个把「无人脸 / 部分帧无人脸」的镜提前标出来（否则要等跑到一半才失败）。
     fr = _face_probe(mp4)
-    face = None if fr is None else (fr[0] > 0)
+    face = None if fr is None else (fr[0] == fr[1] and fr[1] > 0)
+    frames = None if fr is None else "%d/%d" % (fr[0], fr[1])
     if fr is not None:
-        print("[comfy] motion 人脸检测：%d/%d 帧可检出（%s）"
-              % (fr[0], fr[1], "有人脸" if face else "无人脸"), flush=True)
+        print("[comfy] motion 人脸检测：%s 帧可检出（%s）"
+              % (frames, "全部帧有人脸" if face else ("无人脸" if fr[0] == 0 else "部分帧无人脸")),
+              flush=True)
     if progress_fn:
         progress_fn(100, "done")
     return [{"bytes": mp4, "mime": "video/mp4", "width": int(w), "height": int(h),
-             "duration_ms": pdur, "face_detected": face}]
+             "duration_ms": pdur, "face_detected": face, "face_frames": frames}]
 
 
 # ---- P7 配乐：ACE-Step 1.5（ComfyUI 原生节点，非 wrapper） ----
@@ -916,6 +918,13 @@ print("RESULT:%d/%d" % (hits, total))
 '''
 
 
+NO_FACE_MSG = ("该镜检测不到人脸（可能是远景/背影/空镜）——对口型只对正脸/侧脸可见的镜头有意义；"
+               "请换一镜，或在导演里把该镜改成对话近景后重生成画面")
+
+# 预检失败原因（给调用方拼错误文案；单线程内单次使用，无需加锁）
+_face_reason = {"msg": NO_FACE_MSG}
+
+
 def _face_probe(video_bytes):
     """抽 6 帧跑人脸检测。返回 (hits, total)；无法判定时返回 None（不拦不传）。"""
     import subprocess
@@ -949,17 +958,37 @@ def _face_probe(video_bytes):
 
 
 def _face_precheck(video_bytes, where="lipsync"):
-    """对口型前置门禁：**一帧都没检出**才拦（避免误拦）；拿不到结果则放行。"""
+    """对口型前置门禁：**抽样帧里只要有一帧检不出人脸就拦**。
+
+    为什么不是「一帧都检不出才拦」：LatentSync 的 `affine_transform_video()` 会对**每一帧**
+    做人脸检测，任何一帧失败就整体抛 RuntimeError("Face not detected")。实测第 3 镜
+    抽样 4/6（有两帧没人脸）——照旧口径会放行，结果必然白烧十几分钟 GPU。
+
+    而反向不会误拦：本预检用的检测器与管线同一模型同一阈值，且管线还额外过滤
+    （人脸尺寸/长宽比/取最大），即**管线比预检更严** —— 预检说没人脸，管线一定也没。
+    拿不到结果（SKIP/异常）时一律放行。
+    """
     r = _face_probe(video_bytes)
     if r is None:
         return True
     hits, total = r
     print("[comfy] 人脸预检 %s：%d/%d 帧可检出" % (where, hits, total), flush=True)
-    return not (total > 0 and hits == 0)
+    if total <= 0:
+        return True
+    if hits == 0:
+        _face_reason["msg"] = NO_FACE_MSG
+        return False
+    if hits < total:
+        _face_reason["msg"] = (
+            "该镜有 %d/%d 帧检测不到人脸——对口型（LatentSync）要求**每一帧**都能检出人脸，"
+            "跑下去会在中途报 Face not detected；请换镜，或先把该镜画面重新生成"
+            % (total - hits, total))
+        return False
+    return True
 
 
-NO_FACE_MSG = ("该镜检测不到人脸（可能是远景/背影/空镜）——对口型只对正脸/侧脸可见的镜头有意义；"
-               "请换一镜，或在导演里把该镜改成对话近景后重生成画面")
+# 预检失败原因（给调用方拼错误文案；线程内单次使用，无需加锁）
+
 
 
 def _probe_video_meta(mp4_bytes):
@@ -1027,7 +1056,7 @@ def generate_lipsync(client_id, payload, progress_fn=None):
         raise ComfyError("上传画面失败")
     # 人脸预检：一帧都检不出就直接拒掉（否则要在 ComfyUI 里烧 1 分钟才报 Face not detected）
     if not _face_precheck(vdata, where="第%s镜" % (payload.get("shot_no") or "?")):
-        raise ComfyError(NO_FACE_MSG)
+        raise ComfyError(_face_reason["msg"])
     aname = _upload_any(adata, "weaveora_lipsync_%s_voice.wav" % _tok, "audio/wav")
     if not aname:
         raise ComfyError("上传配音失败")

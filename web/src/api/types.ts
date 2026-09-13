@@ -355,9 +355,12 @@ export interface AssetRef {
   snapshotKind?: string | null
   /**
    * P13：该产物画面里是否检出了人脸（后端由 prompt_snapshot.faceDetected 派生）。
-   * true=检出；false=抽样一帧都没检出（对口型跑不了）；null/undefined=未知（历史产物）。
+   * true=抽样帧**全部**检出（对口型要求每帧都要有人脸）；false=没全检出（跑不了）；
+   * null/undefined=未知（历史产物）。具体比例看 faceFrames。
    */
   faceDetected?: boolean | null
+  /** P13：检出人脸的抽样帧数，如 "6/6" "4/6" "0/6" */
+  faceFrames?: string | null
   /** P10：产物真实时长（毫秒）—— 配音靠它对齐字幕、判定超长 */
   durationMs?: number | null
   /** P10：配音在镜内的段号（null = 非配音产物） */

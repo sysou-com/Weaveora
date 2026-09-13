@@ -1451,7 +1451,15 @@ const pickerShots = computed(() => {
       const face = newestVisual
         ? (assets.data.value ?? []).find((a) => a.jobId === newestVisual.id)?.faceDetected
         : undefined
-      if (face === false) missing.push('无人脸')
+      const faceFrames = newestVisual
+        ? (assets.data.value ?? []).find((a) => a.jobId === newestVisual.id)?.faceFrames
+        : undefined
+      if (face === false) {
+        // LatentSync 要求**每一帧**都能检出人脸：0/N = 完全无脸；其它 = 部分帧无脸（同样跑不了）
+        missing.push(faceFrames && !faceFrames.startsWith('0/')
+          ? `部分帧无人脸(${faceFrames})`
+          : '无人脸')
+      }
       const newest = newestStamp(visuals)
       const rev = newest ? revOfJob(newest) : undefined
       return {
