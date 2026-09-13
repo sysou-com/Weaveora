@@ -23,6 +23,10 @@ KEY="${WEAVEORA_SSH_KEY:-$HOME/.ssh/comfy_tunnel_ed25519}"
 DIR="${WEAVEORA_WORKER_DIR:-/opt/weaveora}"
 SVC="weaveora-cloud-worker"
 FILES=(stub_worker.py cloud_client.py cloud_image.py comfy_client.py audio_client.py)
+# 对口型工作流 JSON：worker 在**本机**读它，再把图 POST 给远端 ComfyUI（GPU 服务器）。
+# 必须跟着代码一起发，否则 fps/节点接线不一致会出各种怪问题。
+WF_SRC="$(cd "$(dirname "$0")/windows" && pwd)/lipsync_workflow_api.json"
+WF_DST="$DIR/lipsync_workflow_api.json"
 
 cd "$(dirname "$0")/../worker"
 SSH=(ssh -i "$KEY" -o BatchMode=yes -o ConnectTimeout=15 "$HOST")
@@ -47,8 +51,16 @@ echo "== 3/5 备份 + 原子改名 =="
   for f in ${FILES[*]}; do mv -f \"\$f.new\" \"\$f\"; done
   echo '   已替换'; ls -la stub_worker.py cloud_client.py | sed 's/^/   /'"
 
-echo "== 4/5 重启 $SVC =="
-"${SSH[@]}" "systemctl restart $SVC; sleep 8; systemctl is-active $SVC | sed 's/^/   /'"
+echo "== 4/5 重启 worker 服务 =="
+if [ -f "$WF_SRC" ]; then
+  scp -i "$KEY" -q "$WF_SRC" "$HOST:$WF_DST.new"
+  echo "   工作流 JSON: $("${SSH[@]}" "mv -f $WF_DST.new $WF_DST && echo 已同步" || true)"
+fi
+for svc in "$SVC" "weaveora-gpu-worker"; do
+  if "${SSH[@]}" "systemctl list-unit-files 2>/dev/null | grep -q '^$svc'"; then
+    "${SSH[@]}" "systemctl restart $svc; sleep 4; echo \"   $svc -> \$(systemctl is-active $svc)\""
+  fi
+done
 
 echo "== 5/5 自检（导入 + 日志）=="
 # 注意：stub_worker 模块级有「MODE 必须是 comfy/cloud」的启动守卫（防 stub 模式抢 GPU 任务），
@@ -61,6 +73,6 @@ if [ "$OK" != "IMPORTS_OK" ]; then
   echo "   已回滚到上一版"
   exit 1
 fi
-"${SSH[@]}" "journalctl -u $SVC -n 8 --no-pager | tail -6 | sed 's/^/   /'"
+"${SSH[@]}" "journalctl -u $SVC -n 6 --no-pager | tail -5 | sed 's/^/   /'"
 echo
 echo "== 完成。回滚：ssh $HOST 'cd $DIR && for f in ${FILES[*]}; do [ -f \$f.bak.$TS ] && mv -f \$f.bak.$TS \$f; done && systemctl restart $SVC' =="

@@ -487,11 +487,10 @@ def _motion_graph(client_id, payload, positive, negative, first_frame_name, pref
 def _encode_frames_mp4(frames_bytes, fps, out_dir):
     import subprocess as _sp
     import tempfile
-    try:
-        import imageio_ffmpeg as _iif
-        ff = _iif.get_ffmpeg_exe()
-    except Exception as e:
-        raise ComfyError("imageio_ffmpeg 不可用: %s" % e)
+    # 统一走 _ffmpeg_exe()（支持 WEAVEORA_FFMPEG 覆盖 + PATH 回退）。
+    # 旧写法直接 import imageio_ffmpeg 并用其自带二进制：老版本（4.2.2）不支持
+    # `-fps_mode`（需 ffmpeg >= 4.3），会导致对口型拼接报 "Unrecognized option 'fps_mode'"。
+    ff = _ffmpeg_exe()
     if not frames_bytes:
         raise ComfyError("motion 无输出帧")
     for i, b in enumerate(frames_bytes):
@@ -501,7 +500,7 @@ def _encode_frames_mp4(frames_bytes, fps, out_dir):
     r = _sp.run([ff, "-y", "-framerate", str(fps), "-i",
                  os.path.join(out_dir, "f_%04d.png"),
                  "-c:v", "libx264", "-pix_fmt", "yuv420p", out],
-                capture_output=True, text=True)
+                stdout=_sp.PIPE, stderr=_sp.PIPE, universal_newlines=True)  # py3.6 兼容（capture_output/text 需 3.7+）
     if r.returncode != 0 or not os.path.exists(out):
         raise ComfyError("ffmpeg 合成失败: %s" % (r.stderr or "")[-300:])
     with open(out, "rb") as fh:
@@ -988,7 +987,7 @@ def _face_probe(video_bytes, target_emb=None):
             with open(tgt, "w", encoding="utf-8") as fh:
                 json.dump(list(target_emb), fh)
         r = subprocess.run([_sys.executable, "-c", _FACE_CHECK, fp, tgt if target_emb else ""],
-                           capture_output=True, text=True, timeout=900)
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=900)
         out = (r.stdout or "") + (r.stderr or "")
         for line in out.splitlines():
             if line.startswith("SKIP:"):
@@ -1099,7 +1098,7 @@ def _embed_reference(img_bytes):
         with open(fp, "wb") as fh:
             fh.write(img_bytes)
         r = subprocess.run([_sys.executable, "-c", _EMBED, fp],
-                           capture_output=True, text=True, timeout=900)
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=900)
         out = (r.stdout or "") + (r.stderr or "")
         for line in out.splitlines():
             if line.startswith("SKIP:"):
@@ -1129,7 +1128,15 @@ def _set_node_scalar(graph, node_class, key, value):
 
 
 def _ffmpeg_exe():
-    """本机 ffmpeg 路径（优先 imageio_ffmpeg 自带的，其次 PATH 里的 ffmpeg）。"""
+    """本机 ffmpeg 路径。
+
+    优先级：WEAVEORA_FFMPEG 环境变量 > imageio_ffmpeg 自带的 > PATH 里的 ffmpeg。
+    加环境变量覆盖是因为 imageio-ffmpeg 在 Python 3.6 上只能装到 0.4.9，其自带
+    ffmpeg 仅 4.2.2，不支持 `-fps_mode`（需 >= 4.3）。
+    """
+    p = os.environ.get("WEAVEORA_FFMPEG", "").strip()
+    if p and os.path.exists(p):
+        return p
     try:
         import imageio_ffmpeg as _iif
         return _iif.get_ffmpeg_exe()
@@ -1140,7 +1147,7 @@ def _ffmpeg_exe():
 def _run_ff(args, timeout=900):
     import subprocess
     r = subprocess.run([_ffmpeg_exe(), "-y", "-loglevel", "error"] + args,
-                       capture_output=True, text=True, timeout=timeout)
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=timeout)
     if r.returncode != 0:
         raise ComfyError("ffmpeg 失败: %s" % (r.stderr or "")[-300:])
     return r
@@ -1386,7 +1393,8 @@ def _probe_video_meta(mp4_bytes):
     with open(p, "wb") as fh:
         fh.write(mp4_bytes)
     try:
-        r = subprocess.run([_ffmpeg_exe(), "-i", p], capture_output=True, text=True, timeout=180)
+        r = subprocess.run([_ffmpeg_exe(), "-i", p],
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=180)
         err = r.stderr or ""
     except Exception:
         return None, None, None
@@ -1465,16 +1473,15 @@ def generate_lipsync(client_id, payload, progress_fn=None):
         if not spec:
             return ""
         try:
-            f = tempfile.NamedTemporaryFile("w", prefix="weaveora_emb_", suffix=".json",
-                                            delete=False, encoding="utf-8")
-            json.dump(spec, f)
-            f.close()
+            # ★ 返回**内联 JSON**（不是文件路径）：worker 与 ComfyUI 可能不在同一台机
+            # （worker 在 API 服务器、ComfyUI 在 GPU 服务器），文件路径在节点侧根本不存在。
+            # 节点/inference.py 已支持「以 { 开头 = 直接当 JSON 解析」。
             print("[comfy] 说话人「%s」锁定规格：point=%s embedding=%s"
                   % (name, spec.get("point") and [round(v, 3) for v in spec["point"]],
                      bool(spec.get("embedding"))), flush=True)
-            return f.name
+            return json.dumps(spec, separators=(",", ":"))
         except Exception as ex:
-            print("[comfy] 锁定规格写入失败（退回最大脸）: %s" % ex, flush=True)
+            print("[comfy] 锁定规格序列化失败（退回最大脸）: %s" % ex, flush=True)
             return ""
 
     # 先预检：画面里有人脸；且（有特征时）说话人的脸真在画面里
@@ -1505,14 +1512,11 @@ def generate_lipsync(client_id, payload, progress_fn=None):
             return None
 
     tmp = tempfile.mkdtemp(prefix="weaveora_splice_")
-    _paths = []
     try:
         if speaker_count <= 1 or not segs:
             # ---------- 单人镜：整镜一次 ----------
             _who = _first or (next(iter(speakers)) if speakers else "")
             ep = _spec_path_of(_who)
-            if ep:
-                _paths.append(ep)
             print("[comfy] 第%s镜单人模式：说话人=%s，整镜一次" % (shot_no, _who or "?"), flush=True)
             # 预警：LatentSync 的产出帧数由音频决定，音频比画面长时它会「正放+倒放」循环视频凑帧
             # （loop_video）→ 时间轴会异常。本机无法凭空补画面，只能提醒上游保证画面 ≥ 配音。
@@ -1531,17 +1535,16 @@ def generate_lipsync(client_id, payload, progress_fn=None):
             print("[comfy] 第%s镜多人模式：%d 人说话 / %d 段，源片 %d 帧 @%.2ffps"
                   % (shot_no, speaker_count, len(segs), total, fps), flush=True)
             results = []
-            cursor = 0
+            # ★ 各段的帧范围按**配音的真实时间轴**平铺，而不是方案里的 at_sec/end_sec：
+            #   平台混音时是把各段配音**首尾相接**拼成一条音轨的（行间没有空隙），
+            #   而方案的 at_sec/end_sec 只是大致窗口（实测 第1镜 宝玉窗 0–3.2s、
+            #   实际配音 3.3s → 按窗口切 96 帧、音频要 99 帧 → 触发 LatentSync 的
+            #   loop_video「正放+倒放」凑帧 → 时间轴错乱）。
+            #   所以用「累加配音时长」定位每段的起点，并给 +4 帧余量保证「视频帧 ≥ 音频需求」。
+            plan = []
+            t_cum = 0.0
             for i, s in enumerate(segs):
                 who = (s.get("subject") or "").strip()
-                try:
-                    a = max(0, int(round(float(s.get("startMs", 0)) / 1000.0 * fps)))
-                    b = min(total, int(round(float(s.get("endMs", 0)) / 1000.0 * fps)))
-                except (TypeError, ValueError):
-                    continue
-                if b <= a or a < cursor:
-                    continue
-                # 该段音频（优先用该段自己的配音，才严格对齐）
                 vk = (s.get("voiceKey") or "").strip()
                 seg_audio = None
                 if vk:
@@ -1549,33 +1552,28 @@ def generate_lipsync(client_id, payload, progress_fn=None):
                         seg_audio, _ = fetch_reference_bytes(vk)
                     except Exception as e:
                         print("[comfy] 第%s段配音获取失败，退回整轨: %s" % (i + 1, e), flush=True)
-                if seg_audio is None:
-                    seg_audio = adata
-                # ★ 切多少帧要**跟着音频走**，不是跟着方案时间窗：
-                # LatentSync 的产出帧数由音频决定（loop_video），切出来的视频比音频短时会
-                # 正放+**倒放**循环凑帧 → 时间轴彻底乱（实测拼回去错位 ±6 帧）。
-                # 所以取 max(音频秒数×fps + 余量, 时间窗)，并确保不超过下一个段/片尾（不抢别人的帧）。
-                next_a = total
-                for t in segs[i + 1:]:
+                dur = _wav_bytes_seconds(seg_audio) if seg_audio else None
+                if dur is None:
+                    # 拿不到音频时长（极少数）：退回方案窗口
+                    seg_audio = seg_audio or adata
                     try:
-                        na = int(round(float(t.get("startMs", 0)) / 1000.0 * fps))
-                        if na > a:
-                            next_a = min(next_a, na)
-                            break
+                        dur = max(0.1, (float(s.get("endMs", 0)) - float(s.get("startMs", 0))) / 1000.0)
                     except (TypeError, ValueError):
-                        continue
-                avail = max(1, next_a - a)
-                dur = _wav_bytes_seconds(seg_audio)
-                need = (int(round(dur * fps)) + 4) if dur else (b - a)
-                want = min(max(need, 1), avail)
-                if want < need:
-                    print("[comfy] 第%s段可用帧 %d < 音频需求 %d（可能与其他台词重叠）—— 以可用帧为准"
-                          % (i + 1, avail, need), flush=True)
-                b = a + want
+                        dur = 0.1
+                a = max(0, int(round(t_cum * fps)))
+                want = max(1, int(round(dur * fps)) + 4)
+                b = min(a + want, total)
+                plan.append((i, s, who, seg_audio, a, b, dur))
+                t_cum += dur
+            if plan:
+                print("[comfy] 第%s镜各段（按配音时间轴）：%s"
+                      % (shot_no, " / ".join("%s %d-%d帧(%.2fs)" % (q[2] or "?", q[4], q[5], q[6]) for q in plan)),
+                      flush=True)
+            for (i, s, who, seg_audio, a, b, dur) in plan:
+                if b <= a:
+                    continue
                 seg_video = _cut_frames(vdata, a, b, tmp, "s%d" % i)
                 ep = _spec_path_of(who)
-                if ep:
-                    _paths.append(ep)
                 # 该段先确认「这位说话人的脸真在这一段里」—— 比跑到一半失败便宜得多
                 # （多人镜里很常见，比如某段是画外音、或某角色只在这一段背对着镜头）
                 # 注：走了点选（faceHints）就不做识别式预检 —— 用户点的位置本身就是权威信号，
@@ -1607,11 +1605,7 @@ def generate_lipsync(client_id, payload, progress_fn=None):
             print("[comfy] 第%s镜按段驱动完成：%d 段已按原时间轴拼回并接回完整音轨" % (shot_no, len(results)),
                   flush=True)
     finally:
-        for _p in _paths:
-            try:
-                os.remove(_p)
-            except OSError:
-                pass
+        # 锁定规格已内联进工作流（不再有临时文件），只需清临时目录
         import shutil as _sh
         _sh.rmtree(tmp, ignore_errors=True)
 
@@ -1657,7 +1651,15 @@ def _concat_voice(voice_keys):
 
 
 def _ffmpeg_exe():
-    """本机 ffmpeg 路径（优先 imageio_ffmpeg 自带的，其次 PATH 里的 ffmpeg）。"""
+    """本机 ffmpeg 路径。
+
+    优先级：WEAVEORA_FFMPEG 环境变量 > imageio_ffmpeg 自带的 > PATH 里的 ffmpeg。
+    加环境变量覆盖是因为 imageio-ffmpeg 在 Python 3.6 上只能装到 0.4.9，其自带
+    ffmpeg 仅 4.2.2，不支持 `-fps_mode`（需 >= 4.3）。
+    """
+    p = os.environ.get("WEAVEORA_FFMPEG", "").strip()
+    if p and os.path.exists(p):
+        return p
     try:
         import imageio_ffmpeg as _iif
         return _iif.get_ffmpeg_exe()
@@ -1698,7 +1700,7 @@ def _still_to_video(img_bytes, audio_bytes, duration_sec=None, size=512, fps=25)
          "scale=%d:%d:force_original_aspect_ratio=decrease,pad=%d:%d:(ow-iw)/2:(oh-ih)/2"
          % (size, size, size, size),
          "-pix_fmt", "yuv420p", "-c:v", "libx264", op],
-        capture_output=True, text=True, timeout=300)
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=300)
     if r.returncode != 0 or not os.path.exists(op):
         raise ComfyError("静帧转视频失败: %s" % (r.stderr or "")[-300:])
     with open(op, "rb") as fh:
