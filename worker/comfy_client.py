@@ -885,23 +885,32 @@ def _apply_fps_policy(graph):
 # 缓存在显存里（实测残留 ~5GB/8GB）；再起一个 CUDA 上下文（torch + ORT）很容易把 8GiB 卡打爆。
 # 6 帧检测在 CPU 上只多花几秒，但完全不吃显存。
 _FACE_CHECK = r'''
-import os, sys, cv2
+import os, sys, json, cv2, numpy as np
 node = os.environ.get("WEAVEORA_LATENTSYNC_DIR") or r"D:\ComfyUI\custom_nodes\ComfyUI-LatentSyncWrapper"
 sys.path.insert(0, node)
 AUX = os.path.join(node, "checkpoints", "auxiliary")
+tgt_path = sys.argv[2] if len(sys.argv) > 2 else ""
 try:
     from insightface.app import FaceAnalysis
-    app = FaceAnalysis(allowed_modules=["detection"], root=AUX,
-                       providers=["CPUExecutionProvider"])
+    mods = ["detection"] + (["recognition"] if tgt_path else [])
+    app = FaceAnalysis(allowed_modules=mods, root=AUX, providers=["CPUExecutionProvider"])
     app.prepare(ctx_id=-1, det_size=(512, 512))
 except Exception as e:
     print("SKIP:init:" + str(e)[:160]); sys.exit(0)
+tgt = None
+if tgt_path:
+    try:
+        tgt = np.asarray(json.load(open(tgt_path, encoding="utf-8")), dtype=np.float32).reshape(-1)
+        tgt = tgt / (float(np.linalg.norm(tgt)) or 1.0)
+    except Exception:
+        tgt = None
 cap = cv2.VideoCapture(sys.argv[1])
 if not cap.isOpened():
     print("SKIP:decode"); sys.exit(0)
 n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 idx = sorted({int(i * (n - 1) / 5) for i in range(6)}) if n > 1 else [0]
 hits = total = 0
+best = -1.0
 for i in idx:
     cap.set(cv2.CAP_PROP_POS_FRAMES, i)
     ok, fr = cap.read()
@@ -909,24 +918,42 @@ for i in idx:
         continue
     total += 1
     try:
-        if len(app.get(fr)) > 0:
-            hits += 1
+        faces = app.get(fr)
     except Exception:
-        pass
+        faces = []
+    if len(faces) > 0:
+        hits += 1
+    if tgt is not None:
+        for f in faces:
+            emb = getattr(f, "normed_embedding", None)
+            if emb is None:
+                continue
+            v = np.asarray(emb, dtype=np.float32)
+            v = v / (float(np.linalg.norm(v)) or 1.0)
+            s = float(np.dot(v, tgt))
+            if s > best:
+                best = s
 cap.release()
-print("RESULT:%d/%d" % (hits, total))
+print("RESULT:%d/%d/%s" % (hits, total, ("%.4f" % best) if tgt is not None else ""))
 '''
 
 
 NO_FACE_MSG = ("该镜检测不到人脸（可能是远景/背影/空镜）——对口型只对正脸/侧脸可见的镜头有意义；"
                "请换一镜，或在导演里把该镜改成对话近景后重生成画面")
+# 锁人时「目标人脸」的最低余弦相似度（低于它就不认，宁可不贴也不要贴错人）
+TARGET_MIN_SIM = 0.28
 
 # 预检失败原因（给调用方拼错误文案；单线程内单次使用，无需加锁）
 _face_reason = {"msg": NO_FACE_MSG}
 
 
-def _face_probe(video_bytes):
-    """抽 6 帧跑人脸检测。返回 (hits, total)；无法判定时返回 None（不拦不传）。"""
+def _face_probe(video_bytes, target_emb=None):
+    """抽 6 帧跑人脸检测。
+
+    返回 (hits, total, best_target_sim)：
+      hits/total = 检出人脸的帧数；给了 target_emb 时额外给出「最像目标的相似度」。
+    无法判定时返回 None（不拦不传）。
+    """
     import subprocess
     import sys as _sys
     import tempfile
@@ -934,10 +961,14 @@ def _face_probe(video_bytes):
         return None
     d = tempfile.mkdtemp(prefix="weaveora_facechk_")
     fp = os.path.join(d, "in.mp4")
+    tgt = os.path.join(d, "target.json")
     try:
         with open(fp, "wb") as fh:
             fh.write(video_bytes)
-        r = subprocess.run([_sys.executable, "-c", _FACE_CHECK, fp],
+        if target_emb:
+            with open(tgt, "w", encoding="utf-8") as fh:
+                json.dump(list(target_emb), fh)
+        r = subprocess.run([_sys.executable, "-c", _FACE_CHECK, fp, tgt if target_emb else ""],
                            capture_output=True, text=True, timeout=900)
         out = (r.stdout or "") + (r.stderr or "")
         for line in out.splitlines():
@@ -945,8 +976,10 @@ def _face_probe(video_bytes):
                 print("[comfy] 人脸预检跳过（%s）" % line[5:], flush=True)
                 return None
             if line.startswith("RESULT:"):
-                hits, total = (int(x) for x in line[7:].split("/"))
-                return hits, total
+                parts = line[7:].split("/")
+                hits, total = int(parts[0]), int(parts[1])
+                best = float(parts[2]) if len(parts) > 2 else None
+                return hits, total, best
         print("[comfy] 人脸预检无结果，不拦：%s" % out[:120], flush=True)
         return None
     except Exception as e:
@@ -957,22 +990,21 @@ def _face_probe(video_bytes):
         _sh.rmtree(d, ignore_errors=True)
 
 
-def _face_precheck(video_bytes, where="lipsync"):
-    """对口型前置门禁：**抽样帧里只要有一帧检不出人脸就拦**。
+def _face_precheck(video_bytes, where="lipsync", target_emb=None, speaker=""):
+    """对口型前置门禁。两道：① 画面里有人脸；② （给了目标特征时）**说话人的脸真在画面里**。
 
-    为什么不是「一帧都检不出才拦」：LatentSync 的 `affine_transform_video()` 会对**每一帧**
-    做人脸检测，任何一帧失败就整体抛 RuntimeError("Face not detected")。实测第 3 镜
-    抽样 4/6（有两帧没人脸）——照旧口径会放行，结果必然白烧十几分钟 GPU。
-
-    而反向不会误拦：本预检用的检测器与管线同一模型同一阈值，且管线还额外过滤
-    （人脸尺寸/长宽比/取最大），即**管线比预检更严** —— 预检说没人脸，管线一定也没。
-    拿不到结果（SKIP/异常）时一律放行。
+    为什么要第二道（2026-09-13 实例）：第 6 镜说话人是「袭人」，但她与「警幻」的定妆照
+    几乎同一张脸（相似度 0.71）——锁定她时最高相似度只有 0.18，低于阈值 0.28。
+    这时不能硬跑（会去驱动最大脸=另一个人，画面坏掉），也不能报一句误导的
+    "Face not detected"，而应该**说清楚原因并让用户去修定妆照**。
     """
-    r = _face_probe(video_bytes)
+    r = _face_probe(video_bytes, target_emb)
     if r is None:
         return True
-    hits, total = r
-    print("[comfy] 人脸预检 %s：%d/%d 帧可检出" % (where, hits, total), flush=True)
+    hits, total, best = r
+    print("[comfy] 人脸预检 %s：%d/%d 帧可检出%s"
+          % (where, hits, total, "，最像说话人的相似度=%.2f" % best if best is not None else ""),
+          flush=True)
     if total <= 0:
         return True
     if hits == 0:
@@ -983,6 +1015,14 @@ def _face_precheck(video_bytes, where="lipsync"):
             "该镜有 %d/%d 帧检测不到人脸——对口型（LatentSync）要求**每一帧**都能检出人脸，"
             "跑下去会在中途报 Face not detected；请换镜，或先把该镜画面重新生成"
             % (total - hits, total))
+        return False
+    if target_emb is not None and best is not None and best < TARGET_MIN_SIM:
+        _face_reason["msg"] = (
+            "画面里找不到说话人「%s」的人脸（最高的相似度仅 %.2f，阈值 %.2f）。"
+            "常见原因：① 说话人不在画面里（画外音）；② 该角色的定妆照与画面形象差异过大；"
+            "③ 两个角色的定妆照过于相似（实测「袭人」与「警幻」定妆照相似度 0.71，同一张脸），"
+            "此时按脸认人本身就不可能。请先核对「%s」的定妆照（导入图）选对了没有。"
+            % (speaker or "?", best, TARGET_MIN_SIM, speaker or "?"))
         return False
     return True
 
@@ -1115,15 +1155,35 @@ def generate_lipsync(client_id, payload, progress_fn=None):
     if still_mode:
         vdata = _still_to_video(vdata, adata, payload.get("duration_sec"))
         print("[comfy] lipsync 画面为静帧 → 已用 ffmpeg 转成与配音等长的 mp4", flush=True)
+    # --- 锁人：多人同框必须知道「谁在说话」，否则逐帧取最大脸会中途换人（画面坏掉）---
+    # 先算说话人特征，下面的预检和后续注入都要用它
+    speakers = payload.get("speakers") if isinstance(payload.get("speakers"), dict) else {}
+    speaker_count = int(payload.get("speakerCount") or len(speakers) or 0)
+    if speaker_count > 1:
+        raise ComfyError(
+            "该镜有 %d 个人说话（%s）——LatentSync 每帧只能驱动一张脸，双人对话会把台词配到同一个人脸上"
+            "（嘴型错位、面部区域错位）。请把这一镜拆成两个单人镜（各自单独说话），或等「按段驱动」上线。"
+            % (speaker_count, payload.get("speakerNames") or "、".join(speakers.keys())))
+    _who = next(iter(speakers)) if speakers else ""
+    _emb = None
+    if _who:
+        try:
+            _pb, _ = fetch_reference_bytes(speakers[_who])
+            _emb = _embed_reference(_pb)
+            if _emb:
+                print("[comfy] 已提取说话人「%s」的人脸特征（%d 维）" % (_who, len(_emb)), flush=True)
+        except Exception as e:
+            print("[comfy] 说话人特征提取失败：%s" % e, flush=True)
+    # 人脸预检（带目标）：① 画面里有人脸；② 说话人的脸真在画面里且可信
+    if not _face_precheck(vdata, where="第%s镜" % (payload.get("shot_no") or "?"),
+                          target_emb=_emb, speaker=_who):
+        raise ComfyError(_face_reason["msg"])
     # 文件名带上本次任务的唯一后缀：一是避免 ComfyUI 重名自动改名（会变成 xxx (1).mp4，
     # 日志里对不上人），二是从根上堆不了「同名旧文件被静默复用」。
     _tok = _uuid.uuid4().hex[:8]
     vname = _upload_any(vdata, "weaveora_lipsync_%s_in.mp4" % _tok, "video/mp4")
     if not vname:
         raise ComfyError("上传画面失败")
-    # 人脸预检：一帧都检不出就直接拒掉（否则要在 ComfyUI 里烧 1 分钟才报 Face not detected）
-    if not _face_precheck(vdata, where="第%s镜" % (payload.get("shot_no") or "?")):
-        raise ComfyError(_face_reason["msg"])
     aname = _upload_any(adata, "weaveora_lipsync_%s_voice.wav" % _tok, "audio/wav")
     if not aname:
         raise ComfyError("上传配音失败")
@@ -1154,30 +1214,18 @@ def generate_lipsync(client_id, payload, progress_fn=None):
     for node in graph.values():
         if isinstance(node, dict) and "filename_prefix" in (node.get("inputs") or {}):
             node["inputs"]["filename_prefix"] = prefix
-    # --- 锁人：多人同框必须知道「谁在说话」，否则逐帧取最大脸会中途换人（画面坏掉）---
-    speakers = payload.get("speakers") if isinstance(payload.get("speakers"), dict) else {}
-    speaker_count = int(payload.get("speakerCount") or len(speakers) or 0)
-    if speaker_count > 1:
-        raise ComfyError(
-            "该镜有 %d 个人说话（%s）——LatentSync 每帧只能驱动一张脸，双人对话会把台词配到同一个人脸上"
-            "（嘴型错位、面部区域错位）。请把这一镜拆成两个单人镜（各自单独说话），或等「按段驱动」上线。"
-            % (speaker_count, payload.get("speakerNames") or "、".join(speakers.keys())))
+    # 把特征写成文件交给节点（节点只能收字符串路径）
     _emb_path = ""
-    if speakers:
-        _who = next(iter(speakers))
+    if _emb:
         try:
-            _pb, _ = fetch_reference_bytes(speakers[_who])
-            _emb = _embed_reference(_pb)
-            if _emb:
-                import tempfile as _tf
-                _f = _tf.NamedTemporaryFile("w", prefix="weaveora_emb_", suffix=".json",
-                                            delete=False, encoding="utf-8")
-                json.dump(_emb, _f)
-                _f.close()
-                _emb_path = _f.name
-                print("[comfy] 已锁定说话人「%s」的人脸特征（%d 维）" % (_who, len(_emb)), flush=True)
+            import tempfile as _tf
+            _f = _tf.NamedTemporaryFile("w", prefix="weaveora_emb_", suffix=".json",
+                                        delete=False, encoding="utf-8")
+            json.dump(_emb, _f)
+            _f.close()
+            _emb_path = _f.name
         except Exception as e:
-            print("[comfy] 说话人特征准备失败（退回「最大脸」）: %s" % e, flush=True)
+            print("[comfy] 特征文件写入失败（退回「最大脸」）: %s" % e, flush=True)
     if _emb_path:
         _n = _set_node_scalar(graph, LIPSYNC_NODE_CLASS, "target_embedding_path", _emb_path)
         print("[comfy] 已注入 target_embedding_path（命中 %d 个 %s）" % (_n, LIPSYNC_NODE_CLASS), flush=True)
