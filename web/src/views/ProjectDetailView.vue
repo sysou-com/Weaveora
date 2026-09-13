@@ -2106,8 +2106,33 @@ async function doExport(): Promise<void> {
   }
 }
 const renderBusy = ref(false)
+
+/**
+ * 渲染前检查：方案里有台词/旁白、但**字幕开关是关的** → 先提醒。
+ *
+ * 坑过两次：开关默认 false（现为 true）、旧草稿回写 false → 渲染出来没字幕，用户以为“字幕坏了”。
+ * 在用到的地方提醒（不靠人记），用户选“打开并渲染”就顺便把开关写回方案。
+ */
+async function ensureSubtitleForRender(): Promise<boolean> {
+  const p = draft.value
+  if (!p || p.mode !== 'video') return true
+  const hasLine = (p.shots ?? []).some((s) => (s.narrations ?? []).some((l) => (l.text ?? '').trim()))
+  if (!hasLine || p.edit_plan?.subtitle === true) return true
+  const ok = window.confirm(
+    '当前方案的「字幕」开关是关的，渲染出来的成片不会有台词/旁白字幕。\n\n要现在打开并渲染吗？',
+  )
+  if (!ok) return true // 尊重用户选择：仍旧渲染无字幕版
+  if (p.edit_plan) p.edit_plan.subtitle = true
+  const saved = await savePlanInPlace()
+  if (!saved) {
+    message.warning('字幕开关已改，但方案保存失败；请先「确认并使用此版本」再渲染')
+  }
+  return true
+}
+
 async function doRender(): Promise<void> {
   if (!selectedRevId.value) return
+  if (!(await ensureSubtitleForRender())) return
   
   focusJobTab('master')
   renderBusy.value = true
