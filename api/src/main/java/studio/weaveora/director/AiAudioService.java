@@ -280,8 +280,23 @@ public class AiAudioService {
                         .collect(java.util.stream.Collectors.joining("、")))
                 .append('\n');
         double dur = shot.path("duration_sec").asDouble(3);
+        // P13：字数预算按 **min(镜长, 视频模型单次上限)** 收口。
+        // 否则「镜头 5.2s 但模型只能出 4.0s」时会写出超过模型能力的台词 —— 要么溢出更多、
+        // 要么被迫本地拉伸；从源头按模型能力限额最省事。
+        double capSec = plan.path("edit_plan").path("video_model_max_sec").asDouble(0);
+        String timingMode = plan.path("edit_plan").path("timing_mode").asText("shot_fixed");
+        if (capSec > 0 && dur > capSec) {
+            user.append("注意：本镜时长 ")
+                    .append(String.format(java.util.Locale.ROOT, "%.1f", dur))
+                    .append("s 超过所选视频模型的单次输出上限 ")
+                    .append(String.format(java.util.Locale.ROOT, "%.1f", capSec))
+                    .append("s\n");
+            dur = capSec;
+        }
         user.append("本镜：第 ").append(shot.path("shot_no").asInt()).append(" 镜");
-        user.append("，时长 ").append(String.format(java.util.Locale.ROOT, "%.1f", dur)).append("s\n");
+        user.append("，时长 ").append(String.format(java.util.Locale.ROOT, "%.1f", dur)).append("s");
+        user.append("（时长模式：").append("shot_fixed".equals(timingMode)
+                ? "镜长固定、配音顺排（可少量溢出到下一镜）" : "镜长跟随配音（尽量不要溢出）").append("）\n");
         user.append("时长上限：台词合计不超过 ")
                 .append(String.format(java.util.Locale.ROOT, "%.1f", secBudget(dur))).append("s")
                 .append("（中文 ≈ ").append(String.format(java.util.Locale.ROOT, "%.1f", CHARS_PER_SEC)).append(" 字/秒，")
