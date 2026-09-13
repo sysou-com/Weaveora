@@ -574,11 +574,20 @@ def generate_motion(client_id, payload, progress_fn=None):
     finally:
         import shutil as _sh
         _sh.rmtree(out_dir, ignore_errors=True)
-    w = (payload.get("params") or {}).get("width", 768)
-    h = (payload.get("params") or {}).get("height", 768)
+    # 上报**真实**产出规格：原先直接把 payload 里「请求的」width/height 当结果上报，
+    # 于是资产库里记的是 1280×704，而实际文件是 Wan 真正出图桶（本例 832×464）——
+    # 2026-09-13 排查时让人误以为「对口型把分辨率改小了」。
+    pw, ph, pdur = _probe_video_meta(mp4)
+    rw = (payload.get("params") or {}).get("width", 768)
+    rh = (payload.get("params") or {}).get("height", 768)
+    w, h = pw or rw, ph or rh
+    if (pw and int(pw) != int(rw)) or (ph and int(ph) != int(rh)):
+        print("[comfy] motion 实际尺寸 %sx%s 与请求 %sx%s 不一致（已按实际上报）"
+              % (w, h, rw, rh), flush=True)
     if progress_fn:
         progress_fn(100, "done")
-    return [{"bytes": mp4, "mime": "video/mp4", "width": int(w), "height": int(h)}]
+    return [{"bytes": mp4, "mime": "video/mp4", "width": int(w), "height": int(h),
+             "duration_ms": pdur}]
 
 
 # ---- P7 配乐：ACE-Step 1.5（ComfyUI 原生节点，非 wrapper） ----
@@ -724,6 +733,9 @@ LIPSYNC_AUDIO_TITLE = os.environ.get("WEAVEORA_LIPSYNC_AUDIO_TITLE", "audio").st
 # 不设则回退到旧行为（视频键 video / 音频键 audio）。
 LIPSYNC_VIDEO_INPUT = os.environ.get("WEAVEORA_LIPSYNC_VIDEO_INPUT", "").strip()
 LIPSYNC_AUDIO_INPUT = os.environ.get("WEAVEORA_LIPSYNC_AUDIO_INPUT", "").strip()
+# LatentSync 的原生输出帧率（configs/unet/stage2_512.yaml: video_fps: 25）。
+# 组装成片时必须用这个值，不能用源片 fps —— 否则时长会按 25/源fps 缩短。
+LIPSYNC_FPS = int(os.environ.get("WEAVEORA_LIPSYNC_FPS", "25") or 25)
 
 
 # 文件名类输入的候选键（按优先级）：不同加载节点名字不一样
@@ -794,6 +806,30 @@ def _set_node_input(graph, title, value, input_key=None, want_video=True):
               flush=True)
         hit += 1
     return hit
+
+
+def _ensure_output_fps(graph, fps):
+    """把「图片序列→视频」那一步的 fps 钉成 LatentSync 的原生帧率（默认 25）。
+
+    为什么要钉（2026-09-13 线上事故）：LatentSync 按 config 的 `video_fps: 25` 生成帧，
+    帧数 ≈ 配音时长 × 25；若组装时用**源片 fps**（本项目 motion 是 30），播放会快 25/30，
+    成片时长缩短 17% → **末尾对白被截掉**（实例：4.92s 配音 → 4.17s 成片）。
+    注意这些帧是「定数」的，改播放速度不能补回内容，只能改回 25。
+    """
+    fixed = []
+    for node in (graph or {}).values():
+        if not isinstance(node, dict):
+            continue
+        inputs = node.get("inputs") or {}
+        if "fps" not in inputs:
+            continue
+        # 无论原值是指向源片的链接还是字面量，一律钉成固定值
+        inputs["fps"] = int(fps)
+        fixed.append(node.get("class_type"))
+    if fixed:
+        print("[comfy] 对口型输出 fps 已钉为 %d（节点：%s）" % (int(fps), ",".join(str(x) for x in fixed)),
+              flush=True)
+    return fixed
 
 
 def _probe_video_meta(mp4_bytes):
@@ -889,6 +925,8 @@ def generate_lipsync(client_id, payload, progress_fn=None):
     for node in graph.values():
         if isinstance(node, dict) and "filename_prefix" in (node.get("inputs") or {}):
             node["inputs"]["filename_prefix"] = prefix
+    # 帧率必须钉住：LatentSync 出的是 25fps 的定数帧，用源片 fps 组装会截短时长
+    _ensure_output_fps(graph, LIPSYNC_FPS)
     _free_comfy_models()
     # 注意：导出的「API 格式」工作流是**裸节点图**（{"1":{...}}），而 /prompt 要的是
     # {"prompt": 图, "client_id": ...} —— 直接投裸图会被 ComfyUI 拒为 no_prompt。

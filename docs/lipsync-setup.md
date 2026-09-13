@@ -86,7 +86,7 @@ Invoke-RestMethod "http://127.0.0.1:8188/object_info" |
 
 ---
 
-## 二、本机已排掉的 14 个坑（2026-09-13，都别踩）
+## 二、本机已排掉的 16 个坑（2026-09-13，都别踩）
 
 这些坑的表现都是「**ComfyUI 卡住 / 队列永远 running=1 / GPU 0%**」，实际是软件问题，不是显卡不够。
 
@@ -106,6 +106,8 @@ Invoke-RestMethod "http://127.0.0.1:8188/object_info" |
 | 12 | 任务 `succeeded`、mp4 也落盘，但**资源库看不到**；且该资产无宽高/时长 | ① 前端 `outputAssets` 白名单漏了 `lipsync`（`GAL_TABS` 里有 Tab → 那个 Tab 永远空）② worker 没回填 width/height/duration | ① 白名单补 `lipsync`（抽成 `OUTPUT_KINDS` 常量，注释写明「Tab 有的 kind 必须都在白名单」）；② worker 新增 `_probe_video_meta()`（ffmpeg -i 读回 512/512/5000ms）；已产出的那条资产已 SQL 回填 |
 | 13 | 跑到第 **15 分钟**被判 `WORKER_STUCK 执行超时（worker 无心跳完成）`，但 worker 心跳正常、ComfyUI 已 `Doing inference 5/8` | 回收器 `reapStaleRunning()` 只比 `startedAt`、硬编码 `minusMinutes(15)`（注释还写着 30min），完全不看 worker 心跳——对口型一个 5s 镜实测 **25–30 分钟**，必被杀 | 改成「心跳感知 + 硬上限」：`running-timeout-minutes`（默认 60，可配）+ worker `lastSeenAt` 宽限 5min 内不回收 + `max(4×超时, 超时+60min)` 硬上限；回收改按 id 单条 |
 | 14 | **任务 succeeded、资产也在，但画面是错的素材**（拿调试用的静帧片出了片，5s 音频配上我那张测试脸） | worker 把上传后的文件名注入到 `LoadVideo` **不认识的 `video` 键**，而真键 `file` 保留了工作流 JSON 里写死的旧文件名 → ComfyUI 静默加载旧文件。验尸方法：`GET /history` 看该 prompt 的图，`LoadVideo.inputs` 里两个键都会在那儿 | ① `_set_node_input` 改为**从节点 schema 推导键名**（`file`/`video`/`audio`，env 写错也回退）；② 删/清同一节点上其它候选文件名键；③ 上传文件名带**每任务唯一后缀**，从根上消掉重名复用；④ 注入后**全图自检**：还有指向其它 `.mp4/.wav` 的输入就拒跑；⑤ 工作流 JSON 的默认文件名改空串；⑥ supervisor 启动回显 lipsync env（本次就是靠它确认 `videoInput=file`） |
+| 15 | **成片比配音短，末尾对白被截**（4.92s 配音 → 4.17s 成片） | 工作流把 `CreateVideo.fps` 接到了**源片 fps**（`GetVideoComponents.fps` = 30），而 LatentSync 按 config `video_fps: 25` 生成**定数帧**（帧数 ≈ 配音时长×25）→ 按 30fps 播放就快 25/30，**时长缩短 17%**。帧是定数的，改播放速度补不回内容 | ① 工作流 `CreateVideo.fps` 写字面量 **25**（并把标题改成提醒）；② worker 新增 `_ensure_output_fps()`：运行时把图里所有带 `fps` 输入的节点**钉成 `WEAVEORA_LIPSYNC_FPS`**（默认 25），无论原来是指向源片的链接还是字面量；③ env 回显里带上 fps |
+| 16 | 资产库里记的分辨率与实际文件不符（记 1280×704，文件其实 832×464/1280×720）→ 让人误以为「对口型把分辨率改小了」 | `generate_motion` 把 payload 里**请求的** width/height 当结果上报，而 Wan 实际出图桶不同；`/internal/assets` 只是原样读文件，不转码 | `generate_motion` 改用 `_probe_video_meta(mp4)` 上报**真实**宽高/时长（与请求不一致时打日志）。注：对口型产物会原样保留源片分辨率 |
 
 ---
 

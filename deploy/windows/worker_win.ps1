@@ -28,9 +28,11 @@ $env:WEAVEORA_LIPSYNC_WORKFLOW = "D:\ComfyUI\_setup\lipsync_workflow_api.json"
 $env:WEAVEORA_LIPSYNC_VIDEO_INPUT = "file"
 # 3070 Ti 8GB 实测：512x512 / 16帧一块约 75s，约 2.5 分钟/秒视频；1800s 够 5s 片段
 $env:WEAVEORA_LIPSYNC_TIMEOUT = "1800"
+# 输出帧率必须 = LatentSync 原生 25fps，否则成片时长按 25/源fps 缩短（末尾对白被截）
+$env:WEAVEORA_LIPSYNC_FPS = "25"
 
 Log "worker supervisor started (mode=comfy api=18080 comfy=8188)"
-Log ("lipsync env: workflow=" + $env:WEAVEORA_LIPSYNC_WORKFLOW + " videoInput=" + $env:WEAVEORA_LIPSYNC_VIDEO_INPUT + " audioInput=" + $env:WEAVEORA_LIPSYNC_AUDIO_INPUT + " timeout=" + $env:WEAVEORA_LIPSYNC_TIMEOUT)
+Log ("lipsync env: workflow=" + $env:WEAVEORA_LIPSYNC_WORKFLOW + " videoInput=" + $env:WEAVEORA_LIPSYNC_VIDEO_INPUT + " audioInput=" + $env:WEAVEORA_LIPSYNC_AUDIO_INPUT + " timeout=" + $env:WEAVEORA_LIPSYNC_TIMEOUT + " fps=" + $env:WEAVEORA_LIPSYNC_FPS)
 while ($true) {
     Log "starting stub_worker.py ..."
     Push-Location $workDir

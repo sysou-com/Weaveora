@@ -1,0 +1,82 @@
+{
+  "1": {
+    "class_type": "LoadVideo",
+    "inputs": {
+      "file": ""
+    },
+    "_meta": {
+      "title": "video"
+    }
+  },
+  "2": {
+    "class_type": "GetVideoComponents",
+    "inputs": {
+      "video": [
+        "1",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "split source video"
+    }
+  },
+  "3": {
+    "class_type": "LoadAudio",
+    "inputs": {
+      "audio": ""
+    },
+    "_meta": {
+      "title": "audio"
+    }
+  },
+  "4": {
+    "class_type": "LatentSyncNode",
+    "inputs": {
+      "images": [
+        "2",
+        0
+      ],
+      "audio": [
+        "3",
+        0
+      ],
+      "seed": 1247,
+      "lips_expression": 1.5,
+      "inference_steps": 20
+    },
+    "_meta": {
+      "title": "LatentSync 1.6"
+    }
+  },
+  "5": {
+    "class_type": "CreateVideo",
+    "inputs": {
+      "images": [
+        "4",
+        0
+      ],
+      "fps": 25,
+      "audio": [
+        "4",
+        1
+      ]
+    },
+    "_meta": {
+      "title": "assemble video (fps=25 = LatentSync native, do NOT wire to source fps)"
+    }
+  },
+  "6": {
+    "class_type": "SaveVideo",
+    "inputs": {
+      "video": [
+        "5",
+        0
+      ],
+      "filename_prefix": "weaveora_lipsync",
+      "format": "auto"
+    },
+    "_meta": {
+      "title": "save result"
+    }
+  }
+}
