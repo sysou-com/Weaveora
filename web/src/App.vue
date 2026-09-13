@@ -12,7 +12,9 @@ import { themeOverrides } from '@/theme'
     inline-theme-disabled
   >
     <NDialogProvider>
-      <NMessageProvider placement="top" :duration="2200" :max="3">
+      <!-- 全局提示/报错自动消失时长：2.2s 太短（报错常来不及读完），改 3s。
+           个别重要提示仍可在调用处用 { duration: 4000|5000|6000 } 单独延长。 -->
+      <NMessageProvider placement="top" :duration="3000" :max="3">
         <router-view />
       </NMessageProvider>
     </NDialogProvider>
