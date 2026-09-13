@@ -870,6 +870,81 @@ def _apply_fps_policy(graph):
     return ("forced=%d" % forced) if forced is not None else "auto=source-fps", touched
 
 
+# 人脸预检（子进程）：LatentSync 必须能逐帧检出人脸，否则跑到一半才会报
+# "Face not detected"（模型加载 + 扫全片 ≈ 1 分钟 GPU 白烧）。先抽 6 帧探一下，
+# **只有一帧都检不出**才拦（避免误拦）；检测器加载失败则跳过（SKIP）。
+_FACE_CHECK = r'''
+import os, sys, cv2
+node = os.environ.get("WEAVEORA_LATENTSYNC_DIR") or r"D:\ComfyUI\custom_nodes\ComfyUI-LatentSyncWrapper"
+sys.path.insert(0, node)
+try:
+    from latentsync.utils.face_detector import FaceDetector
+except Exception as e:
+    print("SKIP:import:" + str(e)[:160]); sys.exit(0)
+try:
+    fd = FaceDetector(device="cuda")
+except Exception as e:
+    print("SKIP:init:" + str(e)[:160]); sys.exit(0)
+cap = cv2.VideoCapture(sys.argv[1])
+n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+if not cap.isOpened():
+    print("SKIP:decode"); sys.exit(0)
+idx = sorted({int(i * (n - 1) / 5) for i in range(6)}) if n > 1 else [0]
+hits = total = 0
+for i in idx:
+    cap.set(cv2.CAP_PROP_POS_FRAMES, i)
+    ok, fr = cap.read()
+    if not ok:
+        continue
+    total += 1
+    if fd(fr)[0] is not None:
+        hits += 1
+cap.release()
+print("RESULT:%d/%d" % (hits, total))
+'''
+
+
+def _face_precheck(video_bytes, where="lipsync"):
+    """扫 6 帧看有没有人脸；返回 True=通过/无法判定 SKIP，False=一帧都没检出。
+
+    为什么值得花这 ~20秒：LatentSync 会先把全片人脸检测一遍，没脸时抛
+    RuntimeError("Face not detected")——但那时已经烧掉了一分钟 GPU。
+    """
+    import subprocess
+    import sys as _sys
+    import tempfile
+    if not video_bytes:
+        return True
+    d = tempfile.mkdtemp(prefix="weaveora_facechk_")
+    fp = os.path.join(d, "in.mp4")
+    try:
+        with open(fp, "wb") as fh:
+            fh.write(video_bytes)
+        r = subprocess.run([_sys.executable, "-c", _FACE_CHECK, fp],
+                           capture_output=True, text=True, timeout=600)
+        out = (r.stdout or "") + (r.stderr or "")
+        for line in out.splitlines():
+            if line.startswith("SKIP:"):
+                print("[comfy] 人脸预检跳过（%s）" % line[5:], flush=True)
+                return True
+            if line.startswith("RESULT:"):
+                hits, total = (int(x) for x in line[7:].split("/"))
+                print("[comfy] 人脸预检 %s：%d/%d 帧可检出" % (where, hits, total), flush=True)
+                return not (total > 0 and hits == 0)
+        print("[comfy] 人脸预检无结果，不拦截（%s）" % out[:120], flush=True)
+        return True
+    except Exception as e:
+        print("[comfy] 人脸预检异常，不拦截：%s" % e, flush=True)
+        return True
+    finally:
+        import shutil as _sh
+        _sh.rmtree(d, ignore_errors=True)
+
+
+NO_FACE_MSG = ("该镜检测不到人脸（可能是远景/背影/空镜）——对口型只对正脸/侧脸可见的镜头有意义；"
+               "请换一镜，或在导演里把该镜改成对话近景后重生成画面")
+
+
 def _probe_video_meta(mp4_bytes):
     """用 ffmpeg -i 读 mp4 的宽高与时长（返回 (w, h, duration_ms)）。
 
@@ -933,6 +1008,9 @@ def generate_lipsync(client_id, payload, progress_fn=None):
     vname = _upload_any(vdata, "weaveora_lipsync_%s_in.mp4" % _tok, "video/mp4")
     if not vname:
         raise ComfyError("上传画面失败")
+    # 人脸预检：一帧都检不出就直接拒掉（否则要在 ComfyUI 里烧 1 分钟才报 Face not detected）
+    if not _face_precheck(vdata, where="第%s镜" % (payload.get("shot_no") or "?")):
+        raise ComfyError(NO_FACE_MSG)
     aname = _upload_any(adata, "weaveora_lipsync_%s_voice.wav" % _tok, "audio/wav")
     if not aname:
         raise ComfyError("上传配音失败")
@@ -993,6 +1071,9 @@ def generate_lipsync(client_id, payload, progress_fn=None):
             _comfy("POST", "/interrupt", payload={}, timeout=30)
         except Exception:
             pass
+        _raw = str(e)
+        if "Face not detected" in _raw:
+            raise ComfyError(NO_FACE_MSG)
         raise ComfyError("对口型推理失败：%s" % e)
     outs = _download_outputs(rec, prefix)
     if not outs:
