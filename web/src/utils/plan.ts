@@ -127,7 +127,7 @@ export function normalizePlan(raw: DirectorPlan): DirectorPlan {
     v.aspect_ratio = str(v.aspect_ratio, '16:9')
     v.script = v.script ?? { theme: '', acts: [] }
     v.audio = v.audio ?? { music_mood: '', sfx: [], vo: '' }
-    v.edit_plan = v.edit_plan ?? { fps: 30, transition_default: 'cut', subtitle: false }
+    v.edit_plan = v.edit_plan ?? { fps: 30, transition_default: 'cut', subtitle: true }
     v.shots = Array.isArray(v.shots) ? v.shots : []
     v.shots = v.shots.map((s) => {
       const sh = s as unknown as Record<string, unknown>

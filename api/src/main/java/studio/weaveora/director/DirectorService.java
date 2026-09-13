@@ -168,7 +168,7 @@ public class DirectorService {
         ObjectNode edit = merged.putObject("edit_plan");
         edit.put("fps", 30);
         edit.put("transition_default", "cut");
-        edit.put("subtitle", false);
+        edit.put("subtitle", true);
 
         ArrayNode allShots = merged.putArray("shots");
         ArrayNode segMeta = merged.putArray("segments");
@@ -290,7 +290,7 @@ public class DirectorService {
             obj.set("shots", node);
             obj.putObject("script").put("theme", "");
             obj.putObject("audio").put("music_mood", "");
-            obj.putObject("edit_plan").put("fps", 30).put("transition_default", "cut").put("subtitle", false);
+            obj.putObject("edit_plan").put("fps", 30).put("transition_default", "cut").put("subtitle", true);
             return obj;
         }
         return node;

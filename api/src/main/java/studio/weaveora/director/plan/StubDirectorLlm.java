@@ -92,7 +92,7 @@ public class StubDirectorLlm implements DirectorLlm {
         ObjectNode editPlan = plan.putObject("edit_plan");
         editPlan.put("fps", 30);
         editPlan.put("transition_default", "cut");
-        editPlan.put("subtitle", false);
+        editPlan.put("subtitle", true);
 
         List<BigDecimal> parts = splitDuration(duration, targetShotCount(duration));
         ArrayNode shots = plan.putArray("shots");

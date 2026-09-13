@@ -101,7 +101,7 @@ public class ConcatService {
             throw new BizException(ErrorCode.VALIDATION, "仅视频项目可渲染成片");
         }
         boolean crossfade = "fade".equals(transition) || "crossfade".equals(transition);
-        boolean subtitleOn = plan.path("edit_plan").path("subtitle").asBoolean(false);
+        boolean subtitleOn = plan.path("edit_plan").path("subtitle").asBoolean(true);
         boolean subOk = hasFilter("ass");
         if (subtitleOn && !subOk) {
             log.warn("subtitle enabled but ffmpeg lacks ass/libass filter; skip burning");
