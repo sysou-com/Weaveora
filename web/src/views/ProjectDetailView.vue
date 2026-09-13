@@ -36,6 +36,7 @@ import BriefComposer from '@/components/director/BriefComposer.vue'
 import ImagePlanEditor from '@/components/director/ImagePlanEditor.vue'
 import RevisionRail from '@/components/director/RevisionRail.vue'
 import ShotPickerDialog from '@/components/director/ShotPickerDialog.vue'
+import LipsyncFacePickerDialog from '@/components/director/LipsyncFacePickerDialog.vue'
 import VoiceCloneDialog from '@/components/director/VoiceCloneDialog.vue'
 import VideoPlanEditor from '@/components/director/VideoPlanEditor.vue'
 import { useAuthStore } from '@/stores/auth'
@@ -288,6 +289,79 @@ function onPatchShot(shotNo: number, patch: { duration_sec?: number; allowNarrat
     shot.allowNarrationOverflow = true
     message.info(`第 ${shotNo} 镜已允许配音溢出到下一镜（不再提醒）`)
   }
+}
+
+/**
+ * P13：对口型「谁在哪张脸」点选（多人同框必需）。
+ *
+ * 为何要人工点选：LatentSync 每帧只能驱动一张脸；按定妆照做人脸识别在
+ * 480p/AI 古风这类风格化素材上区分度会崩（实测同一人只有 0.2 上下、互相混淆）。
+ * 用户点一下是最可靠的信号。结果写入方案 `shots[].lipsync_targets`，随任务 payload 下发。
+ */
+const facePickShotNo = ref<number | null>(null)
+const facePickOpen = ref(false)
+const facePickShot = computed(() => {
+  const plan = draft.value
+  if (!plan || !isVideoPlan(plan) || facePickShotNo.value == null) return null
+  return (plan.shots ?? []).find((s) => s.shot_no === facePickShotNo.value) ?? null
+})
+/** 该镜有台词的说话人（去重、保序） */
+const facePickSpeakers = computed<string[]>(() => {
+  const ns = facePickShot.value?.narrations ?? []
+  const out: string[] = []
+  for (const n of ns) {
+    if (n.kind !== 'dialogue') continue
+    const s = (n.subject ?? '').trim()
+    if (s && !out.includes(s)) out.push(s)
+  }
+  return out
+})
+const facePickTargets = computed<Record<string, { x: number; y: number }>>(() =>
+  facePickShot.value?.lipsync_targets ?? {},
+)
+/** 该镜最新的画面产物（clip 优先，退关键帧）—— 用来点人脸 */
+const facePickNewest = computed(() => {
+  if (facePickShotNo.value == null) return null
+  const list = (assets.data.value ?? []).filter(
+    (a) => a.shotNo === facePickShotNo.value && (a.kind === 'clip' || a.kind === 'still'),
+  )
+  const clips = list.filter((a) => a.kind === 'clip')
+  const pool = clips.length ? clips : list
+  return [...pool].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())[0] ?? null
+})
+const facePickMedia = computed(() => {
+  const a = facePickNewest.value
+  return a ? (galUrls.value[a.id] ?? '') : ''
+})
+function openFacePicker(shotNo: number): void {
+  facePickShotNo.value = shotNo
+  facePickOpen.value = true
+  const a = facePickNewest.value
+  // 缩略图只会在对应 Tab 被浏览时加载 → 这里补一次按需拉取（否则弹窗里是空白）
+  if (a && !galUrls.value[a.id]) {
+    void assetBlob(a.id).then((blob) => {
+      if (blob) galUrls.value[a.id] = URL.createObjectURL(blob)
+    })
+  }
+}
+/** 保存某说话人的点选坐标（归一化）；写入方案后立即就地方保存 */
+async function onFacePick(p: { subject: string; x: number; y: number }): Promise<void> {
+  const shot = facePickShot.value
+  if (!shot) return
+  const t = { ...(shot.lipsync_targets ?? {}) }
+  t[p.subject] = { x: p.x, y: p.y }
+  shot.lipsync_targets = t
+  await savePlanInPlace()
+  message.success(`已记录「${p.subject}」在第 ${shot.shot_no} 镜的人脸位置`)
+}
+async function onFaceClear(subject: string): Promise<void> {
+  const shot = facePickShot.value
+  if (!shot || !shot.lipsync_targets) return
+  const t = { ...shot.lipsync_targets }
+  delete t[subject]
+  shot.lipsync_targets = t
+  await savePlanInPlace()
+  message.info(`已清除「${subject}」的人脸位置`)
 }
 
 /* ---------------- P11 AI 音频助手 ---------------- */
@@ -1456,6 +1530,12 @@ const pickerShots = computed(() => {
       if (speakers.length > 1) {
         multiHint = `多人（${speakers.join('、')}）· 按段驱动，耗时约×${speakers.length}`
       }
+      // 多人镜必须为每个说话人指定“他的脸在哪”——否则 LatentSync 会把台词配到同一张脸上
+      const tg = s.lipsync_targets ?? {}
+      const needFace = speakers.filter((n) => !tg[n]).length
+      const faceHint = speakers.length
+        ? `${speakers.filter((n) => tg[n]).length}/${speakers.length}`
+        : ''
       // 最新画面产物的人脸结论（undefined = 未知/历史数据 → 不拦）
       const pool = clips.length ? clips : stills
       const newestVisual = [...pool].sort(
@@ -1482,6 +1562,8 @@ const pickerShots = computed(() => {
         lineCount: voice.length,
         unit: '段语音',
         eligible: missing.length === 0,
+        needsFaceHint: speakers.length > 1 && needFace > 0,
+        faceHint: speakers.length > 1 ? faceHint : '',
         note: missing.length
           ? `不可：${missing.join('、')}`
           : `可生成 · ${voice.length} 段语音${clips.length ? '' : '（用关键帧静帧）'}${multiHint ? ` · ${multiHint}` : ''}`,
@@ -3807,6 +3889,19 @@ const shotTotal = computed(() => {
         :locked="lockedShots"
         :busy="pickBusy"
         @confirm="onShotPicked"
+        @pick-face="openFacePicker"
+      />
+
+      <!-- P13：对口型「谁在哪张脸」点选（多人同框必需） -->
+      <LipsyncFacePickerDialog
+        v-model:show="facePickOpen"
+        :shot-no="facePickShotNo ?? 0"
+        :speakers="facePickSpeakers"
+        :targets="facePickTargets"
+        :media-url="facePickMedia"
+        :is-video="facePickNewest?.kind === 'clip'"
+        @pick="onFacePick"
+        @clear="onFaceClear"
       />
 
       <!-- P9：克隆配音弹窗（放在页面级，方案区与分镜共用同一个） -->

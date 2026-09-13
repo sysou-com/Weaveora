@@ -1370,18 +1370,36 @@ def generate_lipsync(client_id, payload, progress_fn=None):
         except Exception as e:
             print("[comfy] 说话人「%s」特征提取失败：%s" % (name, e), flush=True)
 
-    def _emb_path_of(name):
-        e = embs.get(name)
-        if not e:
+    face_hints = payload.get("faceHints") if isinstance(payload.get("faceHints"), dict) else {}
+
+    def _spec_path_of(name):
+        """锁定规格文件：**点选位置优先**，其次定妆照人脸特征（见 face_detector 两种模式）。
+
+        点选（faceHints）不受画风影响、完全确定；识别式在 480p/AI 古风这类素材上
+        区分度会崩（实测同一人只有 0.2 上下且互相混淆），所以有坐标就优先用坐标。
+        """
+        spec = {}
+        h = face_hints.get(name)
+        if isinstance(h, dict):
+            try:
+                spec["point"] = [float(h["x"]), float(h["y"])]
+            except (KeyError, TypeError, ValueError):
+                spec.pop("point", None)
+        if embs.get(name):
+            spec["embedding"] = embs[name]
+        if not spec:
             return ""
         try:
             f = tempfile.NamedTemporaryFile("w", prefix="weaveora_emb_", suffix=".json",
                                             delete=False, encoding="utf-8")
-            json.dump(e, f)
+            json.dump(spec, f)
             f.close()
+            print("[comfy] 说话人「%s」锁定规格：point=%s embedding=%s"
+                  % (name, spec.get("point") and [round(v, 3) for v in spec["point"]],
+                     bool(spec.get("embedding"))), flush=True)
             return f.name
         except Exception as ex:
-            print("[comfy] 特征文件写入失败（退回最大脸）: %s" % ex, flush=True)
+            print("[comfy] 锁定规格写入失败（退回最大脸）: %s" % ex, flush=True)
             return ""
 
     # 先预检：画面里有人脸；且（有特征时）说话人的脸真在画面里
@@ -1407,7 +1425,7 @@ def generate_lipsync(client_id, payload, progress_fn=None):
         if speaker_count <= 1 or not segs:
             # ---------- 单人镜：整镜一次 ----------
             _who = _first or (next(iter(speakers)) if speakers else "")
-            ep = _emb_path_of(_who)
+            ep = _spec_path_of(_who)
             if ep:
                 _paths.append(ep)
             print("[comfy] 第%s镜单人模式：说话人=%s，整镜一次" % (shot_no, _who or "?"), flush=True)
@@ -1442,12 +1460,14 @@ def generate_lipsync(client_id, payload, progress_fn=None):
                         seg_audio = adata
                 else:
                     seg_audio = adata
-                ep = _emb_path_of(who)
+                ep = _spec_path_of(who)
                 if ep:
                     _paths.append(ep)
                 # 该段先确认「这位说话人的脸真在这一段里」—— 比跑到一半失败便宜得多
                 # （多人镜里很常见，比如某段是画外音、或某角色只在这一段背对着镜头）
-                if embs.get(who):
+                # 注：走了点选（faceHints）就不做识别式预检 —— 用户点的位置本身就是权威信号，
+                # 而识别在风格化素材上不可信；那种情况交给管线的“就近选脸 + 沿用上一帧”。
+                if embs.get(who) and not face_hints.get(who):
                     _pr = _face_probe(seg_video, embs[who])
                     if _pr and _pr[1] > 0 and (_pr[0] == 0 or _pr[2] is None or _pr[2] < TARGET_MIN_SIM):
                         raise ComfyError(

@@ -1659,6 +1659,21 @@ public class JobService {
                     seg.put("voiceKey", va.storageKey());
                 }
             }
+            // P13：用户在预览图上**点选**的人脸位置（`shots[].lipsync_targets = {主体: {x,y}}`，归一化 0–1）。
+            // 为什么需要：实测在 480p/AI 古风这类风格化素材上，人脸识别（ArcFace）区分度崩了
+            // —— 同一个人只有 0.2 上下、且宝玉/警幻/袭人互相混淆，任何阈值都把噪声当信号。
+            // 用户点一下“谁是警幻”是最可靠的信号，且完全确定、不受画风影响。
+            JsonNode targetsNode = shot.path("lipsync_targets");
+            ObjectNode hintsNode = payload.putObject("faceHints");
+            for (String who : speakerNames) {
+                JsonNode t = targetsNode.path(who);
+                if (t.isObject() && t.hasNonNull("x") && t.hasNonNull("y")) {
+                    ObjectNode h = hintsNode.putObject(who);
+                    h.put("x", t.path("x").asDouble());
+                    h.put("y", t.path("y").asDouble());
+                }
+            }
+            payload.put("faceHintCount", hintsNode.size());
             payload.put("speakerCount", speakerNames.size());
             payload.put("speakerNames", String.join("、", speakerNames));
             payload.put("segmentCount", segmentsNode.size());

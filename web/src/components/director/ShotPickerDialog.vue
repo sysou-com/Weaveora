@@ -25,6 +25,10 @@ export interface PickerShot {
   eligible?: boolean
   /** 行内补充说明，例如「可生成 · 2 段语音」「不可：缺画面(motion/关键帧)、缺配音」 */
   note?: string
+  /** 该行是否需要先「指定人脸」（多人镜：每句台词是谁的脸）——点了会打开点选弹窗 */
+  needsFaceHint?: boolean
+  /** 已指定人脸的人数 / 总说话人数（展示用，如 "1/2"） */
+  faceHint?: string
 }
 
 const props = withDefaults(
@@ -46,6 +50,8 @@ const emit = defineEmits<{
   'update:show': [v: boolean]
   /** 确认：要处理的镜号 + 封版变更（需要落库的） */
   confirm: [payload: { shotNos: number[]; lock: number[]; unlock: number[] }]
+  /** 点「指定人脸」：为该镜打开对口型人脸点选弹窗 */
+  'pick-face': [shotNo: number]
 }>()
 
 const message = useMessage()
@@ -179,6 +185,19 @@ function confirm(): void {
           <span v-if="s.note" class="sp-note" :class="{ bad: s.eligible === false }">
             {{ s.note }}
           </span>
+          <button
+            v-if="s.needsFaceHint || s.faceHint"
+            type="button"
+            class="sp-face"
+            :class="{ todo: s.needsFaceHint }"
+            :data-testid="`sp-face-${s.shotNo}`"
+            :title="s.needsFaceHint
+              ? '多人说话：先指定每句台词是谁的脸，否则会把台词配到同一张脸上'
+              : '查看/修改人脸指定'"
+            @click.stop="emit('pick-face', s.shotNo)"
+          >
+            指定人脸<template v-if="s.faceHint">（{{ s.faceHint }}）</template>
+          </button>
         </NCheckbox>
         <NCheckbox
           :checked="lockedSet.includes(s.shotNo)"
@@ -260,6 +279,20 @@ function confirm(): void {
 }
 .sp-note.bad {
   color: var(--wv-danger, #d9534f);
+}
+.sp-face {
+  margin-left: 8px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--wv-line);
+  background: transparent;
+  font-size: 11px;
+  color: var(--wv-text-3);
+  cursor: pointer;
+}
+.sp-face.todo {
+  border-color: var(--wv-warn, #d0a24e);
+  color: var(--wv-warn, #d0a24e);
 }
 .sp-no {
   font-size: 13px;
