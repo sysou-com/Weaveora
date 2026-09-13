@@ -30,7 +30,7 @@ import { createExport, fetchExportBlob, renderMaster, timecode } from '@/api/exp
 import { aiGenerateLines, aiGenerateMusic, extractSubjects, patchPlanInPlace, patchSubjectMeta } from '@/api/director'
 import { getEngineSettings } from '@/api/engineSettings'
 import { getProject, updateProjectDuration } from '@/api/projects'
-import { listShotLocks, setShotLocks } from '@/api/shotLocks'
+import { getVideoLimits, listShotLocks, setShotLocks } from '@/api/shotLocks'
 import type { AssetRef, DirectorPlan, DirectorShot, JobRecord, PlanSubject, PlanSubjectRef } from '@/api/types'
 import BriefComposer from '@/components/director/BriefComposer.vue'
 import ImagePlanEditor from '@/components/director/ImagePlanEditor.vue'
@@ -1688,20 +1688,45 @@ function deleteJobOne(jobId: string): void {
   jobSel.value = [jobId]
   void deleteJobsSel()
 }
-// motion 帧数（系统范围 32–96）
-const MOTION_MIN = 32
-const MOTION_MAX = 96
+/**
+ * motion 帧数区间**按引擎下发**（不再写死 32–96）：
+ * 本机 GPU 上限由显存决定（3070Ti ≈ 96 帧）；云 API 上限由**模型**决定
+ * （可用项目「模型上限(s) × fps」，如 5s@30fps = 150 帧）。
+ */
+const MOTION_MIN = ref(32)
+const MOTION_MAX = ref(96)
+const motionLimitSource = ref('')
 const motionOpen = ref(false)
 const motionFrames = ref(48)
+
+const motionLimits = useQuery({
+  queryKey: computed(() => ['video-limits', workspaceId.value, projectId.value, selectedRevId.value ?? '']),
+  queryFn: () => getVideoLimits(workspaceId.value, projectId.value, selectedRevId.value as string),
+  enabled: computed(() => !!projectId.value && !!selectedRevId.value),
+})
+
+watch(
+  () => motionLimits.data.value,
+  (v) => {
+    if (!v) return
+    MOTION_MIN.value = v.minFrames
+    MOTION_MAX.value = v.maxFrames
+    motionLimitSource.value = v.source
+    if (motionFrames.value > v.maxFrames) motionFrames.value = v.maxFrames
+  },
+  { immediate: true },
+)
+
 function openMotionModal(): void {
-  motionFrames.value = 48
+  motionFrames.value = Math.min(48, MOTION_MAX.value)
+  void motionLimits.refetch()
   motionOpen.value = true
 }
 function confirmMotion(): void {
   focusJobTab('clip')
   const f = Number(motionFrames.value)
-  if (!Number.isInteger(f) || f < MOTION_MIN || f > MOTION_MAX) {
-    message.warning(`运动帧数需在 ${MOTION_MIN}–${MOTION_MAX} 之间`)
+  if (!Number.isInteger(f) || f < MOTION_MIN.value || f > MOTION_MAX.value) {
+    message.warning(`运动帧数需在 ${MOTION_MIN.value}–${MOTION_MAX.value} 之间`)
     return
   }
   motionOpen.value = false
@@ -3434,7 +3459,8 @@ const shotTotal = computed(() => {
       <NModal v-model:show="motionOpen" preset="card" :title="'生成运动(motion)'" style="max-width: 420px">
         <div class="motion-form">
           <p class="text-secondary">
-            设置视频帧数（系统支持 {{ MOTION_MIN }}–{{ MOTION_MAX }}，帧数越高越流畅、耗时越长）：
+            设置视频帧数（系统支持 {{ MOTION_MIN }}–{{ MOTION_MAX }}，帧数越高越流畅、耗时越长）
+            <span v-if="motionLimitSource" class="state-hint font-mono">· 上限来源：{{ motionLimitSource }}</span>
           </p>
           <NInputNumber v-model:value="motionFrames" :min="MOTION_MIN" :max="MOTION_MAX" :step="4" style="width: 180px" />
           <div class="motion-ops">

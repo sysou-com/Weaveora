@@ -337,6 +337,15 @@ public class DirectorService {
      * <p>与 {@link #patchRevision} 的区别：后者在已确认稿上会 fork 新版本 + 需重新确认。
      */
     @Transactional
+    /** 取某版本的方案 JSON（供「运动帧数上限」等接口使用；只做读取与权限校验）。 */
+    public com.fasterxml.jackson.databind.JsonNode planOf(UUID userId, UUID workspaceId, UUID projectId,
+                                                         UUID revisionId) {
+        context.require(userId, workspaceId, projectId);
+        PromptRevision r = findRevision(workspaceId, projectId, revisionId);
+        com.fasterxml.jackson.databind.JsonNode p = r.schemaJson();
+        return p == null ? com.fasterxml.jackson.databind.node.JsonNodeFactory.instance.objectNode() : p;
+    }
+
     public RevisionDetailResponse patchPlanInPlace(UUID userId, UUID workspaceId, UUID projectId,
                                                    UUID revisionId, com.fasterxml.jackson.databind.JsonNode plan) {
         ProjectSnapshot project = context.require(userId, workspaceId, projectId);

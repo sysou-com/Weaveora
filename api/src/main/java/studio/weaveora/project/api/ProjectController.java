@@ -34,11 +34,33 @@ public class ProjectController {
 
     private final ProjectService projectService;
     private final studio.weaveora.project.ShotLockService shotLockService;
+    private final studio.weaveora.job.JobService jobService;
+    private final studio.weaveora.director.DirectorService directorService;
 
     public ProjectController(ProjectService projectService,
-                             studio.weaveora.project.ShotLockService shotLockService) {
+                             studio.weaveora.project.ShotLockService shotLockService,
+                             studio.weaveora.job.JobService jobService,
+                             studio.weaveora.director.DirectorService directorService) {
         this.projectService = projectService;
         this.shotLockService = shotLockService;
+        this.jobService = jobService;
+        this.directorService = directorService;
+    }
+
+    /**
+     * P13 运动帧数可用区间（按引擎区分）：
+     * 云 API 的上限由**模型**决定（可用「项目模型上限(s) × fps」），本机 GPU 由显存决定。
+     * 前端 motion 弹窗用它渲染 min/max，不再写死 32–96。
+     */
+    @GetMapping("/{projectId}/video-limits")
+    public ResponseEntity<Map<String, Object>> videoLimits(
+            HttpServletRequest request,
+            @RequestHeader(value = WORKSPACE_HEADER, required = false) String workspaceId,
+            @PathVariable UUID projectId,
+            @RequestParam UUID revisionId) {
+        com.fasterxml.jackson.databind.JsonNode plan =
+                directorService.planOf(uid(request), ws(workspaceId), projectId, revisionId);
+        return ResponseEntity.ok(jobService.motionLimits(uid(request), "clip", plan));
     }
 
     /** P12 分镜封版：已封版镜号（升序）。 */

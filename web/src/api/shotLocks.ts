@@ -30,3 +30,30 @@ export async function setShotLocks(
   })
   return r.shotNos ?? []
 }
+
+/** P13：运动帧数可用区间（按引擎区分：本机 GPU 由显存决定，云 API 由模型决定）。 */
+export interface VideoLimits {
+  engine: string
+  minFrames: number
+  maxFrames: number
+  fps: number
+  maxClipSec: number
+  gpuMaxFrames: number
+  cloudMaxFrames: number
+  source: string
+}
+
+export async function getVideoLimits(
+  workspaceId: string,
+  projectId: string,
+  revisionId: string,
+): Promise<VideoLimits | null> {
+  try {
+    return await request<VideoLimits>(
+      `/api/v1/projects/${projectId}/video-limits?revisionId=${revisionId}`,
+      { headers: { [WORKSPACE_HEADER]: workspaceId } },
+    )
+  } catch {
+    return null // 取不到就用界面默认（32–96），不阻塞生成
+  }
+}
