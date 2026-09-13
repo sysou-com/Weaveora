@@ -886,6 +886,15 @@ public class ConcatService {
     }
 
     private Asset pickClipOrStill(UUID workspaceId, UUID projectId, UUID shotId, int shotNo) {
+        // P13：对口型产物优先 —— 有 lipsync 就用它（嘴型已与台词对齐），否则用普通 motion/关键帧
+        List<Asset> lips = assetRepo.findByProjectIdAndWorkspaceIdAndShotNoAndKindOrderByCreatedAtDesc(
+                projectId, workspaceId, shotNo, "lipsync");
+        if (lips.isEmpty() && shotId != null) {
+            lips = assetRepo.findByShotIdAndWorkspaceIdAndKindOrderByCreatedAtDesc(shotId, workspaceId, "lipsync");
+        }
+        if (!lips.isEmpty()) {
+            return lips.get(0);
+        }
         // P6：优先 (project, shot_no)；退 shot_id
         List<Asset> clips = assetRepo.findByProjectIdAndWorkspaceIdAndShotNoAndKindOrderByCreatedAtDesc(
                 projectId, workspaceId, shotNo, "clip");

@@ -679,3 +679,135 @@ if __name__ == "__main__":
     print("comfy engine url=%s api=%s" % (COMFY, API))
     print("music ckpt=%s node=%s steps=%d cfg=%s shift=%s"
           % (MUSIC_CKPT, MUSIC_SAVE_NODE, MUSIC_STEPS, MUSIC_CFG, MUSIC_SHIFT))
+
+
+# --------------------------------------------------------------------------- #
+# P13 对口型（lipsync）：音频驱动嘴型
+#
+# 图生视频模型（Wan i2v 等）**没有音频通道**，出来的画面不可能对口型；
+# 口型必须靠「音频驱动」的后处理。这里走 **workflow 驱动**：
+#   把 ComfyUI 里已装好的口型工作流（LatentSync / MuseTalk / Wav2Lip 任一）
+#   导出成 API 格式 JSON，用环境变量 WEAVEORA_LIPSYNC_WORKFLOW 指过来，
+#   本函数负责：上传 视频 + 音频 → 按**节点标题**注入输入 → 排队 → 取回 mp4。
+#
+# 安装步骤见 docs/lipsync-setup.md。未配置时给出明确报错（不静默出无声/无口型结果）。
+# --------------------------------------------------------------------------- #
+LIPSYNC_WORKFLOW = os.environ.get("WEAVEORA_LIPSYNC_WORKFLOW", "").strip()
+LIPSYNC_TIMEOUT = float(os.environ.get("WEAVEORA_LIPSYNC_TIMEOUT", "1800"))
+# 工作流里承载「视频/音频路径」的节点标题（用户按自己导出的工作流改这两个值即可）
+LIPSYNC_VIDEO_TITLE = os.environ.get("WEAVEORA_LIPSYNC_VIDEO_TITLE", "video").strip()
+LIPSYNC_AUDIO_TITLE = os.environ.get("WEAVEORA_LIPSYNC_AUDIO_TITLE", "audio").strip()
+
+
+def _upload_any(data, filename, ctype, sub="input"):
+    """上传任意文件到 ComfyUI 输入目录（视频/音频），返回服务器端文件名。"""
+    _, body = _comfy("POST", "/upload/image", files={"image": (filename, data, ctype)},
+                     timeout=600)
+    try:
+        return json.loads(body.decode()).get("name")
+    except Exception:
+        return None
+
+
+def _set_node_input(graph, title, value):
+    """按节点 title 注入输入（只改第一个匹配到的节点，避免误改）。"""
+    hit = 0
+    for _nid, node in (graph or {}).items():
+        if not isinstance(node, dict):
+            continue
+        meta = node.get("_meta") or {}
+        if (meta.get("title") or "").strip().lower() == (title or "").lower():
+            node.setdefault("inputs", {})
+            node["inputs"]["video" if "video" in (title or "").lower() else "audio"] = value
+            hit += 1
+    return hit
+
+
+def generate_lipsync(client_id, payload, progress_fn=None):
+    """对口型（lipsync 任务）：画面 + 配音 → 嘴型对齐的视频。返回 [{bytes, mime}]。"""
+    import uuid as _uuid
+    if not LIPSYNC_WORKFLOW:
+        raise ComfyError(
+            "未配置对口型工作流：请按 docs/lipsync-setup.md 安装（ComfyUI-LatentSyncWrapper 等）"
+            "并把导出的 API 格式工作流路径填到 WEAVEORA_LIPSYNC_WORKFLOW")
+    if not os.path.exists(LIPSYNC_WORKFLOW):
+        raise ComfyError("对口型工作流文件不存在: %s（检查 WEAVEORA_LIPSYNC_WORKFLOW）" % LIPSYNC_WORKFLOW)
+    vkey = (payload.get("videoKey") or "").strip()
+    vkeys = [k for k in (payload.get("voiceKeys") or []) if k]
+    if not vkey or not vkeys:
+        raise ComfyError("对口型缺少输入：videoKey/voiceKeys")
+
+    if progress_fn:
+        progress_fn(15, "upload")
+    vdata = fetch_reference_bytes(vkey)
+    vname = _upload_any(vdata, "weaveora_lipsync_in.mp4", "video/mp4")
+    if not vname:
+        raise ComfyError("上传画面失败")
+    # 多段配音：先合成为一个音频（本机 ffmpeg），一次对口型
+    adata = _concat_voice(vkeys)
+    aname = _upload_any(adata, "weaveora_lipsync_voice.wav", "audio/wav")
+    if not aname:
+        raise ComfyError("上传配音失败")
+
+    with open(LIPSYNC_WORKFLOW, "r", encoding="utf-8") as fh:
+        graph = json.load(fh)
+    vh = _set_node_input(graph, LIPSYNC_VIDEO_TITLE, vname)
+    ah = _set_node_input(graph, LIPSYNC_AUDIO_TITLE, aname)
+    if not vh or not ah:
+        raise ComfyError(
+            "工作流里没找到标题为「%s」/「%s」的节点：请在 ComfyUI 里把承载视频/音频的节点标题改成这两个值"
+            "（或用 WEAVEORA_LIPSYNC_VIDEO_TITLE / _AUDIO_TITLE 指定）"
+            % (LIPSYNC_VIDEO_TITLE, LIPSYNC_AUDIO_TITLE))
+
+    prefix = "weaveora_lipsync_" + _uuid.uuid4().hex[:6]
+    for node in graph.values():
+        if isinstance(node, dict) and "filename_prefix" in (node.get("inputs") or {}):
+            node["inputs"]["filename_prefix"] = prefix
+    pid = _post_prompt(graph, client_id)
+    if progress_fn:
+        progress_fn(40, "lipsync")
+    rec = _poll_history(client_id, pid, timeout=LIPSYNC_TIMEOUT)
+    outs = _download_outputs(rec, prefix)
+    if not outs:
+        # 有些口型工作流走 SaveVideo/自定义节点，兜底再抓一次不限风格
+        outs = _download_outputs(rec, "weaveora")
+    if not outs:
+        raise ComfyError("对口型无输出视频（prefix=%s）" % prefix)
+    if progress_fn:
+        progress_fn(100, "done")
+    return [{"bytes": o["bytes"], "mime": "video/mp4", "width": o.get("width"),
+             "height": o.get("height"), "duration_ms": None} for o in outs]
+
+
+def _concat_voice(voice_keys):
+    """把多段配音按顺序拼成一个 wav（用本机 ffmpeg；失败时退回第一段）。"""
+    import subprocess, tempfile
+    blobs = []
+    for k in voice_keys:
+        try:
+            blobs.append(fetch_reference_bytes(k))
+        except Exception:
+            continue
+    if not blobs:
+        raise ComfyError("配音素材读取失败")
+    if len(blobs) == 1:
+        return blobs[0]
+    tmp = tempfile.mkdtemp(prefix="weaveora_voice_")
+    paths = []
+    for i, b in enumerate(blobs):
+        fp = os.path.join(tmp, "v%d.bin" % i)
+        with open(fp, "wb") as fh:
+            fh.write(b)
+        paths.append(fp)
+    out = os.path.join(tmp, "out.wav")
+    cmd = ["ffmpeg", "-y"]
+    for fp in paths:
+        cmd += ["-i", fp]
+    cmd += ["-filter_complex", "".join("[%d:a]" % i for i in range(len(paths)))
+            + "concat=n=%d:v=0:a=1[out]" % len(paths), "-map", "[out]", "-ar", "16000", out]
+    try:
+        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=300)
+        with open(out, "rb") as fh:
+            return fh.read()
+    except Exception:
+        return blobs[0]

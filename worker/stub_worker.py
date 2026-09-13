@@ -239,6 +239,25 @@ def execute_job(job):
                  {"code": "AUDIO_ERROR", "message": str(e)[:500]})
             return False
 
+    # P13 对口型（lipsync）：画面 + 配音 → 音频驱动嘴型。走本机 ComfyUI 工作流
+    # （LatentSync/MuseTalk/Wav2Lip 任一，见 docs/lipsync-setup.md）
+    if kind == "lipsync":
+        import comfy_client as comfy
+        try:
+            outs = comfy.generate_lipsync(
+                "weaveora-stub-worker", payload,
+                progress_fn=lambda p, st: _req("POST", "/internal/jobs/%s/progress" % jid,
+                                               {"progress": p, "stage": st}))
+            media = [(o["bytes"], o.get("mime") or "video/mp4", o.get("width"), o.get("height"),
+                      o.get("duration_ms")) for o in outs]
+            return _complete(jid, payload, media)
+        except Exception as e:
+            import traceback as _tb
+            _tb.print_exc()
+            _req("POST", "/internal/jobs/%s/fail" % jid,
+                 {"code": "LIPSYNC_ERROR", "message": str(e)[:500]})
+            return False
+
     if MODE == "cloud":
         import cloud_client as cloud
         # 用户云凭据（图片=OpenAI-compatible；视频=Replicate），经 internal 通道拉取
@@ -250,6 +269,10 @@ def execute_job(job):
             except Exception:
                 cfg = {}
         try:
+            if kind == "lipsync":
+                # 对口型不该走到云端（云视频模型没有口型能力）；给出明确原因而不是掉进图片分支
+                raise RuntimeError("对口型需要本机 ComfyUI 口型工作流（见 docs/lipsync-setup.md）；"
+                                   "当前任务被路由到云引擎，请确认 worker 的 WEAVEORA_LIPSYNC_WORKFLOW 已配置")
             if kind == "clip":
                 vcfg = cfg.get("video") or {}
                 outs = cloud.generate_motion_via_replicate(

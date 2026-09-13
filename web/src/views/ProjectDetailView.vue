@@ -986,7 +986,7 @@ const refOverModelLimit = computed(
 const LIST_PAGE = 5
 
 /* ---------------- P12 任务 / 资产按类型分 Tab（避免一次刷一堆） ---------------- */
-type AudioTab = 'master' | 'portrait' | 'voice' | 'bgm' | 'still' | 'clip' | 'all'
+type AudioTab = 'master' | 'portrait' | 'voice' | 'bgm' | 'still' | 'clip' | 'lipsync' | 'all'
 /**
  * 任务卡片的 Tab：**不含成片 master**（任务区不会产出 master，成片是导出/合成的产物，只在资产库）。
  * “全部”放最后。
@@ -996,6 +996,7 @@ const JOB_TABS: Array<{ key: AudioTab; label: string; kind?: string; hint: strin
   { key: 'bgm', label: '配乐', kind: 'bgm', hint: '含试听产物 bgm_preview' },
   { key: 'still', label: '关键帧', kind: 'still', hint: '首帧图片 still' },
   { key: 'clip', label: 'motion', kind: 'clip', hint: '图生视频片段 clip' },
+  { key: 'lipsync', label: '对口型', kind: 'lipsync', hint: '音频驱动嘴型的片段（lipsync）' },
   { key: 'all', label: '全部', hint: '全部任务（项多，缩略图按需懒加载）' },
 ]
 /** 资产库 Tab：保留成片 master（导出/合成产物在这里） */
@@ -1006,11 +1007,13 @@ const GAL_TABS: Array<{ key: AudioTab; label: string; kind?: string; hint: strin
   { key: 'bgm', label: '配乐', kind: 'bgm', hint: '含试听产物 bgm_preview' },
   { key: 'still', label: '关键帧', kind: 'still', hint: '首帧图片 still' },
   { key: 'clip', label: 'motion', kind: 'clip', hint: '图生视频片段 clip' },
+  { key: 'lipsync', label: '对口型', kind: 'lipsync', hint: '音频驱动嘴型的片段（lipsync）' },
   { key: 'all', label: '全部', hint: '全部产物（项多，缩略图按需懒加载）' },
 ]
 /** 把 kind 归到 Tab（试听产物归入对应正式类型） */
 function kindTab(kind: string): AudioTab {
   if (kind === 'portrait') return 'portrait'
+  if (kind === 'lipsync') return 'lipsync'
   if (kind === 'voice' || kind === 'voice_preview') return 'voice'
   if (kind === 'bgm' || kind === 'bgm_preview') return 'bgm'
   if (kind === 'still') return 'still'
@@ -1742,7 +1745,7 @@ function confirmMotion(): void {
   motionOpen.value = false
   withShotPicker('运动(motion)', (shotNos) => startMotion(f, shotNos), 'clip')
 }
-const KIND_LABEL: Record<string, string> = { still: '关键帧', clip: '运动', voice: '配音', bgm: '配乐' }
+const KIND_LABEL: Record<string, string> = { still: '关键帧', clip: '运动', voice: '配音', bgm: '配乐', lipsync: '对口型' }
 
 /** P7：逐镜配音（自托管 CosyVoice） */
 async function startVoice(shotNos?: number[] | null): Promise<void> {
@@ -2061,6 +2064,29 @@ async function startBgm(): Promise<void> {
     message.success(`已创建 ${created.length} 个配乐任务（按 music_mood）`)
   } catch (e) {
     message.error(e instanceof Error ? e.message : '创建配乐任务失败')
+  } finally {
+    genBusy.value = false
+  }
+}
+
+/** P13 对口型：该镜的 motion/关键帧 + 该镜配音 -> 音频驱动嘴型（本机 ComfyUI 工作流） */
+async function startLipsync(): Promise<void> {
+  focusJobTab('lipsync')
+  if (dirty.value && !(await savePlanInPlace())) return
+  genBusy.value = true
+  try {
+    const created = await createJobs(workspaceId.value, projectId.value, {
+      revisionId: selectedRevId.value as string,
+      kind: 'lipsync',
+    })
+    if (!created.length) {
+      message.warning('没有可对口型的镜头（需该镜已有 motion/关键帧且已生成配音）')
+      return
+    }
+    await queryClient.invalidateQueries({ queryKey: ['jobs'] })
+    message.success(`已排入 ${created.length} 个对口型任务`)
+  } catch (e) {
+    message.error(e instanceof Error ? e.message : '对口型任务创建失败')
   } finally {
     genBusy.value = false
   }
@@ -3235,6 +3261,20 @@ const shotTotal = computed(() => {
               @click="openMotionModal"
             >
               运动(motion)
+            </NButton>
+            <NButton
+              v-if="isVideoNow"
+              size="small"
+              secondary
+              :loading="genBusy"
+              :disabled="!detApproved"
+              data-testid="btn-lipsync-jobs"
+              :title="detApproved
+                ? '对口型：用该镜配音驱动嘴型（需本机已装口型工作流，见 docs/lipsync-setup.md）'
+                : '需先确认方案'"
+              @click="startLipsync()"
+            >
+              对口型
             </NButton>
             <NButton
               v-if="isVideoNow"

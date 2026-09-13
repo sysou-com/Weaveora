@@ -9,7 +9,7 @@ export async function createJobs(
   input: {
     revisionId: string
     shotId?: string | null
-    kind: 'still' | 'clip' | 'voice' | 'bgm'
+    kind: 'still' | 'clip' | 'voice' | 'bgm' | 'portrait' | 'lipsync'
     count?: number
     frames?: number | null
     /** true=试听任务（配音/配乐试听） */

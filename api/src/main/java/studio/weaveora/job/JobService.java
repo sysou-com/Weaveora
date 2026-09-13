@@ -209,7 +209,7 @@ public class JobService {
     public List<JobView> create(UUID userId, UUID workspaceId, UUID projectId, CreateJobRequest req) {
         guard.requireMember(userId, workspaceId);
         ProjectSnapshot project = projects.require(userId, workspaceId, projectId);
-        if (req.kind() == null || !List.of("still", "clip", "voice", "bgm", "portrait").contains(req.kind())) {
+        if (req.kind() == null || !List.of("still", "clip", "voice", "bgm", "portrait", "lipsync").contains(req.kind())) {
             throw new BizException(ErrorCode.VALIDATION, "kind 必须为 still|clip|voice|bgm");
         }
         if (project.approvedRevisionId() == null || !project.approvedRevisionId().equals(req.revisionId())) {
@@ -231,7 +231,14 @@ public class JobService {
             return createPortraitJob(workspaceId, projectId, req, plan, revisionNo, userId)
                     .stream().map(this::toView).toList();
         }
-        boolean audioKind = "voice".equals(req.kind()) || "bgm".equals(req.kind());
+        if ("lipsync".equals(req.kind())) {
+            return createLipsyncJobs(workspaceId, projectId, req, plan, revisionNo, userId)
+                    .stream().map(this::toView).toList();
+        }
+        // 配音/配乐是自托管音频服务；**对口型也固定走本机 GPU**（音频驱动的后处理跑在 ComfyUI 工作流里，
+        // 云端视频模型没有口型能力 —— 之前漏了这条，lipsync 被路由到云 → 掉进云图片分支报错）
+        boolean audioKind = "voice".equals(req.kind()) || "bgm".equals(req.kind())
+                || "lipsync".equals(req.kind());
         String engineRoute = audioKind ? "gpu" : engineSettings.resolveEngine(userId, req.kind());
 
         if (audioKind) {
@@ -949,7 +956,7 @@ public class JobService {
         job.succeed();
         jobs.save(job);
         metrics.jobSucceeded();
-        String kind = List.of("clip", "still", "voice", "bgm", "portrait").contains(job.kind()) ? job.kind() : "still";
+        String kind = List.of("clip", "still", "voice", "bgm", "portrait", "lipsync").contains(job.kind()) ? job.kind() : "still";
         // 试听产物单独 kind（voice_preview/bgm_preview），避免被正式渲染/导出选中
         boolean previewJob = job.payload() != null && job.payload().path("preview").asBoolean(false);
         if (previewJob && ("voice".equals(kind) || "bgm".equals(kind))) {
@@ -1388,6 +1395,88 @@ public class JobService {
     private List<UUID> resolveVideoShots(UUID userId, UUID workspaceId, UUID projectId,
                                          UUID revisionId, UUID shotId, String kind) {
         return resolveVideoShots(userId, workspaceId, projectId, revisionId, shotId, kind, null, false);
+    }
+
+    /**
+     * P13 对口型（lipsync）：把该镜的 **画面产物** 与 **该镜配音** 一起交给口型模型，
+     * 输出「嘴型与台词对齐」的片段。
+     *
+     * <p>为什么必须单独一条任务：图生视频模型（Wan i2v 等）没有音频通道，
+     * 出来的画面不可能对口型；口型要靠音频驱动的后处理（本地 LatentSync / 云端 lipsync）。
+     *
+     * <p>只对**有台词的镜**有意义；建议只在对话 + 特写/近景镜头上跑（远景/背影白花钱）。
+     * 时长对齐要求：音频与画面基本等长 → 对话镜建议用 audio_first 模式（镜长=配音长）。
+     */
+    private List<GenerationJob> createLipsyncJobs(UUID workspaceId, UUID projectId, CreateJobRequest req,
+                                                 JsonNode plan, int revisionNo, UUID userId) {
+        List<UUID> shotIds = resolveVideoShots(userId, workspaceId, projectId, req.revisionId(), req.shotId(),
+                "clip", req.shotNos(), Boolean.TRUE.equals(req.includeLocked()));
+        if (shotIds.isEmpty()) {
+            throw new BizException(ErrorCode.SHOT_NOT_APPROVED, emptyShotReason(workspaceId, projectId, req));
+        }
+        String engineRoute = engineSettings.resolveEngine(userId, "clip");
+        List<GenerationJob> created = new ArrayList<>();
+        for (UUID shotId : shotIds) {
+            JsonNode shot = shotOf(plan, shotId);
+            if (shot == null) {
+                continue;
+            }
+            int shotNo = shot.path("shot_no").asInt();
+            // 画面：该镜最新的 motion 片段（没有 motion 就用关键帧静帧，口型模型能处理静帧）
+            studio.weaveora.asset.domain.Asset clip = pickNewestAsset(projectId, workspaceId, shotNo, "clip");
+            studio.weaveora.asset.domain.Asset still = clip != null ? clip : pickNewestAsset(projectId, workspaceId, shotNo, "still");
+            if (still == null) {
+                continue;
+            }
+            // 音频：该镜全部配音段（按 line_index 升序，取每段最新）
+            List<studio.weaveora.asset.domain.Asset> voices = newestVoicePerLine(projectId, workspaceId, shotNo);
+            if (voices.isEmpty()) {
+                continue;   // 没配音就没有可对的口型
+            }
+            ObjectNode payload = mapper().createObjectNode();
+            payload.put("kind", "lipsync");
+            payload.put("mode", "video");
+            payload.put("revisionId", req.revisionId().toString());
+            payload.put("shotId", shotId.toString());
+            payload.put("shot_no", shotNo);
+            payload.put("videoKey", still.storageKey());
+            payload.put("videoIsStill", clip == null);
+            payload.put("isStill", clip == null);
+            com.fasterxml.jackson.databind.node.ArrayNode vk = payload.putArray("voiceKeys");
+            for (studio.weaveora.asset.domain.Asset a : voices) {
+                vk.add(a.storageKey());
+            }
+            payload.put("voiceCount", voices.size());
+            payload.put("duration_sec", shot.path("duration_sec").asDouble(3));
+            payload.put("lipSync", shot.path("lip_sync").asBoolean(true));
+            created.add(createOne(workspaceId, projectId, req.revisionId(), shotId,
+                    PRESET_CLIP, "lipsync", payload, userId, engineRoute));
+        }
+        if (created.isEmpty()) {
+            throw new BizException(ErrorCode.VALIDATION,
+                    "没有可对口型的镜头：需要该镜已有 motion/关键帧**且**已生成配音");
+        }
+        return created;
+    }
+
+    /** 该项目/镜号下最新的一条某类产物。 */
+    private studio.weaveora.asset.domain.Asset pickNewestAsset(UUID projectId, UUID workspaceId, int shotNo, String kind) {
+        List<studio.weaveora.asset.domain.Asset> list = assetRepo
+                .findByProjectIdAndWorkspaceIdAndShotNoAndKindOrderByCreatedAtDesc(projectId, workspaceId, shotNo, kind);
+        return list.isEmpty() ? null : list.get(0);
+    }
+
+    /** 该镜每个 line_index 的最新配音产物（升序），用于对口型。 */
+    private List<studio.weaveora.asset.domain.Asset> newestVoicePerLine(UUID projectId, UUID workspaceId, int shotNo) {
+        List<studio.weaveora.asset.domain.Asset> all = assetRepo
+                .findByProjectIdAndWorkspaceIdAndShotNoAndKindOrderByCreatedAtDesc(projectId, workspaceId, shotNo, "voice");
+        Map<Integer, studio.weaveora.asset.domain.Asset> newest = new java.util.TreeMap<>();
+        for (studio.weaveora.asset.domain.Asset a : all) {
+            JsonNode snap = a.promptSnapshot();
+            int li = (snap != null && snap.hasNonNull("line_index")) ? snap.path("line_index").asInt(0) : 0;
+            newest.putIfAbsent(li, a);
+        }
+        return new ArrayList<>(newest.values());
     }
 
     /**
