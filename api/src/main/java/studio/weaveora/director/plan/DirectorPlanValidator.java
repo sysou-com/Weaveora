@@ -31,6 +31,16 @@ public final class DirectorPlanValidator {
 
     /** 校验导演方案；返回问题列表（空 = 通过）。mode 为目标模式，durationSec 为目标时长（视频必填）。 */
     public static List<String> validate(JsonNode plan, String mode, BigDecimal durationSec) {
+        return validate(plan, mode, durationSec, true);
+    }
+
+    /**
+     * @param strictDuration 是否严格校验「时长一致性」（plan.duration_sec / 镜头总和 vs 项目目标 ±0.5s）。
+     *       P13：「按配音校准时长」会按配音实际时长改写镜头时长 → 总和必然变化，
+     *       对**就地保存**放宽此项（AI 生成方案时仍严格），否则用户改完存不进去。
+     */
+    public static List<String> validate(JsonNode plan, String mode, BigDecimal durationSec,
+                                        boolean strictDuration) {
         List<String> problems = new ArrayList<>();
         if (plan == null || !plan.isObject()) {
             problems.add("plan 必须是 JSON 对象");
@@ -48,7 +58,7 @@ public final class DirectorPlanValidator {
         }
 
         if ("video".equals(mode)) {
-            validateVideo(plan, durationSec, problems);
+            validateVideo(plan, durationSec, problems, strictDuration);
         } else {
             if (isBlank(text(plan, "positive_prompt"))) {
                 problems.add("缺少 positive_prompt");
@@ -65,14 +75,17 @@ public final class DirectorPlanValidator {
         return problems;
     }
 
-    private static void validateVideo(JsonNode plan, BigDecimal targetDuration, List<String> problems) {
+    private static void validateVideo(JsonNode plan, BigDecimal targetDuration, List<String> problems,
+                                      boolean strictDuration) {
         if (targetDuration == null) {
             problems.add("视频项目缺少目标时长 durationSec");
         }
         BigDecimal planDuration = decimal(plan, "duration_sec");
         if (planDuration == null) {
             problems.add("缺少 duration_sec");
-        } else if (targetDuration != null && diff(planDuration, targetDuration).compareTo(new BigDecimal("0.5")) > 0) {
+        } else if (strictDuration && targetDuration != null
+                && diff(planDuration, targetDuration).compareTo(new BigDecimal("0.5")) > 0) {
+            // P13：就地保存（按配音校准时长）时跳过 —— 时长由配音决定，必然偏离原目标
             problems.add("duration_sec(" + planDuration + ")与目标(" + targetDuration + ")偏差超过 0.5s");
         }
         if (!plan.hasNonNull("aspect_ratio") || plan.get("aspect_ratio").asText().isBlank()) {
@@ -156,10 +169,11 @@ public final class DirectorPlanValidator {
                 }
             }
         }
-        if (planDuration != null && diff(sum, planDuration).compareTo(new BigDecimal("0.5")) > 0) {
+        if (strictDuration && planDuration != null && diff(sum, planDuration).compareTo(new BigDecimal("0.5")) > 0) {
             problems.add("镜头时长总和(" + sum + ")≠duration_sec(" + planDuration + ")，偏差 >0.5s");
         }
         if (targetDuration != null && diff(sum, targetDuration).compareTo(new BigDecimal("0.5")) > 0) {
+        if (strictDuration)
             problems.add("镜头时长总和(" + sum + ")与项目目标(" + targetDuration + ")偏差 >0.5s");
         }
     }

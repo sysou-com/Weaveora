@@ -46,6 +46,10 @@ import {
   clonePlan,
   isVideoPlan,
   normalizePlan,
+  audioVideoHealthCheck,
+  calibrateAllShots,
+  modelClipCap,
+  planTailSec,
   planProblems,
   round2,
   shotHasText,
@@ -2108,6 +2112,62 @@ async function doExport(): Promise<void> {
 const renderBusy = ref(false)
 
 /**
+ * 「按配音校准时长」：用每段配音的**实际时长**反推镜头时长（+余量），
+ * 超过模型单次输出上限的镜头自动写 `segments`（分段生成、成片 cut 拼接）。
+ *
+ * 先弹差异预览（哪镜变长/变短、切几段），确认后**就地保存**（不另存版本、不动确认态）。
+ */
+async function calibrateAllDurations(): Promise<void> {
+  const p0 = draft.value
+  if (!p0 || !isVideoPlan(p0)) {
+    message.info('仅视频项目支持按配音校准')
+    return
+  }
+  const p = p0
+  const cap = modelClipCap(p)
+  const tail = planTailSec(p)
+  const diffs = calibrateAllShots(p as never, durations.value, false)
+  if (!diffs.length) {
+    message.success('全部镜头已与配音一致（模型上限 ' + cap + 's、余量 ' + tail + 's）')
+    return
+  }
+  const lines = diffs
+    .slice(0, 12)
+    .map((d) => {
+      const seg = d.segCount > 1 ? '（切 ' + d.segCount + ' 段）' : ''
+      return '第 ' + d.shotNo + ' 镜：' + d.from + 's → ' + d.to + 's' + seg
+    })
+  const more = diffs.length > 12 ? '\n…另有 ' + (diffs.length - 12) + ' 个镜头' : ''
+  const ok = window.confirm(
+    '按配音校准（模型单次上限 ' + cap + 's、尾部余量 ' + tail + 's）：\n\n' +
+      lines.join('\n') +
+      more +
+      '\n\n确认写入方案？',
+  )
+  if (!ok) return
+  calibrateAllShots(p as never, durations.value, true)
+  if (!(await savePlanInPlace())) {
+    message.warning('已改时长，但方案保存失败，请稍后重试')
+    return
+  }
+  message.success('已按配音校准 ' + diffs.length + ' 个镜头')
+}
+
+/** 渲染前音画体检：配音超镜/镜头空等/超上限未分段 等 */
+function healthCheckBeforeRender(): boolean {
+  const p = draft.value
+  if (!p || !isVideoPlan(p)) return true
+  const issues = audioVideoHealthCheck(p as never, durations.value)
+  if (!issues.length) return true
+  const head = issues.slice(0, 8).join('\n')
+  const more = issues.length > 8 ? '\n…另有 ' + (issues.length - 8) + ' 条' : ''
+  return window.confirm(
+    '渲染前检查发现问题：\n\n' + head + more + '\n\n仍要渲染吗？（建议先点「按配音校准时长」）',
+  )
+}
+
+/** 渲染前音画体检：配音超镜/镜头空等/超上限未分段 等 */
+/**
  * 渲染前检查：方案里有台词/旁白、但**字幕开关是关的** → 先提醒。
  *
  * 坑过两次：开关默认 false（现为 true）、旧草稿回写 false → 渲染出来没字幕，用户以为“字幕坏了”。
@@ -2134,6 +2194,7 @@ async function ensureSubtitleForRender(): Promise<boolean> {
 async function doRender(): Promise<void> {
   if (!selectedRevId.value) return
   if (!(await ensureSubtitleForRender())) return
+  if (!healthCheckBeforeRender()) return
   
   focusJobTab('master')
   renderBusy.value = true
@@ -3107,6 +3168,16 @@ const shotTotal = computed(() => {
             用户找不到入口；改为常显 + :disabled + title 说明前置条件。
           -->
           <div class="jobs-actions" data-testid="job-gen-actions">
+            <NButton
+              v-if="isVideoNow"
+              size="small"
+              quaternary
+              data-testid="btn-calibrate-durations"
+              title="用每段配音的**实际时长**反推镜头时长（配音占用 + 余量）；超过视频模型单次输出上限的镜头自动切成多段"
+              @click="calibrateAllDurations"
+            >
+              按配音校准时长
+            </NButton>
             <span v-if="activeJobCount" class="state-hint font-mono gen-live" data-testid="job-live-hint">
               {{ freshActiveCount || activeJobCount }} 个进行中…
             </span>

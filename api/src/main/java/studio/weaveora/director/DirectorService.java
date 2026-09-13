@@ -347,7 +347,8 @@ public class DirectorService {
         com.fasterxml.jackson.databind.node.ObjectNode obj = plan.deepCopy();
         String curMode = r.schemaJson() == null ? "" : r.schemaJson().path("mode").asText("");
         enrich(obj, curMode, project.aspectRatio());
-        validateOrThrow(obj, curMode, project.durationSec());
+        // P13：就地保存放宽「时长一致性」（镜头时长由配音决定，总和必然变化）
+        validateOrThrow(obj, curMode, project.durationSec(), false);
         r.replacePlan(obj);
         revisions.save(r);
         // 注意：这里**不能** syncShots()！
@@ -540,7 +541,16 @@ public class DirectorService {
     }
 
     private void validateOrThrow(JsonNode plan, String mode, BigDecimal durationSec) {
-        List<String> problems = DirectorPlanValidator.validate(plan, mode, durationSec);
+        validateOrThrow(plan, mode, durationSec, true);
+    }
+
+    /**
+     * @param strictDuration 是否严格校验时长一致性。
+     *       P13：「按配音校准时长」会按配音实际时长改写镜头时长 → 对**就地保存**放宽，
+     *       否则用户校准完存不进去（AI 生成方案仍走严格校验）。
+     */
+    private void validateOrThrow(JsonNode plan, String mode, BigDecimal durationSec, boolean strictDuration) {
+        List<String> problems = DirectorPlanValidator.validate(plan, mode, durationSec, strictDuration);
         if (!problems.isEmpty()) {
             String msg = String.join("；", problems.stream().limit(4).toList());
             throw new BizException(ErrorCode.VALIDATION, "方案校验未通过：" + msg);

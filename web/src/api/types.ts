@@ -198,6 +198,11 @@ export interface DirectorShot {
    * 置 true 表示用户已确认，不再提醒。
    */
   allowNarrationOverflow?: boolean | null
+  /**
+   * P13：镜内分段（跨模型时长上限时把一镜切多段生成，成片仍是一镜）。
+   * duration_sec = 各段之和；同镜内段间必须 cut 拼接。
+   */
+  segments?: Array<{ index: number; start_sec: number; duration_sec: number }> | null
   zh?: string
   en_synced?: boolean
   /** P2 运镜关键帧（穿越/从A到B看到C）：≥2 帧时生成按帧出图，motion 用首/尾帧 */
@@ -246,7 +251,15 @@ export interface VideoPlan extends BasePlan {
   script: { theme: string; acts: Array<Record<string, unknown>> }
   shots: DirectorShot[]
   audio: PlanAudio
-  edit_plan: { fps: number; transition_default: string; subtitle: boolean }
+  edit_plan: {
+    fps: number
+    transition_default: string
+    subtitle: boolean
+    /** P13：视频模型「单次输出上限」秒（不同模型不同：i2v 常见 5s，部分 15s+） */
+    video_model_max_sec?: number
+    /** P13：镜头尾部呼吸余量（秒），默认 0.3 */
+    tail_sec?: number
+  }
 }
 
 export type DirectorPlan = ImagePlan | VideoPlan

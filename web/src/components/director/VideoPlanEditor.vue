@@ -274,6 +274,36 @@ const transitions = ['cut', 'dissolve', 'fade', 'wipe'].map((v) => ({ label: v, 
           <NSwitch v-model:value="props.plan.edit_plan.subtitle" size="small" :disabled="disabled" />
         </label>
       </div>
+      <!--
+        P13：视频模型单次输出上限与呼吸余量 —— 「按配音校准时长」用它决定镜头该多长、要不要切段。
+        不同模型不一样（i2v 常见 5s，部分 15s+），所以做成项目级设定。
+      -->
+      <div class="grid3">
+        <label class="row">
+          <span class="key" title="你所选视频模型单次能输出的最长秒数；超出就自动切段生成">模型上限(s)</span>
+          <NInputNumber
+            :value="props.plan.edit_plan.video_model_max_sec ?? 5"
+            size="small"
+            :min="1"
+            :max="60"
+            :step="1"
+            :disabled="disabled"
+            @update:value="(v: number | null) => props.plan.edit_plan && (props.plan.edit_plan.video_model_max_sec = v ?? 5)"
+          />
+        </label>
+        <label class="row">
+          <span class="key" title="镜头尾部留白，避免配音贴着画面切走">呼吸余量(s)</span>
+          <NInputNumber
+            :value="props.plan.edit_plan.tail_sec ?? 0.3"
+            size="small"
+            :min="0"
+            :max="3"
+            :step="0.1"
+            :disabled="disabled"
+            @update:value="(v: number | null) => props.plan.edit_plan && (props.plan.edit_plan.tail_sec = v ?? 0.3)"
+          />
+        </label>
+      </div>
       </template>
     </section>
 
@@ -296,6 +326,11 @@ const transitions = ['cut', 'dissolve', 'fade', 'wipe'].map((v) => ({ label: v, 
               :disabled="!!disabled"
             />
             <span class="dur-unit">秒</span>
+            <span
+              v-if="(shot.segments?.length ?? 0) > 1"
+              class="dur-segs font-mono"
+              :title="'超过模型单次上限，按配音校准后切成 ' + (shot.segments?.length ?? 0) + ' 段生成（同镜内 cut 拼接）'"
+            >{{ shot.segments?.length }} 段</span>
           </span>
         </label>
       </div>
@@ -744,6 +779,15 @@ const transitions = ['cut', 'dissolve', 'fade', 'wipe'].map((v) => ({ label: v, 
   grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
   gap: 12px 14px;
   margin-top: 6px;
+}
+.dur-segs {
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--wv-accent) 18%, transparent);
+  color: var(--wv-accent);
+  font-size: 11px;
+  white-space: nowrap;
 }
 .dur-cell {
   display: flex;

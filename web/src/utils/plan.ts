@@ -236,3 +236,197 @@ function str(v: unknown, fallback = ''): string {
 function num(v: unknown, fallback: number | null): number {
   return typeof v === 'number' && Number.isFinite(v) ? v : (fallback ?? 0)
 }
+
+/* ------------------------------------------------------------------------- *
+ * P13 配音优先的时长校准（audio-first timing）
+ *
+ * 背景：镜头时长原来由 AI 一次写死，配音只能硬塞 → 截断/脱节。
+ * 现在反过来：**用配音的实际时长反推镜头该多长**；当所需时长超过
+ * 「视频模型单次输出上限」时，把镜头切成多段（分段生成、成片 cut 拼接）。
+ * 方案文档：docs/audio-first-timing.md
+ * ------------------------------------------------------------------------- */
+
+/** 字数 → 秒（与 NarrationTimeline 同一口径：4.5 字/秒） */
+function estSecOf(text: string): number {
+  const t = (text ?? '').trim()
+  return t ? Math.max(1, t.length / 4.5) : 0
+}
+
+/** 视频模型单次输出上限（秒）：项目级设定优先；未设按 5s（当前 i2v 模型上限） */
+export function modelClipCap(plan: { edit_plan?: { video_model_max_sec?: number } }): number {
+  const v = Number(plan?.edit_plan?.video_model_max_sec ?? 0)
+  return v > 0 ? v : 5
+}
+
+/** 镜头尾部呼吸余量（秒）：项目级设定优先，默认 0.3 */
+export function planTailSec(plan: { edit_plan?: { tail_sec?: number } }): number {
+  const v = Number(plan?.edit_plan?.tail_sec ?? NaN)
+  return Number.isFinite(v) && v >= 0 ? v : 0.3
+}
+
+export interface ShotSegment {
+  index: number
+  start_sec: number
+  duration_sec: number
+}
+
+export interface ShotTiming {
+  /** 本镜需要多长（配音占用 + 余量） */
+  need: number
+  /** 分段（单段时长度为 1） */
+  segs: ShotSegment[]
+  /** 配音占用（不含余量） */
+  voiceEnd: number
+  /** 提示（空 = 无异常） */
+  warn: string
+}
+
+/**
+ * 计算某镜需要的时长与分段（**纯函数，不改动 plan**）。
+ *
+ * 规则（已确认的默认值）：
+ * - 配音位置**不动**，只调镜头总长；`need = 配音结束 + tail`
+ * - `need <= cap` → 单段
+ * - `need > cap` → 切成 ceil(need/cap) 段，末段
+ * - 末段短于 `minClip`（模型下限，默认 1s）→ **并入上一段**（不生成极短段）
+ */
+export function computeShotTiming(
+  shot: {
+    shot_no: number
+    narrations?: Array<{ at_sec?: number | null; end_sec?: number | null; text?: string }> | null
+    duration_sec?: number
+  },
+  durations: Record<string, number>,
+  cap: number,
+  tail: number,
+  minClip = 1,
+): ShotTiming {
+  const lines = shot.narrations ?? []
+  let voiceEnd = 0
+  lines.forEach((l, i) => {
+    const at = Math.max(0, Number(l.at_sec ?? 0))
+    const ms = durations[`${shot.shot_no}:${i}`]
+    const actual = ms && ms > 0 ? ms / 1000 : null
+    const end = Number(l.end_sec ?? 0)
+    const len = actual ?? (end > at ? end - at : estSecOf(l.text ?? ''))
+    voiceEnd = Math.max(voiceEnd, at + len)
+  })
+  const r1 = (n: number) => Math.round(n * 10) / 10
+  const need = r1(Math.max(minClip, voiceEnd > 0 ? voiceEnd + tail : Number(shot.duration_sec ?? 0) || minClip))
+
+  let segs: ShotSegment[] = []
+  let warn = ''
+  if (need <= cap) {
+    segs = [{ index: 0, start_sec: 0, duration_sec: need }]
+  } else {
+    const n = Math.ceil(need / cap)
+    let cursor = 0
+    for (let i = 0; i < n; i++) {
+      const d = Math.min(cap, r1(need - cursor))
+      segs.push({ index: i, start_sec: r1(cursor), duration_sec: d })
+      cursor = r1(cursor + d)
+    }
+    // 末段过短 → 并入上一段（避免 <1s 的碎片段）
+    if (segs.length > 1 && segs[segs.length - 1].duration_sec < minClip) {
+      const last = segs.pop() as ShotSegment
+      const prev = segs[segs.length - 1]
+      prev.duration_sec = r1(prev.duration_sec + last.duration_sec)
+    }
+    warn = `需要 ${need}s，超过模型单次上限 ${cap}s → 切成 ${segs.length} 段生成（同镜内 cut 拼接）`
+  }
+  return { need, segs, voiceEnd: r1(voiceEnd), warn }
+}
+
+/** 某镜当前是否已按配音校准过（时长与分段一致） */
+export function shotTimingAligned(
+  shot: { shot_no: number; duration_sec?: number; segments?: ShotSegment[] | null },
+  t: ShotTiming,
+): boolean {
+  const cur = Number(shot.duration_sec ?? 0)
+  const segs = shot.segments ?? []
+  if (Math.abs(cur - t.need) > 0.05) return false
+  if (segs.length !== t.segs.length) return false
+  return segs.every((s, i) => Math.abs(Number(s.duration_sec) - t.segs[i].duration_sec) < 0.05)
+}
+
+export interface CalibrateDiff {
+  shotNo: number
+  from: number
+  to: number
+  segCount: number
+  warn: string
+}
+
+/**
+ * 全片按配音校准：把每个镜头的 `duration_sec` 改为「配音占用 + 余量」，并写入 `segments`。
+ *
+ * @param apply true = 直接写回 plan（就地保存由调用方负责）；false = 只算差异（预览）
+ */
+export function calibrateAllShots(
+  plan: {
+    edit_plan?: { video_model_max_sec?: number; tail_sec?: number }
+    shots?: Array<{
+      shot_no: number
+      duration_sec?: number
+      narrations?: Array<{ at_sec?: number | null; end_sec?: number | null; text?: string }> | null
+      segments?: ShotSegment[] | null
+    }>
+  },
+  durations: Record<string, number>,
+  apply: boolean,
+): CalibrateDiff[] {
+  const cap = modelClipCap(plan)
+  const tail = planTailSec(plan)
+  const out: CalibrateDiff[] = []
+  for (const s of plan.shots ?? []) {
+    const t = computeShotTiming(s, durations, cap, tail)
+    const from = Number(s.duration_sec ?? 0)
+    const changed = Math.abs(from - t.need) > 0.05 || !shotTimingAligned(s, t)
+    if (changed) {
+      out.push({ shotNo: s.shot_no, from, to: t.need, segCount: t.segs.length, warn: t.warn })
+      if (apply) {
+        s.duration_sec = t.need
+        s.segments = t.segs
+      }
+    }
+  }
+  return out
+}
+
+/** 音画体检：渲染前检查配音与镜头、分段是否协调（返回人类可读的问题列表） */
+export function audioVideoHealthCheck(
+  plan: {
+    edit_plan?: { video_model_max_sec?: number; tail_sec?: number }
+    shots?: Array<{
+      shot_no: number
+      duration_sec?: number
+      narrations?: Array<{ at_sec?: number | null; end_sec?: number | null; text?: string }> | null
+      segments?: ShotSegment[] | null
+    }>
+  },
+  durations: Record<string, number>,
+): string[] {
+  const cap = modelClipCap(plan)
+  const tail = planTailSec(plan)
+  const issues: string[] = []
+  for (const s of plan.shots ?? []) {
+    const t = computeShotTiming(s, durations, cap, tail)
+    const dur = Number(s.duration_sec ?? 0)
+    if (t.voiceEnd > 0 && dur + 0.05 < t.voiceEnd) {
+      issues.push(`第 ${s.shot_no} 镜：配音 ${t.voiceEnd}s 超出镜头 ${dur}s（会被截断）`)
+    } else if (t.voiceEnd > 0 && dur > t.voiceEnd + 1.0) {
+      issues.push(`第 ${s.shot_no} 镜：镜头 ${dur}s 比配音长 ${(dur - t.voiceEnd).toFixed(1)}s（画面空等）`)
+    }
+    if (dur > cap && !(s.segments ?? []).length) {
+      issues.push(`第 ${s.shot_no} 镜：${dur}s 超过模型上限 ${cap}s，但未分段（生成会失败/被截）`)
+    }
+    const segs = s.segments ?? []
+    if (segs.length > 1) {
+      const sum = segs.reduce((a, b) => a + Number(b.duration_sec), 0)
+      if (Math.abs(sum - dur) > 0.15) {
+        issues.push(`第 ${s.shot_no} 镜：分段合计 ${sum.toFixed(1)}s 与镜头 ${dur}s 不一致`)
+      }
+    }
+  }
+  return issues
+}
