@@ -1562,8 +1562,11 @@ const pickerShots = computed(() => {
         lineCount: voice.length,
         unit: '段语音',
         eligible: missing.length === 0,
-        needsFaceHint: speakers.length > 1 && needFace > 0,
-        faceHint: speakers.length > 1 ? faceHint : '',
+        // 只要有台词说话人就给「指定人脸」入口 —— 单人镜同样需要：
+        // 多人同框时「取最大脸/按定妆照识别」都不可靠（实测 480p/AI 古风下识别区分度崩塌），
+        // 用户点一下最实在。多人镜额外用高亮提醒「还有谁没指定」。
+        needsFaceHint: speakers.length > 0 && needFace > 0 && (speakers.length > 1 || multiHint !== ''),
+        faceHint: speakers.length ? faceHint : '',
         note: missing.length
           ? `不可：${missing.join('、')}`
           : `可生成 · ${voice.length} 段语音${clips.length ? '' : '（用关键帧静帧）'}${multiHint ? ` · ${multiHint}` : ''}`,
