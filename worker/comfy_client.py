@@ -1098,6 +1098,202 @@ def _set_node_scalar(graph, node_class, key, value):
     return hit
 
 
+def _ffmpeg_exe():
+    """本机 ffmpeg 路径（优先 imageio_ffmpeg 自带的，其次 PATH 里的 ffmpeg）。"""
+    try:
+        import imageio_ffmpeg as _iif
+        return _iif.get_ffmpeg_exe()
+    except Exception:
+        return "ffmpeg"
+
+
+def _run_ff(args, timeout=900):
+    import subprocess
+    r = subprocess.run([_ffmpeg_exe(), "-y", "-loglevel", "error"] + args,
+                       capture_output=True, text=True, timeout=timeout)
+    if r.returncode != 0:
+        raise ComfyError("ffmpeg 失败: %s" % (r.stderr or "")[-300:])
+    return r
+
+
+def _cut_frames(video_bytes, a, b, tmp, tag):
+    """按**帧号**切 [a, b)（帧精确，用于按段驱动）。
+
+    为什么按帧号而不是按秒：分段驱动要把每段的结果拼回原位，时间戳一旦有偏差
+    就会出现音视频错位。`select=between(n,a,b-1)` + `setpts=N/FRAME_RATE/TB` 让
+    切出来的片从第 0 帧重新计时、且帧数与原视频一致。
+    """
+    ip = os.path.join(tmp, "%s_in.mp4" % tag)
+    op = os.path.join(tmp, "%s_out.mp4" % tag)
+    with open(ip, "wb") as fh:
+        fh.write(video_bytes)
+    _run_ff(["-i", ip, "-vf",
+             "select='between(n\\,%d\\,%d)',setpts=N/FRAME_RATE/TB" % (a, b - 1),
+             "-an", "-fps_mode", "passthrough", "-c:v", "libx264", "-pix_fmt", "yuv420p",
+             "-crf", "18", op])
+    with open(op, "rb") as fh:
+        return fh.read()
+
+
+def _mux_audio(video_bytes, audio_bytes, tmp):
+    """给拼好的画面重新接上**完整配音**（音轨不动，保证与原来同一时间轴）。"""
+    vp = os.path.join(tmp, "mux_v.mp4")
+    ap = os.path.join(tmp, "mux_a.wav")
+    op = os.path.join(tmp, "mux_out.mp4")
+    with open(vp, "wb") as fh:
+        fh.write(video_bytes)
+    with open(ap, "wb") as fh:
+        fh.write(audio_bytes)
+    _run_ff(["-i", vp, "-i", ap, "-c:v", "copy", "-c:a", "aac", "-b:a", "160k",
+             "-map", "0:v:0", "-map", "1:a:0", op])
+    with open(op, "rb") as fh:
+        return fh.read()
+
+
+def _frame_count(video_bytes, tmp, tag="fc"):
+    """数一段视频的帧数（用 -count_frames 太重，改用 python 侧 cv2）。"""
+    import tempfile as _tf
+    import cv2 as _cv
+    p = os.path.join(tmp, "%s.mp4" % tag)
+    with open(p, "wb") as fh:
+        fh.write(video_bytes)
+    cap = _cv.VideoCapture(p)
+    n = int(cap.get(_cv.CAP_PROP_FRAME_COUNT)) if cap.isOpened() else 0
+    cap.release()
+    return n
+
+
+def _decode_frames(video_bytes, tmp, tag="dec"):
+    """把一段视频解码成帧列表（BGR numpy）。"""
+    import cv2 as _cv
+    p = os.path.join(tmp, "%s.mp4" % tag)
+    with open(p, "wb") as fh:
+        fh.write(video_bytes)
+    cap = _cv.VideoCapture(p)
+    frames = []
+    while True:
+        ok, fr = cap.read()
+        if not ok:
+            break
+        frames.append(fr)
+    cap.release()
+    return frames
+
+
+def _encode_frames(frames, fps, tmp, tag="enc"):
+    """帧列表 → mp4（复用 _encode_frames_mp4：写 PNG 序列再交 ffmpeg）。"""
+    import cv2 as _cv
+    pngs = []
+    for fr in frames:
+        ok, buf = _cv.imencode(".png", fr)
+        if ok:
+            pngs.append(buf.tobytes())
+    if not pngs:
+        raise ComfyError("编码失败：没有帧")
+    out_dir = os.path.join(tmp, "enc_%s" % tag)
+    os.makedirs(out_dir, exist_ok=True)
+    return _encode_frames_mp4(pngs, max(1, int(fps)), out_dir)
+
+
+def _source_fps(video_bytes, tmp, tag="fps"):
+    """源片帧率（分段驱动要靠它把秒换算成帧号）。"""
+    import cv2 as _cv
+    p = os.path.join(tmp, "%s.mp4" % tag)
+    with open(p, "wb") as fh:
+        fh.write(video_bytes)
+    cap = _cv.VideoCapture(p)
+    fps = cap.get(_cv.CAP_PROP_FPS) if cap.isOpened() else 0
+    cap.release()
+    return float(fps or 25.0) or 25.0
+
+
+def _splice(source_bytes, seg_results, fps, tmp):
+    """把各段的处理结果**按原时间轴替换回原帧序列**。
+
+    为什么不用「切段→拼接」：LatentSync 是按**音频长度**出帧的，段内产出的帧数
+    与切出来的帧数可能差一两帧；一旦用拼接，后面的每一段都会整体前/后移，音画就溧了。
+    替换回原位则**总帧数与帧位置完全不变**，音轨也就能原封不动接上。
+    帧数不足时重复末帧（宁多不少），多了就截掉。
+    """
+    frames = _decode_frames(source_bytes, tmp, "src")
+    if not frames:
+        raise ComfyError("源片解码失败（0 帧）")
+    for a, b, pf in seg_results:
+        want = max(0, b - a)
+        if want <= 0 or not pf:
+            continue
+        if a >= len(frames):
+            continue
+        b = min(b, len(frames))
+        want = b - a
+        if len(pf) > want:
+            pf = pf[:want]
+        while len(pf) < want:
+            pf.append(pf[-1] if pf else frames[a])
+        frames[a:b] = pf
+    return _encode_frames(frames, fps, tmp, "spliced")
+
+
+def _run_lipsync_graph(client_id, vbytes, abytes, emb_path, on_tick=None):
+    """跑一次对口型工作流，返回产物 mp4 bytes（整镜 / 单段共用）。"""
+    import uuid as _uuid
+    if not LIPSYNC_WORKFLOW or not os.path.exists(LIPSYNC_WORKFLOW):
+        raise ComfyError("对口型工作流不存在：检查 WEAVEORA_LIPSYNC_WORKFLOW=%s" % LIPSYNC_WORKFLOW)
+    _tok = _uuid.uuid4().hex[:8]
+    vname = _upload_any(vbytes, "weaveora_lipsync_%s_in.mp4" % _tok, "video/mp4")
+    if not vname:
+        raise ComfyError("上传画面失败")
+    aname = _upload_any(abytes, "weaveora_lipsync_%s_voice.wav" % _tok, "audio/wav")
+    if not aname:
+        raise ComfyError("上传配音失败")
+    with open(LIPSYNC_WORKFLOW, "r", encoding="utf-8") as fh:
+        graph = json.load(fh)
+    vh = _set_node_input(graph, LIPSYNC_VIDEO_TITLE, vname, LIPSYNC_VIDEO_INPUT)
+    ah = _set_node_input(graph, LIPSYNC_AUDIO_TITLE, aname, LIPSYNC_AUDIO_INPUT, want_video=False)
+    if not vh or not ah:
+        raise ComfyError(
+            "工作流里没找到标题为「%s」/「%s」的节点：请在 ComfyUI 里把承载视频/音频的节点标题改成这两个值"
+            % (LIPSYNC_VIDEO_TITLE, LIPSYNC_AUDIO_TITLE))
+    # 自检：确认注入后的图上确实指向本次上传的文件（防止再出现「写错键→静默用旧文件」）
+    dirty = []
+    for node in graph.values():
+        if not isinstance(node, dict):
+            continue
+        for k, v in (node.get("inputs") or {}).items():
+            if isinstance(v, str) and v and v.endswith((".mp4", ".wav", ".png", ".jpg")) \
+                    and v not in (vname, aname):
+                dirty.append("%s.%s=%s" % (node.get("class_type"), k, v))
+    if dirty:
+        raise ComfyError("对口型工作流里还有指向其它文件的输入（拒绝跑，避免拿错素材）：%s" % ", ".join(dirty))
+    prefix = "weaveora_lipsync_" + _uuid.uuid4().hex[:6]
+    for node in graph.values():
+        if isinstance(node, dict) and "filename_prefix" in (node.get("inputs") or {}):
+            node["inputs"]["filename_prefix"] = prefix
+    if emb_path:
+        _n = _set_node_scalar(graph, LIPSYNC_NODE_CLASS, "target_embedding_path", emb_path)
+        print("[comfy] 已注入 target_embedding_path（命中 %d 个 %s）" % (_n, LIPSYNC_NODE_CLASS), flush=True)
+    _mode, _nodes = _apply_fps_policy(graph)
+    print("[comfy] 对口型 fps 策略：%s（节点：%s）" % (_mode, ",".join(str(x) for x in _nodes)), flush=True)
+    # 裸节点图 → /prompt 要的是 {"prompt": 图, "client_id": ...}
+    pid = _post_prompt({"prompt": graph, "client_id": client_id}, client_id)
+    try:
+        rec = _poll_history(client_id, pid, timeout=LIPSYNC_TIMEOUT, on_tick=on_tick)
+    except ComfyError as e:
+        try:
+            _comfy("POST", "/interrupt", payload={}, timeout=30)
+        except Exception:
+            pass
+        if "Face not detected" in str(e):
+            raise ComfyError(NO_FACE_MSG)
+        raise ComfyError("对口型推理失败：%s" % e)
+    outs = _download_outputs(rec, prefix)
+    if not outs:
+        outs = _download_outputs(rec, "weaveora")
+    if not outs:
+        raise ComfyError("对口型无输出视频（prefix=%s）" % prefix)
+    return outs[0]["bytes"]
+
+
 def _probe_video_meta(mp4_bytes):
     """用 ffmpeg -i 读 mp4 的宽高与时长（返回 (w, h, duration_ms)）。
 
@@ -1128,14 +1324,17 @@ def _probe_video_meta(mp4_bytes):
 
 
 def generate_lipsync(client_id, payload, progress_fn=None):
-    """对口型（lipsync 任务）：画面 + 配音 → 嘴型对齐的视频。返回 [{bytes, mime}]。"""
+    """对口型（lipsync 任务）：画面 + 配音 → 嘴型对齐的视频。返回 [{bytes, mime}]。
+
+    两种模式：
+      · **单人镜**：整镜跑一次，并把脸锁在该说话人上（防止逐帧取最大脸中途换人）；
+      · **多人镜（按段驱动）**：按方案的台词时间窗分段，每段只驱动**该段说话人**的脸，
+        再把处理后的帧按原时间轴拼回去 —— LatentSync 每帧只能驱动一张脸，不分段就必然配错人。
+    """
     import uuid as _uuid
-    if not LIPSYNC_WORKFLOW:
-        raise ComfyError(
-            "未配置对口型工作流：请按 docs/lipsync-setup.md 安装（ComfyUI-LatentSyncWrapper 等）"
-            "并把导出的 API 格式工作流路径填到 WEAVEORA_LIPSYNC_WORKFLOW")
-    if not os.path.exists(LIPSYNC_WORKFLOW):
-        raise ComfyError("对口型工作流文件不存在: %s（检查 WEAVEORA_LIPSYNC_WORKFLOW）" % LIPSYNC_WORKFLOW)
+    import tempfile
+    if not LIPSYNC_WORKFLOW or not os.path.exists(LIPSYNC_WORKFLOW):
+        raise ComfyError("未配置对口型工作流：见 docs/lipsync-setup.md（WEAVEORA_LIPSYNC_WORKFLOW）")
     vkey = (payload.get("videoKey") or "").strip()
     vkeys = [k for k in (payload.get("voiceKeys") or []) if k]
     if not vkey or not vkeys:
@@ -1143,106 +1342,53 @@ def generate_lipsync(client_id, payload, progress_fn=None):
 
     if progress_fn:
         progress_fn(15, "upload")
-    # fetch_reference_bytes 返回 (bytes, content_type) —— 别把 tuple 直接塞给上传（
-    # 之前就是 b"".join(parts) 报 "expected a bytes-like object, tuple found"）。
+    # fetch_reference_bytes 返回 (bytes, content_type)
     vdata, vctype = fetch_reference_bytes(vkey)
-    # 多段配音：先合成为一个音频（本机 ffmpeg），一次对口型
-    adata = _concat_voice(vkeys)
-    # 没有 motion 的镜，后端会把关键帧静帧（png）当画面传过来；口型工作流吃的是视频
-    # （LoadVideo → GetVideoComponents），所以先把它变成与配音等长的 mp4。
+    adata = _concat_voice(vkeys)          # 完整配音（最终音轨用它，音画同一时间轴）
     still_mode = (bool(payload.get("videoIsStill")) or bool(payload.get("isStill"))
                   or str(vctype or "").startswith("image"))
     if still_mode:
         vdata = _still_to_video(vdata, adata, payload.get("duration_sec"))
         print("[comfy] lipsync 画面为静帧 → 已用 ffmpeg 转成与配音等长的 mp4", flush=True)
-    # --- 锁人：多人同框必须知道「谁在说话」，否则逐帧取最大脸会中途换人（画面坏掉）---
-    # 先算说话人特征，下面的预检和后续注入都要用它
+
     speakers = payload.get("speakers") if isinstance(payload.get("speakers"), dict) else {}
+    segs = payload.get("segments") if isinstance(payload.get("segments"), list) else []
     speaker_count = int(payload.get("speakerCount") or len(speakers) or 0)
-    if speaker_count > 1:
-        raise ComfyError(
-            "该镜有 %d 个人说话（%s）——LatentSync 每帧只能驱动一张脸，双人对话会把台词配到同一个人脸上"
-            "（嘴型错位、面部区域错位）。请把这一镜拆成两个单人镜（各自单独说话），或等「按段驱动」上线。"
-            % (speaker_count, payload.get("speakerNames") or "、".join(speakers.keys())))
-    _who = next(iter(speakers)) if speakers else ""
-    _emb = None
-    if _who:
+    shot_no = payload.get("shot_no") or "?"
+
+    # 每个说话人的人脸特征（定妆照）—— 锁人用；拿不到就退回「最大脸」
+    embs = {}
+    for name, pkey in speakers.items():
         try:
-            _pb, _ = fetch_reference_bytes(speakers[_who])
-            _emb = _embed_reference(_pb)
-            if _emb:
-                print("[comfy] 已提取说话人「%s」的人脸特征（%d 维）" % (_who, len(_emb)), flush=True)
+            pb, _ = fetch_reference_bytes(pkey)
+            e = _embed_reference(pb)
+            if e:
+                embs[name] = e
+                print("[comfy] 已提取说话人「%s」的人脸特征（%d 维）" % (name, len(e)), flush=True)
         except Exception as e:
-            print("[comfy] 说话人特征提取失败：%s" % e, flush=True)
-    # 人脸预检（带目标）：① 画面里有人脸；② 说话人的脸真在画面里且可信
-    if not _face_precheck(vdata, where="第%s镜" % (payload.get("shot_no") or "?"),
-                          target_emb=_emb, speaker=_who):
+            print("[comfy] 说话人「%s」特征提取失败：%s" % (name, e), flush=True)
+
+    def _emb_path_of(name):
+        e = embs.get(name)
+        if not e:
+            return ""
+        try:
+            f = tempfile.NamedTemporaryFile("w", prefix="weaveora_emb_", suffix=".json",
+                                            delete=False, encoding="utf-8")
+            json.dump(e, f)
+            f.close()
+            return f.name
+        except Exception as ex:
+            print("[comfy] 特征文件写入失败（退回最大脸）: %s" % ex, flush=True)
+            return ""
+
+    # 先预检：画面里有人脸；且（有特征时）说话人的脸真在画面里
+    _first = next(iter(embs)) if len(embs) == 1 else ""
+    if not _face_precheck(vdata, where="第%s镜" % shot_no,
+                          target_emb=embs.get(_first), speaker=_first):
         raise ComfyError(_face_reason["msg"])
-    # 文件名带上本次任务的唯一后缀：一是避免 ComfyUI 重名自动改名（会变成 xxx (1).mp4，
-    # 日志里对不上人），二是从根上堆不了「同名旧文件被静默复用」。
-    _tok = _uuid.uuid4().hex[:8]
-    vname = _upload_any(vdata, "weaveora_lipsync_%s_in.mp4" % _tok, "video/mp4")
-    if not vname:
-        raise ComfyError("上传画面失败")
-    aname = _upload_any(adata, "weaveora_lipsync_%s_voice.wav" % _tok, "audio/wav")
-    if not aname:
-        raise ComfyError("上传配音失败")
 
-    with open(LIPSYNC_WORKFLOW, "r", encoding="utf-8") as fh:
-        graph = json.load(fh)
-    vh = _set_node_input(graph, LIPSYNC_VIDEO_TITLE, vname, LIPSYNC_VIDEO_INPUT)
-    ah = _set_node_input(graph, LIPSYNC_AUDIO_TITLE, aname, LIPSYNC_AUDIO_INPUT, want_video=False)
-    if not vh or not ah:
-        raise ComfyError(
-            "工作流里没找到标题为「%s」/「%s」的节点：请在 ComfyUI 里把承载视频/音频的节点标题改成这两个值"
-            "（或用 WEAVEORA_LIPSYNC_VIDEO_TITLE / _AUDIO_TITLE 指定）"
-            % (LIPSYNC_VIDEO_TITLE, LIPSYNC_AUDIO_TITLE))
-
-    # 自检：确认注入后的图上确实指向本次上传的文件（防止再出现「写错键→静默用旧文件」）
-    dirty = []
-    for node in graph.values():
-        if not isinstance(node, dict):
-            continue
-        for k, v in (node.get("inputs") or {}).items():
-            if isinstance(v, str) and v and v.endswith((".mp4", ".wav", ".png", ".jpg")) \
-                    and v not in (vname, aname):
-                dirty.append("%s.%s=%s" % (node.get("class_type"), k, v))
-    if dirty:
-        raise ComfyError("对口型工作流里还有指向其它文件的输入（拒绝跑，避免拿错素材）：%s" % ", ".join(dirty))
-
-    prefix = "weaveora_lipsync_" + _uuid.uuid4().hex[:6]
-    for node in graph.values():
-        if isinstance(node, dict) and "filename_prefix" in (node.get("inputs") or {}):
-            node["inputs"]["filename_prefix"] = prefix
-    # 把特征写成文件交给节点（节点只能收字符串路径）
-    _emb_path = ""
-    if _emb:
-        try:
-            import tempfile as _tf
-            _f = _tf.NamedTemporaryFile("w", prefix="weaveora_emb_", suffix=".json",
-                                        delete=False, encoding="utf-8")
-            json.dump(_emb, _f)
-            _f.close()
-            _emb_path = _f.name
-        except Exception as e:
-            print("[comfy] 特征文件写入失败（退回「最大脸」）: %s" % e, flush=True)
-    if _emb_path:
-        _n = _set_node_scalar(graph, LIPSYNC_NODE_CLASS, "target_embedding_path", _emb_path)
-        print("[comfy] 已注入 target_embedding_path（命中 %d 个 %s）" % (_n, LIPSYNC_NODE_CLASS), flush=True)
-    else:
-        print("[comfy] 未提供说话人参考图 → 沿用「取最大脸」（多人同框可能配错人）", flush=True)
-    # 帧率：生成帧率必须 = 播放帧率（默认都跟源片 fps 走）
-    _mode, _nodes = _apply_fps_policy(graph)
-    print("[comfy] 对口型 fps 策略：%s（节点：%s）" % (_mode, ",".join(str(x) for x in _nodes)),
-          flush=True)
     _free_comfy_models()
-    # 注意：导出的「API 格式」工作流是**裸节点图**（{"1":{...}}），而 /prompt 要的是
-    # {"prompt": 图, "client_id": ...} —— 直接投裸图会被 ComfyUI 拒为 no_prompt。
-    pid = _post_prompt({"prompt": graph, "client_id": client_id}, client_id)
-    if progress_fn:
-        progress_fn(40, "lipsync")
-    # 对口型单镜实测 25–30 分钟；期间每过一分钟报一次“已运行 N 分钟”，
-    # 既让 UI 有动静，也方便判“还在跑”还是“卡住了”。
     _last_min = [-1]
 
     def _tick(elapsed):
@@ -1253,40 +1399,79 @@ def generate_lipsync(client_id, payload, progress_fn=None):
         if progress_fn and m > 0:
             progress_fn(40, "lipsync 已运行 %d 分钟" % m)
 
+    tmp = tempfile.mkdtemp(prefix="weaveora_splice_")
+    _paths = []
     try:
-        rec = _poll_history(client_id, pid, timeout=LIPSYNC_TIMEOUT, on_tick=_tick)
-    except ComfyError as e:
-        # 把还在 ComfyUI 队列里的任务清掉，避免它继续空占显存
-        try:
-            _comfy("POST", "/interrupt", payload={}, timeout=30)
-        except Exception:
-            pass
-        _raw = str(e)
-        if "Face not detected" in _raw:
-            raise ComfyError(NO_FACE_MSG)
-        raise ComfyError("对口型推理失败：%s" % e)
+        if speaker_count <= 1 or not segs:
+            # ---------- 单人镜：整镜一次 ----------
+            _who = _first or (next(iter(speakers)) if speakers else "")
+            ep = _emb_path_of(_who)
+            if ep:
+                _paths.append(ep)
+            print("[comfy] 第%s镜单人模式：说话人=%s，整镜一次" % (shot_no, _who or "?"), flush=True)
+            if progress_fn:
+                progress_fn(40, "lipsync")
+            out = _run_lipsync_graph(client_id, vdata, adata, ep, on_tick=_tick)
+        else:
+            # ---------- 多人镜：按段驱动 ----------
+            fps = _source_fps(vdata, tmp)
+            total = _frame_count(vdata, tmp, "cnt")
+            print("[comfy] 第%s镜多人模式：%d 人说话 / %d 段，源片 %d 帧 @%.2ffps"
+                  % (shot_no, speaker_count, len(segs), total, fps), flush=True)
+            results = []
+            cursor = 0
+            for i, s in enumerate(segs):
+                who = (s.get("subject") or "").strip()
+                try:
+                    a = max(0, int(round(float(s.get("startMs", 0)) / 1000.0 * fps)))
+                    b = min(total, int(round(float(s.get("endMs", 0)) / 1000.0 * fps)))
+                except (TypeError, ValueError):
+                    continue
+                if b <= a or a < cursor:
+                    continue
+                # 该段视频 + 该段音频（优先用该段自己的配音，才严格对齐）
+                seg_video = _cut_frames(vdata, a, b, tmp, "s%d" % i)
+                vk = (s.get("voiceKey") or "").strip()
+                if vk:
+                    try:
+                        seg_audio, _ = fetch_reference_bytes(vk)
+                    except Exception as e:
+                        print("[comfy] 第%s段配音获取失败，退回整轨切片: %s" % (i + 1, e), flush=True)
+                        seg_audio = adata
+                else:
+                    seg_audio = adata
+                ep = _emb_path_of(who)
+                if ep:
+                    _paths.append(ep)
+                if progress_fn:
+                    progress_fn(40, "lipsync 第%d/%d段（%s）" % (i + 1, len(segs), who or "?"))
+                seg_mp4 = _run_lipsync_graph(client_id, seg_video, seg_audio, ep, on_tick=_tick)
+                pf = _decode_frames(seg_mp4, tmp, "seg%d" % i)
+                results.append((a, b, pf))
+                cursor = b
+                print("[comfy] 第%s段完成：%s 帧 %d-%d（产出 %d 帧）" % (i + 1, who or "?", a, b, len(pf)),
+                      flush=True)
+            if not results:
+                raise ComfyError("按段驱动失败：没有可处理的有效段（检查台词的 at_sec/end_sec）")
+            if progress_fn:
+                progress_fn(75, "lipsync 拼接画面")
+            merged = _splice(vdata, results, fps, tmp)
+            out = _mux_audio(merged, adata, tmp)
+            print("[comfy] 第%s镜按段驱动完成：%d 段已按原时间轴拼回并接回完整音轨" % (shot_no, len(results)),
+                  flush=True)
     finally:
-        # 人脸特征临时文件用完即删（里面是人脸特征，不留在磁盘上）
-        if _emb_path:
+        for _p in _paths:
             try:
-                os.remove(_emb_path)
+                os.remove(_p)
             except OSError:
                 pass
-    outs = _download_outputs(rec, prefix)
-    if not outs:
-        # 有些口型工作流走 SaveVideo/自定义节点，兜底再抓一次不限风格
-        outs = _download_outputs(rec, "weaveora")
-    if not outs:
-        raise ComfyError("对口型无输出视频（prefix=%s）" % prefix)
+        import shutil as _sh
+        _sh.rmtree(tmp, ignore_errors=True)
+
     if progress_fn:
         progress_fn(100, "done")
-    result = []
-    for o in outs:
-        w, h, dur = _probe_video_meta(o["bytes"])
-        result.append({"bytes": o["bytes"], "mime": "video/mp4", "width": w,
-                       "height": h, "duration_ms": dur})
-    return result
-
+    w, h, dur = _probe_video_meta(out)
+    return [{"bytes": out, "mime": "video/mp4", "width": w, "height": h, "duration_ms": dur}]
 
 def _concat_voice(voice_keys):
     """把多段配音按顺序拼成一个 wav（用本机 ffmpeg；失败时退回第一段）。"""

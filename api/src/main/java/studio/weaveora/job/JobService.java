@@ -1618,31 +1618,50 @@ public class JobService {
             payload.put("voiceCount", voices.size());
             payload.put("duration_sec", shot.path("duration_sec").asDouble(3));
             payload.put("lipSync", shot.path("lip_sync").asBoolean(true));
-            // P13：说话人信息 —— 双人对话必须知道「哪段台词是谁说的」。
-            // narrations 每段带 subject（说话人）与 at_sec/end_sec（时间窗）；
-            // 定妆照（kind=portrait + subject）作为「锁人」参考：worker 用 w600k_r50
-            // 算人脸特征，逐帧只驱动与该特征最像的那张脸。
-            // 为什么必须：LatentSync 逐帧取「面积最大的脸」，多人同框时两张脸的大小会
-            // 在镜头中途互换（实测第 4 镜 frame34 左脸大、frame45 右脸大）→ 突然换人 → 画面坏掉。
+            // P13：说话人 + 分段信息 —— 多人对话必须知道「哪段台词是谁说的、对应哪段音频」，
+            // 否则口型会把台词全配到同一张脸上（实测第4镜：宝玉/警幻 2 段台词全给了同一人，
+            // 而且逐帧取最大脸还会中途换人 → 面部画面坏掉）。
+            //
+            // 数据源用 AudioPlan.lines(shot)：它的**下标就是 line_index**（配音资产按它写入），
+            // 所以 segments[k].voiceKey 能精确关联到该段配音。
             ObjectNode speakersNode = payload.putObject("speakers");   // {说话人: 定妆照 storageKey}
             var segmentsNode = payload.putArray("segments");
             java.util.LinkedHashSet<String> speakerNames = new java.util.LinkedHashSet<>();
-            for (JsonNode n : shot.path("narrations")) {
-                if (!"dialogue".equals(n.path("kind").asText(""))) {
-                    continue;
+            java.util.List<studio.weaveora.director.plan.AudioPlan.Line> lines =
+                    studio.weaveora.director.plan.AudioPlan.lines(shot);
+            java.util.Map<Integer, studio.weaveora.asset.domain.Asset> voiceByLine = new java.util.HashMap<>();
+            for (studio.weaveora.asset.domain.Asset a : voices) {
+                Object li = studio.weaveora.asset.AssetService.lineIndexOf(a);
+                if (li != null) {
+                    voiceByLine.put((Integer) li, a);
                 }
-                String who = n.path("subject").asText("").trim();
-                if (who.isEmpty()) {
+            }
+            double shotDur = shot.path("duration_sec").asDouble(3);
+            for (int k = 0; k < lines.size(); k++) {
+                studio.weaveora.director.plan.AudioPlan.Line line = lines.get(k);
+                String who = line.subject() == null ? "" : line.subject().trim();
+                if (!line.dialogue() || who.isEmpty()) {
+                    continue;   // 旁白没有说话人，不需要驱动嘴型（那段时间保留原帧）
+                }
+                double begin = Math.max(0, line.atSec());
+                double end = line.hasEnd() ? line.endSec() : shotDur;
+                if (end <= begin) {
                     continue;
                 }
                 speakerNames.add(who);
                 ObjectNode seg = segmentsNode.addObject();
                 seg.put("subject", who);
-                seg.put("startMs", (int) Math.round(n.path("at_sec").asDouble(0) * 1000));
-                seg.put("endMs", (int) Math.round(n.path("end_sec").asDouble(0) * 1000));
+                seg.put("lineIndex", k);
+                seg.put("startMs", (int) Math.round(begin * 1000));
+                seg.put("endMs", (int) Math.round(end * 1000));
+                studio.weaveora.asset.domain.Asset va = voiceByLine.get(k);
+                if (va != null) {
+                    seg.put("voiceKey", va.storageKey());
+                }
             }
             payload.put("speakerCount", speakerNames.size());
             payload.put("speakerNames", String.join("、", speakerNames));
+            payload.put("segmentCount", segmentsNode.size());
             for (String who : speakerNames) {
                 String pk = portraitKeyOf(plan, projectId, workspaceId, who);
                 if (pk != null) {
