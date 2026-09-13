@@ -96,6 +96,10 @@ function lineDurSec(i: number): number | null {
  */
 function spanOf(l: NarrationLine, i: number): { start: number; len: number; exact: boolean } {
   const start = Math.max(0, l.at_sec ?? 0)
+  // 文本改过、音频还是旧的 → 按**新文本**估算（标签带 * 号），先让用户看到新长度
+  if (retexted.value.has(i)) {
+    return { start, len: Math.min(estimateSec(l.text), Math.max(0.4, dur.value - start)), exact: false }
+  }
   const actual = lineDurSec(i)
   if (actual != null) {
     return { start, len: actual, exact: true }
@@ -308,6 +312,56 @@ function relayoutByActual(): void {
   }
 }
 
+/**
+ * 文本被改过的段（本段音频已过时）：标签改为按**新文本**估算，并带 * 号提醒。
+ * 用「重排这条」或「重新生成这条」后清除。
+ */
+const retexted = ref<Set<number>>(new Set())
+
+/** 文本输入：立即把该段标为“文本已改”（时间标签马上按新文本更新），并保存方案 */
+function onTextEdit(): void {
+  if (selected.value >= 0) {
+    const next = new Set(retexted.value)
+    next.add(selected.value)
+    retexted.value = next
+  }
+  commit()
+}
+
+/**
+ * 「重排这条」：用**当前文本**估算本段长度并写回时间轴，同时把后面几段顺延（不重叠）。
+ *
+ * 场景：改了台词文本但还没重新生成配音时，先把时间轴按新文本铺好（不必等 TTS）。
+ * 后面的段：有实际音频用实际时长，否则用其已有长度/估算。
+ */
+function retextLine(): void {
+  const lines = props.shot.narrations ?? []
+  const i = selected.value
+  const l = lines[i]
+  if (!l) return
+  const at = Math.round(Math.max(0, l.at_sec ?? 0) * 10) / 10
+  const est = Math.round(estimateSec(l.text) * 10) / 10
+  l.manual = true
+  l.at_sec = at
+  l.end_sec = Math.round((at + est) * 10) / 10
+  let cursor = l.end_sec + 0.1
+  for (let k = i + 1; k < lines.length; k++) {
+    const n = lines[k]
+    const nat = lineDurSec(k)
+    const len = nat != null ? nat : Math.max(0.4, Number(n.end_sec ?? 0) - (n.at_sec ?? 0) || estimateSec(n.text))
+    const nAt = Math.round(cursor * 10) / 10
+    n.manual = true
+    n.at_sec = nAt
+    n.end_sec = Math.round((nAt + len) * 10) / 10
+    cursor = n.end_sec + 0.1
+  }
+  const next = new Set(retexted.value)
+  next.delete(i)
+  retexted.value = next
+  commit()
+  message.success(`已按新文本铺排：本段 ${est.toFixed(1)}s（估算）${i + 1 < lines.length ? '，后续段已顺延' : ''}`)
+}
+
 /** 把结束点设为“此刻 + 估算时长” */
 function setEndFromEstimate(): void {
   if (!cur.value) return
@@ -450,8 +504,11 @@ function pickVoiceFile(i: number): void {
         <span class="nt-block-tag font-mono">{{ (l.kind ?? 'narration') === 'dialogue' ? (l.subject || '台词') : '旁白' }}</span>
         <span class="nt-block-text">{{ l.text || '（空）' }}</span>
         <span class="nt-est font-mono">
-          <template v-if="lineDurSec(i) != null">
+          <template v-if="lineDurSec(i) != null && !retexted.has(i)">
             <span class="nt-real">{{ lineDurSec(i)!.toFixed(1) }}s</span>
+          </template>
+          <template v-else-if="retexted.has(i)">
+            <span class="nt-retext" title="文本改过了，这个长度是按新文本算的；重新生成后才是真实音频">{{ spanOf(l, i).len.toFixed(1) }}~s*</span>
           </template>
           <template v-else>{{ spanOf(l, i).len.toFixed(1) }}{{ spanOf(l, i).exact ? '' : '~' }}s</template>
         </span>
@@ -511,7 +568,7 @@ function pickVoiceFile(i: number): void {
           :disabled="disabled"
           placeholder="这一段要说什么"
           :data-testid="`narration-text-${shot.shot_no}`"
-          @update:value="commit"
+          @update:value="onTextEdit"
         />
       </label>
       <label class="nt-field">
@@ -587,6 +644,12 @@ function pickVoiceFile(i: number): void {
       </NButton>
       <NButton size="tiny" quaternary :disabled="disabled" @click="setEndFromEstimate">
         按估算设结束
+      </NButton>
+      <NButton size="tiny" :type="retexted.has(selected) ? 'warning' : 'default'" secondary :disabled="disabled"
+               :data-testid="`narration-retext-${shot.shot_no}`"
+               title="用当前文本重新估算本段长度并写回时间轴，后面几段自动顺延（不必等重新生成配音）"
+               @click="retextLine">
+        重排这条
       </NButton>
       <NButton size="tiny" quaternary type="primary" :disabled="disabled"
                :data-testid="`narration-relayout-${shot.shot_no}`"
@@ -721,6 +784,11 @@ function pickVoiceFile(i: number): void {
 </template>
 
 <style scoped>
+.nt-retext {
+  color: var(--wv-warn, #d99a2b);
+  font-weight: 600;
+}
+
 .nt {
   display: flex;
   flex-direction: column;
