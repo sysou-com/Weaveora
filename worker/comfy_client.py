@@ -1221,18 +1221,16 @@ def _splice(source_bytes, seg_results, fps, tmp):
     if not frames:
         raise ComfyError("源片解码失败（0 帧）")
     for a, b, pf in seg_results:
-        want = max(0, b - a)
-        if want <= 0 or not pf:
+        if not pf:
             continue
         if a >= len(frames):
             continue
-        b = min(b, len(frames))
-        want = b - a
-        if len(pf) > want:
-            pf = pf[:want]
-        while len(pf) < want:
-            pf.append(pf[-1] if pf else frames[a])
-        frames[a:b] = pf
+        # 只把**实际产出**的帧放回 [a, a+len(pf))，其余保持原帧：
+        # 不外推、不重复末帧 —— 因为 LatentSync 的产出帧数与切出来的帧数本来就可能不等
+        # （产出长度由**音频**决定，见 loop_video），重复外推会把后面的画面“冻结”几帧。
+        n = min(len(pf), max(0, b - a), len(frames) - a)
+        if n > 0:
+            frames[a:a + n] = pf[:n]
     return _encode_frames(frames, fps, tmp, "spliced")
 
 
@@ -1419,6 +1417,16 @@ def generate_lipsync(client_id, payload, progress_fn=None):
         if progress_fn and m > 0:
             progress_fn(40, "lipsync 已运行 %d 分钟" % m)
 
+    def _wav_bytes_seconds(b):
+        """一段音频的秒数（优先 wave；拿不到返回 None）。"""
+        try:
+            import wave as _w
+            import io as _io2
+            with _w.open(_io2.BytesIO(b), "rb") as w:
+                return w.getnframes() / float(w.getframerate() or 1)
+        except Exception:
+            return None
+
     tmp = tempfile.mkdtemp(prefix="weaveora_splice_")
     _paths = []
     try:
@@ -1429,6 +1437,13 @@ def generate_lipsync(client_id, payload, progress_fn=None):
             if ep:
                 _paths.append(ep)
             print("[comfy] 第%s镜单人模式：说话人=%s，整镜一次" % (shot_no, _who or "?"), flush=True)
+            # 预警：LatentSync 的产出帧数由音频决定，音频比画面长时它会「正放+倒放」循环视频凑帧
+            # （loop_video）→ 时间轴会异常。本机无法凭空补画面，只能提醒上游保证画面 ≥ 配音。
+            _vms = (_probe_video_meta(vdata)[2] or 0) / 1000.0
+            _asec = _wav_bytes_seconds(adata) or 0
+            if _asec > _vms + 0.35:
+                print("[comfy] ⚠ 第%s镜配音 %.2fs 明显长于画面 %.2fs —— LatentSync 会循环凑帧，"
+                      "可能出现时间轴异常；建议把该镜画面时长做到 ≥ 配音" % (shot_no, _asec, _vms), flush=True)
             if progress_fn:
                 progress_fn(40, "lipsync")
             out = _run_lipsync_graph(client_id, vdata, adata, ep, on_tick=_tick)
@@ -1449,17 +1464,38 @@ def generate_lipsync(client_id, payload, progress_fn=None):
                     continue
                 if b <= a or a < cursor:
                     continue
-                # 该段视频 + 该段音频（优先用该段自己的配音，才严格对齐）
-                seg_video = _cut_frames(vdata, a, b, tmp, "s%d" % i)
+                # 该段音频（优先用该段自己的配音，才严格对齐）
                 vk = (s.get("voiceKey") or "").strip()
+                seg_audio = None
                 if vk:
                     try:
                         seg_audio, _ = fetch_reference_bytes(vk)
                     except Exception as e:
-                        print("[comfy] 第%s段配音获取失败，退回整轨切片: %s" % (i + 1, e), flush=True)
-                        seg_audio = adata
-                else:
+                        print("[comfy] 第%s段配音获取失败，退回整轨: %s" % (i + 1, e), flush=True)
+                if seg_audio is None:
                     seg_audio = adata
+                # ★ 切多少帧要**跟着音频走**，不是跟着方案时间窗：
+                # LatentSync 的产出帧数由音频决定（loop_video），切出来的视频比音频短时会
+                # 正放+**倒放**循环凑帧 → 时间轴彻底乱（实测拼回去错位 ±6 帧）。
+                # 所以取 max(音频秒数×fps + 余量, 时间窗)，并确保不超过下一个段/片尾（不抢别人的帧）。
+                next_a = total
+                for t in segs[i + 1:]:
+                    try:
+                        na = int(round(float(t.get("startMs", 0)) / 1000.0 * fps))
+                        if na > a:
+                            next_a = min(next_a, na)
+                            break
+                    except (TypeError, ValueError):
+                        continue
+                avail = max(1, next_a - a)
+                dur = _wav_bytes_seconds(seg_audio)
+                need = (int(round(dur * fps)) + 4) if dur else (b - a)
+                want = min(max(need, 1), avail)
+                if want < need:
+                    print("[comfy] 第%s段可用帧 %d < 音频需求 %d（可能与其他台词重叠）—— 以可用帧为准"
+                          % (i + 1, avail, need), flush=True)
+                b = a + want
+                seg_video = _cut_frames(vdata, a, b, tmp, "s%d" % i)
                 ep = _spec_path_of(who)
                 if ep:
                     _paths.append(ep)
