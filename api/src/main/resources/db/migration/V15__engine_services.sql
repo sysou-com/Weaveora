@@ -1,4 +1,4 @@
--- V10：生成引擎配置 - 服务地址（配音/配乐、对口型、转写、人脸）
+-- V15：生成引擎配置 - 服务地址（配音/配乐、对口型、转写、人脸）
 --
 -- 背景：这些服务原先只由 worker 机器上的环境变量决定（WEAVEORA_TTS_URL / _MUSIC_URL /
 -- _COMFY_URL / _LIPSYNC_WORKFLOW / _LATENTSYNC_DIR），换 GPU 服务器就得改脚本、重启 worker。

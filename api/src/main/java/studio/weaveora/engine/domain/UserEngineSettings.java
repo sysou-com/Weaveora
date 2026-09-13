@@ -93,7 +93,7 @@ public class UserEngineSettings {
     private String gatewaySample;
 
     /**
-     * 服务地址（配音/配乐、对口型、转写、人脸）——见 V10 迁移注释里的结构。
+     * 服务地址（配音/配乐、对口型、转写、人脸）——见 V15 迁移注释里的结构。
      *
      * <p>为什么放这里：这些服务原先由 worker 机器的环境变量决定，换 GPU 服务器就得改脚本、
      * 重启 worker；收敛到用户级配置后可随时切换（worker 按任务下发，空值回退环境变量）。

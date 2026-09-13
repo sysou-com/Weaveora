@@ -473,7 +473,7 @@ export interface EngineSettings {
   services?: ServiceEndpoints | null
 }
 
-/** 服务地址：配音/配乐、对口型、转写、人脸（见后端 V10__engine_services.sql） */
+/** 服务地址：配音/配乐、对口型、转写、人脸（见后端 V15__engine_services.sql） */
 export interface ServiceEndpoints {
   /** 配音（CosyVoice 等 TTS 服务） */
   tts?: { url?: string | null } | null
