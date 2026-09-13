@@ -2114,8 +2114,9 @@ const renderBusy = ref(false)
  * 在用到的地方提醒（不靠人记），用户选“打开并渲染”就顺便把开关写回方案。
  */
 async function ensureSubtitleForRender(): Promise<boolean> {
-  const p = draft.value
-  if (!p || p.mode !== 'video') return true
+  const p0 = draft.value
+  if (!p0 || !isVideoPlan(p0)) return true
+  const p = p0
   const hasLine = (p.shots ?? []).some((s) => (s.narrations ?? []).some((l) => (l.text ?? '').trim()))
   if (!hasLine || p.edit_plan?.subtitle === true) return true
   const ok = window.confirm(
