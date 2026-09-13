@@ -156,6 +156,22 @@ Start-ScheduledTask -TaskName ComfyWorker
 > 想更快：① 只对有台词的正脸镜跑；② 对话镜时长模式用 `audio_first`（镜长=配音长）避免白跑；
 > ③ `inference_steps` 20 → 12 左右（质量略降）；④ 关键镜头改走云端（Replicate `sync/lipsync`）。
 
+### 5.1 并发与排队（重要）
+
+对口型在 8GiB 卡上会把显存吃到 ~7.9GiB，**同一时刻不能再有其它 GPU 任务**：
+
+- 本机 worker（`stub_worker.py`）是**单线程取任务**，天然串行；但如果在其它节点/云端并发处理，会 OOM。
+- API 侧已在 lipsync 任务的 `payload` 里带上 `gpuExclusive: true` 与 `gpuHint`（人话提示），
+  并在创建时打 `WARN` 日志；前端「对口型」按钮/Tab 的 tooltip 也写了这条。
+- 排队建议：把对口型放到其它 GPU 任务都跑完之后再提交；一个 4–5s 对话镜约 10–13 分钟，
+  别和关键帧/motion 批量任务混在一起排。
+
+```json
+// GET /api/jobs 里 lipsync 任务的 payload 片段
+{ "kind": "lipsync", "gpuExclusive": true,
+  "gpuHint": "对口型会独占本机显存（~7.9/8GiB），同一时刻不要同时排其它 GPU 任务；实测约 2.5 分钟/秒视频（4–5s 对话镜约 10–13 分钟）" }
+```
+
 ## 六、使用
 
 1. 该镜**已有 motion/关键帧** + **已生成配音**

@@ -1406,6 +1406,10 @@ public class JobService {
      *
      * <p>只对**有台词的镜**有意义；建议只在对话 + 特写/近景镜头上跑（远景/背影白花钱）。
      * 时长对齐要求：音频与画面基本等长 → 对话镜建议用 audio_first 模式（镜长=配音长）。
+     *
+     * <p><b>并发警告</b>：本机 3070 Ti 8GB 实测峰值显存 ~7.9GiB，对口型期间**不能再排其它 GPU 任务**
+     * （本机 worker 单线程取任务，天然串行；payload 里带 gpuExclusive/gpuHint 给前端提示）。
+     * 实测速度 ≈ 2.5 分钟 / 秒视频（4–5s 对话镜约 10–13 分钟），故 worker 超时设 1800s。
      */
     private List<GenerationJob> createLipsyncJobs(UUID workspaceId, UUID projectId, CreateJobRequest req,
                                                  JsonNode plan, int revisionNo, UUID userId) {
@@ -1449,6 +1453,11 @@ public class JobService {
             payload.put("voiceCount", voices.size());
             payload.put("duration_sec", shot.path("duration_sec").asDouble(3));
             payload.put("lipSync", shot.path("lip_sync").asBoolean(true));
+            // 本机 LatentSync 实测：峰值显存 ~7.9GiB / 8GiB，跑的时候不能再有别的 GPU 任务。
+            // 本机 worker 单线程取任务，天然串行；这两个字段是给前端/运维看的显式提示。
+            payload.put("gpuExclusive", true);
+            payload.put("gpuHint", "对口型会独占本机显存（~7.9/8GiB），同一时刻不要同时排其它 GPU 任务；"
+                    + "实测约 2.5 分钟/秒视频（4–5s 对话镜约 10–13 分钟）");
             created.add(createOne(workspaceId, projectId, req.revisionId(), shotId,
                     PRESET_CLIP, "lipsync", payload, userId, engineRoute));
         }
@@ -1456,6 +1465,8 @@ public class JobService {
             throw new BizException(ErrorCode.VALIDATION,
                     "没有可对口型的镜头：需要该镜已有 motion/关键帧**且**已生成配音");
         }
+        log.warn("lipsync jobs created project={} count={} —— 独占本机显存（~7.9/8GiB），勿与其它 GPU 任务并发",
+                projectId, created.size());
         return created;
     }
 

@@ -996,7 +996,7 @@ const JOB_TABS: Array<{ key: AudioTab; label: string; kind?: string; hint: strin
   { key: 'bgm', label: '配乐', kind: 'bgm', hint: '含试听产物 bgm_preview' },
   { key: 'still', label: '关键帧', kind: 'still', hint: '首帧图片 still' },
   { key: 'clip', label: 'motion', kind: 'clip', hint: '图生视频片段 clip' },
-  { key: 'lipsync', label: '对口型', kind: 'lipsync', hint: '音频驱动嘴型的片段（lipsync）' },
+  { key: 'lipsync', label: '对口型', kind: 'lipsync', hint: '音频驱动嘴型的片段（lipsync）；独占 GPU 显存（~7.9/8GiB），约 2.5 分钟/秒视频' },
   { key: 'all', label: '全部', hint: '全部任务（项多，缩略图按需懒加载）' },
 ]
 /** 资产库 Tab：保留成片 master（导出/合成产物在这里） */
@@ -1007,7 +1007,7 @@ const GAL_TABS: Array<{ key: AudioTab; label: string; kind?: string; hint: strin
   { key: 'bgm', label: '配乐', kind: 'bgm', hint: '含试听产物 bgm_preview' },
   { key: 'still', label: '关键帧', kind: 'still', hint: '首帧图片 still' },
   { key: 'clip', label: 'motion', kind: 'clip', hint: '图生视频片段 clip' },
-  { key: 'lipsync', label: '对口型', kind: 'lipsync', hint: '音频驱动嘴型的片段（lipsync）' },
+  { key: 'lipsync', label: '对口型', kind: 'lipsync', hint: '音频驱动嘴型的片段（lipsync）；独占 GPU 显存（~7.9/8GiB），约 2.5 分钟/秒视频' },
   { key: 'all', label: '全部', hint: '全部产物（项多，缩略图按需懒加载）' },
 ]
 /** 把 kind 归到 Tab（试听产物归入对应正式类型） */
@@ -3270,7 +3270,8 @@ const shotTotal = computed(() => {
               :disabled="!detApproved"
               data-testid="btn-lipsync-jobs"
               :title="detApproved
-                ? '对口型：用该镜配音驱动嘴型（需本机已装口型工作流，见 docs/lipsync-setup.md）'
+                ? '对口型：用该镜配音驱动嘴型（需本机已装口型工作流，见 docs/lipsync-setup.md）。'
+                  + '会独占本机显存（~7.9/8GiB），跑的时候别同时排其它 GPU 任务；约 2.5 分钟/秒视频'
                 : '需先确认方案'"
               @click="startLipsync()"
             >
