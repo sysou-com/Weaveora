@@ -48,23 +48,29 @@ public class EngineSettingsService {
     public com.fasterxml.jackson.databind.node.ObjectNode servicesWithDefaults(UserEngineSettings s) {
         com.fasterxml.jackson.databind.node.ObjectNode out = mapper.createObjectNode();
         com.fasterxml.jackson.databind.JsonNode cur = s == null ? null : s.services();
-        out.set("tts", merge(cur, "tts", mapper.createObjectNode().put("url", defaultTtsUrl)));
+        // ★ 机器相关的 URL **一律不填默认值**，留空 = 用 worker 机器自己的默认。
+        //   踩过的坑：API 侧默认 tts 是 127.0.0.1:18091（那是 API 主机上的 SSH 隧道口），
+        //   而 worker 机器上的 TTS 在 127.0.0.1:8091 —— 若把 API 的默认下发过去，
+        //   worker 会用错端口、配音直接失败。只有用户显式配了才下发。
+        //   非机器相关的行为默认值（引擎类型/超时/帧率）可以填。
+        out.set("tts", merge(cur, "tts", mapper.createObjectNode().put("url", "")));
         out.set("music", merge(cur, "music", mapper.createObjectNode()
-                .put("engine", "comfy").put("url", "http://127.0.0.1:8092")
-                .put("ckpt", "ace_step_1.5_turbo_aio.safetensors")));
+                .put("engine", "comfy").put("url", "").put("ckpt", "")));
         out.set("lipsync", merge(cur, "lipsync", mapper.createObjectNode()
-                .put("comfyUrl", gpuComfyUrl(s)).put("workflow", "")
+                .put("comfyUrl", gpuComfyUrlOrEmpty(s)).put("workflow", "")
                 .put("timeout", 1800).put("fps", 0)));
-        out.set("transcribe", merge(cur, "transcribe",
-                mapper.createObjectNode().put("url", defaultTtsUrl)));
-        out.set("face", merge(cur, "face", mapper.createObjectNode().put("url", "")));
+        out.set("transcribe", merge(cur, "transcribe", mapper.createObjectNode().put("url", "")));
+        out.set("face", merge(cur, "face", mapper.createObjectNode().put("url", "").put("latentsyncDir", "")));
         return out;
     }
 
-    /** 用户配的 GPU 服务器 → ComfyUI 地址（lipsync 默认走它；与图片/视频引擎共用同一台机）。 */
-    private static String gpuComfyUrl(UserEngineSettings s) {
+    /**
+     * 用户配了 GPU 服务器 → 推导 ComfyUI 地址（对口型/配乐默认走它）；没配就返回空
+     * （空 = 用 worker 机器自己的 WEAVEORA_COMFY_URL 默认值，不要替它猜）。
+     */
+    private static String gpuComfyUrlOrEmpty(UserEngineSettings s) {
         if (s == null || s.gpuServerUrl() == null || s.gpuServerUrl().isBlank()) {
-            return "http://127.0.0.1:8188";
+            return "";
         }
         String base = s.gpuServerUrl().trim().replaceAll("/+$", "");
         Integer port = s.gpuServerPort();

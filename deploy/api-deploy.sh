@@ -46,8 +46,11 @@ if [ -n "$RUNNING" ] && [ "${RUNNING:-0}" != "0" ] && [ "${WEAVEORA_API_FORCE:-0
 fi
 
 echo "== 1/5 构建（含测试）=="
-MVN=(mvn -o -q package)
-[ "${WEAVEORA_API_SKIP_TESTS:-0}" = "1" ] && MVN=(mvn -o -q package -DskipTests)
+# 必须 clean：删除/改名的资源（如 db/migration 下的迁移文件）不会自动从 target/classes 消失，
+# 不 clean 会把旧文件一起打进 jar —— 实测踩过：迁移改名后 jar 里同时存在新旧两份 V10，
+# Flyway 报 "Found more than one migration with version 10"，API 直接起不来。
+MVN=(mvn -o -q clean package)
+[ "${WEAVEORA_API_SKIP_TESTS:-0}" = "1" ] && MVN=(mvn -o -q clean package -DskipTests)
 (cd api && "${MVN[@]}")
 JAR="api/target/weaveora-api-0.1.0-SNAPSHOT.jar"
 test -f "$JAR" || { echo "!! 没找到 $JAR"; exit 1; }
