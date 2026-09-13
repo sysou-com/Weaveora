@@ -3,20 +3,25 @@ package studio.weaveora.job;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * P13：任务执行面路由（回归防护）。
+ * P13：任务执行面路由 + running 回收口径（回归防护）。
  *
- * <p>线上事故（2026-09-13，项目「那宝玉恍恍惚惚」第 1 镜）：对口型任务
- * {@code engine_route=cloud} → 被云 worker（VPS）领走 → 云上没有
- * {@code WEAVEORA_LIPSYNC_WORKFLOW} → 创建后 70ms 就失败
- * {@code LIPSYNC_ERROR 未配置对口型工作流}。
- *
- * <p>根因：{@code createLipsyncJobs} 自己调 {@code resolveEngine(userId,"clip")}，
- * 而该用户 {@code video_engine=cloud}；「自托管 kind 固定走本机 GPU」的规则只写在
- * 通用分支里（lipsync 在此之前就 return 了）。配音/配乐的「重生成」也踩了同一个坑。
+ * <p>线上事故（2026-09-13，项目「那宝玉恍恍惚惚」第 1 镜）连着踩了两个坑：
+ * <ol>
+ *   <li>对口型任务 {@code engine_route=cloud} → 被 VPS 云 worker 领走 → 云上没有
+ *       {@code WEAVEORA_LIPSYNC_WORKFLOW} → 创建后 70ms 就失败。根因：自托管 kind 的
+ *       「必须本机 GPU」规则只写在通用分支，lipsync 在到达那行前就 return 了。</li>
+ *   <li>修好路由后任务真的在本机跑了，却在第 15 分钟被判 {@code WORKER_STUCK}，
+ *       而 worker 心跳一直正常、ComfyUI 已经跑到 5/8。根因：回收器只比 {@code startedAt}，
+ *       硬编码 15min，完全没看 worker 心跳（错误信息却写「无心跳完成」）。</li>
+ * </ol>
  */
 class JobEngineRouteTest {
+
+    // ---------- 执行面路由 ----------
 
     @Test
     void selfHostedKindsAlwaysGpuEvenWhenUserChoseCloud() {
@@ -29,7 +34,7 @@ class JobEngineRouteTest {
 
     @Test
     void otherKindsFollowUserSetting() {
-        // 出图/视频尊重用户的 引擎 选择（云端模型确实能跑这些）
+        // 出图/视频尊重用户选择（云端模型确实能跑这些）
         assertEquals("cloud", JobService.routeForKind("clip", "cloud"));
         assertEquals("cloud", JobService.routeForKind("still", "cloud"));
         assertEquals("gpu", JobService.routeForKind("clip", "gpu"));
@@ -39,6 +44,27 @@ class JobEngineRouteTest {
 
     @Test
     void nullKindIsNotTreatedAsSelfHosted() {
+        // Set.of(...).contains(null) 会抛 NPE，实现里必须先判 null
         assertEquals("cloud", JobService.routeForKind(null, "cloud"));
+    }
+
+    // ---------- running 回收口径 ----------
+
+    @Test
+    void longRunningJobIsKeptWhileWorkerHeartbeats() {
+        // 对口型一个镜实测 25–30min：worker 心跳正常就不该回收
+        assertFalse(JobService.shouldReap(true, false));
+    }
+
+    @Test
+    void jobIsReapedWhenWorkerDied() {
+        assertTrue(JobService.shouldReap(false, false));
+        assertTrue(JobService.shouldReap(false, true));
+    }
+
+    @Test
+    void jobIsReapedPastHardCapEvenIfWorkerAlive() {
+        // worker 不死但任务永不结束 → 不能永久占着 GPU
+        assertTrue(JobService.shouldReap(true, true));
     }
 }

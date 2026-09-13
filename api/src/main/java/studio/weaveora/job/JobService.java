@@ -140,6 +140,7 @@ public class JobService {
      */
     private final int motionFramesMaxCloud;
     private final int queuedTimeoutMin;   // queued 超时回收阈值（分钟）
+    private final int runningTimeoutMin;  // running 超时回收阈值（分钟）
 
     public JobService(GenerationJobRepository jobs, WorkerNodeRepository nodes, AssetService assets,
                       StoragePort storage, ProjectContextPort projects, WorkspaceGuard guard, JobWsHandler ws,
@@ -158,7 +159,9 @@ public class JobService {
                               @org.springframework.beans.factory.annotation.Value(
                               "${weaveora.video.motion-frames-max-cloud:300}") int motionFramesMaxCloud,
                       @org.springframework.beans.factory.annotation.Value(
-                              "${weaveora.job.queued-timeout-minutes:1440}") int queuedTimeoutMin) {
+                              "${weaveora.job.queued-timeout-minutes:1440}") int queuedTimeoutMin,
+                      @org.springframework.beans.factory.annotation.Value(
+                              "${weaveora.job.running-timeout-minutes:60}") int runningTimeoutMin) {
         this.jobs = jobs;
         this.shotLocks = shotLocks;
         this.nodes = nodes;
@@ -179,16 +182,50 @@ public class JobService {
         this.motionFramesMax = motionFramesMax;
         this.motionFramesMaxCloud = motionFramesMaxCloud;
         this.queuedTimeoutMin = queuedTimeoutMin;
+        this.runningTimeoutMin = runningTimeoutMin;
     }
 
-    /** 回收卡死 running 任务（默认 30min 无完成即失败，可重试） */
+    /**
+     * 回收卡死的 running 任务。
+     *
+     * <p><b>只看 startedAt 是错的</b>（2026-09-13 线上：对口型跑到 5/8、worker 心跳正常，
+     * 却在第 15 分钟被误杀）。正确口径：
+     * <ul>
+     *   <li>候选 = running 且 startedAt < now - runningTimeoutMin（默认 60min）；</li>
+     *   <li>候选里**worker 仍活着**（lastSeenAt 在宽限期内）→ 视为长任务在跑，不回收；</li>
+     *   <li>再叠一个**硬上限**（4×超时，最少 2h）：worker 一直不死但任务永远不结束的
+     *       病态情况仍然要收掉，否则任务会永久占着 GPU。</li>
+     * </ul>
+     */
     @Scheduled(fixedDelayString = "${weaveora.job.reaper-ms:300000}")
     @Transactional
     public void reapStaleRunning() {
         java.time.OffsetDateTime now = java.time.OffsetDateTime.now();
-        int n = jobs.markStaleRunning(now.minusMinutes(15), now);
+        java.time.OffsetDateTime cut = now.minusMinutes(runningTimeoutMin);
+        java.time.OffsetDateTime hardCut =
+                now.minusMinutes(Math.max((long) runningTimeoutMin * 4L, runningTimeoutMin + 60L));
+        int n = 0;
+        int keptAlive = 0;
+        for (GenerationJob j : jobs.findRunningStartedBefore(cut)) {
+            boolean pastHardCap = j.startedAt() == null || j.startedAt().isBefore(hardCut);
+            boolean alive = workerAliveRecently(j.workerId(), now);
+            if (!shouldReap(alive, pastHardCap)) {
+                keptAlive++;
+                continue;
+            }
+            String msg = pastHardCap
+                    ? "执行超时（超过硬上限 " + Math.max((long) runningTimeoutMin * 4L, runningTimeoutMin + 60L)
+                      + "min，worker 心跳=" + (alive ? "正常" : "失联") + "）"
+                    : "执行超时（worker 无心跳完成）";
+            if (jobs.failRunning(j.id(), msg, now) == 1) {
+                n++;
+            }
+        }
         if (n > 0) {
-            log.warn("reaped {} stale running jobs", n);
+            log.warn("reaped {} stale running jobs (>{} min)", n, runningTimeoutMin);
+        }
+        if (keptAlive > 0) {
+            log.info("kept {} long-running jobs alive (worker 心跳正常)", keptAlive);
         }
         // queued 但已请求取消（历史遗留/异步取消）→ 直接终态，避免僵尸行永挂列表
         int c = jobs.markCancelledQueued(now);
@@ -1396,6 +1433,37 @@ public class JobService {
     static String routeForKind(String kind, String resolvedEngine) {
         // 注意：Set.of(...).contains(null) 会抛 NPE，故先判 null（kind 非法时按“非自托管”处理）
         return kind != null && SELF_HOSTED_KINDS.contains(kind) ? "gpu" : resolvedEngine;
+    }
+
+    /** worker 心跳间隔 25s（见 stub_worker.py），宽限期给足 12 倍余量。 */
+    private static final long WORKER_ALIVE_GRACE_MIN = 5;
+
+    /**
+     * 纯函数（便于单测）：这个 running 任务该不该被回收。
+     *
+     * <ul>
+     *   <li>worker 心跳正常且未过硬上限 → <b>不回收</b>（长任务，如对口型一个镜 25–30min）</li>
+     *   <li>worker 失联 → 回收（真·卡死）</li>
+     *   <li>过了硬上限 → 回收（worker 不死但任务永不结束的病态情况，不能永久占 GPU）</li>
+     * </ul>
+     */
+    static boolean shouldReap(boolean workerAlive, boolean pastHardCap) {
+        return pastHardCap || !workerAlive;
+    }
+
+    /** worker 是否仍在心跳（workerId 是节点 id 的字符串形式）。 */
+    private boolean workerAliveRecently(String workerId, java.time.OffsetDateTime now) {
+        if (workerId == null || workerId.isBlank()) {
+            return false;
+        }
+        try {
+            return nodes.findById(UUID.fromString(workerId))
+                    .map(n -> n.lastSeenAt() != null
+                            && n.lastSeenAt().isAfter(now.minusMinutes(WORKER_ALIVE_GRACE_MIN)))
+                    .orElse(false);
+        } catch (IllegalArgumentException e) {
+            return false;   // 非 UUID（历史行）→ 当作失联，按老逻辑回收
+        }
     }
 
     /**

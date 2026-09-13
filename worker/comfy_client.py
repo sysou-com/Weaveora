@@ -310,8 +310,14 @@ def _prompt(client_id, positive, negative, params, seed, width=None, height=None
     return {"prompt": nodes, "client_id": client_id}
 
 
-def _poll_history(client_id, prompt_id, poll=2.0, timeout=600):
+def _poll_history(client_id, prompt_id, poll=2.0, timeout=600, on_tick=None):
+    """轮询 /history 直到成功/失败/超时。
+
+    on_tick(elapsed_sec) 每轮回调一次（用于上报“已运行 N 分钟”，
+    否则对口型 25–30 分钟期间 UI 会一直停在 40%，看着像卡死）。
+    """
     deadline = time.time() + timeout
+    t0 = time.time()
     while time.time() < deadline:
         st, body = _comfy("GET", "/history/" + prompt_id)
         if st == 200:
@@ -324,6 +330,11 @@ def _poll_history(client_id, prompt_id, poll=2.0, timeout=600):
                 if status.get("status_str") == "error":
                     msgs = status.get("messages", [])
                     raise ComfyError("comfy error: " + str(msgs[-1] if msgs else status)[:500])
+        if on_tick:
+            try:
+                on_tick(time.time() - t0)
+            except Exception:
+                pass
         time.sleep(poll)
     raise ComfyError("comfy prompt %s timeout" % prompt_id)
 
@@ -798,7 +809,27 @@ def generate_lipsync(client_id, payload, progress_fn=None):
     pid = _post_prompt({"prompt": graph, "client_id": client_id}, client_id)
     if progress_fn:
         progress_fn(40, "lipsync")
-    rec = _poll_history(client_id, pid, timeout=LIPSYNC_TIMEOUT)
+    # 对口型单镜实测 25–30 分钟；期间每过一分钟报一次“已运行 N 分钟”，
+    # 既让 UI 有动静，也方便判“还在跑”还是“卡住了”。
+    _last_min = [-1]
+
+    def _tick(elapsed):
+        m = int(elapsed // 60)
+        if m == _last_min[0]:
+            return
+        _last_min[0] = m
+        if progress_fn and m > 0:
+            progress_fn(40, "lipsync 已运行 %d 分钟" % m)
+
+    try:
+        rec = _poll_history(client_id, pid, timeout=LIPSYNC_TIMEOUT, on_tick=_tick)
+    except ComfyError as e:
+        # 把还在 ComfyUI 队列里的任务清掉，避免它继续空占显存
+        try:
+            _comfy("POST", "/interrupt", payload={}, timeout=30)
+        except Exception:
+            pass
+        raise ComfyError("对口型推理失败：%s" % e)
     outs = _download_outputs(rec, prefix)
     if not outs:
         # 有些口型工作流走 SaveVideo/自定义节点，兜底再抓一次不限风格

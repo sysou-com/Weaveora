@@ -37,13 +37,23 @@ public interface GenerationJobRepository extends JpaRepository<GenerationJob, UU
     @Query("update GenerationJob j set j.cancelRequested=true where j.id=:id and j.state in ('queued','running')")
     int requestCancel(@Param("id") UUID id);
 
-    /** 回收卡死任务：running 超过阈值未完成 → failed(WORKER_STUCK)，可由用户重试 */
+    /** 候选：running 且开始时间早于 cut（是否真卡死由 service 结合 worker 心跳判断）。 */
+    @Query("select j from GenerationJob j where j.state='running' and (j.startedAt is null or j.startedAt < :cut)")
+    List<GenerationJob> findRunningStartedBefore(@Param("cut") java.time.OffsetDateTime cut);
+
+    /**
+     * 回收单个 running 任务为 failed。
+     *
+     * <p>为什么改用「按 id 回收」而不是一条批量 update：批量只比 startedAt，
+     * 会把**还在正常跑的长任务**（对口型一个镜头实测 25–30min）误杀 —— 2026-09-13 线上实例：
+     * worker 心跳一直在（25s 一次）、ComfyUI 已跑到 5/8，却在第 15 分钟被判
+     * {@code WORKER_STUCK 执行超时（worker 无心跳完成）}。
+     */
     @Modifying
     @Query("update GenerationJob j set j.state='failed', j.errorCode='WORKER_STUCK', " +
-            "j.errorMessage='执行超时（worker 无心跳完成）', j.finishedAt=:now " +
-            "where j.state='running' and (j.startedAt is null or j.startedAt < :cut)")
-    int markStaleRunning(@Param("cut") java.time.OffsetDateTime cut,
-                         @Param("now") java.time.OffsetDateTime now);
+            "j.errorMessage=:msg, j.finishedAt=:now where j.id=:id and j.state='running'")
+    int failRunning(@Param("id") UUID id, @Param("msg") String msg,
+                    @Param("now") java.time.OffsetDateTime now);
 
     /** 排队中但已请求取消（历史遗留/异步取消）→ 直接落 cancelled 终态，避免僵尸行。 */
     @Modifying

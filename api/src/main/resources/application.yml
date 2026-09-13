@@ -56,6 +56,13 @@ weaveora:
   queue:
     job-stream: weaveora:${weaveora.env}:jobs
     dl-stream: weaveora:${weaveora.env}:jobs:dlq
+  job:
+    # 回收看门狗（分钟）。running 超过 running-timeout-minutes **且 worker 心跳已失联**才回收；
+    # worker 还活着就视为长任务在跑（对口型一个镜实测 25–30min）。再叠一个 4× 硬上限。
+    running-timeout-minutes: ${WEAVEORA_JOB_RUNNING_TIMEOUT_MIN:60}
+    # queued 超时（默认 24h）
+    queued-timeout-minutes: ${WEAVEORA_JOB_QUEUED_TIMEOUT_MIN:1440}
+    reaper-ms: 300000
 
 server:
   port: 8080
