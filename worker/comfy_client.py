@@ -584,10 +584,17 @@ def generate_motion(client_id, payload, progress_fn=None):
     if (pw and int(pw) != int(rw)) or (ph and int(ph) != int(rh)):
         print("[comfy] motion 实际尺寸 %sx%s 与请求 %sx%s 不一致（已按实际上报）"
               % (w, h, rw, rh), flush=True)
+    # P13：顺手做一次人脸检测并随资产上报 —— 对口型只能用在有人脸的镜上，
+    # 选镜弹窗靠这个把「无人脸」的镜提前标出来（否则要等对口型跑到一半才报 Face not detected）。
+    fr = _face_probe(mp4)
+    face = None if fr is None else (fr[0] > 0)
+    if fr is not None:
+        print("[comfy] motion 人脸检测：%d/%d 帧可检出（%s）"
+              % (fr[0], fr[1], "有人脸" if face else "无人脸"), flush=True)
     if progress_fn:
         progress_fn(100, "done")
     return [{"bytes": mp4, "mime": "video/mp4", "width": int(w), "height": int(h),
-             "duration_ms": pdur}]
+             "duration_ms": pdur, "face_detected": face}]
 
 
 # ---- P7 配乐：ACE-Step 1.5（ComfyUI 原生节点，非 wrapper） ----
@@ -870,25 +877,27 @@ def _apply_fps_policy(graph):
     return ("forced=%d" % forced) if forced is not None else "auto=source-fps", touched
 
 
-# 人脸预检（子进程）：LatentSync 必须能逐帧检出人脸，否则跑到一半才会报
-# "Face not detected"（模型加载 + 扫全片 ≈ 1 分钟 GPU 白烧）。先抽 6 帧探一下，
-# **只有一帧都检不出**才拦（避免误拦）；检测器加载失败则跳过（SKIP）。
+# 人脸预检（子进程，**CPU 检测器**）：抽 6 帧看有没有脸。
+#
+# 为什么必须用 CPU 版：这个检查要在 ComfyUI 刚跑完/还没跑的时候执行，而 ComfyUI 会把模型
+# 缓存在显存里（实测残留 ~5GB/8GB）；再起一个 CUDA 上下文（torch + ORT）很容易把 8GiB 卡打爆。
+# 6 帧检测在 CPU 上只多花几秒，但完全不吃显存。
 _FACE_CHECK = r'''
 import os, sys, cv2
 node = os.environ.get("WEAVEORA_LATENTSYNC_DIR") or r"D:\ComfyUI\custom_nodes\ComfyUI-LatentSyncWrapper"
 sys.path.insert(0, node)
+AUX = os.path.join(node, "checkpoints", "auxiliary")
 try:
-    from latentsync.utils.face_detector import FaceDetector
-except Exception as e:
-    print("SKIP:import:" + str(e)[:160]); sys.exit(0)
-try:
-    fd = FaceDetector(device="cuda")
+    from insightface.app import FaceAnalysis
+    app = FaceAnalysis(allowed_modules=["detection"], root=AUX,
+                       providers=["CPUExecutionProvider"])
+    app.prepare(ctx_id=-1, det_size=(512, 512))
 except Exception as e:
     print("SKIP:init:" + str(e)[:160]); sys.exit(0)
 cap = cv2.VideoCapture(sys.argv[1])
-n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 if not cap.isOpened():
     print("SKIP:decode"); sys.exit(0)
+n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 idx = sorted({int(i * (n - 1) / 5) for i in range(6)}) if n > 1 else [0]
 hits = total = 0
 for i in idx:
@@ -897,48 +906,56 @@ for i in idx:
     if not ok:
         continue
     total += 1
-    if fd(fr)[0] is not None:
-        hits += 1
+    try:
+        if len(app.get(fr)) > 0:
+            hits += 1
+    except Exception:
+        pass
 cap.release()
 print("RESULT:%d/%d" % (hits, total))
 '''
 
 
-def _face_precheck(video_bytes, where="lipsync"):
-    """扫 6 帧看有没有人脸；返回 True=通过/无法判定 SKIP，False=一帧都没检出。
-
-    为什么值得花这 ~20秒：LatentSync 会先把全片人脸检测一遍，没脸时抛
-    RuntimeError("Face not detected")——但那时已经烧掉了一分钟 GPU。
-    """
+def _face_probe(video_bytes):
+    """抽 6 帧跑人脸检测。返回 (hits, total)；无法判定时返回 None（不拦不传）。"""
     import subprocess
     import sys as _sys
     import tempfile
     if not video_bytes:
-        return True
+        return None
     d = tempfile.mkdtemp(prefix="weaveora_facechk_")
     fp = os.path.join(d, "in.mp4")
     try:
         with open(fp, "wb") as fh:
             fh.write(video_bytes)
         r = subprocess.run([_sys.executable, "-c", _FACE_CHECK, fp],
-                           capture_output=True, text=True, timeout=600)
+                           capture_output=True, text=True, timeout=900)
         out = (r.stdout or "") + (r.stderr or "")
         for line in out.splitlines():
             if line.startswith("SKIP:"):
                 print("[comfy] 人脸预检跳过（%s）" % line[5:], flush=True)
-                return True
+                return None
             if line.startswith("RESULT:"):
                 hits, total = (int(x) for x in line[7:].split("/"))
-                print("[comfy] 人脸预检 %s：%d/%d 帧可检出" % (where, hits, total), flush=True)
-                return not (total > 0 and hits == 0)
-        print("[comfy] 人脸预检无结果，不拦截（%s）" % out[:120], flush=True)
-        return True
+                return hits, total
+        print("[comfy] 人脸预检无结果，不拦：%s" % out[:120], flush=True)
+        return None
     except Exception as e:
-        print("[comfy] 人脸预检异常，不拦截：%s" % e, flush=True)
-        return True
+        print("[comfy] 人脸预检异常，不拦：%s" % e, flush=True)
+        return None
     finally:
         import shutil as _sh
         _sh.rmtree(d, ignore_errors=True)
+
+
+def _face_precheck(video_bytes, where="lipsync"):
+    """对口型前置门禁：**一帧都没检出**才拦（避免误拦）；拿不到结果则放行。"""
+    r = _face_probe(video_bytes)
+    if r is None:
+        return True
+    hits, total = r
+    print("[comfy] 人脸预检 %s：%d/%d 帧可检出" % (where, hits, total), flush=True)
+    return not (total > 0 and hits == 0)
 
 
 NO_FACE_MSG = ("该镜检测不到人脸（可能是远景/背影/空镜）——对口型只对正脸/侧脸可见的镜头有意义；"

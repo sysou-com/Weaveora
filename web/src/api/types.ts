@@ -353,6 +353,11 @@ export interface AssetRef {
   portraitVersion?: number | null
   /** P13：快照里的产物类别（portrait=定妆图；兼容历史 kind=still） */
   snapshotKind?: string | null
+  /**
+   * P13：该产物画面里是否检出了人脸（后端由 prompt_snapshot.faceDetected 派生）。
+   * true=检出；false=抽样一帧都没检出（对口型跑不了）；null/undefined=未知（历史产物）。
+   */
+  faceDetected?: boolean | null
   /** P10：产物真实时长（毫秒）—— 配音靠它对齐字幕、判定超长 */
   durationMs?: number | null
   /** P10：配音在镜内的段号（null = 非配音产物） */

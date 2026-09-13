@@ -1005,10 +1005,21 @@ public class JobService {
         }
         Integer jobShotNo = job.shotId() == null ? null : planReader.shotNoOf(job.shotId());
         for (CompleteAsset a : items) {
+            // P13：把 worker 的人脸检测结果写进资产快照（prompt_snapshot），
+            // 供选镜弹窗提前标出「无人脸」的镜——否则要等对口型跑到一半才报 Face not detected。
+            // 注意：job.payload() 是共享节点，必须 deepCopy 后再改，否则会污染任务行。
+            com.fasterxml.jackson.databind.JsonNode snap = job.payload();
+            if (a.faceDetected() != null) {
+                com.fasterxml.jackson.databind.node.ObjectNode o = (snap != null && snap.isObject())
+                        ? ((com.fasterxml.jackson.databind.node.ObjectNode) snap).deepCopy()
+                        : mapper().createObjectNode();
+                o.put("faceDetected", a.faceDetected());
+                snap = o;
+            }
             AssetResponse resp = toAssetResponse(assets.createOutput(
                     job.workspaceId(), job.projectId(), job.id(), job.shotId(), jobShotNo, kind,
                     a.key(), a.mime(), a.width(), a.height(), a.seed(), a.durationMs(),
-                    job.payload()));   // P8：资产带 job payload 快照（混音要靠它取 at_sec/line_index）
+                    snap));   // P8：资产带 job payload 快照（混音要靠它取 at_sec/line_index）
             created.add(resp);
         }
         emit(job, Map.of("type", "job.succeeded", "assets", items.size()));
@@ -1879,7 +1890,8 @@ public class JobService {
                 a.width(), a.height(), a.durationMs(),
                 studio.weaveora.asset.AssetService.lineIndexOf(a),
                 studio.weaveora.asset.AssetService.subjectOf(a), null,
-                studio.weaveora.asset.AssetService.snapshotKindOf(a), a.createdAt());
+                studio.weaveora.asset.AssetService.snapshotKindOf(a),
+                studio.weaveora.asset.AssetService.faceDetectedOf(a), a.createdAt());
     }
 
     private static long randomSeed() {
@@ -1891,6 +1903,7 @@ public class JobService {
     }
 
     /** complete 请求中的资产元数据。 */
-    public record CompleteAsset(String key, String mime, Integer width, Integer height, Long seed, Integer durationMs) {
+    public record CompleteAsset(String key, String mime, Integer width, Integer height, Long seed, Integer durationMs,
+                                Boolean faceDetected) {
     }
 }

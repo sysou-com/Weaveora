@@ -1434,6 +1434,8 @@ const pickerShots = computed(() => {
     if (kind === 'lipsync') {
       // P13 对口型的前置条件（与后端 JobService.createLipsyncJobs 一致）：
       //   画面（该镜最新 motion 片段，没有则退关键帧静帧）+ 至少一段配音
+      //   另外：motion 产物带 faceDetected（worker 出片时抽 6 帧检测）——没人脸的镜
+      //   LatentSync 会直接报 Face not detected，所以在这里提前标出来（而不是跑到一半才失败）
       const clips = succ(s.shot_no, 'clip')
       const stills = succ(s.shot_no, 'still')
       const visuals = [...clips, ...stills]
@@ -1441,6 +1443,15 @@ const pickerShots = computed(() => {
       const missing: string[] = []
       if (!visuals.length) missing.push('缺画面(motion/关键帧)')
       if (!voices.length) missing.push('缺配音')
+      // 最新画面产物的人脸结论（undefined = 未知/历史数据 → 不拦）
+      const pool = clips.length ? clips : stills
+      const newestVisual = [...pool].sort(
+        (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
+      )[0]
+      const face = newestVisual
+        ? (assets.data.value ?? []).find((a) => a.jobId === newestVisual.id)?.faceDetected
+        : undefined
+      if (face === false) missing.push('无人脸')
       const newest = newestStamp(visuals)
       const rev = newest ? revOfJob(newest) : undefined
       return {

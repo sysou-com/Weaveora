@@ -186,11 +186,16 @@ def _bgm_media(jid, payload):
 
 
 def _complete(jid, payload, media):
-    """media: list[(bytes, mime, w, h, dur_ms)]；上传第一个产物并 complete。"""
+    """media: list[(bytes, mime, w, h, dur_ms[, extra])]；上传第一个产物并 complete。
+
+    extra（可选 dict）里的额外字段随 complete 上报给后端，例如 motion 的
+    faceDetected —— 资产快照会存下它，供选镜弹窗提前标出无人脸的镜。
+    """
     if not media:
         _req("POST", "/internal/jobs/%s/fail" % jid, {"code": "EMPTY_OUTPUT", "message": "引擎没有输出"})
         return False
-    data, mime, w, h, dur = media[0]
+    data, mime, w, h, dur = media[0][:5]
+    extra = media[0][5] if len(media[0]) > 5 and isinstance(media[0][5], dict) else {}
     ext = {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp",
            "video/mp4": "mp4", "video/webm": "webm",
            "audio/wav": "wav", "audio/x-wav": "wav", "audio/wave": "wav",
@@ -205,7 +210,7 @@ def _complete(jid, payload, media):
         return False
     st, done = _req("POST", "/internal/jobs/%s/complete" % jid, {
         "assets": [{"key": up["key"], "mime": mime, "width": w, "height": h, "seed": seed,
-                    "durationMs": dur}]})
+                    "durationMs": dur, "faceDetected": extra.get("faceDetected")}]})
     if st != 200:
         _req("POST", "/internal/jobs/%s/fail" % jid, {"code": "COMPLETE_FAIL", "message": str(done)[:200]})
         return False
@@ -349,7 +354,8 @@ def execute_job(job):
                                                   {"progress": p, "stage": s}))
                 media = [(o["bytes"], o.get("mime") or "image/webp",
                           o.get("width") or width, o.get("height") or height,
-                          int(float(payload.get("duration_sec", 3.0)) * 1000)) for o in outs]
+                          int(float(payload.get("duration_sec", 3.0)) * 1000),
+                          {"faceDetected": o.get("face_detected")}) for o in outs]
             else:
                 outs = engine.generate("weaveora-stub-worker", payload,
                                        progress_fn=lambda p, s: _req(

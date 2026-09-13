@@ -29,6 +29,14 @@ public record AssetResponse(
         Integer portraitVersion,
         /** P13：快照里的产物类别（portrait = 定妆图），兼容历史数据 kind 被写成 still 的情况 */
         String snapshotKind,
+        /**
+         * P13：该产物画面里是否检出了人脸（来自 prompt_snapshot.faceDetected；仅 motion 产物会上报）。
+         *
+         * <p>true = 检出；false = **抽样一帧都没检出**；null = 未知（历史产物 / 未检测）。
+         * 对口型只能用在有人脸的镜上（LatentSync 逐帧检测，没脸会直接报 Face not detected），
+         * 所以选镜弹窗靠这个字段提前把无人脸的镜标成「不可：无人脸」。
+         */
+        Boolean faceDetected,
         OffsetDateTime createdAt
 ) {
 }

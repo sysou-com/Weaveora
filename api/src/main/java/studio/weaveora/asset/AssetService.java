@@ -190,6 +190,7 @@ public class AssetService {
                 snapText(a, "subject"),
                 snapInt(a, "portrait_version"),
                 snapText(a, "kind"),
+                faceDetectedOf(a),
                 a.createdAt());
     }
 
@@ -213,6 +214,22 @@ public class AssetService {
     private static Integer snapInt(Asset a, String field) {
         var snap = a.promptSnapshot();
         return snap != null && snap.hasNonNull(field) ? snap.path(field).asInt() : null;
+    }
+
+    /** 快照里的布尔字段（取不到返回 null；与“false” 区分）。 */
+    private static Boolean snapBool(Asset a, String field) {
+        var snap = a.promptSnapshot();
+        return snap != null && snap.hasNonNull(field) ? snap.path(field).asBoolean() : null;
+    }
+
+    /**
+     * P13：该产物画面里是否检出了人脸（worker 在出 motion 时抽样 6 帧检测后写进快照）。
+     *
+     * <p>false = 一帧都没检出：对口型跑不了（LatentSync 会报 Face not detected），
+     * 选镜弹窗靠它把该镜标成「不可：无人脸」；null = 未知（历史数据）。
+     */
+    public static Boolean faceDetectedOf(Asset a) {
+        return snapBool(a, "faceDetected");
     }
 
     /** P10：配音产物在镜内的段号（写产生它的 job payload 快照里）；非配音为空。 */

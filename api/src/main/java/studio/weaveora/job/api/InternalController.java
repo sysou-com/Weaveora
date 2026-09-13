@@ -41,7 +41,8 @@ public class InternalController {
     public record ProgressRequest(int progress, String stage) {
     }
 
-    public record CompleteAssetDto(String key, String mime, Integer width, Integer height, Long seed, Integer durationMs) {
+    public record CompleteAssetDto(String key, String mime, Integer width, Integer height, Long seed, Integer durationMs,
+                                   Boolean faceDetected) {
     }
 
     public record CompleteRequest(List<CompleteAssetDto> assets) {
@@ -86,7 +87,7 @@ public class InternalController {
         List<JobService.CompleteAsset> items = req.assets() == null ? List.of()
                 : req.assets().stream()
                 .map(a -> new JobService.CompleteAsset(a.key(), a.mime(), a.width(), a.height(),
-                        a.seed(), a.durationMs()))
+                        a.seed(), a.durationMs(), a.faceDetected()))
                 .toList();
         return ResponseEntity.ok(jobService.complete(jobId, items));
     }
