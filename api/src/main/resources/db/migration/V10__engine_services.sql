@@ -1,0 +1,17 @@
+-- V10：生成引擎配置 - 服务地址（配音/配乐、对口型、转写、人脸）
+--
+-- 背景：这些服务原先只由 worker 机器上的环境变量决定（WEAVEORA_TTS_URL / _MUSIC_URL /
+-- _COMFY_URL / _LIPSYNC_WORKFLOW / _LATENTSYNC_DIR），换 GPU 服务器就得改脚本、重启 worker。
+-- 现在收敛到用户级配置，界面里随时可切；worker 按任务下发（claim 响应里带 services），
+-- 空值/未配置时回退到原来的环境变量默认值（向后兼容）。
+--
+-- 结构示例：
+-- {
+--   "tts":        {"url": "http://127.0.0.1:8091"},
+--   "music":      {"engine": "comfy", "url": "http://127.0.0.1:8092", "ckpt": "ace_step_1.5_turbo_aio.safetensors"},
+--   "lipsync":    {"comfyUrl": "http://127.0.0.1:8188", "workflow": "D:\\ComfyUI\\_setup\\lipsync_workflow_api.json",
+--                  "timeout": 1800, "fps": 0},
+--   "transcribe": {"url": "http://127.0.0.1:8091"},
+--   "face":       {"url": ""}   -- 空 = 用 worker 本机 insightface；填了则调远端人脸服务
+-- }
+ALTER TABLE user_engine_settings ADD COLUMN IF NOT EXISTS services jsonb;

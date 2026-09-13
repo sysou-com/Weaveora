@@ -92,6 +92,16 @@ public class UserEngineSettings {
     @Column(name = "gateway_sample")
     private String gatewaySample;
 
+    /**
+     * 服务地址（配音/配乐、对口型、转写、人脸）——见 V10 迁移注释里的结构。
+     *
+     * <p>为什么放这里：这些服务原先由 worker 机器的环境变量决定，换 GPU 服务器就得改脚本、
+     * 重启 worker；收敛到用户级配置后可随时切换（worker 按任务下发，空值回退环境变量）。
+     */
+    @org.hibernate.annotations.JdbcTypeCode(org.hibernate.type.SqlTypes.JSON)
+    @Column(name = "services")
+    private com.fasterxml.jackson.databind.JsonNode services;
+
     /** 已配置模型库（图片/视频各一份 JSON 数组；元素含 baseUrl/model/params/schema…） */
     @org.hibernate.annotations.JdbcTypeCode(org.hibernate.type.SqlTypes.JSON)
     @Column(name = "image_model_presets")
@@ -161,6 +171,8 @@ public class UserEngineSettings {
     public void setGatewaySample(String v) { this.gatewaySample = v; }
     public Integer gatewayRefsMax() { return gatewayRefsMax; }
     public void setGatewayRefsMax(Integer v) { this.gatewayRefsMax = v; }
+    public com.fasterxml.jackson.databind.JsonNode services() { return services; }
+    public void setServices(com.fasterxml.jackson.databind.JsonNode v) { this.services = v; }
     public Integer gpuServerPort() { return gpuServerPort; }
     public void setGpuServerPort(Integer v) { this.gpuServerPort = v; }
 

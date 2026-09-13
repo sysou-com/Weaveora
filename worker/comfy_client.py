@@ -746,6 +746,9 @@ LIPSYNC_AUDIO_INPUT = os.environ.get("WEAVEORA_LIPSYNC_AUDIO_INPUT", "").strip()
 # 组装成片时必须用这个值，不能用源片 fps —— 否则时长会按 25/源fps 缩短。
 LIPSYNC_FPS = int(os.environ.get("WEAVEORA_LIPSYNC_FPS", "0") or 0)
 LIPSYNC_NODE_CLASS = os.environ.get("WEAVEORA_LIPSYNC_NODE_CLASS", "LatentSyncNode").strip()
+# 人脸服务地址（生成引擎配置 → 服务地址 → 人脸）。空 = 用本机 insightface 子进程（原行为）。
+# 填了就走远端 HTTP（见 deploy/face/face_server.py），便于把脸算力集中到新 GPU 机器。
+FACE_URL = os.environ.get("WEAVEORA_FACE_URL", "").rstrip("/")
 
 
 # 文件名类输入的候选键（按优先级）：不同加载节点名字不一样
@@ -886,7 +889,7 @@ def _apply_fps_policy(graph):
 # 6 帧检测在 CPU 上只多花几秒，但完全不吃显存。
 _FACE_CHECK = r'''
 import os, sys, json, cv2, numpy as np
-node = os.environ.get("WEAVEORA_LATENTSYNC_DIR") or r"D:\ComfyUI\custom_nodes\ComfyUI-LatentSyncWrapper"
+node = (LATENTSYNC_DIR or os.environ.get("WEAVEORA_LATENTSYNC_DIR") or r"D:\ComfyUI\custom_nodes\ComfyUI-LatentSyncWrapper")
 sys.path.insert(0, node)
 AUX = os.path.join(node, "checkpoints", "auxiliary")
 tgt_path = sys.argv[2] if len(sys.argv) > 2 else ""
@@ -946,6 +949,9 @@ TARGET_MIN_SIM = 0.28
 # 预检失败原因（给调用方拼错误文案；单线程内单次使用，无需加锁）
 _face_reason = {"msg": NO_FACE_MSG}
 
+# LatentSync 节点目录（本机人脸检测子进程用；可被「服务地址 → 人脸 → latentsyncDir」覆盖）
+LATENTSYNC_DIR = os.environ.get("WEAVEORA_LATENTSYNC_DIR", "").strip()
+
 
 def _face_probe(video_bytes, target_emb=None):
     """抽 6 帧跑人脸检测。
@@ -959,6 +965,19 @@ def _face_probe(video_bytes, target_emb=None):
     import tempfile
     if not video_bytes:
         return None
+    # 配了「人脸服务」就走远端（新 GPU 机器集中算脸）；失败自动回退本机
+    if FACE_URL:
+        try:
+            body = {"media_b64": base64.b64encode(video_bytes).decode("ascii"), "suffix": ".mp4"}
+            if target_emb:
+                body["target_embedding"] = [float(x) for x in target_emb]
+            _st, resp = _post_json(FACE_URL + "/face/probe", body, timeout=900)
+            hits = int(resp.get("hits") or 0)
+            total = int(resp.get("total") or 0)
+            best = resp.get("best")
+            return hits, total, (float(best) if best is not None else None)
+        except Exception as e:
+            print("[comfy] 远端人脸服务不可用，回退本机：%s" % e, flush=True)
     d = tempfile.mkdtemp(prefix="weaveora_facechk_")
     fp = os.path.join(d, "in.mp4")
     tgt = os.path.join(d, "target.json")
@@ -1037,7 +1056,7 @@ def _face_precheck(video_bytes, where="lipsync", target_emb=None, speaker=""):
 # 用 CPU 同样是为了不占显存（ComfyUI 还缓存着模型）。
 _EMBED = r'''
 import os, sys, json, cv2, numpy as np
-node = os.environ.get("WEAVEORA_LATENTSYNC_DIR") or r"D:\ComfyUI\custom_nodes\ComfyUI-LatentSyncWrapper"
+node = (LATENTSYNC_DIR or os.environ.get("WEAVEORA_LATENTSYNC_DIR") or r"D:\ComfyUI\custom_nodes\ComfyUI-LatentSyncWrapper")
 sys.path.insert(0, node)
 AUX = os.path.join(node, "checkpoints", "auxiliary")
 try:
@@ -1065,6 +1084,15 @@ def _embed_reference(img_bytes):
     import tempfile
     if not img_bytes:
         return None
+    if FACE_URL:
+        try:
+            _st, resp = _post_json(FACE_URL + "/face/embed",
+                                   {"image_b64": base64.b64encode(img_bytes).decode("ascii"),
+                                    "suffix": ".png"}, timeout=900)
+            emb = resp.get("embedding")
+            return [float(x) for x in emb] if emb else None
+        except Exception as e:
+            print("[comfy] 远端人脸服务不可用，回退本机：%s" % e, flush=True)
     d = tempfile.mkdtemp(prefix="weaveora_emb_")
     fp = os.path.join(d, "ref.png")
     try:
@@ -1232,6 +1260,55 @@ def _splice(source_bytes, seg_results, fps, tmp):
         if n > 0:
             frames[a:a + n] = pf[:n]
     return _encode_frames(frames, fps, tmp, "spliced")
+
+
+def _post_json(url, obj, timeout=900):
+    """POST JSON → (status, dict)。"""
+    import urllib.request as _ur
+    req = _ur.Request(url, data=json.dumps(obj).encode("utf-8"),
+                      headers={"Content-Type": "application/json"})
+    with _ur.urlopen(req, timeout=timeout) as r:
+        return r.status, json.loads(r.read().decode("utf-8"))
+
+
+def apply_services(svc):
+    """按任务下发（claim 响应）的「服务地址」覆盖本进程运行期配置。
+
+    为什么这样做：这些地址原先只能靠 worker 机器的环境变量决定，换 GPU 服务器就得改脚本、
+    重启 worker。现在用户可在「生成引擎配置 → 服务地址」里随时改，随任务下发即刻生效。
+    空值/未配置一律**不覆盖**（保持环境变量默认，向后兼容）。
+    """
+    global COMFY, LIPSYNC_WORKFLOW, LIPSYNC_TIMEOUT, LIPSYNC_FPS, FACE_URL, LATENTSYNC_DIR
+    if not isinstance(svc, dict):
+        return
+    def g(*path):
+        cur = svc
+        for k in path:
+            if not isinstance(cur, dict):
+                return None
+            cur = cur.get(k)
+        return cur
+    comfy = g("lipsync", "comfyUrl")
+    if isinstance(comfy, str) and comfy.strip():
+        COMFY = comfy.strip().rstrip("/")
+    wf = g("lipsync", "workflow")
+    if isinstance(wf, str) and wf.strip():
+        LIPSYNC_WORKFLOW = wf.strip()
+    t = g("lipsync", "timeout")
+    if isinstance(t, (int, float)) and t > 0:
+        LIPSYNC_TIMEOUT = float(t)
+    f = g("lipsync", "fps")
+    if isinstance(f, (int, float)):
+        LIPSYNC_FPS = int(f)
+    face = g("face", "url")
+    if isinstance(face, str) and face.strip():
+        FACE_URL = face.strip().rstrip("/")
+    node = g("face", "latentsyncDir")
+    if isinstance(node, str) and node.strip():
+        LATENTSYNC_DIR = node.strip()
+    print("[comfy] 服务地址：comfy=%s lipsync_wf=%s timeout=%s fps=%s face=%s"
+          % (COMFY, LIPSYNC_WORKFLOW or "(env 默认)", LIPSYNC_TIMEOUT, LIPSYNC_FPS,
+             FACE_URL or "(本机)"), flush=True)
 
 
 def _run_lipsync_graph(client_id, vbytes, abytes, emb_path, on_tick=None):

@@ -15,6 +15,34 @@ TTS_URL = os.environ.get("WEAVEORA_TTS_URL", "http://127.0.0.1:8091").rstrip("/"
 MUSIC_URL = os.environ.get("WEAVEORA_MUSIC_URL", "http://127.0.0.1:8092").rstrip("/")
 
 
+def apply_services(svc):
+    """按任务下发（claim 响应）的「服务地址」覆盖配音/配乐地址。
+
+    空值不覆盖（保持环境变量默认）；见 comfy_client.apply_services 的说明。
+    """
+    global TTS_URL, MUSIC_URL
+    if not isinstance(svc, dict):
+        return
+    tts = (svc.get("tts") or {}).get("url")
+    if isinstance(tts, str) and tts.strip():
+        TTS_URL = tts.strip().rstrip("/")
+    mus = svc.get("music") or {}
+    if isinstance(mus.get("url"), str) and mus["url"].strip():
+        MUSIC_URL = mus["url"].strip().rstrip("/")
+    # 配乐走「本机 ComfyUI 里的 ACE-Step」时，引擎/权重名也要能配
+    try:
+        import comfy_client as _c
+        if isinstance(mus.get("engine"), str) and mus["engine"].strip():
+            # stub_worker 在任务执行时读环境变量 → 写回 env 即时生效
+            os.environ["WEAVEORA_MUSIC_ENGINE"] = mus["engine"].strip()
+        if isinstance(mus.get("ckpt"), str) and mus["ckpt"].strip() and hasattr(_c, "MUSIC_CKPT"):
+            _c.MUSIC_CKPT = mus["ckpt"].strip()
+    except Exception:
+        pass
+    print("[audio] 服务地址：tts=%s music=%s engine=%s"
+          % (TTS_URL, MUSIC_URL, (svc.get("music") or {}).get("engine") or "(env 默认)"), flush=True)
+
+
 class AudioError(Exception):
     pass
 

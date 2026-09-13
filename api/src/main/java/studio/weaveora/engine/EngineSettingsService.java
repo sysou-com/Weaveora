@@ -28,12 +28,68 @@ public class EngineSettingsService {
     private final UserEngineSettingsRepository repo;
     private final ModelSchemaService schemaService;
     private final String storeKey;
+    /** 语音/转写服务默认地址（weaveora.tts-url；worker 侧默认 :8091，此处含 ssh 隧道场景默认 :18091） */
+    private final String defaultTtsUrl;
 
     public EngineSettingsService(UserEngineSettingsRepository repo, ModelSchemaService schemaService,
-                                 @Value("${weaveora.store-key:}") String storeKey) {
+                                 @Value("${weaveora.store-key:}") String storeKey,
+                                 @Value("${weaveora.tts-url:http://127.0.0.1:18091}") String ttsUrl) {
         this.repo = repo;
         this.schemaService = schemaService;
         this.storeKey = storeKey;
+        this.defaultTtsUrl = (ttsUrl == null || ttsUrl.isBlank()) ? "http://127.0.0.1:18091" : ttsUrl;
+    }
+
+    /**
+     * 服务地址默认值（未配置时回退到这里；也是 worker 端环境变量默认值的镜像）。
+     *
+     * <p>换 GPU 服务器时只需在「生成引擎配置 → 服务地址」里改这几项，不用再去改 worker 脚本、重启 worker。
+     */
+    public com.fasterxml.jackson.databind.node.ObjectNode servicesWithDefaults(UserEngineSettings s) {
+        com.fasterxml.jackson.databind.node.ObjectNode out = mapper.createObjectNode();
+        com.fasterxml.jackson.databind.JsonNode cur = s == null ? null : s.services();
+        out.set("tts", merge(cur, "tts", mapper.createObjectNode().put("url", defaultTtsUrl)));
+        out.set("music", merge(cur, "music", mapper.createObjectNode()
+                .put("engine", "comfy").put("url", "http://127.0.0.1:8092")
+                .put("ckpt", "ace_step_1.5_turbo_aio.safetensors")));
+        out.set("lipsync", merge(cur, "lipsync", mapper.createObjectNode()
+                .put("comfyUrl", gpuComfyUrl(s)).put("workflow", "")
+                .put("timeout", 1800).put("fps", 0)));
+        out.set("transcribe", merge(cur, "transcribe",
+                mapper.createObjectNode().put("url", defaultTtsUrl)));
+        out.set("face", merge(cur, "face", mapper.createObjectNode().put("url", "")));
+        return out;
+    }
+
+    /** 用户配的 GPU 服务器 → ComfyUI 地址（lipsync 默认走它；与图片/视频引擎共用同一台机）。 */
+    private static String gpuComfyUrl(UserEngineSettings s) {
+        if (s == null || s.gpuServerUrl() == null || s.gpuServerUrl().isBlank()) {
+            return "http://127.0.0.1:8188";
+        }
+        String base = s.gpuServerUrl().trim().replaceAll("/+$", "");
+        Integer port = s.gpuServerPort();
+        if (port == null || port <= 0 || base.matches(".*:\\d+$")) {
+            return base;
+        }
+        return base + ":" + port;
+    }
+
+    /** 取某项服务配置（用户值覆盖默认值，逐字段合并）。 */
+    private static com.fasterxml.jackson.databind.JsonNode merge(
+            com.fasterxml.jackson.databind.JsonNode cur, String key,
+            com.fasterxml.jackson.databind.node.ObjectNode defaults) {
+        if (cur == null || !cur.isObject() || !cur.path(key).isObject()) {
+            return defaults;
+        }
+        com.fasterxml.jackson.databind.node.ObjectNode out = defaults.deepCopy();
+        cur.path(key).fields().forEachRemaining(e -> out.set(e.getKey(), e.getValue()));
+        return out;
+    }
+
+    /** worker 用：某用户的服务地址（已填默认值）。 */
+    @Transactional(readOnly = true)
+    public com.fasterxml.jackson.databind.JsonNode servicesOf(UUID userId) {
+        return servicesWithDefaults(load(userId));
     }
 
     @Transactional(readOnly = true)
@@ -77,7 +133,8 @@ public class EngineSettingsService {
                                 : java.util.Map.of("m", s.videoModelSchema().path("mapping")),
                         "params", s.videoParams() == null ? java.util.Map.of() : s.videoParams(),
                         "schemaParams", s.videoModelSchema() == null ? java.util.List.of()
-                                : s.videoModelSchema().path("params")));
+                                : s.videoModelSchema().path("params")),
+                "services", servicesWithDefaults(s));
     }
 
     private static String str(String v) {
@@ -100,7 +157,8 @@ public class EngineSettingsService {
                 fresh(false) ? s.videoModelSchema() : null,
                 s.imageParams(), s.videoParams(),
                 s.imageModelSchemaError(), s.videoModelSchemaError(), s.gatewayRefsMax(),
-                s.gatewaySample(), s.imageModelPresets(), s.videoModelPresets());
+                s.gatewaySample(), s.imageModelPresets(), s.videoModelPresets(),
+                servicesWithDefaults(s));
     }
 
     // ---------------------------------------------------------------- P12 模型库
@@ -432,6 +490,10 @@ public class EngineSettingsService {
         if (req.gpuServerPort() != null) s.setGpuServerPort(req.gpuServerPort());
         if (req.gatewayRefsMax() != null) s.setGatewayRefsMax(req.gatewayRefsMax() >= 0 ? req.gatewayRefsMax() : null);
         if (req.gatewaySample() != null) s.setGatewaySample(req.gatewaySample().isBlank() ? null : req.gatewaySample());
+        // 服务地址（配音/配乐、对口型、转写、人脸）：整块替换；空串字段在 worker 侧会回退默认值
+        if (req.services() != null) {
+            s.setServices(req.services().isObject() ? req.services() : null);
+        }
         // P12：全局参数（画质等）按 schema 收口——只留该模型真认识的键，防手改坏调用
         if (req.imageParams() != null) {
             s.setImageParams(schemaService.sanitizeParams(s.imageModelSchema(), req.imageParams()));

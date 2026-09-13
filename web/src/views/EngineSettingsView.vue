@@ -38,6 +38,21 @@ const imageSchema = ref<ModelSchema | null>(null)
 const imageSchemaError = ref<string | null>(null)
 const gatewayRefsMax = ref<number | null>(null)
 const gatewaySample = ref('')
+/**
+ * 服务地址（配音/配乐、对口型、转写、人脸）—— 换 GPU 服务器时只改这里。
+ * 随任务下发给 worker（claim 响应），保存即生效，不用改 worker 脚本、不用重启。
+ */
+const svcTtsUrl = ref('')
+const svcMusicEngine = ref('comfy')
+const svcMusicUrl = ref('')
+const svcMusicCkpt = ref('')
+const svcLipsyncComfy = ref('')
+const svcLipsyncWorkflow = ref('')
+const svcLipsyncTimeout = ref<number | null>(1800)
+const svcLipsyncFps = ref<number | null>(0)
+const svcTranscribeUrl = ref('')
+const svcFaceUrl = ref('')
+const svcFaceDir = ref('')
 const imagePresets = ref<ModelPreset[]>([])
 const videoPresets = ref<ModelPreset[]>([])
 const presetBusy = ref(false)
@@ -158,6 +173,18 @@ async function load(): Promise<void> {
     videoCloudApiKeyMask.value = s.videoCloudApiKeyMask
     gpuServerUrl.value = s.gpuServerUrl ?? ''
     gpuServerPort.value = s.gpuServerPort
+    const sv = s.services ?? {}
+    svcTtsUrl.value = sv.tts?.url ?? ''
+    svcMusicEngine.value = sv.music?.engine ?? 'comfy'
+    svcMusicUrl.value = sv.music?.url ?? ''
+    svcMusicCkpt.value = sv.music?.ckpt ?? ''
+    svcLipsyncComfy.value = sv.lipsync?.comfyUrl ?? ''
+    svcLipsyncWorkflow.value = sv.lipsync?.workflow ?? ''
+    svcLipsyncTimeout.value = sv.lipsync?.timeout ?? 1800
+    svcLipsyncFps.value = sv.lipsync?.fps ?? 0
+    svcTranscribeUrl.value = sv.transcribe?.url ?? ''
+    svcFaceUrl.value = sv.face?.url ?? ''
+    svcFaceDir.value = sv.face?.latentsyncDir ?? ''
     applySettings(s)
     ready.value = true
   } catch (e) {
@@ -187,6 +214,18 @@ async function save(): Promise<void> {
       videoParams: videoParams.value,
       gatewayRefsMax: gatewayRefsMax.value,
       gatewaySample: gatewaySample.value || null,
+      services: {
+        tts: { url: svcTtsUrl.value || null },
+        music: { engine: svcMusicEngine.value, url: svcMusicUrl.value || null, ckpt: svcMusicCkpt.value || null },
+        lipsync: {
+          comfyUrl: svcLipsyncComfy.value || null,
+          workflow: svcLipsyncWorkflow.value || null,
+          timeout: svcLipsyncTimeout.value,
+          fps: svcLipsyncFps.value,
+        },
+        transcribe: { url: svcTranscribeUrl.value || null },
+        face: { url: svcFaceUrl.value || null, latentsyncDir: svcFaceDir.value || null },
+      },
     })
     message.success('已保存生成引擎配置')
     imageEngine.value = s.imageEngine
@@ -384,6 +423,59 @@ onMounted(load)
             <NInputNumber v-model:value="gpuServerPort" :min="1" :max="65535" placeholder="8188" style="width: 130px" />
           </NFormItem>
         </div>
+      </section>
+
+      <section class="card" data-testid="svc-card">
+        <h2 class="card-title">{{ cloudActive ? '⑤' : '③' }} 服务地址（换 GPU 机器只改这里）</h2>
+        <p class="mdl-hint text-secondary">
+          这些服务原先只由 worker 机器的环境变量决定（TTS :8091 / 音乐 :8092 / ComfyUI :8188 / 对口型工作流路径）。
+          填在这里后随任务下发给 worker，<b>保存即生效</b>，不用改脚本、不用重启 worker。留空 = 用 worker 机器上的默认值。
+        </p>
+
+        <NFormItem label="配音（TTS）服务地址">
+          <NInput v-model:value="svcTtsUrl" placeholder="如 http://127.0.0.1:8091（留空=默认）" />
+        </NFormItem>
+
+        <div class="mdl-row">
+          <NFormItem label="配乐引擎" style="width: 190px">
+            <NSelect v-model:value="svcMusicEngine" :options="[
+              { label: 'comfy（本机 ComfyUI 里的 ACE-Step）', value: 'comfy' },
+              { label: 'http（独立音乐服务）', value: 'http' },
+            ]" />
+          </NFormItem>
+          <NFormItem label="配乐服务地址" class="grow">
+            <NInput v-model:value="svcMusicUrl" placeholder="如 http://127.0.0.1:8092（留空=默认）" />
+          </NFormItem>
+        </div>
+        <NFormItem label="配乐权重名（engine=comfy 时用）">
+          <NInput v-model:value="svcMusicCkpt" placeholder="如 ace_step_1.5_turbo_aio.safetensors（留空=默认）" />
+        </NFormItem>
+
+        <NFormItem label="对口型 ComfyUI 地址">
+          <NInput v-model:value="svcLipsyncComfy" placeholder="如 http://127.0.0.1:8188（留空=默认/用上面的 GPU 服务器）" />
+        </NFormItem>
+        <NFormItem label="对口型工作流（API 格式 JSON 的绝对路径，装在哪台机就填哪台的路径）">
+          <NInput v-model:value="svcLipsyncWorkflow" placeholder="如 D:\ComfyUI\_setup\lipsync_workflow_api.json" />
+        </NFormItem>
+        <div class="mdl-row">
+          <NFormItem label="对口型超时（秒）" style="width: 200px">
+            <NInputNumber v-model:value="svcLipsyncTimeout" :min="60" :max="14400" placeholder="1800" style="width: 150px" />
+          </NFormItem>
+          <NFormItem label="输出帧率（0=跟随源片）" class="grow">
+            <NInputNumber v-model:value="svcLipsyncFps" :min="0" :max="60" placeholder="0" style="width: 150px" />
+          </NFormItem>
+        </div>
+
+        <NFormItem label="转写（语音转文字）服务地址">
+          <NInput v-model:value="svcTranscribeUrl" placeholder="如 http://127.0.0.1:8091（留空=默认；通常与配音同一台机）" />
+        </NFormItem>
+
+        <NFormItem label="人脸服务地址（留空 = 用 worker 本机 insightface）">
+          <NInput v-model:value="svcFaceUrl" placeholder="如 http://127.0.0.1:8093（deploy/face/face_server.py）" />
+        </NFormItem>
+        <NFormItem label="人脸/LatentSync 节点目录（本机人脸检测用，可留空）">
+          <NInput v-model:value="svcFaceDir" placeholder="如 D:\ComfyUI\custom_nodes\ComfyUI-LatentSyncWrapper" />
+        </NFormItem>
       </section>
 
       <div class="actions">

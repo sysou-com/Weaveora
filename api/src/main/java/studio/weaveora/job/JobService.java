@@ -965,6 +965,10 @@ public class JobService {
                 emit(running, Map.of("type", "job.queued", "state", "running"));
                 Map<String, Object> out = new LinkedHashMap<>();
                 out.put("job", workerJobView(running));
+                // 服务地址（配音/配乐、对口型、转写、人脸）随任务下发：
+                // 换 GPU 服务器时用户在界面里改即可，不用再去改 worker 脚本/环境变量。
+                // 空值/未配置的字段已在 servicesWithDefaults 里填了默认值。
+                out.put("services", engineSettings.servicesOf(running.createdBy()));
                 return out;
             }
         }

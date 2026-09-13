@@ -31,6 +31,12 @@ public record EngineSettingsResponse(
         String gatewaySample,
         /** P12 模型库：已配置的模型条目（baseUrl/model/params/schema…） */
         com.fasterxml.jackson.databind.JsonNode imageModelPresets,
-        com.fasterxml.jackson.databind.JsonNode videoModelPresets
+        com.fasterxml.jackson.databind.JsonNode videoModelPresets,
+        /**
+         * 服务地址（配音/配乐、对口型、转写、人脸），已填默认值。
+         *
+         * <p>换 GPU 服务器时改这里即可（worker 按任务下发），不必再改 worker 脚本/环境变量。
+         */
+        com.fasterxml.jackson.databind.JsonNode services
 ) {
 }

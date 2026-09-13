@@ -64,19 +64,23 @@ public class VoicePresetService {
     private final AudioProcessService processor;
     private final ObjectMapper mapper = new ObjectMapper();
 
-    /** GPU 机器 tts 服务的地址（经 SSH 反向隧道暴露在 API 服务器 loopback 上） */
+    /** GPU 机器 tts 服务的地址（经 SSH 反向隧道暴露在 API 服务器 loopback 上）——用户没配服务地址时的兜底 */
     private final String ttsUrl;
+    /** 生成引擎配置：转写地址优先读用户配的 `services.transcribe.url`（换 GPU 服务器不用改配置重发） */
+    private final studio.weaveora.engine.EngineSettingsService engineSettings;
     private final HttpClient http = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(5)).build();
 
     public VoicePresetService(AssetRepository assets, StoragePort storage, WorkspaceGuard guard,
                               ProjectContextPort projects, AudioProcessService processor,
+                              studio.weaveora.engine.EngineSettingsService engineSettings,
                               @Value("${weaveora.tts-url:http://127.0.0.1:18091}") String ttsUrl) {
         this.assets = assets;
         this.storage = storage;
         this.guard = guard;
         this.projects = projects;
         this.processor = processor;
+        this.engineSettings = engineSettings;
         this.ttsUrl = ttsUrl == null || ttsUrl.isBlank() ? "http://127.0.0.1:18091" : ttsUrl;
     }
 
@@ -167,11 +171,27 @@ public class VoicePresetService {
         } catch (IOException e) {
             throw new IllegalStateException("读取样本失败", e);
         }
-        return transcribeBytes(bytes, obj.contentType());
+        return transcribeBytes(bytes, obj.contentType(), transcribeUrlOf(userId));
+    }
+
+    /** 转写服务地址：优先用户配置（services.transcribe.url），空则回退全局默认。 */
+    public String transcribeUrlOf(UUID userId) {
+        try {
+            String u = engineSettings.servicesOf(userId).path("transcribe").path("url").asText("").trim();
+            return u.isEmpty() ? ttsUrl : u.replaceAll("/+$", "");
+        } catch (Exception e) {
+            return ttsUrl;
+        }
     }
 
     /** 直接把音频字节发给 tts 服务做转写（不依赖文件在 GPU 机器上存在）。 */
     public String transcribeBytes(byte[] bytes, String mime) {
+        return transcribeBytes(bytes, mime, ttsUrl);
+    }
+
+    /** 同上，显式指定服务地址（多用户/换机场景）。 */
+    public String transcribeBytes(byte[] bytes, String mime, String targetUrl) {
+        String ttsUrl = targetUrl == null || targetUrl.isBlank() ? this.ttsUrl : targetUrl;
         try {
             HttpRequest req = HttpRequest.newBuilder(URI.create(ttsUrl + "/transcribe"))
                     .timeout(Duration.ofSeconds(300))

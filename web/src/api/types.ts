@@ -465,6 +465,26 @@ export interface EngineSettings {
   /** P12 模型库：已配置的模型条目 */
   imageModelPresets: ModelPreset[] | null
   videoModelPresets: ModelPreset[] | null
+  /**
+   * 服务地址（配音/配乐、对口型、转写、人脸），后端已填默认值。
+   *
+   * 换 GPU 服务器时只改这里（随任务下发给 worker），不用改 worker 脚本/重启。
+   */
+  services?: ServiceEndpoints | null
+}
+
+/** 服务地址：配音/配乐、对口型、转写、人脸（见后端 V10__engine_services.sql） */
+export interface ServiceEndpoints {
+  /** 配音（CosyVoice 等 TTS 服务） */
+  tts?: { url?: string | null } | null
+  /** 配乐（engine=comfy 走 ComfyUI 里的 ACE-Step；http 走独立音乐服务） */
+  music?: { engine?: string | null; url?: string | null; ckpt?: string | null } | null
+  /** 对口型（LatentSync via ComfyUI）：comfyUrl + 本机工作流路径 */
+  lipsync?: { comfyUrl?: string | null; workflow?: string | null; timeout?: number | null; fps?: number | null } | null
+  /** 转写（语音转文字，通常与配音同一台机器） */
+  transcribe?: { url?: string | null } | null
+  /** 人脸（人脸预检/锁人；空 = 用 worker 本机 insightface，填了则调远端服务） */
+  face?: { url?: string | null; latentsyncDir?: string | null } | null
 }
 
 /** P12 模型库条目（一个已配置过的 baseUrl + 模型 + 参数 + 参数说明） */
@@ -537,6 +557,8 @@ export interface EngineSettingsInput {
   videoParams?: Record<string, unknown> | null
   gatewayRefsMax?: number | null
   gatewaySample?: string | null
+  /** 服务地址（配音/配乐、对口型、转写、人脸）；null=不改 */
+  services?: ServiceEndpoints | null
 }
 
 /** 统一错误体（§17）：{ code, message, traceId } */

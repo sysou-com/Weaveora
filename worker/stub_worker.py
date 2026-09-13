@@ -416,6 +416,20 @@ def main():
         while not stop.is_set():
             st, body = _req("POST", "/internal/nodes/%s/claim" % node_id, {}, timeout=35)
             job = (body or {}).get("job")
+            if job:
+                # 服务地址（配音/配乐、对口型、转写、人脸）随任务下发 —— 用户在
+                # 「生成引擎配置 → 服务地址」里改即刻生效，不用改脚本/重启 worker。
+                _svc = (body or {}).get("services")
+                try:
+                    import comfy_client as _cc
+                    _cc.apply_services(_svc)
+                except Exception as e:
+                    print("[stub] 应用 comfy 服务地址失败：%s" % e, flush=True)
+                try:
+                    import audio_client as _ac
+                    _ac.apply_services(_svc)
+                except Exception as e:
+                    print("[stub] 应用音频服务地址失败：%s" % e, flush=True)
             if not job:
                 if args.once and worked == 0:
                     time.sleep(1)
