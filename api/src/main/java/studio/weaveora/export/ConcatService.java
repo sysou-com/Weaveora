@@ -120,6 +120,18 @@ public class ConcatService {
             work = Files.createTempDirectory("weaveora-render-");
             List<Path> segs = new ArrayList<>();
             List<String> segDurs = new ArrayList<>();
+            // P13：配音顺排（shot_fixed）时最后一句可能超出画面总长 —— 给**最后一段补尾**
+            // （clone 末帧）而不是把配音切掉，用户听到的最后一个字不会被剪。
+            double videoTotal = 0.0;
+            for (MediaClip c : clips) {
+                videoTotal += c.durationSec();
+            }
+            double audioEnd = globalVoiceEnd(clips);
+            double tailPad = Math.max(0.0, audioEnd - videoTotal);
+            if (tailPad > 0.05) {
+                log.info("tail pad for voice overflow: audio={}s video={}s pad={}s",
+                        fmt3(audioEnd), fmt3(videoTotal), fmt3(tailPad));
+            }
             int idx = 0;
             for (MediaClip c : clips) {
                 idx++;
@@ -128,6 +140,9 @@ public class ConcatService {
                 Path seg = work.resolve("seg_" + idx + ".mp4");
                 // 叠化模式：每段素材尾部 clone 延长 CROSSFADE_SEC，供 xfade 重叠且时长守恒
                 double pad = crossfade ? CROSSFADE_SEC : 0.0;
+                if (idx == clips.size()) {
+                    pad += tailPad;
+                }
                 double target = c.durationSec() + pad;
                 // P13：素材比镜头短（配音比模型单次上限长）→ **本地重定时拉伸**补齐，
                 // 不额外调用云端（按次计费的模型省一次钱）；音频/字幕位置不受影响。
@@ -538,6 +553,27 @@ public class ConcatService {
         args.add("title=" + title);
         args.add(master.toString());
         run("ffmpeg-xfade", args.toArray(new String[0]));
+    }
+
+    /**
+     * 配音在**全片时间轴**上的结束时刻（秒）：各段时长累加得到镜起点，再加镜内 of at+实际时长。
+     * 用于「配音顺排」模式判断是否需要片尾补画面。
+     */
+    private double globalVoiceEnd(List<MediaClip> clips) {
+        double cursor = 0.0;
+        double end = 0.0;
+        for (MediaClip c : clips) {
+            for (studio.weaveora.asset.AudioAssetLookup.VoiceCue v : c.voices()) {
+                double len = v.windowSec();
+                if (len <= 0) {
+                    Integer ms = v.asset().durationMs();
+                    len = (ms != null && ms > 0) ? ms / 1000.0 : Math.max(0.0, v.endSec() - v.atSec());
+                }
+                end = Math.max(end, cursor + v.atSec() + len);
+            }
+            cursor += c.durationSec();
+        }
+        return end;
     }
 
     /** 用 ffprobe 读视频时长（秒）。 */

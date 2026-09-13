@@ -211,6 +211,8 @@ export interface DirectorShot {
    * 若为 false/未设且 segments 只有一段 → 渲染保持原速（画面会比配音短）。
    */
   stretch?: boolean | null
+  /** P13：作者设定的目标镜长（shot_fixed 模式下用它取 min(模型上限, 目标)） */
+  target_sec?: number | null
   zh?: string
   en_synced?: boolean
   /** P2 运镜关键帧（穿越/从A到B看到C）：≥2 帧时生成按帧出图，motion 用首/尾帧 */
@@ -272,6 +274,12 @@ export interface VideoPlan extends BasePlan {
      * stretch=本地拉伸(默认,不多花钱) | overflow=配音溢出下一镜(不多花钱) | segment=切段(多消耗调用)
      */
     oversize_policy?: 'stretch' | 'overflow' | 'segment'
+    /**
+     * P13：镜头时长由谁决定。
+     * shot_fixed（默认）= 镜长取 min(模型上限, 目标镜长)，配音顺排、允许溢出到下一镜（每镜 1 次调用）；
+     * audio_first = 镜长跟着配音走（超上限时按 oversize_policy 处理）。
+     */
+    timing_mode?: 'shot_fixed' | 'audio_first'
   }
 }
 

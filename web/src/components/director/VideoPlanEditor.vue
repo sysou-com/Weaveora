@@ -304,11 +304,28 @@ const transitions = ['cut', 'dissolve', 'fade', 'wipe'].map((v) => ({ label: v, 
           />
         </label>
         <label class="row">
-          <span class="key" title="配音比模型单次上限长时怎么处理；这直接决定云端调用次数（钱）">超长策略</span>
+          <span class="key" title="镜长由谁决定：镜长固定(配音顺排溢出下一镜，每镜 1 次调用) / 镜长跟配音">时长模式</span>
+          <select
+            :value="props.plan.edit_plan.timing_mode ?? 'shot_fixed'"
+            class="select"
+            :disabled="disabled"
+            @change="(e: Event) => props.plan.edit_plan && (props.plan.edit_plan.timing_mode = (e.target as HTMLSelectElement).value as 'shot_fixed' | 'audio_first')"
+          >
+            <option value="shot_fixed">镜长固定·配音顺排（默认，省调用）</option>
+            <option value="audio_first">镜长跟配音（对话/口型）</option>
+          </select>
+        </label>
+        <label class="row">
+          <span
+            class="key"
+            :title="(props.plan.edit_plan.timing_mode ?? 'shot_fixed') === 'shot_fixed'
+              ? '当前是镜长固定模式，配音顺排溢出，不需要超长策略（仅 audio_first 生效）'
+              : '配音比模型单次上限长时怎么处理；这直接决定云端调用次数（钱）'"
+          >超长策略</span>
           <select
             :value="props.plan.edit_plan.oversize_policy ?? 'stretch'"
             class="select"
-            :disabled="disabled"
+            :disabled="disabled || (props.plan.edit_plan.timing_mode ?? 'shot_fixed') === 'shot_fixed'"
             @change="(e: Event) => props.plan.edit_plan && (props.plan.edit_plan.oversize_policy = (e.target as HTMLSelectElement).value as 'stretch' | 'overflow' | 'segment')"
           >
             <option value="stretch">本地拉伸（不额外花钱）</option>
