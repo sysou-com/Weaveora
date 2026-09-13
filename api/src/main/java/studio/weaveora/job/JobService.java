@@ -1420,6 +1420,8 @@ public class JobService {
         }
         String engineRoute = engineSettings.resolveEngine(userId, "clip");
         List<GenerationJob> created = new ArrayList<>();
+        // 被跳过的镜及原因：显式勾选却没生成时，把原因回给用户（不再只给一句笼统提示）
+        List<String> skipped = new ArrayList<>();
         for (UUID shotId : shotIds) {
             JsonNode shot = shotOf(plan, shotId);
             if (shot == null) {
@@ -1430,11 +1432,13 @@ public class JobService {
             studio.weaveora.asset.domain.Asset clip = pickNewestAsset(projectId, workspaceId, shotNo, "clip");
             studio.weaveora.asset.domain.Asset still = clip != null ? clip : pickNewestAsset(projectId, workspaceId, shotNo, "still");
             if (still == null) {
+                skipped.add("第" + shotNo + "镜（缺画面：无 motion 也无关键帧）");
                 continue;
             }
             // 音频：该镜全部配音段（按 line_index 升序，取每段最新）
             List<studio.weaveora.asset.domain.Asset> voices = newestVoicePerLine(projectId, workspaceId, shotNo);
             if (voices.isEmpty()) {
+                skipped.add("第" + shotNo + "镜（缺配音）");
                 continue;   // 没配音就没有可对的口型
             }
             ObjectNode payload = mapper().createObjectNode();
@@ -1462,8 +1466,13 @@ public class JobService {
                     PRESET_CLIP, "lipsync", payload, userId, engineRoute));
         }
         if (created.isEmpty()) {
+            String why = skipped.isEmpty() ? "" : "（" + String.join("、", skipped.subList(0, Math.min(4, skipped.size())))
+                    + (skipped.size() > 4 ? " 等" : "") + "）";
             throw new BizException(ErrorCode.VALIDATION,
-                    "没有可对口型的镜头：需要该镜已有 motion/关键帧**且**已生成配音");
+                    "没有可对口型的镜头：需要该镜已有 motion/关键帧**且**已生成配音" + why);
+        }
+        if (!skipped.isEmpty()) {
+            log.warn("lipsync 跳过了 {} 个镜：{}", skipped.size(), skipped);
         }
         log.warn("lipsync jobs created project={} count={} —— 独占本机显存（~7.9/8GiB），勿与其它 GPU 任务并发",
                 projectId, created.size());

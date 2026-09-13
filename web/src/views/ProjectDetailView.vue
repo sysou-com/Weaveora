@@ -1315,12 +1315,15 @@ const pickCtx = ref<{ title: string; run: (shotNos: number[] | null) => Promise<
 async function withShotPicker(
   title: string,
   run: (shotNos: number[] | null) => Promise<void> | void,
-  kind: 'still' | 'clip' | 'voice' = 'still',
+  kind: 'still' | 'clip' | 'voice' | 'lipsync' = 'still',
+  opts?: { always?: boolean; hint?: string },
 ): Promise<void> {
   pickerKind.value = kind
+  pickHint.value = opts?.hint ?? ''
   // P13：生成前预检（未确认改动 → 先问）
   if (!(await ensureApprovedForGenerate(title))) return
-  if (pickerShots.value.length <= 3) {
+  // 镜少时默认跳过弹窗（等同于「全部」）；对口型贵且按镜判断前置条件 → 传 always 强制选镜
+  if (!opts?.always && pickerShots.value.length <= 3) {
     void run(null)
     return
   }
@@ -1387,15 +1390,42 @@ const lockedShots = computed<number[]>(() => shotLocks.data.value ?? [])
  * 点「生成关键帧」就只看 still 的版本/张数；点「生成配音」才看 voice 的版本/段数 ——
  * 混着显示其它类型（如语音段数）对当前操作没意义。
  */
-const pickerKind = ref<'still' | 'clip' | 'voice'>('still')
+const pickerKind = ref<'still' | 'clip' | 'voice' | 'lipsync'>('still')
+const pickHint = ref('')
 const pickerShots = computed(() => {
   const plan = draft.value
   if (!plan || !isVideoPlan(plan)) return []
   const kind = pickerKind.value
-  return (plan.shots ?? []).map((s) => {
-    const rel = (jobs.data.value ?? []).filter(
-      (j) => j.payload?.shot_no === s.shot_no && j.kind === kind && j.state === 'succeeded',
+  const succ = (no: number, k: string) =>
+    (jobs.data.value ?? []).filter(
+      (j) => j.payload?.shot_no === no && j.kind === k && j.state === 'succeeded',
     )
+  return (plan.shots ?? []).map((s) => {
+    if (kind === 'lipsync') {
+      // P13 对口型的前置条件（与后端 JobService.createLipsyncJobs 一致）：
+      //   画面（该镜最新 motion 片段，没有则退关键帧静帧）+ 至少一段配音
+      const clips = succ(s.shot_no, 'clip')
+      const stills = succ(s.shot_no, 'still')
+      const visuals = [...clips, ...stills]
+      const voices = succ(s.shot_no, 'voice')
+      const missing: string[] = []
+      if (!visuals.length) missing.push('缺画面(motion/关键帧)')
+      if (!voices.length) missing.push('缺配音')
+      const newest = newestStamp(visuals)
+      const rev = newest ? revOfJob(newest) : undefined
+      return {
+        shotNo: s.shot_no,
+        revNo: rev?.no ?? null,
+        stale: rev?.stale === true,
+        lineCount: voices.length,
+        unit: '段语音',
+        eligible: missing.length === 0,
+        note: missing.length
+          ? `不可：${missing.join('、')}`
+          : `可生成 · ${voices.length} 段语音${clips.length ? '' : '（用关键帧静帧）'}`,
+      }
+    }
+    const rel = succ(s.shot_no, kind)
     const newest = newestStamp(rel)
     const rev = newest ? revOfJob(newest) : undefined
     return {
@@ -2069,15 +2099,20 @@ async function startBgm(): Promise<void> {
   }
 }
 
-/** P13 对口型：该镜的 motion/关键帧 + 该镜配音 -> 音频驱动嘴型（本机 ComfyUI 工作流） */
-async function startLipsync(): Promise<void> {
+/** P13 对口型：按「镜」生成 —— 该镜的 motion/关键帧 + 该镜配音 → 音频驱动嘴型（本机 ComfyUI 工作流）
+ *  shotNos 为空 = 全部已确认镜。前置条件：该镜同时有画面与配音，否则后端会跳过。 */
+async function startLipsync(shotNos?: number[] | null): Promise<void> {
+  const revId = genRevisionId()
+  if (!revId) return
   focusJobTab('lipsync')
   if (dirty.value && !(await savePlanInPlace())) return
+  if (dirty.value && !(await handleSave())) return
   genBusy.value = true
   try {
     const created = await createJobs(workspaceId.value, projectId.value, {
-      revisionId: selectedRevId.value as string,
+      revisionId: revId,
       kind: 'lipsync',
+      ...(shotNos && shotNos.length ? { shotNos } : {}),
     })
     if (!created.length) {
       message.warning('没有可对口型的镜头（需该镜已有 motion/关键帧且已生成配音）')
@@ -2090,6 +2125,21 @@ async function startLipsync(): Promise<void> {
   } finally {
     genBusy.value = false
   }
+}
+
+/** 对口型按钮：**总是先弹分镜选择**（贵 + 按镜判断前置条件），再对该镜最新资产对口型 */
+function openLipsyncPicker(): void {
+  void withShotPicker(
+    '对口型(lipsync)',
+    (nos) => startLipsync(nos),
+    'lipsync',
+    {
+      always: true,
+      hint:
+        '对口型按「镜」生成：只处理勾选的分镜，用该镜最新资产（优先 motion 片段，'+
+        '没有则退回关键帧静帧）+ 该镜全部配音。需同时具备「画面」与「配音」才能生成。',
+    },
+  )
 }
 
 async function startMotion(frames?: number, shotNos?: number[] | null): Promise<void> {
@@ -3273,7 +3323,7 @@ const shotTotal = computed(() => {
                 ? '对口型：用该镜配音驱动嘴型（需本机已装口型工作流，见 docs/lipsync-setup.md）。'
                   + '会独占本机显存（~7.9/8GiB），跑的时候别同时排其它 GPU 任务；约 2.5 分钟/秒视频'
                 : '需先确认方案'"
-              @click="startLipsync()"
+              @click="openLipsyncPicker()"
             >
               对口型
             </NButton>
@@ -3690,6 +3740,7 @@ const shotTotal = computed(() => {
       <ShotPickerDialog
         v-model:show="pickOpen"
         :title="pickCtx?.title ?? '选择分镜'"
+        :hint="pickHint"
         :shots="pickerShots"
         :locked="lockedShots"
         :busy="pickBusy"

@@ -21,6 +21,10 @@ export interface PickerShot {
   lineCount?: number
   /** 计数的单位（配音=段语音；关键帧/motion=张已出）——由当前操作类型决定 */
   unit?: string
+  /** 是否满足本次操作的前置条件（undefined = 不判断，保持旧行为） */
+  eligible?: boolean
+  /** 行内补充说明，例如「可生成 · 2 段语音」「不可：缺画面(motion/关键帧)、缺配音」 */
+  note?: string
 }
 
 const props = withDefaults(
@@ -28,12 +32,14 @@ const props = withDefaults(
     show: boolean
     /** 弹窗标题（例如「生成关键帧(still)」） */
     title?: string
+    /** 顶部说明（不传用通用文案；对口型这类有前置条件的操作应传入） */
+    hint?: string
     shots: PickerShot[]
     /** 已封版镜号 */
     locked: number[]
     busy?: boolean
   }>(),
-  { title: '选择分镜', busy: false },
+  { title: '选择分镜', hint: '', busy: false },
 )
 
 const emit = defineEmits<{
@@ -51,9 +57,12 @@ const lockedSet = ref<number[]>([])
 
 function reset(): void {
   lockedSet.value = [...props.locked]
-  const unlocked = props.shots.filter((s) => !props.locked.includes(s.shotNo)).map((s) => s.shotNo)
+  const unlocked = props.shots.filter((s) => !props.locked.includes(s.shotNo))
   // 未封版的默认全勾；若全部都封版了，则默认勾「全部」（否则用户点确认什么也不会发生）
-  picked.value = unlocked.length ? unlocked : props.shots.map((s) => s.shotNo)
+  const pool = unlocked.length ? unlocked : props.shots
+  // 有前置条件信息时（对口型），默认只勾「可生成」的镜，避免点了确认却全被跳过
+  const usable = pool.filter((s) => s.eligible !== false)
+  picked.value = (usable.length ? usable : pool).map((s) => s.shotNo)
 }
 
 watch(
@@ -84,15 +93,36 @@ function pickNone(): void {
 function pickUnlocked(): void {
   picked.value = props.shots.filter((s) => !lockedSet.value.includes(s.shotNo)).map((s) => s.shotNo)
 }
+/** 仅当列表带前置条件信息（eligible）时才显示：只勾「现在真能跑」的镜 */
+const hasEligibility = computed(() => props.shots.some((s) => s.eligible !== undefined))
+function pickEligible(): void {
+  picked.value = props.shots
+    .filter((s) => s.eligible !== false && !lockedSet.value.includes(s.shotNo))
+    .map((s) => s.shotNo)
+}
 
 function confirm(): void {
-  if (!picked.value.length) {
+  let sel = [...picked.value].sort((a, b) => a - b)
+  if (!sel.length) {
     message.warning('至少勾选一个要处理的分镜（或取消）')
     return
   }
+  // 前置条件不满足的镜：本地就剔除并说清楚原因，不让后端静默跳过
+  const bad = props.shots.filter((s) => sel.includes(s.shotNo) && s.eligible === false)
+  if (bad.length) {
+    const why = bad
+      .map((s) => `第${s.shotNo}镜${s.note ? `（${s.note.replace(/^不可[：:]?/, '')}）` : ''}`)
+      .join('、')
+    sel = sel.filter((no) => !bad.some((s) => s.shotNo === no))
+    if (!sel.length) {
+      message.error(`所选分镜都不满足前置条件：${why}`)
+      return
+    }
+    message.warning(`已跳过不满足前置条件的分镜：${why}`)
+  }
   const lock = lockedSet.value.filter((x) => !props.locked.includes(x))
   const unlock = props.locked.filter((x) => !lockedSet.value.includes(x))
-  emit('confirm', { shotNos: [...picked.value].sort((a, b) => a - b), lock, unlock })
+  emit('confirm', { shotNos: sel, lock, unlock })
   emit('update:show', false)
 }
 </script>
@@ -107,7 +137,7 @@ function confirm(): void {
     @update:show="(v: boolean) => emit('update:show', v)"
   >
     <p class="sp-hint">
-      勾选要处理的<b>分镜</b>；右侧「封版」表示该镜资源已达标，<b>以后批量生成会自动跳过</b>（单镜重做不受限）。
+      {{ hint || '勾选要处理的分镜；右侧「封版」表示该镜资源已达标，以后批量生成会自动跳过（单镜重做不受限）。' }}
     </p>
 
     <div class="sp-tools">
@@ -115,6 +145,15 @@ function confirm(): void {
       <NButton size="tiny" secondary data-testid="sp-pick-none" @click="pickNone">全不选</NButton>
       <NButton size="tiny" secondary data-testid="sp-pick-unlocked" @click="pickUnlocked">
         只选未封版
+      </NButton>
+      <NButton
+        v-if="hasEligibility"
+        size="tiny"
+        secondary
+        data-testid="sp-pick-eligible"
+        @click="pickEligible"
+      >
+        只选可生成
       </NButton>
       <span class="sp-count font-mono">
         已选 {{ picked.length }} / {{ shots.length }} 镜 · 封版 {{ lockedCount }} 镜
@@ -125,7 +164,7 @@ function confirm(): void {
       <div
         v-for="s in shots"
         :key="s.shotNo"
-        :class="['sp-row', { locked: lockedSet.includes(s.shotNo) }]"
+        :class="['sp-row', { locked: lockedSet.includes(s.shotNo), bad: s.eligible === false }]"
         :data-testid="`sp-row-${s.shotNo}`"
       >
         <NCheckbox
@@ -137,6 +176,9 @@ function confirm(): void {
             {{ s.revNo ? `v${s.revNo}${s.stale ? '·旧' : ''}` : 'v—' }}
           </span>
           <span v-if="s.lineCount" class="sp-extra font-mono">{{ s.lineCount }} {{ s.unit ?? '段语音' }}</span>
+          <span v-if="s.note" class="sp-note" :class="{ bad: s.eligible === false }">
+            {{ s.note }}
+          </span>
         </NCheckbox>
         <NCheckbox
           :checked="lockedSet.includes(s.shotNo)"
@@ -206,6 +248,18 @@ function confirm(): void {
 }
 .sp-row.locked {
   border-color: color-mix(in srgb, var(--wv-warn, #d0a24e) 45%, var(--wv-line));
+}
+.sp-row.bad {
+  border-color: color-mix(in srgb, var(--wv-danger, #d9534f) 35%, var(--wv-line));
+  opacity: 0.82;
+}
+.sp-note {
+  margin-left: 8px;
+  font-size: 11px;
+  color: var(--wv-text-4);
+}
+.sp-note.bad {
+  color: var(--wv-danger, #d9534f);
 }
 .sp-no {
   font-size: 13px;
