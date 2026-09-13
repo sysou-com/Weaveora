@@ -978,7 +978,9 @@ def _face_probe(video_bytes, target_emb=None):
             if line.startswith("RESULT:"):
                 parts = line[7:].split("/")
                 hits, total = int(parts[0]), int(parts[1])
-                best = float(parts[2]) if len(parts) > 2 else None
+                # 无目标时脚本会输出 RESULT:h/t/（末段为空）——直接 float("") 会抛异常，
+                # 导致“预检异常→不拦”，静默失去这道拦截
+                best = float(parts[2]) if len(parts) > 2 and parts[2].strip() else None
                 return hits, total, best
         print("[comfy] 人脸预检无结果，不拦：%s" % out[:120], flush=True)
         return None
@@ -1443,6 +1445,18 @@ def generate_lipsync(client_id, payload, progress_fn=None):
                 ep = _emb_path_of(who)
                 if ep:
                     _paths.append(ep)
+                # 该段先确认「这位说话人的脸真在这一段里」—— 比跑到一半失败便宜得多
+                # （多人镜里很常见，比如某段是画外音、或某角色只在这一段背对着镜头）
+                if embs.get(who):
+                    _pr = _face_probe(seg_video, embs[who])
+                    if _pr and _pr[1] > 0 and (_pr[0] == 0 or _pr[2] is None or _pr[2] < TARGET_MIN_SIM):
+                        raise ComfyError(
+                            "第%d段（%s %.1f–%.1fs）里找不到该说话人的脸（检出 %d/%d 帧，"
+                            "最像的相似度 %.2f，阈值 %.2f）。常见原因：这段是画外音；或「%s」的"
+                            "定妆照与画面差异过大、与其它角色过于相似。\n"
+                            "（多人镜按段驱动：每段只驱动该段说话人的脸，找不到就无法对口型）"
+                            % (i + 1, who or "?", a / fps, b / fps, _pr[0], _pr[1], (_pr[2] or 0),
+                               TARGET_MIN_SIM, who or "?"))
                 if progress_fn:
                     progress_fn(40, "lipsync 第%d/%d段（%s）" % (i + 1, len(segs), who or "?"))
                 seg_mp4 = _run_lipsync_graph(client_id, seg_video, seg_audio, ep, on_tick=_tick)
