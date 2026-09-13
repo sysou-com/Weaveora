@@ -240,6 +240,33 @@ def _refs_spec(mapping, model, fields=None):
     return "image", False, 0
 
 
+def _put_frames(inp, mapping, cfg, fields, payload):
+    """把「运动帧数」写到模型认识的帧数字段，并按 schema 的 max 收口。
+
+    候选顺序按各模型常见命名：num_frames(Wan) > frames > video_length > length > frame_count。
+    同时把 payload.frames 与用户全局参数合并（全局参数先放、弹窗值后放 → 弹窗优先）。
+    """
+    want = payload.get("frames")
+    try:
+        want = int(want) if want else None
+    except (TypeError, ValueError):
+        want = None
+    if want is None:
+        return
+    for cand in ("num_frames", "frames", "video_length", "length", "frame_count"):
+        if not _model_has(fields, cand):
+            continue
+        v = want
+        mx = ((fields or {}).get(cand) or {}).get("max")
+        try:
+            if mx:
+                v = min(v, int(float(mx)))
+        except (TypeError, ValueError):
+            pass
+        inp[cand] = v
+        return
+
+
 def _put_user_params(inp, mapping, cfg, fields):
     """合并用户全局参数（画质等）：只在 schema 认识该字段时下发，防手改坏调用。"""
     params = (cfg or {}).get("params") or {}
@@ -687,6 +714,11 @@ def generate_motion_via_replicate(payload, token, model, progress_fn=None, cfg=N
         if _model_has(fields, seed_field):
             inp[seed_field] = int(payload.get("seed") or int(time.time() % 10 ** 9))
         _put_user_params(inp, mp, cfg, fields)   # 用户全局参数（分辨率/画质等）
+        # P13：motion 弹窗设置的**帧数**映射到模型真实字段。
+        # 踩过的坑：Wan 系真实字段是 num_frames（default 81、max 121），旧代码只找
+        # duration/seconds/length → 弹窗设 150 帧**根本没发**，模型用默认 81 帧 @30fps = 2.7s，
+        # 用户看到「设了 150 帧却只有 2 秒」。这里按 schema 的上限收口后再发。
+        _put_frames(inp, mp, cfg, fields, payload)
     elif "p-video" in ml:
         inp["fps"] = 24
         try:
@@ -695,6 +727,8 @@ def generate_motion_via_replicate(payload, token, model, progress_fn=None, cfg=N
             dur = 5
         inp["duration"] = max(1, min(20, dur))
         # 测试档硬约束 draft ON + ≤720p；生产（TEST_MODE=0）仅在显式 env 指定时注入
+        _put_user_params(inp, mp, cfg, fields)
+        _put_frames(inp, mp, cfg, fields, payload)
         if TEST_MODE:
             inp["draft"] = True
             inp["resolution"] = VIDEO_RESOLUTION or "720p"

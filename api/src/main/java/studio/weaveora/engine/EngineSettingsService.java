@@ -162,6 +162,41 @@ public class EngineSettingsService {
         return toResponse(userId);
     }
 
+    /**
+     * 视频模型 schema 里「帧数」字段的上限（如 Wan 的 num_frames.max=121）。
+     *
+     * <p>「运动帧数」的可用上限必须按**模型**收口：本机 GPU 由显存决定，
+     * 云模型由它自己声明的 max 决定（旧实现只用一个全局配置 300，比模型大 -> 送出去会被拒/被截）。
+     */
+    public Integer videoSchemaFramesMax(UUID userId) {
+        UserEngineSettings s = current;
+        if (s == null || !userId.equals(s.userId())) {
+            s = repo.findByUserId(userId).orElse(null);
+        }
+        if (s == null) {
+            return null;
+        }
+        return framesMaxOf(s.videoModelSchema());
+    }
+
+    private static Integer framesMaxOf(com.fasterxml.jackson.databind.JsonNode schema) {
+        if (schema == null) {
+            return null;
+        }
+        com.fasterxml.jackson.databind.JsonNode params = schema.path("params");
+        if (!params.isArray()) {
+            return null;
+        }
+        for (String cand : java.util.List.of("num_frames", "frames", "video_length", "length", "frame_count")) {
+            for (com.fasterxml.jackson.databind.JsonNode pn : params) {
+                if (cand.equals(pn.path("name").asText("")) && pn.path("max").isNumber()) {
+                    return (int) Math.round(pn.path("max").asDouble());
+                }
+            }
+        }
+        return null;
+    }
+
     /** 只刷新某个条目的参数说明（界面上的「刷新参数说明」）。 */
     @Transactional
     public EngineSettingsResponse refreshPreset(UUID userId, String kind, String baseUrl, String model) {

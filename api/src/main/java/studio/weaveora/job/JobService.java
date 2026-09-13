@@ -294,7 +294,7 @@ public class JobService {
                     if (req.frames() != null) {
                         int f = req.frames();
                         int lo = motionFramesMin;
-                        int hi = motionFramesMaxFor(engineRoute, plan);
+                        int hi = motionFramesMaxFor(engineRoute, plan, userId);
                         if (f < lo || f > hi) {
                             throw new BizException(ErrorCode.VALIDATION,
                                     "运动帧数须在 " + lo + "–" + hi + " 之间"
@@ -372,7 +372,7 @@ public class JobService {
                             ObjectNode sp = payload.deepCopy();
                             int f = (int) Math.round(segDur * Math.max(1, fpsVal));
                             // 上限按**引擎**取：云 = 模型口径，本机 = 显存口径
-                            int segHi = motionFramesMaxFor(engineRoute, plan);
+                            int segHi = motionFramesMaxFor(engineRoute, plan, userId);
                             f = Math.max(motionFramesMin, Math.min(segHi, f));
                             sp.put("frames", f);
                             sp.put("segment_index", si);
@@ -1478,22 +1478,29 @@ public class JobService {
      *   <li>gpu（本机 ComfyUI）：motion-frames-max（默认 96，按 3070Ti 显存定）。</li>
      * </ul>
      */
-    private int motionFramesMaxFor(String engineRoute, JsonNode plan) {
+    private int motionFramesMaxFor(String engineRoute, JsonNode plan, UUID userId) {
         if (!"cloud".equals(engineRoute)) {
             return Math.max(motionFramesMin, motionFramesMax);
         }
         int fps = Math.max(1, plan.path("edit_plan").path("fps").asInt(30));
+        // 1) 项目里显式设了「模型上限(s)」-> 用它（最准）
         double capSec = plan.path("edit_plan").path("video_model_max_sec").asDouble(0);
         if (capSec > 0) {
             return Math.max(motionFramesMin, (int) Math.round(capSec * fps));
         }
+        // 2) 否则看**模型 schema** 里帧数字段的上限（如 Wan num_frames.max=121）
+        Integer schemaMax = engineSettings.videoSchemaFramesMax(userId);
+        if (schemaMax != null && schemaMax > 0) {
+            return Math.max(motionFramesMin, Math.min(schemaMax, motionFramesMaxCloud));
+        }
+        // 3) 都没有 -> 云配置兜底
         return Math.max(motionFramesMin, motionFramesMaxCloud);
     }
 
     /** 供接口下发：本项目的运动帧数可用区间（含来源说明）。 */
     public java.util.Map<String, Object> motionLimits(UUID userId, String kind, JsonNode plan) {
         String route = engineSettings.resolveEngine(userId, kind);
-        int hi = motionFramesMaxFor(route, plan);
+        int hi = motionFramesMaxFor(route, plan, userId);
         int fps = Math.max(1, plan.path("edit_plan").path("fps").asInt(30));
         return java.util.Map.of(
                 "engine", route,
@@ -1503,10 +1510,11 @@ public class JobService {
                 "maxClipSec", Math.round(hi * 100.0 / fps) / 100.0,
                 "gpuMaxFrames", motionFramesMax,
                 "cloudMaxFrames", motionFramesMaxCloud,
-                "source", "cloud".equals(route)
-                        ? (plan.path("edit_plan").path("video_model_max_sec").asDouble(0) > 0
-                            ? "项目「模型上限」× fps" : "云配置 motion-frames-max-cloud")
-                        : "本机 GPU 显存（motion-frames-max）");
+                "source", !"cloud".equals(route)
+                        ? "本机 GPU 显存（motion-frames-max）"
+                        : (plan.path("edit_plan").path("video_model_max_sec").asDouble(0) > 0
+                            ? "项目「模型上限」× fps"
+                            : (hi < motionFramesMaxCloud ? "云模型 schema 的帧数上限" : "云配置 motion-frames-max-cloud")));
     }
 
     private String resolveVideoShotsPlaceholder() {
