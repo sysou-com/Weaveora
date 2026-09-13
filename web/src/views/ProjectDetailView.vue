@@ -1095,6 +1095,32 @@ function newestStamp<T extends { createdAt: string }>(list: T[]): T | undefined 
 const OUTPUT_KINDS = ['still', 'clip', 'master', 'voice', 'bgm', 'voice_preview', 'bgm_preview', 'portrait', 'lipsync']
 const outputAssets = computed(() => (assets.data.value ?? []).filter((a) => OUTPUT_KINDS.includes(a.kind)))
 
+/**
+ * 是不是视频/音频产物 —— 一律按 **mime** 判断，不要再写 `kind === 'clip' || kind === 'master'` 这种白名单。
+ *
+ * P13 实例：卡片模板的视频分支只认 clip/master，对口型（kind=lipsync, mime=video/mp4）
+ * 就掉进了 `<img>` 分支（拿 mp4 当图片渲染）→ 资产在库里看得到但**没法预览**。
+ * 以后再加新产物类型（lipsync/…）也不会再漏。
+ */
+function isVideoAsset(a: { mime?: string | null }): boolean {
+  return (a.mime ?? '').startsWith('video/')
+}
+function isAudioAsset(a: { mime?: string | null }): boolean {
+  return (a.mime ?? '').startsWith('audio/')
+}
+/** 下载文件名后缀：按 mime 推（之前写死 .png，视频会被存成 .png） */
+function assetExt(a: { mime?: string | null }): string {
+  const m = (a.mime ?? '').toLowerCase()
+  if (m.includes('mp4')) return 'mp4'
+  if (m.includes('webm')) return 'webm'
+  if (m.includes('audio/mpeg') || m.includes('audio/mp3')) return 'mp3'
+  if (m.includes('wav')) return 'wav'
+  if (m.includes('jpeg')) return 'jpg'
+  if (m.includes('png')) return 'png'
+  if (m.includes('webp')) return 'webp'
+  return 'bin'
+}
+
 /** P12：资产库也按类型分 Tab */
 const galTabCounts = computed(() => {
   const m: Record<string, number> = { all: 0 }
@@ -3399,7 +3425,7 @@ const shotTotal = computed(() => {
               <input type="checkbox" :checked="jobSel.includes(j.id)" @change="toggleJobSel(j.id)" />
             </label>
             <span v-else class="row-check" />
-            <span class="job-kind font-mono">[{{ KIND_LABEL[j.kind] ?? j.kind }}{{ j.payload?.preview ? '·试听' : '' }}<template v-if="j.kind === 'still' || j.kind === 'clip' || j.kind === 'voice'"> · 第{{ j.payload?.shot_no ?? '—' }}镜</template><template v-if="j.kind === 'voice' && j.payload?.line_index != null"> · 第{{ (j.payload.line_index ?? 0) + 1 }}段</template><template v-if="j.payload?.subject"> · {{ j.payload.subject }}</template><template v-if="j.kind === 'bgm' && j.payload?.mood"> · {{ j.payload.mood }}</template><template v-if="j.payload?.frame_label"> · {{ j.payload.frame_label }}</template>]</span>
+            <span class="job-kind font-mono">[{{ KIND_LABEL[j.kind] ?? j.kind }}{{ j.payload?.preview ? '·试听' : '' }}<template v-if="j.kind === 'still' || j.kind === 'clip' || j.kind === 'voice' || j.kind === 'lipsync'"> · 第{{ j.payload?.shot_no ?? '—' }}镜</template><template v-if="j.kind === 'voice' && j.payload?.line_index != null"> · 第{{ (j.payload.line_index ?? 0) + 1 }}段</template><template v-if="j.payload?.subject"> · {{ j.payload.subject }}</template><template v-if="j.kind === 'bgm' && j.payload?.mood"> · {{ j.payload.mood }}</template><template v-if="j.payload?.frame_label"> · {{ j.payload.frame_label }}</template>]</span>
             <span
               v-if="revOfJob(j)"
               :class="['job-rev', 'font-mono', { stale: revOfJob(j)?.stale }]"
@@ -3519,14 +3545,14 @@ const shotTotal = computed(() => {
               ×
             </button>
             <audio
-              v-if="(a.mime ?? '').startsWith('audio/') && galUrls[a.id]"
+              v-if="isAudioAsset(a) && galUrls[a.id]"
               :src="galUrls[a.id]"
               class="g-audio"
               controls
               preload="metadata"
             />
             <video
-              v-else-if="(a.kind === 'clip' || a.kind === 'master') && (a.mime ?? '').startsWith('video/') && galUrls[a.id]"
+              v-else-if="isVideoAsset(a) && galUrls[a.id]"
               :src="galUrls[a.id]"
               class="g-video"
               controls
@@ -3544,7 +3570,7 @@ const shotTotal = computed(() => {
                         @click.stop="openImmersive(a.id, a.mime ?? '')">
                   ⤢
                 </button>
-                <a v-if="galUrls[a.id]" :href="galUrls[a.id]" :download="'weaveora-' + a.id.slice(0, 8) + '.png'" title="下载">↓</a>
+                <a v-if="galUrls[a.id]" :href="galUrls[a.id]" :download="'weaveora-' + a.id.slice(0, 8) + '.' + assetExt(a)" title="下载">↓</a>
                 <button
                   type="button"
                   class="g-ref"

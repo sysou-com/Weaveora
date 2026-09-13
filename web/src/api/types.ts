@@ -366,7 +366,10 @@ export interface JobRecord {
   projectId: string
   revisionId: string | null
   shotId: string | null
-  kind: 'still' | 'clip' | 'voice' | 'bgm'
+  // 必须覆盖后端允许的全部 kind（JobService 白名单：still|clip|voice|bgm|portrait|lipsync）。
+  // 漏项会让 TS 在模板里把 kind 收窄，出现「这个比较不可能成立」的假报错，
+  // 也容易让新产物类型在各处分支里被漏掉（P13 实例：lipsync 卡片掉进 <img> 分支）。
+  kind: 'still' | 'clip' | 'voice' | 'bgm' | 'portrait' | 'lipsync'
   state: string
   progress: number
   stage: string | null
