@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# Weaveora VPS worker 部署（云出图 / 中转 worker：stub_worker.py + cloud_* + comfy_client + audio_client）
+#
+# 为什么单独有这个脚本（2026-09-13 线上事故）：
+#   上一次部署把 cloud_client.py 上传成了 cloud_client.py.new 却**没执行改名**，
+#   于是 /opt/weaveora/ 里根本没有 cloud_client.py → 云 worker 每领到任务就
+#   `ModuleNotFoundError: No module named 'cloud_client'` → 崩溃退出 → systemd 每 6s
+#   重启一次（restart counter 到了 25），任务永远停在 running（用户看到「转圈」）。
+#
+# 本脚本的防呆：
+#   ① 一律先传成 <file>.new，**在目标机用目标机的 python 做语法校验**（VPS 是 py3.6，
+#      本地可能更新，只有目标机能证明能否跑）；
+#   ② 全部通过才一起原子改名（要么全换、要么不动）——不存在“传了一半”的中间态；
+#   ③ 改名前置备份 <file>.bak.<ts>，任一步失败自动回滚；
+#   ④ 重启后做 is-active + 日志尾部检查。
+#
+# 用法：bash deploy/vps-worker-deploy.sh
+# 可覆盖：WEAVEORA_WORKER_HOST / WEAVEORA_SSH_KEY / WEAVEORA_WORKER_DIR
+set -euo pipefail
+
+HOST="${WEAVEORA_WORKER_HOST:-root@sysou.com}"
+KEY="${WEAVEORA_SSH_KEY:-$HOME/.ssh/comfy_tunnel_ed25519}"
+DIR="${WEAVEORA_WORKER_DIR:-/opt/weaveora}"
+SVC="weaveora-cloud-worker"
+FILES=(stub_worker.py cloud_client.py cloud_image.py comfy_client.py audio_client.py)
+
+cd "$(dirname "$0")/../worker"
+SSH=(ssh -i "$KEY" -o BatchMode=yes -o ConnectTimeout=15 "$HOST")
+TS="$(date +%Y%m%d-%H%M%S)"
+
+echo "== 1/5 上传（.new）=="
+for f in "${FILES[@]}"; do
+  test -f "$f" || { echo "!! 仓库里缺 $f"; exit 1; }
+  scp -i "$KEY" -q "$f" "$HOST:$DIR/$f.new"
+  echo "   $f  $(wc -c < "$f") bytes"
+done
+
+echo "== 2/5 目标机语法校验（用它自己的 python）=="
+if ! "${SSH[@]}" "set -e; cd '$DIR'; for f in ${FILES[*]}; do /usr/bin/python3 -m py_compile \$f.new && echo \"   OK \$f\" || { echo \"!! \$f 语法不通过\"; exit 1; }; done"; then
+  echo "!! 有文件校验失败 —— 已保持线上原样（只留下 .new 供排查）"
+  exit 1
+fi
+
+echo "== 3/5 备份 + 原子改名 =="
+"${SSH[@]}" "set -e; cd '$DIR'
+  for f in ${FILES[*]}; do [ -f \"\$f\" ] && cp -f \"\$f\" \"\$f.bak.$TS\"; done
+  for f in ${FILES[*]}; do mv -f \"\$f.new\" \"\$f\"; done
+  echo '   已替换'; ls -la stub_worker.py cloud_client.py | sed 's/^/   /'"
+
+echo "== 4/5 重启 $SVC =="
+"${SSH[@]}" "systemctl restart $SVC; sleep 8; systemctl is-active $SVC | sed 's/^/   /'"
+
+echo "== 5/5 自检（导入 + 日志）=="
+# 注意：stub_worker 模块级有「MODE 必须是 comfy/cloud」的启动守卫（防 stub 模式抢 GPU 任务），
+# 所以导入自检必须带上 WEAVEORA_WORKER_MODE，否则会被误判为导入失败（本脚本第一版就踩了）。
+OK="$("${SSH[@]}" "cd '$DIR' && WEAVEORA_WORKER_MODE=cloud /usr/bin/python3 -c \"import sys; sys.path.insert(0,'$DIR'); import stub_worker, cloud_client, cloud_image, comfy_client, audio_client; print('IMPORTS_OK')\"" || true)"
+echo "   $OK"
+if [ "$OK" != "IMPORTS_OK" ]; then
+  echo "!! 导入失败，回滚："
+  "${SSH[@]}" "cd '$DIR'; for f in ${FILES[*]}; do [ -f \"\$f.bak.$TS\" ] && mv -f \"\$f.bak.$TS\" \"\$f\"; done; systemctl restart $SVC"
+  echo "   已回滚到上一版"
+  exit 1
+fi
+"${SSH[@]}" "journalctl -u $SVC -n 8 --no-pager | tail -6 | sed 's/^/   /'"
+echo
+echo "== 完成。回滚：ssh $HOST 'cd $DIR && for f in ${FILES[*]}; do [ -f \$f.bak.$TS ] && mv -f \$f.bak.$TS \$f; done && systemctl restart $SVC' =="

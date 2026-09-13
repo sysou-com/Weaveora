@@ -644,11 +644,10 @@ async function genPortrait(name: string): Promise<void> {
   if (dirty.value && !(await savePlanInPlace())) return
   portraitBusy.value = true
   try {
-    // 用界面上“当前点选的参考图”直接生成 —— 不必先保存/确认方案
-    const pickedIds = refSelected.value.filter((id) => {
-      const subj = (refSubjects.value[id] ?? '').trim()
-      return subj === '' || subj === name
-    })
+    // 用「本主体名下/方案里/界面未命名点选」的参考图（subjectRefCandidates）——
+    // 不再用「subj==='' 就算本主体」的松散过滤：导入的定妆照 snapshot 里本来就没 subject，
+    // 那个规则会把别的角色的图也当成本主体的（实测把袭人的图带进了警幻的定妆生成）。
+    const pickedIds = subjectRefCandidates(name)
     const created = await createJobs(workspaceId.value, projectId.value, {
       revisionId: revId,
       kind: 'portrait',
@@ -657,7 +656,9 @@ async function genPortrait(name: string): Promise<void> {
     } as never)
     const jobId = created[0]?.id
     if (!jobId) throw new Error('未创建定妆图任务')
-    message.info(`「${name}」定妆图合成中…`)
+    // 把“这次到底用了哪几张参考图”说清楚 —— 用户报过「换一版定妆照没使用我选的参考图」，
+    // 看不到实际入参就只能猜（实测根因是后端把旧定妆照也追加进去了）
+    message.info(`「${name}」定妆图合成中…（参考图 ${pickedIds.length} 张：${pickedIds.map((i) => '#' + i.slice(-4)).join(' ') || '无'}）`)
     const job = await waitJobDone(jobId, 600000)
     if (job.state !== 'succeeded') throw new Error(job.errorMessage || `任务${job.state}`)
     await queryClient.invalidateQueries({ queryKey: ['assets'] })

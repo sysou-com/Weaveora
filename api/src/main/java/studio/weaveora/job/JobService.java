@@ -1721,7 +1721,8 @@ public class JobService {
             }
         }
         int explicitRefs = ids.size();
-        if (sub != null) {
+        if (sub != null && explicitRefs == 0) {
+            // 没显式指定参考图 → 用该主体自己的：当前定妆照 + 方案里勾选的 refs
             if (sub.hasPortrait()) {
                 try {
                     ids.add(UUID.fromString(sub.portraitAssetId()));
@@ -1736,7 +1737,21 @@ public class JobService {
                     // 忽略
                 }
             }
+        } else if (explicitRefs > 0) {
+            // Weaveora 2026-09-13：用户显式选了参考图 → **只用这些**，不再自动追加。
+            //
+            // 为什么必须这样做（用户报「换一版定妆照没使用我选的参考图」）：
+            //   旧逻辑会把 sub.portraitAssetId()（= 用户正要替换掉的旧定妆照）和主体 refs
+            //   无条件追加到末尾，参考图变成「用户选的 + 旧定妆照 + 其它 refs」；
+            //   图片模型参考图越多越互相拉扯，旧脸往往把新脸压回去 → 新参考图看着“没生效”。
+            //   另外前端那个过滤器把「没有 subject 标记」的图也当成本主体的（而导入的定妆照
+            //   本来就没 subject）→ 其它角色的图也会混进来（实测把袭人的图带进了警幻的生成）。
+            log.info("portrait explicit refs project={} subject={} refs={}（不追加旧定妆照与主体 refs）",
+                    projectId, subject, explicitRefs);
         }
+        // 去重保序（用户给的顺序即权重顺序，模型通常更看前面的）
+        java.util.LinkedHashSet<UUID> dedup = new java.util.LinkedHashSet<>(ids);
+        ids = new ArrayList<>(dedup);
         if (sub == null && explicitRefs == 0) {
             throw new BizException(ErrorCode.VALIDATION,
                     "方案里没有主体「" + subject + "」，且没有指定参考图（先在参考图卡片里「一键生成主体」或手动添加）");
