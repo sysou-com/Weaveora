@@ -726,6 +726,23 @@ LIPSYNC_VIDEO_INPUT = os.environ.get("WEAVEORA_LIPSYNC_VIDEO_INPUT", "").strip()
 LIPSYNC_AUDIO_INPUT = os.environ.get("WEAVEORA_LIPSYNC_AUDIO_INPUT", "").strip()
 
 
+# 文件名类输入的候选键（按优先级）：不同加载节点名字不一样
+_VIDEO_FILE_KEYS = ("file", "video", "video_file", "path", "filename", "image", "url")
+_AUDIO_FILE_KEYS = ("audio", "audio_file", "file", "path", "filename", "url")
+
+
+def _derive_input_key(info, want_video):
+    """从节点 schema（object_info）推出「文件名输入」的键名。
+
+    原生 LoadVideo 用 `file`、VHS_LoadVideo 用 `video`、LoadAudio 用 `audio` ——
+    不同节点不一致，写错键名会被 ComfyUI 忽略（并静默使用工作流里写死的旧文件名）。
+    """
+    for k in (_VIDEO_FILE_KEYS if want_video else _AUDIO_FILE_KEYS):
+        if _has_input(info, k):
+            return k
+    return None
+
+
 def _upload_any(data, filename, ctype, sub="input"):
     """上传任意文件到 ComfyUI 输入目录（视频/音频），返回服务器端文件名。"""
     _, body = _comfy("POST", "/upload/image", files={"image": (filename, data, ctype)},
@@ -736,21 +753,46 @@ def _upload_any(data, filename, ctype, sub="input"):
         return None
 
 
-def _set_node_input(graph, title, value, input_key=None):
-    """按节点 title 注入输入（只改第一个匹配到的节点，避免误改）。
+def _set_node_input(graph, title, value, input_key=None, want_video=True):
+    """按节点 title 注入输入；返回命中数。
 
-    input_key 指定要写哪个输入键；不传时回退为「视频→video / 音频→audio」。
+    input_key 显式指定要写哪个输入键；不传则**从节点 schema 推**（原生 LoadVideo=file、
+    VHS_LoadVideo=video、LoadAudio=audio），最后才回退到按 title 猜。
+
+    为什么要 schema 推导 + 清掉非法键（2026-09-13 线上事故）：只靠 title 猜时，
+    给 LoadVideo 写了它不认识的 `video` 键，而真正的 `file` 键保留了工作流 JSON 里
+    写死的旧文件名 —— ComfyUI 直接加载了那个旧文件，于是拿我调试用的静帧片出了片，
+    但外观上「任务成功、资产也有」，极难发现。
     """
     hit = 0
-    key = (input_key or "").strip() or ("video" if "video" in (title or "").lower() else "audio")
+    explicit = (input_key or "").strip()
+    candidates = _VIDEO_FILE_KEYS if want_video else _AUDIO_FILE_KEYS
     for _nid, node in (graph or {}).items():
         if not isinstance(node, dict):
             continue
         meta = node.get("_meta") or {}
-        if (meta.get("title") or "").strip().lower() == (title or "").lower():
-            node.setdefault("inputs", {})
-            node["inputs"][key] = value
-            hit += 1
+        if (meta.get("title") or "").strip().lower() != (title or "").lower():
+            continue
+        info = _node_info(node.get("class_type")) if node.get("class_type") else None
+        # 显式指定的键如果该节点并不声明（env 写错键名），**退回 schema 推导**，
+        # 而不是写到节点不认识的键上（那正是把真文件丢掉、旧文件被静默使用的成因）
+        key = explicit if (explicit and (not info or _has_input(info, explicit))) else None
+        key = key or _derive_input_key(info, want_video) or explicit \
+            or ("video" if want_video else "audio")
+        inputs = node.setdefault("inputs", {})
+        # 同一节点上其它「候选文件名键」：节点不认识的直接删掉，认识的清空
+        # （宁可让 ComfyUI 报「文件名为空」，也不要静默加载旧文件）
+        for k in candidates:
+            if k == key or k not in inputs or not isinstance(inputs[k], str):
+                continue
+            if _has_input(info, k):
+                inputs[k] = ""
+            else:
+                del inputs[k]
+        inputs[key] = value
+        print("[comfy] 注入 %s -> %s.%s = %s" % (title, node.get("class_type"), key, value),
+              flush=True)
+        hit += 1
     return hit
 
 
@@ -811,22 +853,37 @@ def generate_lipsync(client_id, payload, progress_fn=None):
     if still_mode:
         vdata = _still_to_video(vdata, adata, payload.get("duration_sec"))
         print("[comfy] lipsync 画面为静帧 → 已用 ffmpeg 转成与配音等长的 mp4", flush=True)
-    vname = _upload_any(vdata, "weaveora_lipsync_in.mp4", "video/mp4")
+    # 文件名带上本次任务的唯一后缀：一是避免 ComfyUI 重名自动改名（会变成 xxx (1).mp4，
+    # 日志里对不上人），二是从根上堆不了「同名旧文件被静默复用」。
+    _tok = _uuid.uuid4().hex[:8]
+    vname = _upload_any(vdata, "weaveora_lipsync_%s_in.mp4" % _tok, "video/mp4")
     if not vname:
         raise ComfyError("上传画面失败")
-    aname = _upload_any(adata, "weaveora_lipsync_voice.wav", "audio/wav")
+    aname = _upload_any(adata, "weaveora_lipsync_%s_voice.wav" % _tok, "audio/wav")
     if not aname:
         raise ComfyError("上传配音失败")
 
     with open(LIPSYNC_WORKFLOW, "r", encoding="utf-8") as fh:
         graph = json.load(fh)
     vh = _set_node_input(graph, LIPSYNC_VIDEO_TITLE, vname, LIPSYNC_VIDEO_INPUT)
-    ah = _set_node_input(graph, LIPSYNC_AUDIO_TITLE, aname, LIPSYNC_AUDIO_INPUT)
+    ah = _set_node_input(graph, LIPSYNC_AUDIO_TITLE, aname, LIPSYNC_AUDIO_INPUT, want_video=False)
     if not vh or not ah:
         raise ComfyError(
             "工作流里没找到标题为「%s」/「%s」的节点：请在 ComfyUI 里把承载视频/音频的节点标题改成这两个值"
             "（或用 WEAVEORA_LIPSYNC_VIDEO_TITLE / _AUDIO_TITLE 指定）"
             % (LIPSYNC_VIDEO_TITLE, LIPSYNC_AUDIO_TITLE))
+
+    # 自检：确认注入后的图上确实指向本次上传的文件（防止再出现「写错键→静默用旧文件」）
+    dirty = []
+    for node in graph.values():
+        if not isinstance(node, dict):
+            continue
+        for k, v in (node.get("inputs") or {}).items():
+            if isinstance(v, str) and v and v.endswith((".mp4", ".wav", ".png", ".jpg")) \
+                    and v not in (vname, aname):
+                dirty.append("%s.%s=%s" % (node.get("class_type"), k, v))
+    if dirty:
+        raise ComfyError("对口型工作流里还有指向其它文件的输入（拒绝跑，避免拿错素材）：%s" % ", ".join(dirty))
 
     prefix = "weaveora_lipsync_" + _uuid.uuid4().hex[:6]
     for node in graph.values():

@@ -86,7 +86,7 @@ Invoke-RestMethod "http://127.0.0.1:8188/object_info" |
 
 ---
 
-## 二、本机已排掉的 13 个坑（2026-09-13，都别踩）
+## 二、本机已排掉的 14 个坑（2026-09-13，都别踩）
 
 这些坑的表现都是「**ComfyUI 卡住 / 队列永远 running=1 / GPU 0%**」，实际是软件问题，不是显卡不够。
 
@@ -105,6 +105,7 @@ Invoke-RestMethod "http://127.0.0.1:8188/object_info" |
 | 11 | `comfy POST /prompt -> 400 no_prompt` | 导出的「API 格式」工作流是**裸节点图** `{"1":{...}}`，而 `/prompt` 要 `{"prompt": 图, "client_id":...}` | `_post_prompt({"prompt": graph, "client_id": client_id}, client_id)` |
 | 12 | 任务 `succeeded`、mp4 也落盘，但**资源库看不到**；且该资产无宽高/时长 | ① 前端 `outputAssets` 白名单漏了 `lipsync`（`GAL_TABS` 里有 Tab → 那个 Tab 永远空）② worker 没回填 width/height/duration | ① 白名单补 `lipsync`（抽成 `OUTPUT_KINDS` 常量，注释写明「Tab 有的 kind 必须都在白名单」）；② worker 新增 `_probe_video_meta()`（ffmpeg -i 读回 512/512/5000ms）；已产出的那条资产已 SQL 回填 |
 | 13 | 跑到第 **15 分钟**被判 `WORKER_STUCK 执行超时（worker 无心跳完成）`，但 worker 心跳正常、ComfyUI 已 `Doing inference 5/8` | 回收器 `reapStaleRunning()` 只比 `startedAt`、硬编码 `minusMinutes(15)`（注释还写着 30min），完全不看 worker 心跳——对口型一个 5s 镜实测 **25–30 分钟**，必被杀 | 改成「心跳感知 + 硬上限」：`running-timeout-minutes`（默认 60，可配）+ worker `lastSeenAt` 宽限 5min 内不回收 + `max(4×超时, 超时+60min)` 硬上限；回收改按 id 单条 |
+| 14 | **任务 succeeded、资产也在，但画面是错的素材**（拿调试用的静帧片出了片，5s 音频配上我那张测试脸） | worker 把上传后的文件名注入到 `LoadVideo` **不认识的 `video` 键**，而真键 `file` 保留了工作流 JSON 里写死的旧文件名 → ComfyUI 静默加载旧文件。验尸方法：`GET /history` 看该 prompt 的图，`LoadVideo.inputs` 里两个键都会在那儿 | ① `_set_node_input` 改为**从节点 schema 推导键名**（`file`/`video`/`audio`，env 写错也回退）；② 删/清同一节点上其它候选文件名键；③ 上传文件名带**每任务唯一后缀**，从根上消掉重名复用；④ 注入后**全图自检**：还有指向其它 `.mp4/.wav` 的输入就拒跑；⑤ 工作流 JSON 的默认文件名改空串；⑥ supervisor 启动回显 lipsync env（本次就是靠它确认 `videoInput=file`） |
 
 ---
 

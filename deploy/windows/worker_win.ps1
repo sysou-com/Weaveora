@@ -30,6 +30,7 @@ $env:WEAVEORA_LIPSYNC_VIDEO_INPUT = "file"
 $env:WEAVEORA_LIPSYNC_TIMEOUT = "1800"
 
 Log "worker supervisor started (mode=comfy api=18080 comfy=8188)"
+Log ("lipsync env: workflow=" + $env:WEAVEORA_LIPSYNC_WORKFLOW + " videoInput=" + $env:WEAVEORA_LIPSYNC_VIDEO_INPUT + " audioInput=" + $env:WEAVEORA_LIPSYNC_AUDIO_INPUT + " timeout=" + $env:WEAVEORA_LIPSYNC_TIMEOUT)
 while ($true) {
     Log "starting stub_worker.py ..."
     Push-Location $workDir
