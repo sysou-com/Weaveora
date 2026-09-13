@@ -303,6 +303,19 @@ const transitions = ['cut', 'dissolve', 'fade', 'wipe'].map((v) => ({ label: v, 
             @update:value="(v: number | null) => props.plan.edit_plan && (props.plan.edit_plan.tail_sec = v ?? 0.3)"
           />
         </label>
+        <label class="row">
+          <span class="key" title="配音比模型单次上限长时怎么处理；这直接决定云端调用次数（钱）">超长策略</span>
+          <select
+            :value="props.plan.edit_plan.oversize_policy ?? 'stretch'"
+            class="select"
+            :disabled="disabled"
+            @change="(e: Event) => props.plan.edit_plan && (props.plan.edit_plan.oversize_policy = (e.target as HTMLSelectElement).value as 'stretch' | 'overflow' | 'segment')"
+          >
+            <option value="stretch">本地拉伸（不额外花钱）</option>
+            <option value="overflow">配音溢出下一镜（不额外花钱）</option>
+            <option value="segment">切段生成（每多一段多一次调用）</option>
+          </select>
+        </label>
       </div>
       </template>
     </section>

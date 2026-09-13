@@ -258,6 +258,20 @@ export function modelClipCap(plan: { edit_plan?: { video_model_max_sec?: number 
   return v > 0 ? v : 5
 }
 
+/**
+ * 「配音比模型单次上限长」时的处理策略 —— 直接决定**云端调用次数（= 钱）**：
+ *
+ * - `stretch`（默认）：按模型上限生成 **1 次**，本地重定时拉伸到镜头需要的时间。**不多花钱**。
+ * - `overflow`：按模型上限生成 1 次，画面到点就切，配音**溢出到下一镜**（旁白类可接受）。**不多花钱**。
+ * - `segment`：切成 N 段分别生成 → **每多一段就多一次云端调用**（按次计费时最贵）。
+ */
+export type OversizePolicy = 'stretch' | 'overflow' | 'segment'
+
+export function oversizePolicy(plan: { edit_plan?: Record<string, unknown> }): OversizePolicy {
+  const v = plan?.edit_plan?.oversize_policy as string | undefined
+  return v === 'overflow' || v === 'segment' ? v : 'stretch'
+}
+
 /** 镜头尾部呼吸余量（秒）：项目级设定优先，默认 0.3 */
 export function planTailSec(plan: { edit_plan?: { tail_sec?: number } }): number {
   const v = Number(plan?.edit_plan?.tail_sec ?? NaN)
@@ -273,6 +287,8 @@ export interface ShotSegment {
 export interface ShotTiming {
   /** 本镜需要多长（配音占用 + 余量） */
   need: number
+  /** 单段素材不足、需要**本地拉伸**补齐（不额外调用云端） */
+  stretch: boolean
   /** 分段（单段时长度为 1） */
   segs: ShotSegment[]
   /** 配音占用（不含余量） */
@@ -300,6 +316,7 @@ export function computeShotTiming(
   cap: number,
   tail: number,
   minClip = 1,
+  policy: OversizePolicy = 'stretch',
 ): ShotTiming {
   const lines = shot.narrations ?? []
   let voiceEnd = 0
@@ -316,8 +333,17 @@ export function computeShotTiming(
 
   let segs: ShotSegment[] = []
   let warn = ''
+  let stretch = false
   if (need <= cap) {
     segs = [{ index: 0, start_sec: 0, duration_sec: need }]
+  } else if (policy === 'stretch') {
+    // 按模型上限出 1 次 → 渲染时本地拉伸到 need：**不增加云端调用**
+    segs = [{ index: 0, start_sec: 0, duration_sec: cap }]
+    stretch = true
+    warn = `需要 ${need}s，超过模型单次上限 ${cap}s → 按上限生成 1 次后**本地拉伸**到 ${need}s（不额外消耗云端调用）`
+  } else if (policy === 'overflow') {
+    segs = [{ index: 0, start_sec: 0, duration_sec: cap }]
+    warn = `需要 ${need}s，超过模型上限 ${cap}s → 画面按 ${cap}s，配音溢出到下一镜（不额外消耗云端调用）`
   } else {
     const n = Math.ceil(need / cap)
     // **平均切分**（而不是先填满第一段、剩下丢给末段）：
@@ -336,9 +362,10 @@ export function computeShotTiming(
       const prev = segs[segs.length - 1]
       prev.duration_sec = r1(prev.duration_sec + last.duration_sec)
     }
-    warn = `需要 ${need}s，超过模型单次上限 ${cap}s → 切成 ${segs.length} 段生成（同镜内 cut 拼接）`
+    warn = `需要 ${need}s，超过模型单次上限 ${cap}s → 切成 ${segs.length} 段生成`
+      + `（同镜内 cut 拼接，**将多消耗 ${segs.length - 1} 次云端调用**）`
   }
-  return { need, segs, voiceEnd: r1(voiceEnd), warn }
+  return { need, segs, stretch, voiceEnd: r1(voiceEnd), warn }
 }
 
 /** 某镜当前是否已按配音校准过（时长与分段一致） */
@@ -349,6 +376,7 @@ export function shotTimingAligned(
   const cur = Number(shot.duration_sec ?? 0)
   const segs = shot.segments ?? []
   if (Math.abs(cur - t.need) > 0.05) return false
+  if ((shot as { stretch?: boolean }).stretch !== t.stretch) return false
   if (segs.length !== t.segs.length) return false
   return segs.every((s, i) => Math.abs(Number(s.duration_sec) - t.segs[i].duration_sec) < 0.05)
 }
@@ -368,7 +396,7 @@ export interface CalibrateDiff {
  */
 export function calibrateAllShots(
   plan: {
-    edit_plan?: { video_model_max_sec?: number; tail_sec?: number }
+    edit_plan?: { video_model_max_sec?: number; tail_sec?: number; oversize_policy?: string; fps?: number }
     shots?: Array<{
       shot_no: number
       duration_sec?: number
@@ -384,16 +412,19 @@ export function calibrateAllShots(
   // 段长下限 = 模型最小帧数 / fps（默认 32 帧），避免生成出低于下限的碎片段
   const fps = Math.max(1, Number((plan as { edit_plan?: { fps?: number } }).edit_plan?.fps ?? 30))
   const minSeg = Math.max(0.5, 32 / fps)
+  const policy = oversizePolicy(plan)
   const out: CalibrateDiff[] = []
   for (const s of plan.shots ?? []) {
-    const t = computeShotTiming(s, durations, cap, tail, minSeg)
+    const t = computeShotTiming(s, durations, cap, tail, minSeg, policy)
     const from = Number(s.duration_sec ?? 0)
     const changed = Math.abs(from - t.need) > 0.05 || !shotTimingAligned(s, t)
     if (changed) {
       out.push({ shotNo: s.shot_no, from, to: t.need, segCount: t.segs.length, warn: t.warn })
       if (apply) {
-        s.duration_sec = t.need
+        // overflow 策略：画面按模型上限（配音溢出到下一镜），其余策略画面覆盖整段
+        s.duration_sec = policy === 'overflow' ? t.segs[0].duration_sec : t.need
         s.segments = t.segs
+        ;(s as { stretch?: boolean | null }).stretch = t.stretch
       }
     }
   }
@@ -403,7 +434,7 @@ export function calibrateAllShots(
 /** 音画体检：渲染前检查配音与镜头、分段是否协调（返回人类可读的问题列表） */
 export function audioVideoHealthCheck(
   plan: {
-    edit_plan?: { video_model_max_sec?: number; tail_sec?: number }
+    edit_plan?: { video_model_max_sec?: number; tail_sec?: number; oversize_policy?: string; fps?: number }
     shots?: Array<{
       shot_no: number
       duration_sec?: number
@@ -417,9 +448,10 @@ export function audioVideoHealthCheck(
   const tail = planTailSec(plan)
   const fps = Math.max(1, Number((plan as { edit_plan?: { fps?: number } }).edit_plan?.fps ?? 30))
   const minSeg = Math.max(0.5, 32 / fps)
+  const policy = oversizePolicy(plan)
   const issues: string[] = []
   for (const s of plan.shots ?? []) {
-    const t = computeShotTiming(s, durations, cap, tail, minSeg)
+    const t = computeShotTiming(s, durations, cap, tail, minSeg, policy)
     const dur = Number(s.duration_sec ?? 0)
     if (t.voiceEnd > 0 && dur + 0.05 < t.voiceEnd) {
       issues.push(`第 ${s.shot_no} 镜：配音 ${t.voiceEnd}s 超出镜头 ${dur}s（会被截断）`)
@@ -428,6 +460,9 @@ export function audioVideoHealthCheck(
     }
     if (dur > cap && !(s.segments ?? []).length) {
       issues.push(`第 ${s.shot_no} 镜：${dur}s 超过模型上限 ${cap}s，但未分段（生成会失败/被截）`)
+    } else if (dur > cap + 0.05 && (s.segments ?? []).length === 1
+        && policy === 'stretch' && (s as { stretch?: boolean }).stretch !== true) {
+      issues.push(`第 ${s.shot_no} 镜：${dur}s 超过模型上限但未标记「本地拉伸」（画面会比配音短）`)
     }
     const segs = s.segments ?? []
     if (segs.length > 1) {

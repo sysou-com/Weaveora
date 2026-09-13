@@ -203,6 +203,14 @@ export interface DirectorShot {
    * duration_sec = 各段之和；同镜内段间必须 cut 拼接。
    */
   segments?: Array<{ index: number; start_sec: number; duration_sec: number }> | null
+  /**
+   * P13：单段素材**时长不足**时（配音比模型单次上限长），是否用「本地重定时拉伸」补齐。
+   *
+   * 这样**不增加云端调用次数**（按次计费的模型尤其重要）：1 次调用出模型上限长度，
+   * 渲染时 setpts 拉长到镜头需要的时间；音频位置不动。
+   * 若为 false/未设且 segments 只有一段 → 渲染保持原速（画面会比配音短）。
+   */
+  stretch?: boolean | null
   zh?: string
   en_synced?: boolean
   /** P2 运镜关键帧（穿越/从A到B看到C）：≥2 帧时生成按帧出图，motion 用首/尾帧 */
@@ -259,6 +267,11 @@ export interface VideoPlan extends BasePlan {
     video_model_max_sec?: number
     /** P13：镜头尾部呼吸余量（秒），默认 0.3 */
     tail_sec?: number
+    /**
+     * P13：配音超过模型单次上限时的策略（直接决定云端调用次数/成本）。
+     * stretch=本地拉伸(默认,不多花钱) | overflow=配音溢出下一镜(不多花钱) | segment=切段(多消耗调用)
+     */
+    oversize_policy?: 'stretch' | 'overflow' | 'segment'
   }
 }
 

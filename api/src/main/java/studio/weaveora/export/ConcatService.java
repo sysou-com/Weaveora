@@ -129,8 +129,19 @@ public class ConcatService {
                 // 叠化模式：每段素材尾部 clone 延长 CROSSFADE_SEC，供 xfade 重叠且时长守恒
                 double pad = crossfade ? CROSSFADE_SEC : 0.0;
                 double target = c.durationSec() + pad;
+                // P13：素材比镜头短（配音比模型单次上限长）→ **本地重定时拉伸**补齐，
+                // 不额外调用云端（按次计费的模型省一次钱）；音频/字幕位置不受影响。
+                double stretch = 0.0;
+                if (c.stretch()) {
+                    double srcDur = durationOf(raw);
+                    if (srcDur > 0.05 && target > srcDur * 1.02) {
+                        stretch = target / srcDur;
+                        log.info("stretch clip to shot length: src={}s target={}s factor={}",
+                                fmt3(srcDur), fmt3(target), fmt3(stretch));
+                    }
+                }
                 encodeSegment(raw, seg, c, fps, target, pad, canvas[0], canvas[1],
-                        subtitleOn && subOk ? c.subs() : null, work);
+                        subtitleOn && subOk ? c.subs() : null, work, stretch);
                 segs.add(seg);
                 segDurs.add(String.valueOf(c.durationSec() + pad));
             }
@@ -343,11 +354,15 @@ public class ConcatService {
      * pad>0 时用 tpad 尾帧 clone 补足（供 xfade 叠化与时长守恒）。
      */
     private void encodeSegment(Path raw, Path out, MediaClip c, int fps, double target, double pad,
-                               int cw, int ch, List<SubCue> subs, Path workDir)
+                               int cw, int ch, List<SubCue> subs, Path workDir, double stretchFactor)
             throws IOException, InterruptedException {
         String vf = "scale=" + cw + ":" + ch + ":force_original_aspect_ratio=increase,"
-                + "crop=" + cw + ":" + ch + ","
-                + "fps=" + fps + ",format=yuv420p";
+                + "crop=" + cw + ":" + ch + ",";
+        // P13：先按倍率重定时（拉长时长，帧会被复制/后续重采样），再统一 fps
+        if (stretchFactor > 1.01) {
+            vf += "setpts=PTS*" + fmt3(stretchFactor) + ",";
+        }
+        vf += "fps=" + fps + ",format=yuv420p";
         if (pad > 0) {
             vf += ",tpad=stop_mode=clone:stop_duration=" + pad;
         }
@@ -597,7 +612,10 @@ public class ConcatService {
                 }
                 log.warn("render segmented shot without clips: shot_no={} → 回退整镜素材", shotNo);
             }
-            draft.add(new MediaClip(m.storageKey(), isVideo(m), dur, cues, List.of()));
+            // P13：单段但配音比模型上限长 → 标记为“本地拉伸补齐”（不额外花云端调用）
+            boolean stretchNeeded = segNode.isArray() && segNode.size() <= 1
+                    && shot.path("stretch").asBoolean(false);
+            draft.add(new MediaClip(m.storageKey(), isVideo(m), dur, cues, List.of(), stretchNeeded));
             shotsOfDraft.add(shot);
             voicesOfDraft.add(draft.get(draft.size() - 1).voices());
         }
@@ -893,6 +911,11 @@ public class ConcatService {
     }
 
     private record MediaClip(String assetKey, boolean video, double durationSec,
-                             List<studio.weaveora.asset.AudioAssetLookup.VoiceCue> voices, List<SubCue> subs) {
+                             List<studio.weaveora.asset.AudioAssetLookup.VoiceCue> voices, List<SubCue> subs,
+                             boolean stretch) {
+        MediaClip(String assetKey, boolean video, double durationSec,
+                  List<studio.weaveora.asset.AudioAssetLookup.VoiceCue> voices, List<SubCue> subs) {
+            this(assetKey, video, durationSec, voices, subs, false);
+        }
     }
 }
