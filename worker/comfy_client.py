@@ -759,12 +759,21 @@ def generate_lipsync(client_id, payload, progress_fn=None):
 
     if progress_fn:
         progress_fn(15, "upload")
-    vdata = fetch_reference_bytes(vkey)
+    # fetch_reference_bytes 返回 (bytes, content_type) —— 别把 tuple 直接塞给上传（
+    # 之前就是 b"".join(parts) 报 "expected a bytes-like object, tuple found"）。
+    vdata, vctype = fetch_reference_bytes(vkey)
+    # 多段配音：先合成为一个音频（本机 ffmpeg），一次对口型
+    adata = _concat_voice(vkeys)
+    # 没有 motion 的镜，后端会把关键帧静帧（png）当画面传过来；口型工作流吃的是视频
+    # （LoadVideo → GetVideoComponents），所以先把它变成与配音等长的 mp4。
+    still_mode = (bool(payload.get("videoIsStill")) or bool(payload.get("isStill"))
+                  or str(vctype or "").startswith("image"))
+    if still_mode:
+        vdata = _still_to_video(vdata, adata, payload.get("duration_sec"))
+        print("[comfy] lipsync 画面为静帧 → 已用 ffmpeg 转成与配音等长的 mp4", flush=True)
     vname = _upload_any(vdata, "weaveora_lipsync_in.mp4", "video/mp4")
     if not vname:
         raise ComfyError("上传画面失败")
-    # 多段配音：先合成为一个音频（本机 ffmpeg），一次对口型
-    adata = _concat_voice(vkeys)
     aname = _upload_any(adata, "weaveora_lipsync_voice.wav", "audio/wav")
     if not aname:
         raise ComfyError("上传配音失败")
@@ -784,7 +793,9 @@ def generate_lipsync(client_id, payload, progress_fn=None):
         if isinstance(node, dict) and "filename_prefix" in (node.get("inputs") or {}):
             node["inputs"]["filename_prefix"] = prefix
     _free_comfy_models()
-    pid = _post_prompt(graph, client_id)
+    # 注意：导出的「API 格式」工作流是**裸节点图**（{"1":{...}}），而 /prompt 要的是
+    # {"prompt": 图, "client_id": ...} —— 直接投裸图会被 ComfyUI 拒为 no_prompt。
+    pid = _post_prompt({"prompt": graph, "client_id": client_id}, client_id)
     if progress_fn:
         progress_fn(40, "lipsync")
     rec = _poll_history(client_id, pid, timeout=LIPSYNC_TIMEOUT)
@@ -806,7 +817,9 @@ def _concat_voice(voice_keys):
     blobs = []
     for k in voice_keys:
         try:
-            blobs.append(fetch_reference_bytes(k))
+            # fetch_reference_bytes 返回 (bytes, ctype)
+            b, _ct = fetch_reference_bytes(k)
+            blobs.append(b)
         except Exception:
             continue
     if not blobs:
@@ -821,7 +834,7 @@ def _concat_voice(voice_keys):
             fh.write(b)
         paths.append(fp)
     out = os.path.join(tmp, "out.wav")
-    cmd = ["ffmpeg", "-y"]
+    cmd = [_ffmpeg_exe(), "-y"]
     for fp in paths:
         cmd += ["-i", fp]
     cmd += ["-filter_complex", "".join("[%d:a]" % i for i in range(len(paths)))
@@ -832,3 +845,52 @@ def _concat_voice(voice_keys):
             return fh.read()
     except Exception:
         return blobs[0]
+
+
+def _ffmpeg_exe():
+    """本机 ffmpeg 路径（优先 imageio_ffmpeg 自带的，其次 PATH 里的 ffmpeg）。"""
+    try:
+        import imageio_ffmpeg as _iif
+        return _iif.get_ffmpeg_exe()
+    except Exception:
+        return "ffmpeg"
+
+
+def _wav_seconds(path):
+    try:
+        import wave
+        with wave.open(path, "rb") as w:
+            return w.getnframes() / float(w.getframerate() or 1)
+    except Exception:
+        return None
+
+
+def _still_to_video(img_bytes, audio_bytes, duration_sec=None, size=512, fps=25):
+    """关键帧静帧 + 配音 → mp4（口型工作流需要视频轨）。时长以实际配音为准。
+
+    为什么必须做：LatentSync 工作流是 LoadVideo → GetVideoComponents，
+    直接把 png 当 mp4 传进去 LoadVideo 会解码失败。
+    """
+    import subprocess, tempfile
+    if not img_bytes:
+        raise ComfyError("静帧画面为空，无法生成对口型输入视频")
+    d = tempfile.mkdtemp(prefix="weaveora_still_")
+    ip = os.path.join(d, "in.png")
+    ap = os.path.join(d, "a.wav")
+    op = os.path.join(d, "out.mp4")
+    with open(ip, "wb") as fh:
+        fh.write(img_bytes)
+    with open(ap, "wb") as fh:
+        fh.write(audio_bytes or b"")
+    dur = _wav_seconds(ap) or float(duration_sec or 0) or 3.0
+    r = subprocess.run(
+        [_ffmpeg_exe(), "-y", "-loglevel", "error", "-loop", "1", "-i", ip, "-t", "%.3f" % dur,
+         "-r", str(fps), "-vf",
+         "scale=%d:%d:force_original_aspect_ratio=decrease,pad=%d:%d:(ow-iw)/2:(oh-ih)/2"
+         % (size, size, size, size),
+         "-pix_fmt", "yuv420p", "-c:v", "libx264", op],
+        capture_output=True, text=True, timeout=300)
+    if r.returncode != 0 or not os.path.exists(op):
+        raise ComfyError("静帧转视频失败: %s" % (r.stderr or "")[-300:])
+    with open(op, "rb") as fh:
+        return fh.read()
