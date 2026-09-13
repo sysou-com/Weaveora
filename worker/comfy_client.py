@@ -991,6 +991,73 @@ def _face_precheck(video_bytes, where="lipsync"):
 
 
 
+# 参考图人脸特征提取（子进程，**CPU**）：用于「锁人」——多人同框时只驱动说话人那张脸。
+# 用 CPU 同样是为了不占显存（ComfyUI 还缓存着模型）。
+_EMBED = r'''
+import os, sys, json, cv2, numpy as np
+node = os.environ.get("WEAVEORA_LATENTSYNC_DIR") or r"D:\ComfyUI\custom_nodes\ComfyUI-LatentSyncWrapper"
+sys.path.insert(0, node)
+AUX = os.path.join(node, "checkpoints", "auxiliary")
+try:
+    from insightface.app import FaceAnalysis
+    app = FaceAnalysis(allowed_modules=["detection", "recognition"], root=AUX,
+                       providers=["CPUExecutionProvider"])
+    app.prepare(ctx_id=-1, det_size=(512, 512))
+except Exception as e:
+    print("SKIP:init:" + str(e)[:160]); sys.exit(0)
+img = cv2.imdecode(np.fromfile(sys.argv[1], dtype=np.uint8), cv2.IMREAD_COLOR)
+if img is None:
+    print("SKIP:decode"); sys.exit(0)
+faces = app.get(img)
+if not faces:
+    print("SKIP:noface"); sys.exit(0)
+f = max(faces, key=lambda x: (x.bbox[2]-x.bbox[0])*(x.bbox[3]-x.bbox[1]))
+print("EMB:" + json.dumps([float(v) for v in f.normed_embedding]))
+'''
+
+
+def _embed_reference(img_bytes):
+    """取参考图（定妆照）里最大脸的 512 维特征；拿不到返回 None（调用方退回旧行为）。"""
+    import subprocess
+    import sys as _sys
+    import tempfile
+    if not img_bytes:
+        return None
+    d = tempfile.mkdtemp(prefix="weaveora_emb_")
+    fp = os.path.join(d, "ref.png")
+    try:
+        with open(fp, "wb") as fh:
+            fh.write(img_bytes)
+        r = subprocess.run([_sys.executable, "-c", _EMBED, fp],
+                           capture_output=True, text=True, timeout=900)
+        out = (r.stdout or "") + (r.stderr or "")
+        for line in out.splitlines():
+            if line.startswith("SKIP:"):
+                print("[comfy] 参考图人脸特征提取跳过（%s）" % line[5:], flush=True)
+                return None
+            if line.startswith("EMB:"):
+                import json as _json
+                return _json.loads(line[4:])
+        print("[comfy] 参考图人脸特征无结果：%s" % out[:120], flush=True)
+        return None
+    except Exception as e:
+        print("[comfy] 参考图人脸特征异常：%s" % e, flush=True)
+        return None
+    finally:
+        import shutil as _sh
+        _sh.rmtree(d, ignore_errors=True)
+
+
+def _set_node_scalar(graph, node_class, key, value):
+    """按 class_type 给节点写一个标量输入（返回命中数）。用于注入人脸特征文件路径等。"""
+    hit = 0
+    for node in (graph or {}).values():
+        if isinstance(node, dict) and node.get("class_type") == node_class:
+            node.setdefault("inputs", {})[key] = value
+            hit += 1
+    return hit
+
+
 def _probe_video_meta(mp4_bytes):
     """用 ffmpeg -i 读 mp4 的宽高与时长（返回 (w, h, duration_ms)）。
 
@@ -1087,6 +1154,35 @@ def generate_lipsync(client_id, payload, progress_fn=None):
     for node in graph.values():
         if isinstance(node, dict) and "filename_prefix" in (node.get("inputs") or {}):
             node["inputs"]["filename_prefix"] = prefix
+    # --- 锁人：多人同框必须知道「谁在说话」，否则逐帧取最大脸会中途换人（画面坏掉）---
+    speakers = payload.get("speakers") if isinstance(payload.get("speakers"), dict) else {}
+    speaker_count = int(payload.get("speakerCount") or len(speakers) or 0)
+    if speaker_count > 1:
+        raise ComfyError(
+            "该镜有 %d 个人说话（%s）——LatentSync 每帧只能驱动一张脸，双人对话会把台词配到同一个人脸上"
+            "（嘴型错位、面部区域错位）。请把这一镜拆成两个单人镜（各自单独说话），或等「按段驱动」上线。"
+            % (speaker_count, payload.get("speakerNames") or "、".join(speakers.keys())))
+    _emb_path = ""
+    if speakers:
+        _who = next(iter(speakers))
+        try:
+            _pb, _ = fetch_reference_bytes(speakers[_who])
+            _emb = _embed_reference(_pb)
+            if _emb:
+                import tempfile as _tf
+                _f = _tf.NamedTemporaryFile("w", prefix="weaveora_emb_", suffix=".json",
+                                            delete=False, encoding="utf-8")
+                json.dump(_emb, _f)
+                _f.close()
+                _emb_path = _f.name
+                print("[comfy] 已锁定说话人「%s」的人脸特征（%d 维）" % (_who, len(_emb)), flush=True)
+        except Exception as e:
+            print("[comfy] 说话人特征准备失败（退回「最大脸」）: %s" % e, flush=True)
+    if _emb_path:
+        _n = _set_node_scalar(graph, LIPSYNC_NODE_CLASS, "target_embedding_path", _emb_path)
+        print("[comfy] 已注入 target_embedding_path（命中 %d 个 %s）" % (_n, LIPSYNC_NODE_CLASS), flush=True)
+    else:
+        print("[comfy] 未提供说话人参考图 → 沿用「取最大脸」（多人同框可能配错人）", flush=True)
     # 帧率：生成帧率必须 = 播放帧率（默认都跟源片 fps 走）
     _mode, _nodes = _apply_fps_policy(graph)
     print("[comfy] 对口型 fps 策略：%s（节点：%s）" % (_mode, ",".join(str(x) for x in _nodes)),
@@ -1121,6 +1217,13 @@ def generate_lipsync(client_id, payload, progress_fn=None):
         if "Face not detected" in _raw:
             raise ComfyError(NO_FACE_MSG)
         raise ComfyError("对口型推理失败：%s" % e)
+    finally:
+        # 人脸特征临时文件用完即删（里面是人脸特征，不留在磁盘上）
+        if _emb_path:
+            try:
+                os.remove(_emb_path)
+            except OSError:
+                pass
     outs = _download_outputs(rec, prefix)
     if not outs:
         # 有些口型工作流走 SaveVideo/自定义节点，兜底再抓一次不限风格

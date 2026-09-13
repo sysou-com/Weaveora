@@ -1503,6 +1503,51 @@ public class JobService {
         return out;
     }
 
+    /**
+     * P13：某剧情主体的定妆照存储 key（用于对口型「锁人」）；没有返回 null。
+     *
+     * <p>取数顺序（线上实测：只有第一条能命中）：
+     * <ol>
+     *   <li>{@code plan.subjects[].portraitAssetId} —— 方案里每个主体记的就是资产 id（权威来源）</li>
+     *   <li>{@code kind=portrait} 且 snapshot.subject 匹配的产物（新链路）</li>
+     *   <li>{@code kind=reference} 且 snapshot.subject 匹配的产物（早期把参考图直接当定妆照）</li>
+     * </ol>
+     * 实测坑：「那宝玉恍恍惚惚」项目里定妆照是 {@code kind=reference} 的 PNG，
+     * 根本不在 portrait 表里 —— 只查 kind=portrait 会永远拿不到参考图，
+     * 锁人静默退化成「取最大脸」，多人镜又回到配错人。
+     */
+    private String portraitKeyOf(JsonNode plan, UUID projectId, UUID workspaceId, String subject) {
+        if (subject == null || subject.isBlank()) {
+            return null;
+        }
+        String assetId = null;
+        for (JsonNode s : plan.path("subjects")) {
+            if (subject.equals(s.path("name").asText(""))) {
+                assetId = s.path("portraitAssetId").asText("");
+                break;
+            }
+        }
+        if (!assetId.isBlank()) {
+            try {
+                var a = assetRepo.findByIdAndWorkspaceId(UUID.fromString(assetId), workspaceId).orElse(null);
+                if (a != null) {
+                    return a.storageKey();
+                }
+            } catch (IllegalArgumentException ignored) {
+                // 非 UUID（脏数据）→ 继续下面的兜底查询
+            }
+        }
+        for (String kind : List.of("portrait", "reference")) {
+            for (studio.weaveora.asset.domain.Asset a : assetRepo
+                    .findByProjectIdAndWorkspaceIdAndKindOrderByCreatedAtDesc(projectId, workspaceId, kind)) {
+                if (subject.equals(studio.weaveora.asset.AssetService.subjectOf(a))) {
+                    return a.storageKey();
+                }
+            }
+        }
+        return null;
+    }
+
     /** 旧签名（不带 shotNos / includeLocked）：等于“全部且跳过封版”。 */
     private List<UUID> resolveVideoShots(UUID userId, UUID workspaceId, UUID projectId,
                                          UUID revisionId, UUID shotId, String kind) {
@@ -1573,6 +1618,39 @@ public class JobService {
             payload.put("voiceCount", voices.size());
             payload.put("duration_sec", shot.path("duration_sec").asDouble(3));
             payload.put("lipSync", shot.path("lip_sync").asBoolean(true));
+            // P13：说话人信息 —— 双人对话必须知道「哪段台词是谁说的」。
+            // narrations 每段带 subject（说话人）与 at_sec/end_sec（时间窗）；
+            // 定妆照（kind=portrait + subject）作为「锁人」参考：worker 用 w600k_r50
+            // 算人脸特征，逐帧只驱动与该特征最像的那张脸。
+            // 为什么必须：LatentSync 逐帧取「面积最大的脸」，多人同框时两张脸的大小会
+            // 在镜头中途互换（实测第 4 镜 frame34 左脸大、frame45 右脸大）→ 突然换人 → 画面坏掉。
+            ObjectNode speakersNode = payload.putObject("speakers");   // {说话人: 定妆照 storageKey}
+            var segmentsNode = payload.putArray("segments");
+            java.util.LinkedHashSet<String> speakerNames = new java.util.LinkedHashSet<>();
+            for (JsonNode n : shot.path("narrations")) {
+                if (!"dialogue".equals(n.path("kind").asText(""))) {
+                    continue;
+                }
+                String who = n.path("subject").asText("").trim();
+                if (who.isEmpty()) {
+                    continue;
+                }
+                speakerNames.add(who);
+                ObjectNode seg = segmentsNode.addObject();
+                seg.put("subject", who);
+                seg.put("startMs", (int) Math.round(n.path("at_sec").asDouble(0) * 1000));
+                seg.put("endMs", (int) Math.round(n.path("end_sec").asDouble(0) * 1000));
+            }
+            payload.put("speakerCount", speakerNames.size());
+            payload.put("speakerNames", String.join("、", speakerNames));
+            for (String who : speakerNames) {
+                String pk = portraitKeyOf(plan, projectId, workspaceId, who);
+                if (pk != null) {
+                    speakersNode.put(who, pk);
+                } else {
+                    log.warn("lipsync 第{}镜说话人「{}」没有定妆照/参考图 —— 无法锁人，将退回「取最大脸」", shotNo, who);
+                }
+            }
             // 本机 LatentSync 实测：峰值显存 ~7.9GiB / 8GiB，跑的时候不能再有别的 GPU 任务。
             // 本机 worker 单线程取任务，天然串行；这两个字段是给前端/运维看的显式提示。
             payload.put("gpuExclusive", true);

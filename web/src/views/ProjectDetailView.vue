@@ -1439,10 +1439,20 @@ const pickerShots = computed(() => {
       const clips = succ(s.shot_no, 'clip')
       const stills = succ(s.shot_no, 'still')
       const visuals = [...clips, ...stills]
-      const voices = succ(s.shot_no, 'voice')
+      const voice = succ(s.shot_no, 'voice')
       const missing: string[] = []
       if (!visuals.length) missing.push('缺画面(motion/关键帧)')
-      if (!voices.length) missing.push('缺配音')
+      if (!voice.length) missing.push('缺配音')
+      // 多人说话：LatentSync 每帧只驱动一张脸，双人对话会把台词配到同一张脸上
+      // （嘴型和脸都错位）—— 必须拆成单人镜，所以这里直接标不可生成
+      const speakers = [...new Set(
+        (s.narrations ?? [])
+          .filter((n) => n.kind === 'dialogue' && (n.subject ?? '').trim() !== '')
+          .map((n) => (n.subject ?? '').trim()),
+      )]
+      if (speakers.length > 1) {
+        missing.push(`${speakers.length} 人说话（${speakers.join('、')}）`)
+      }
       // 最新画面产物的人脸结论（undefined = 未知/历史数据 → 不拦）
       const pool = clips.length ? clips : stills
       const newestVisual = [...pool].sort(
@@ -1466,12 +1476,13 @@ const pickerShots = computed(() => {
         shotNo: s.shot_no,
         revNo: rev?.no ?? null,
         stale: rev?.stale === true,
-        lineCount: voices.length,
+        lineCount: voice.length,
         unit: '段语音',
         eligible: missing.length === 0,
         note: missing.length
           ? `不可：${missing.join('、')}`
-          : `可生成 · ${voices.length} 段语音${clips.length ? '' : '（用关键帧静帧）'}`,
+          : `可生成 · ${voice.length} 段语音${clips.length ? '' : '（用关键帧静帧）'}`,
+          // 注：有多种不可生成原因时，note 列出全部；只有可生成时才走这一支
       }
     }
     const rel = succ(s.shot_no, kind)
