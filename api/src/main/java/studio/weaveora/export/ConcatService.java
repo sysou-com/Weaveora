@@ -27,6 +27,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -568,7 +569,12 @@ public class ConcatService {
             UUID shotId = order <= shotIds.size() ? shotIds.get(order - 1) : null;
             Asset m = pickClipOrStill(workspaceId, projectId, shotId, shotNo);
             if (m == null) continue;   // 无素材的镜不入片（沿用旧行为，不占时间轴）
-            draft.add(new MediaClip(m.storageKey(), isVideo(m), dur, voiceCues(workspaceId, projectId, shotNo), List.of()));
+            // P13：配音的**摆放位置/窗口以当前方案为准**。
+            // 资产快照里的 at_sec/end_sec 是「生成那一刻」冻结的，用户后来拖了/「按实际重排」了，
+            // 渲染却还按旧快照摆 → 听起来像“生成了新配音但渲染还是旧的”。
+            List<studio.weaveora.asset.AudioAssetLookup.VoiceCue> cues =
+                    alignCuesWithPlan(shot, voiceCues(workspaceId, projectId, shotNo));
+            draft.add(new MediaClip(m.storageKey(), isVideo(m), dur, cues, List.of()));
             shotsOfDraft.add(shot);
             voicesOfDraft.add(draft.get(draft.size() - 1).voices());
         }
@@ -647,6 +653,50 @@ public class ConcatService {
             subs.add(new SubCue(a - s0, b - s0, sp.text()));
         }
         return subs;
+    }
+
+    /**
+     * 把配音 cue 的镜内位置对齐到**当前方案**的 narrations（按 line_index 对位）。
+     *
+     * <p>音频文件仍取该段最新生成的产物（见 AudioAssetLookup）；这里只覆盖 at/end，
+     * 保证“渲染出来的配音落在你刚刚在时间轴上看到的位置”。
+     * 方案里找不到对应段（历史数据/line_index 缺失）→ 保留快照值。
+     */
+    private List<studio.weaveora.asset.AudioAssetLookup.VoiceCue> alignCuesWithPlan(
+            JsonNode shot, List<studio.weaveora.asset.AudioAssetLookup.VoiceCue> cues) {
+        if (cues == null || cues.isEmpty()) {
+            return cues == null ? List.of() : cues;
+        }
+        Map<Integer, double[]> planAt = new HashMap<>();
+        JsonNode narr = shot.path("narrations");
+        if (narr.isArray()) {
+            for (int i = 0; i < narr.size(); i++) {
+                JsonNode n = narr.get(i);
+                planAt.put(i, new double[]{n.path("at_sec").asDouble(0), n.path("end_sec").asDouble(0)});
+            }
+        }
+        if (planAt.isEmpty()) {
+            return cues;
+        }
+        List<studio.weaveora.asset.AudioAssetLookup.VoiceCue> out = new ArrayList<>(cues.size());
+        for (studio.weaveora.asset.AudioAssetLookup.VoiceCue c : cues) {
+            double[] pe = planAt.get(c.lineIndex());
+            if (pe == null) {
+                out.add(c);
+                continue;
+            }
+            double at = Math.max(0, pe[0]);
+            double end = pe[1] > at ? pe[1] : 0;
+            if (Math.abs(at - c.atSec()) < 0.001 && Math.abs(end - c.endSec()) < 0.001) {
+                out.add(c);
+                continue;
+            }
+            log.info("voice cue aligned to plan: shot={} line={} at {}->{} end {}->{}",
+                    shot.path("shot_no").asInt(), c.lineIndex(), c.atSec(), at, c.endSec(), end);
+            out.add(new studio.weaveora.asset.AudioAssetLookup.VoiceCue(
+                    c.asset(), at, end, c.lineIndex(), c.lineKind(), c.subject()));
+        }
+        return out;
     }
 
     /**

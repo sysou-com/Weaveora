@@ -7,7 +7,7 @@
  */
 import { Delete, Plus } from 'lucide-vue-next'
 import { NButton, NIcon, NInput, NInputNumber, NSelect, NTooltip, useMessage } from 'naive-ui'
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 
 import type { DirectorShot, NarrationLine } from '@/api/types'
 import { relayoutShotByActual } from '@/utils/plan'
@@ -317,6 +317,32 @@ function relayoutByActual(): void {
  * 用「重排这条」或「重新生成这条」后清除。
  */
 const retexted = ref<Set<number>>(new Set())
+/** 标记时的“旧音频时长”，用于判断该段是否已经重新生成过 */
+const retextedDur = new Map<number, number | null>()
+
+/**
+ * 配音资产变化后自动清理「文本已改」标记：
+ * 该段重新生成过（实际时长变了 / 从无到有）→ 标签恢复为真实音频时长。
+ */
+watch(
+  () => props.durations,
+  () => {
+    if (!retexted.value.size) return
+    const next = new Set(retexted.value)
+    next.forEach((i) => {
+      const now = lineDurSec(i)
+      const before = retextedDur.get(i) ?? null
+      if (now != null && now !== before) {
+        next.delete(i)
+        retextedDur.delete(i)
+      }
+    })
+    if (next.size !== retexted.value.size) {
+      retexted.value = next
+    }
+  },
+  { deep: true },
+)
 
 /** 文本输入：立即把该段标为“文本已改”（时间标签马上按新文本更新），并保存方案 */
 function onTextEdit(): void {
@@ -324,6 +350,7 @@ function onTextEdit(): void {
     const next = new Set(retexted.value)
     next.add(selected.value)
     retexted.value = next
+    retextedDur.set(selected.value, lineDurSec(selected.value))
   }
   commit()
 }
