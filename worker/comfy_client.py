@@ -735,7 +735,8 @@ LIPSYNC_VIDEO_INPUT = os.environ.get("WEAVEORA_LIPSYNC_VIDEO_INPUT", "").strip()
 LIPSYNC_AUDIO_INPUT = os.environ.get("WEAVEORA_LIPSYNC_AUDIO_INPUT", "").strip()
 # LatentSync 的原生输出帧率（configs/unet/stage2_512.yaml: video_fps: 25）。
 # 组装成片时必须用这个值，不能用源片 fps —— 否则时长会按 25/源fps 缩短。
-LIPSYNC_FPS = int(os.environ.get("WEAVEORA_LIPSYNC_FPS", "25") or 25)
+LIPSYNC_FPS = int(os.environ.get("WEAVEORA_LIPSYNC_FPS", "0") or 0)
+LIPSYNC_NODE_CLASS = os.environ.get("WEAVEORA_LIPSYNC_NODE_CLASS", "LatentSyncNode").strip()
 
 
 # 文件名类输入的候选键（按优先级）：不同加载节点名字不一样
@@ -832,6 +833,43 @@ def _ensure_output_fps(graph, fps):
     return fixed
 
 
+def _apply_fps_policy(graph):
+    """帧率策略：默认「**生成帧率 = 播放帧率 = 源片帧率**」。
+
+    为什么（2026-09-13 事故）：LatentSync 的 `video_fps` 决定「按配音时长生成多少帧」
+    （frames ≈ 配音秒数 × fps）并同步截取音频长度；播放时**必须**用同一个 fps，
+    否则时长会按比例变化（曾把组装端接到源片 30fps 而生成端停在默认 25
+    → 成片短 17%、末尾对白被截；反过来也会把影片拉长）。
+
+    两种模式：
+      · `WEAVEORA_LIPSYNC_FPS` > 0：全部 fps 输入钉成该值（质量兜底开关：
+        模型原生训练帧率是 25，若某台机器上非 25 的效果不满意，设 25 回退）；
+      · 未设/0（默认，auto）：把除生成节点外所有 fps 输入**对齐到生成节点的 fps**
+        （同一个链接/字面量）——工作流把两者都接到源片 fps，就得到源片帧率的成片。
+    生成节点自己缺 fps 输入时（旧工作流）回退到 25（= 节点内部默认值）。
+    返回 (mode, [被改的节点类名]) 供日志展示。
+    """
+    nodes = [n for n in (graph or {}).values() if isinstance(n, dict)]
+    gen = next((n for n in nodes if n.get("class_type") == LIPSYNC_NODE_CLASS), None)
+    gen_fps = ((gen or {}).get("inputs") or {}).get("fps")
+    forced = int(LIPSYNC_FPS) if int(LIPSYNC_FPS or 0) > 0 else None
+    if forced is None and gen_fps is None:
+        forced = 25   # 旧工作流没有 fps 输入 → 跟节点内部默认保持一致
+    touched = []
+    for n in nodes:
+        inputs = n.get("inputs") or {}
+        if "fps" not in inputs:
+            continue
+        if forced is not None:
+            inputs["fps"] = forced
+        elif n.get("class_type") == LIPSYNC_NODE_CLASS:
+            continue                      # 生成节点保留工作流里的来源（源片 fps）
+        else:
+            inputs["fps"] = gen_fps       # 对齐生成端（同一链接 → 运行时同值）
+        touched.append(n.get("class_type"))
+    return ("forced=%d" % forced) if forced is not None else "auto=source-fps", touched
+
+
 def _probe_video_meta(mp4_bytes):
     """用 ffmpeg -i 读 mp4 的宽高与时长（返回 (w, h, duration_ms)）。
 
@@ -925,8 +963,10 @@ def generate_lipsync(client_id, payload, progress_fn=None):
     for node in graph.values():
         if isinstance(node, dict) and "filename_prefix" in (node.get("inputs") or {}):
             node["inputs"]["filename_prefix"] = prefix
-    # 帧率必须钉住：LatentSync 出的是 25fps 的定数帧，用源片 fps 组装会截短时长
-    _ensure_output_fps(graph, LIPSYNC_FPS)
+    # 帧率：生成帧率必须 = 播放帧率（默认都跟源片 fps 走）
+    _mode, _nodes = _apply_fps_policy(graph)
+    print("[comfy] 对口型 fps 策略：%s（节点：%s）" % (_mode, ",".join(str(x) for x in _nodes)),
+          flush=True)
     _free_comfy_models()
     # 注意：导出的「API 格式」工作流是**裸节点图**（{"1":{...}}），而 /prompt 要的是
     # {"prompt": 图, "client_id": ...} —— 直接投裸图会被 ComfyUI 拒为 no_prompt。

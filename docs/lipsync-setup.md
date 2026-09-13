@@ -106,7 +106,7 @@ Invoke-RestMethod "http://127.0.0.1:8188/object_info" |
 | 12 | 任务 `succeeded`、mp4 也落盘，但**资源库看不到**；且该资产无宽高/时长 | ① 前端 `outputAssets` 白名单漏了 `lipsync`（`GAL_TABS` 里有 Tab → 那个 Tab 永远空）② worker 没回填 width/height/duration | ① 白名单补 `lipsync`（抽成 `OUTPUT_KINDS` 常量，注释写明「Tab 有的 kind 必须都在白名单」）；② worker 新增 `_probe_video_meta()`（ffmpeg -i 读回 512/512/5000ms）；已产出的那条资产已 SQL 回填 |
 | 13 | 跑到第 **15 分钟**被判 `WORKER_STUCK 执行超时（worker 无心跳完成）`，但 worker 心跳正常、ComfyUI 已 `Doing inference 5/8` | 回收器 `reapStaleRunning()` 只比 `startedAt`、硬编码 `minusMinutes(15)`（注释还写着 30min），完全不看 worker 心跳——对口型一个 5s 镜实测 **25–30 分钟**，必被杀 | 改成「心跳感知 + 硬上限」：`running-timeout-minutes`（默认 60，可配）+ worker `lastSeenAt` 宽限 5min 内不回收 + `max(4×超时, 超时+60min)` 硬上限；回收改按 id 单条 |
 | 14 | **任务 succeeded、资产也在，但画面是错的素材**（拿调试用的静帧片出了片，5s 音频配上我那张测试脸） | worker 把上传后的文件名注入到 `LoadVideo` **不认识的 `video` 键**，而真键 `file` 保留了工作流 JSON 里写死的旧文件名 → ComfyUI 静默加载旧文件。验尸方法：`GET /history` 看该 prompt 的图，`LoadVideo.inputs` 里两个键都会在那儿 | ① `_set_node_input` 改为**从节点 schema 推导键名**（`file`/`video`/`audio`，env 写错也回退）；② 删/清同一节点上其它候选文件名键；③ 上传文件名带**每任务唯一后缀**，从根上消掉重名复用；④ 注入后**全图自检**：还有指向其它 `.mp4/.wav` 的输入就拒跑；⑤ 工作流 JSON 的默认文件名改空串；⑥ supervisor 启动回显 lipsync env（本次就是靠它确认 `videoInput=file`） |
-| 15 | **成片比配音短，末尾对白被截**（4.92s 配音 → 4.17s 成片） | 工作流把 `CreateVideo.fps` 接到了**源片 fps**（`GetVideoComponents.fps` = 30），而 LatentSync 按 config `video_fps: 25` 生成**定数帧**（帧数 ≈ 配音时长×25）→ 按 30fps 播放就快 25/30，**时长缩短 17%**。帧是定数的，改播放速度补不回内容 | ① 工作流 `CreateVideo.fps` 写字面量 **25**（并把标题改成提醒）；② worker 新增 `_ensure_output_fps()`：运行时把图里所有带 `fps` 输入的节点**钉成 `WEAVEORA_LIPSYNC_FPS`**（默认 25），无论原来是指向源片的链接还是字面量；③ env 回显里带上 fps |
+| 15 | **成片比配音短，末尾对白被截**（4.92s 配音 → 4.17s 成片） | 工作流把 `CreateVideo.fps` 接到了**源片 fps**（`GetVideoComponents.fps` = 30），而 LatentSync 按 config `video_fps: 25` 生成**定数帧**（帧数 ≈ 配音时长×25）→ 按 30fps 播放就快 25/30，**时长缩短 17%**。帧是定数的，改播放速度补不回内容 | ① 节点新增 `fps` 输入并透传给 pipeline；② 工作流把 `LatentSyncNode.fps` 与 `CreateVideo.fps` **接到同一个源片 fps**（生成帧率 = 播放帧率 = 源片帧率）；③ worker 新增 `_apply_fps_policy()`：默认 auto（把组装端对齐生成端），可用 `WEAVEORA_LIPSYNC_FPS=25` 强制回退到模型原生帧率；④ env 回显带上 fps |
 | 16 | 资产库里记的分辨率与实际文件不符（记 1280×704，文件其实 832×464/1280×720）→ 让人误以为「对口型把分辨率改小了」 | `generate_motion` 把 payload 里**请求的** width/height 当结果上报，而 Wan 实际出图桶不同；`/internal/assets` 只是原样读文件，不转码 | `generate_motion` 改用 `_probe_video_meta(mp4)` 上报**真实**宽高/时长（与请求不一致时打日志）。注：对口型产物会原样保留源片分辨率 |
 
 ---
@@ -137,6 +137,9 @@ Invoke-RestMethod "http://127.0.0.1:8188/object_info" |
 $env:WEAVEORA_LIPSYNC_WORKFLOW   = "D:\ComfyUI\_setup\lipsync_workflow_api.json"
 $env:WEAVEORA_LIPSYNC_VIDEO_INPUT = "file"   # 原生 LoadVideo 的输入键；VHS_LoadVideo 才是 "video"
 $env:WEAVEORA_LIPSYNC_TIMEOUT     = "1800"   # 3070Ti：≈2.5 分钟/秒视频，1800s 够 5s 片段
+# 口型帧率策略：0/未设 = auto（生成帧率 = 播放帧率 = 源片 fps，推荐）；
+# 设 25 = 强制用模型原生帧率（若非 25 的同步效果不满意可回退）
+$env:WEAVEORA_LIPSYNC_FPS = "0"
 # 可选：节点标题不是 video/audio 时
 # $env:WEAVEORA_LIPSYNC_VIDEO_TITLE = "video"
 # $env:WEAVEORA_LIPSYNC_AUDIO_TITLE = "audio"
@@ -207,7 +210,37 @@ powershell -File D:\ComfyUI\_setup\stop_comfyui_for_install.ps1
 powershell -File D:\ComfyUI\_setup\start_comfyui.ps1
 ```
 
-## 九、未安装时的行为
+## 九、我们对节点的本地补丁（**重装/升级节点后必须重打**）
+
+`ComfyUI-LatentSyncWrapper` 是第三方节点，下面是本地修过的文件（不在本仓库，无法通过 git 同步）：
+
+| 文件 | 补丁 | 为什么 |
+|---|---|---|
+| `nodes.py` `pre_download_models()` | s3fd 预下载改为**默认跳过**（`WEAVEORA_ALLOW_S3FD_DOWNLOAD=1` 才下）；`download_model` 加 `timeout=(10,60)` | 首次实例化会去 huggingface.co 拉一个**推理根本不用**的文件，无 timeout 会挂死 |
+| `nodes.py` `check_and_install_dependencies()` | 包名 `'ffmpeg-python'` → `'ffmpeg'` | 写包名时 `find_spec` 永远 False，每次实例化都白跑一次 pip |
+| `nodes.py` `inference()` | 删除 `torch.cuda.set_per_process_memory_fraction(0.8)`（改为 `WEAVEORA_LATENTSYNC_MEM_FRACTION` 可选） | 8GiB 卡被硬限到 6.5GiB → 必 OOM |
+| `nodes.py` `INPUT_TYPES` + `inference()` | **新增 `fps` 输入**（FLOAT，默认 25），写进 `args.video_fps`，临时视频也用它 | 不传时 pipeline 吃默认 25，与源片 fps 不一致时成片时长会错 |
+| `scripts/inference.py` | `pipeline(..., video_fps=int(round(args.video_fps or 25)))`；构造后 `pipeline.enable_vae_slicing()`；3 处非 ASCII print 改 ASCII | ① 帧率透传；② 降峰值显存；③ `✓`/`⚠️` 在 GBK stdio 下会抛 UnicodeEncodeError |
+| `latentsync/utils/face_detector.py` | aux 路径改为按 `__file__` 解析；**先 import torch 并 `os.add_dll_directory(torch/lib)`** 再 import insightface | ① ComfyUI 的 CWD=`D:\ComfyUI`，相对路径会去下 buffalo_l；② 否则 ORT 找不到 cublasLt64_12/cudnn64_9 而静默跑 CPU |
+| `latentsync/utils/audio.py` | `audio_config_path` 改为按 `__file__` 解析 | `configs/audio.yaml` 相对 CWD，import 时就炸 |
+| `latentsync/utils/image_processor.py` | `DEFAULT_MASK_PATH` 按 `__file__` 解析 | `latentsync/utils/mask.png` 相对 CWD → `cv2.imread` 返回 None |
+| `latentsync/pipelines/lipsync_pipeline.py` | `mask_image_path` 默认值改用 `image_processor.DEFAULT_MASK_PATH` | 同上 |
+
+一键核对（应该都有输出）：
+
+```bash
+cd /d/ComfyUI/custom_nodes/ComfyUI-LatentSyncWrapper
+grep -n "WEAVEORA_ALLOW_S3FD_DOWNLOAD" nodes.py
+grep -n "WEAVEORA_LATENTSYNC_MEM_FRACTION" nodes.py
+grep -n "video_fps" scripts/inference.py
+grep -n "add_dll_directory" latentsync/utils/face_detector.py
+grep -n "_NODE_ROOT" latentsync/utils/audio.py latentsync/utils/image_processor.py
+curl -s localhost:8188/object_info/LatentSyncNode | grep -o '"fps"'
+```
+
+---
+
+## 十、未安装时的行为
 
 任务会**明确失败**并给出原因（不会静默产出无口型结果）：
 

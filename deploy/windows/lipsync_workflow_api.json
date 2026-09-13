@@ -42,10 +42,14 @@
       ],
       "seed": 1247,
       "lips_expression": 1.5,
-      "inference_steps": 20
+      "inference_steps": 20,
+      "fps": [
+        "2",
+        2
+      ]
     },
     "_meta": {
-      "title": "LatentSync 1.6"
+      "title": "LatentSync 1.6 (fps = source fps)"
     }
   },
   "5": {
@@ -55,14 +59,17 @@
         "4",
         0
       ],
-      "fps": 25,
+      "fps": [
+        "2",
+        2
+      ],
       "audio": [
         "4",
         1
       ]
     },
     "_meta": {
-      "title": "assemble video (fps=25 = LatentSync native, do NOT wire to source fps)"
+      "title": "assemble video (fps MUST equal LatentSync fps)"
     }
   },
   "6": {
