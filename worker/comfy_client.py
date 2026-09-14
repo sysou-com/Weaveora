@@ -929,8 +929,10 @@ def generate_motion(client_id, payload, progress_fn=None):
     # （旧行为：硬跑 → OOM，报一堆看不懂的错；24G 卡无论如何跑不了 A14B）
     if str(_mp.get("mode") or "").strip().lower() != "single":
         _free, _total = vram_stats()
-        _frames, _w, _h, _ = _motion_graph_frames(payload, _mp)
-        _need = _motion_vram_need_gb(_frames, _w, _h)
+        _frames = _motion_graph_frames(payload, _mp)[0]
+        # ★ 必须用**压后**尺寸（mw/mh）估算：线上踩过 —— 已把 1280×704 压成 832×464，
+        #   体检却仍按 1280×704 算 → 误报「放不下」（124 帧报 57.2 GiB，实际只需 ~47 GiB）
+        _need = _motion_vram_need_gb(_frames, mw, mh)
         if _total is not None and _total < MOTION_MIN_TOTAL_GB:
             raise ComfyError(
                 "本机 ComfyUI 总显存 %.1f GiB < A14B 双专家所需 %.0f GiB（实测峰值 ~42–47 GiB）："
@@ -952,7 +954,7 @@ def generate_motion(client_id, payload, progress_fn=None):
         # free < need 但仍能放下 → 给 WARN 继续跑，交给 ComfyUI 自己换入换出
         # （旧写法拿 free 硬拦，会把本来能跑的任务误杀 —— 实测 121 帧 47.3GiB 是能跑的）。
         if _total is not None and _need > (_total - MOTION_VRAM_SAFETY_GB):
-            _area_scale = (float(_w) * float(_h)) / MOTION_VRAM_AREA_REF
+            _area_scale = (float(mw) * float(mh)) / MOTION_VRAM_AREA_REF
             _max_frames = max(32, int((_total - MOTION_VRAM_SAFETY_GB - MOTION_VRAM_BASE_GB)
                                       / max(1e-6, MOTION_VRAM_PER_FRAME_GB * _area_scale)))
             _max_px = int(((_total - MOTION_VRAM_SAFETY_GB - MOTION_VRAM_BASE_GB) /
@@ -962,7 +964,7 @@ def generate_motion(client_id, payload, progress_fn=None):
                 "  ① 本分辨率下最多约 %d 帧；或总像素降到约 %d\n"
                 "  ② 降分辨率（如 832x480）往往比降帧数划算\n"
                 "  ③ 跨镜并发时确认没有其它任务同时占卡（A14B 会独占）"
-                % (_w, _h, _frames, _need, _total, _max_frames, _max_px))
+                % (mw, mh, _frames, _need, _total, _max_frames, _max_px))
         if _free is not None and _free < _need:
             print("[comfy] WARN 当前可用 %.1f GiB < 预估 %.1f GiB：ComfyUI 会自行换入换出，"
                   "若 OOM 请降分辨率或帧数" % (_free, _need), flush=True)
