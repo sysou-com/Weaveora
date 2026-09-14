@@ -61,7 +61,76 @@ public class EngineSettingsService {
                 .put("timeout", 1800).put("fps", 0)));
         out.set("transcribe", merge(cur, "transcribe", mapper.createObjectNode().put("url", "")));
         out.set("face", merge(cur, "face", mapper.createObjectNode().put("url", "").put("latentsyncDir", "")));
+        // ★ motion：自托管图生视频（Wan2.2 I2V-A14B 双专家）的**档位**随任务下发。
+        //   为什么必须走这里：clip 的 payload.params 在 JobService.videoShotPayload() 里只塞了
+        //   {width,height}，preset/steps/lora_*/cfg_* 若不靠这条链路下发就永远到不了 worker ——
+        //   表现为「在『生成引擎配置 → 视频参数』里改了档位，出片毫无变化」。
+        //   与 tts/face 同构：用户显式配了才覆盖，没配就是空对象（worker 用自己的默认档）。
+        out.set("motion", motionServices(cur, s));
         return out;
+    }
+
+    /** 能从「视频参数」透传到自托管 motion 引擎的键（白名单，避免把云模型字段塞进图里）。 */
+    private static final java.util.Set<String> MOTION_KEYS = java.util.Set.of(
+            "preset", "steps", "switch", "switch_step", "cfg", "cfg_high", "cfg_low",
+            "lora_high", "lora_low", "lora_high_name", "lora_low_name", "shift",
+            "sampler_name", "scheduler", "model_high", "model_low",
+            "mode", "dual", "width", "height", "frames", "fps");
+
+    /**
+     * 视频引擎是自托管（GPU）时，sanitize 之后仍要保住 motion 档位键。
+     *
+     * 为什么：sanitizeParams 在「有 schema」时只留 schema 认识的 userEditable 键 ——
+     * 而 schema 描述的是**云视频模型**，根本不包含 preset/lora_high 这些自托管采参。
+     * 一旦用户刷新过云模型 schema，他们填的档位就会被**静默丢弃**（表现为「UI 配了没效果」）。
+     * 所以 engine=gpu 时把这些键从原值里补回。
+     */
+    private com.fasterxml.jackson.databind.node.ObjectNode keepMotionKeys(
+            com.fasterxml.jackson.databind.JsonNode sanitized,
+            com.fasterxml.jackson.databind.JsonNode raw,
+            String videoEngine) {
+        com.fasterxml.jackson.databind.node.ObjectNode out = (sanitized != null && sanitized.isObject())
+                ? ((com.fasterxml.jackson.databind.node.ObjectNode) sanitized).deepCopy()
+                : mapper.createObjectNode();
+        if ("gpu".equals(videoEngine) && raw != null && raw.isObject()) {
+            raw.fields().forEachRemaining(e -> {
+                String key = snake(e.getKey());
+                if (MOTION_KEYS.contains(key) && e.getValue() != null && !e.getValue().isNull()) {
+                    out.set(key, e.getValue());
+                }
+            });
+        }
+        return out;
+    }
+
+    /** camelCase → snake_case（前端两种写法都可能出现，统一收拢成 worker 认识的键）。 */
+    private static String snake(String k) {
+        StringBuilder b = new StringBuilder();
+        for (char c : k.toCharArray()) {
+            if (Character.isUpperCase(c)) {
+                b.append('_').append(Character.toLowerCase(c));
+            } else {
+                b.append(c);
+            }
+        }
+        return b.toString();
+    }
+
+    /** 自托管 motion 档位：services.motion 显式值 + 用户「视频参数」里的采样键（白名单）。 */
+    private com.fasterxml.jackson.databind.node.ObjectNode motionServices(
+            com.fasterxml.jackson.databind.JsonNode cur, UserEngineSettings s) {
+        com.fasterxml.jackson.databind.node.ObjectNode merged = (com.fasterxml.jackson.databind.node.ObjectNode)
+                merge(cur, "motion", mapper.createObjectNode());
+        if (s != null && s.videoParams() != null && s.videoParams().isObject()) {
+            s.videoParams().fields().forEachRemaining(e -> {
+                String key = snake(e.getKey());
+                // switch 是 switch_step 的别名；两个都收
+                if (MOTION_KEYS.contains(key)) {
+                    merged.set(key, e.getValue());
+                }
+            });
+        }
+        return merged;
     }
 
     /**
@@ -212,7 +281,8 @@ public class EngineSettingsService {
         }
         if (req.params() != null) {
             if (video) {
-                s.setVideoParams(schemaService.sanitizeParams(s.videoModelSchema(), req.params()));
+                s.setVideoParams(keepMotionKeys(schemaService.sanitizeParams(s.videoModelSchema(), req.params()),
+                        req.params(), s.videoEngine()));
             } else {
                 s.setImageParams(schemaService.sanitizeParams(s.imageModelSchema(), req.params()));
             }
@@ -505,7 +575,8 @@ public class EngineSettingsService {
             s.setImageParams(schemaService.sanitizeParams(s.imageModelSchema(), req.imageParams()));
         }
         if (req.videoParams() != null) {
-            s.setVideoParams(schemaService.sanitizeParams(s.videoModelSchema(), req.videoParams()));
+            s.setVideoParams(keepMotionKeys(schemaService.sanitizeParams(s.videoModelSchema(), req.videoParams()),
+                    req.videoParams(), s.videoEngine()));
         }
         repo.save(s);
         // 换了模型 → 主动拉一次它的调用说明（失败不阻塞保存）

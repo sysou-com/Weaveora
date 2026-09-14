@@ -531,6 +531,42 @@ MOTION_PRESETS = {
 MOTION_LORA_HIGH_WARN = 0.0
 MOTION_PRESET_ENV = os.environ.get("WEAVEORA_MOTION_PRESET", "balanced").strip().lower()
 
+# ★ 引擎配置下发的 motion 档位（随任务下发，见 api/…/EngineSettingsService.motionServices）。
+#   为什么需要：clip 的 payload.params 只带 {width,height}，否则「UI 改档位没反应」。
+#   生效优先级：payload.params（每镜显式） > 这里的下发值 > MOTION_PRESETS 档位默认。
+MOTION_OVERRIDES = {}
+MOTION_SERVICE_KEYS = ("preset", "steps", "switch", "switch_step", "cfg", "cfg_high", "cfg_low",
+                       "lora_high", "lora_low", "lora_high_name", "lora_low_name", "shift",
+                       "sampler_name", "scheduler", "model_high", "model_low", "mode", "dual",
+                       "width", "height", "frames", "fps")
+
+# 显存口径（A14B 双专家实测：832×480/33 帧 **峰值 41.8~42.4 GiB**）：
+#   · 跑之前要求「ComfyUI 视角的剩余显存」≥ MOTION_MIN_FREE_GB，不够就让 TTS 让位；
+#   · 总显存 < MOTION_MIN_TOTAL_GB 直接**快速失败**并点名换机（24G 卡无论如何跑不了 A14B）。
+MOTION_MIN_FREE_GB = float(os.environ.get("WEAVEORA_MOTION_MIN_FREE_GB", "30") or 30)
+MOTION_MIN_TOTAL_GB = float(os.environ.get("WEAVEORA_MOTION_MIN_TOTAL_GB", "44") or 44)
+
+
+def _snake_key(k):
+    """camelCase → snake_case（switchStep → switch_step）；已是 snake_case 的原样返回。"""
+    out = []
+    for ch in str(k or ""):
+        if ch.isupper():
+            out.append("_")
+            out.append(ch.lower())
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def _motion_params(payload):
+    """本镜 motion 参数：引擎配置下发的档位 ← payload.params 覆盖（每镜显式值优先）。"""
+    p = dict(MOTION_OVERRIDES)
+    raw = (payload or {}).get("params")
+    if isinstance(raw, dict):
+        p.update(raw)
+    return p
+
 
 def _motion_plan(params):
     """preset 打底 + 显式键覆盖 → 采样计划（纯函数，便于扫描实验）。"""
@@ -661,9 +697,21 @@ def _motion_graph(client_id, payload, positive, negative, first_frame_name, pref
     双专家（默认，Wan2.2 I2V-A14B 高/低噪声）或单专家（params.model 显式给了单文件时走旧路径）。
     输出帧由 generate_motion 用 ffmpeg 合成 mp4（不依赖 VHS）。
     """
-    params = payload.get("params") or {}
+    params = _motion_params(payload)
     plan = _motion_plan(params)
-    dual = not params.get("model")          # 只有显式给单模型才退单专家
+    # P1：自托管路径**不能**因为 params.model 里有云模型名就退化成单专家
+    #   （旧写法 `dual = not params.get("model")`：云模型名如 minimax/video-01 会让 worker
+    #   拿它去 UNETLoader 找文件 → 报「扩散模型不存在」）。
+    #   只认：显式 mode=single / dual=false / model 形如本地文件（*.safetensors）。
+    _m = str(params.get("model") or "")
+    _want_single = (str(params.get("mode") or "").strip().lower() == "single"
+                    or params.get("dual") is False
+                    or _m.endswith(".safetensors"))
+    if _m and not _want_single:
+        print("[comfy] 忽略 params.model=%r（云模型名不影响自托管双专家路由）" % _m, flush=True)
+    if not _want_single:
+        params.pop("model", None)
+    dual = not _want_single
     a = _motion_assets(params, dual)
     seed = int(payload.get("seed") or 1)
     frames, width, height, length = _motion_graph_frames(payload, params)
@@ -742,15 +790,19 @@ def vram_stats():
 
 
 def _vram_note(tag):
-    """打一行 ComfyUI 视角的显存体检；余量 <15GiB 时提示（TTS 常驻约 7GiB）。"""
+    """打一行 ComfyUI 视角的显存体检；余量 < MOTION_MIN_FREE_GB 时提示。
+
+    A14B 双专家实测峰值 41.8~42.4 GiB（832×480/33 帧），所以阈值不是旧 24G 卡的 15GiB。
+    """
     free, total = vram_stats()
     if free is None:
         print("[comfy] %s 取显存失败（忽略）" % tag, flush=True)
         return
     print("[comfy] %s 显存 free=%.1f/%.1f GiB" % (tag, free, total), flush=True)
-    if free < 15.0:
-        print("[comfy] WARN 显存余量 <15GiB：14B 双专家会频繁换入换出，"
-              "请确认 TTS 未常驻（WEAVEORA_TTS_PRELOAD=0）或已让出显存", flush=True)
+    if free < MOTION_MIN_FREE_GB:
+        print("[comfy] WARN 显存余量 %.1f GiB < %.1f GiB：14B 双专家会频繁换入换出，"
+              "请确认 TTS 未常驻（WEAVEORA_TTS_PRELOAD=0）或已让出显存"
+              % (free, MOTION_MIN_FREE_GB), flush=True)
 
 
 def _encode_frames_mp4(frames_bytes, fps, out_dir):
@@ -789,9 +841,21 @@ def generate_motion(client_id, payload, progress_fn=None):
     positive = payload.get("positive_prompt", "")
     negative = payload.get("negative_prompt", "")
     fps = int(payload.get("fps") or 16)
+    _mp = _motion_params(payload)
     # motion 固定 768×768（Comfy 原生 Wan2.2 方形档位；8GB fp8），关键帧缩放后上传保证一致
-    mw = int((payload.get("params") or {}).get("width", 768))
-    mh = int((payload.get("params") or {}).get("height", 768))
+    mw = int(_mp.get("width", 768))
+    mh = int(_mp.get("height", 768))
+    # P2：A14B 双专家实测峰值 ~42 GiB → 总显存不够就**快速失败并点名换机**
+    # （旧行为：硬跑 → OOM，报一堆看不懂的错；24G 卡无论如何跑不了 A14B）
+    if str(_mp.get("mode") or "").strip().lower() != "single":
+        _free, _total = vram_stats()
+        if _total is not None and _total < MOTION_MIN_TOTAL_GB:
+            raise ComfyError(
+                "本机 ComfyUI 总显存 %.1f GiB < A14B 双专家所需 %.0f GiB（实测峰值 ~42 GiB）："
+                "Wan2.2 I2V-A14B 在这台机器上跑不了。\n"
+                "  修法一（推荐）：把 clip 任务路由到 48G 的 GPU#2（生成引擎配置 → GPU 服务器地址）\n"
+                "  修法二：显式降级单专家（params.mode=single + params.model=本地 5B 权重名）"
+                % (_total, MOTION_MIN_TOTAL_GB))
     try:
         from PIL import Image as _PIL
         _im = _PIL.open(io.BytesIO(data)).convert("RGB").resize((mw, mh), _PIL.LANCZOS)
@@ -1749,7 +1813,7 @@ def apply_services(svc):
     重启 worker。现在用户可在「生成引擎配置 → 服务地址」里随时改，随任务下发即刻生效。
     空值/未配置一律**不覆盖**（保持环境变量默认，向后兼容）。
     """
-    global COMFY, LIPSYNC_WORKFLOW, LIPSYNC_TIMEOUT, LIPSYNC_FPS, FACE_URL, LATENTSYNC_DIR
+    global COMFY, LIPSYNC_WORKFLOW, LIPSYNC_TIMEOUT, LIPSYNC_FPS, FACE_URL, LATENTSYNC_DIR, MOTION_OVERRIDES
     if not isinstance(svc, dict):
         return
     def g(*path):
@@ -1759,6 +1823,20 @@ def apply_services(svc):
                 return None
             cur = cur.get(k)
         return cur
+    # 引擎配置下发的 motion 档位（preset/steps/lora_*/cfg_* …）：收白名单键，switch 归一成 switch_step
+    motion = g("motion")
+    if isinstance(motion, dict):
+        clean = {}
+        for k, v in motion.items():
+            if v is None:
+                continue
+            k2 = _snake_key(k)          # camelCase 兼容（前端两种写法都可能出现）
+            if k2 not in MOTION_SERVICE_KEYS:
+                continue
+            clean["switch_step" if k2 == "switch" else k2] = v
+        if clean:
+            MOTION_OVERRIDES = clean
+            print("[comfy] motion 档位（引擎配置下发）：%s" % clean, flush=True)
     comfy = g("lipsync", "comfyUrl")
     if isinstance(comfy, str) and comfy.strip():
         COMFY = comfy.strip().rstrip("/")

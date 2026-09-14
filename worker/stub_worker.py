@@ -219,7 +219,7 @@ def _complete(jid, payload, media):
     return True
 
 
-def _yield_vram_for_video(need_gb=15.0):
+def _yield_vram_for_video(need_gb=None):
     """出视频前让 TTS 让出显存。
 
     背景：Wan2.2 I2V-A14B 是双专家（fp8 各 13.3GiB），而 CosyVoice 常驻要占 ~7GiB，
@@ -227,9 +227,15 @@ def _yield_vram_for_video(need_gb=15.0):
     不够则 POST /unload 让 TTS 卸载模型（下次配音自动懒加载回来）。
 
     失败只告警不阻塞：ComfyUI 仍可通过 offload 慢跑，不能因为让位失败就废掉整个任务。
+
+    阈值口径：A14B 双专家实测峰值 41.8~42.4 GiB（832×480/33 帧）→ 默认取
+    comfy_client.MOTION_MIN_FREE_GB（环境变量 WEAVEORA_MOTION_MIN_FREE_GB，缺省 30），
+    而不是旧 24G 卡时代的硬编码 15。
     """
     try:
         import comfy_client as _c
+        if need_gb is None:
+            need_gb = getattr(_c, "MOTION_MIN_FREE_GB", 30.0)
         free, total = _c.vram_stats()
         if free is not None and free >= need_gb:
             print("[stub] 视频前显存余量 %.1f/%.1f GiB ≥ %.1f，TTS 无需卸载"
