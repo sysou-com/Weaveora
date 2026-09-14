@@ -28,3 +28,9 @@ application-local.yml
 
 # ---- pi / 会话 ----
 .pi/
+
+# ---- 临时/杂物（勿入库）----
+.scratch/
+*.stackdump
+g1ctx.json
+.tmp_patch_*.py
