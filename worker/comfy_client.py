@@ -549,6 +549,10 @@ MOTION_SERVICE_KEYS = ("preset", "steps", "switch", "switch_step", "cfg", "cfg_h
 MOTION_VRAM_BASE_GB = float(os.environ.get("WEAVEORA_MOTION_VRAM_BASE_GB", "39.7") or 39.7)
 MOTION_VRAM_PER_FRAME_GB = float(os.environ.get("WEAVEORA_MOTION_VRAM_PER_FRAME_GB", "0.0625") or 0.0625)
 MOTION_VRAM_AREA_REF = 832.0 * 480.0   # 标定分辨率（换成其它分辨率按面积等比缩放）
+# 卡片预留（GiB）：预估值与总显存留这么多余地；只用来挡「根本放不下」的组合。
+# 注意：**不能拿 /system_stats 的 vram_free 当判据** —— ComfyUI 自己缓存的双专家（26.6GiB）
+# 是可以回收的，实测就吃过这个坑：1280x704/48 帧被误拦（当时 free 只有 20GiB）。
+MOTION_VRAM_SAFETY_GB = float(os.environ.get("WEAVEORA_MOTION_VRAM_SAFETY_GB", "0") or 0)
 
 # 总显存低于这个值就别浪费 GPU 时间了（A14B 硬门槛：24G 卡无论如何跑不了）
 MOTION_MIN_FREE_GB = float(os.environ.get("WEAVEORA_MOTION_MIN_FREE_GB", "30") or 30)
@@ -878,18 +882,34 @@ def generate_motion(client_id, payload, progress_fn=None):
                 "  修法二：显式降级单专家（params.mode=single + params.model=本地 5B 权重名）"
                 % (_total, MOTION_MIN_TOTAL_GB))
         if _free is not None and _free < _need:
-            # 实测：64/84 帧曾 OOM 而 121 帧能过 —— 根因是**共存争显存**（CosyVoice 常驻
-            # ~7GiB + ComfyUI 缓存双专家），不是帧数本身。所以这里给出可执行的三个档杆。
+            # 先请 ComfyUI 释放自己的缓存（双专家 26.6GiB 是可回收的），再重新量一次
+            try:
+                _free_comfy_models()
+                _free2, _total2 = vram_stats()
+                if _free2 is not None:
+                    _free, _total = _free2, (_total2 or _total)
+                print("[comfy] 已请 ComfyUI 释放缓存，可用显存 → %.1f GiB" % _free, flush=True)
+            except Exception as _e:
+                print("[comfy] 释放 ComfyUI 缓存失败（忽略）: %s" % _e, flush=True)
+        # 判据：**只挡「根本放不下」的组合**（预估 > 总显存 - 预留）。
+        # free < need 但仍能放下 → 给 WARN 继续跑，交给 ComfyUI 自己换入换出
+        # （旧写法拿 free 硬拦，会把本来能跑的任务误杀 —— 实测 121 帧 47.3GiB 是能跑的）。
+        if _total is not None and _need > (_total - MOTION_VRAM_SAFETY_GB):
             _area_scale = (float(_w) * float(_h)) / MOTION_VRAM_AREA_REF
-            _suggest = max(32, int((_free - MOTION_VRAM_BASE_GB)
-                                   / max(1e-6, MOTION_VRAM_PER_FRAME_GB * _area_scale)))
+            _max_frames = max(32, int((_total - MOTION_VRAM_SAFETY_GB - MOTION_VRAM_BASE_GB)
+                                      / max(1e-6, MOTION_VRAM_PER_FRAME_GB * _area_scale)))
+            _max_px = int(((_total - MOTION_VRAM_SAFETY_GB - MOTION_VRAM_BASE_GB) /
+                           max(1e-6, MOTION_VRAM_PER_FRAME_GB * float(_frames))) * MOTION_VRAM_AREA_REF)
             raise ComfyError(
-                "显存不够跑这次 motion：%dx%d / %d 帧 预估需 %.1f GiB，当前可用 %.1f GiB。\n"
-                "  ① 降帧数（%d → %d 左右）或降分辨率（如 640x384）\n"
-                "  ② 让 TTS 先归还显存：POST {tts}/unload（或把 GPU 机 TTS 的 WEAVEORA_TTS_PRELOAD=0）\n"
+                "这次 motion 放不下：%dx%d / %d 帧 预估需 %.1f GiB，本机总显存 %.1f GiB。\n"
+                "  ① 本分辨率下最多约 %d 帧；或总像素降到约 %d\n"
+                "  ② 降分辨率（如 832x480）往往比降帧数划算\n"
                 "  ③ 跨镜并发时确认没有其它任务同时占卡（A14B 会独占）"
-                % (_w, _h, _frames, _need, _free, _frames, _suggest))
-        if _free is not None:
+                % (_w, _h, _frames, _need, _total, _max_frames, _max_px))
+        if _free is not None and _free < _need:
+            print("[comfy] WARN 当前可用 %.1f GiB < 预估 %.1f GiB：ComfyUI 会自行换入换出，"
+                  "若 OOM 请降分辨率或帧数" % (_free, _need), flush=True)
+        elif _free is not None:
             print("[comfy] motion 显存体检：预估需 %.1f GiB，可用 %.1f/%.1f GiB"
                   % (_need, _free, _total or 0), flush=True)
     try:
