@@ -153,17 +153,82 @@ Start-Process powershell -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass',
 |---|---|
 | HuggingFace 权重 | **`https://aifasthub.com/...`（2026-09-13 实测：Range 206、单连接 ~1.7 MiB/s、10 进程 ~40–80 MiB/s，回源 `us.aws.cdn.hf.co`）——首选** |
 | HuggingFace 备用 | `https://gh-proxy.com/https://huggingface.co/...`（可达）；`https://hf-mirror.com`（**实测极不稳定：单连接 ~0.08 MiB/s，并发 TLS 握手会被掐掉，不要作为首选/唯一源**） |
-| ModelScope 权重 | `https://www.modelscope.cn/models/<org>/<repo>/resolve/master/<path>`（CDN 快、支持断点） |
+| ModelScope 权重 | `resolve` 端点：`https://www.modelscope.cn/models/<org>/<repo>/resolve/master/<path>`（CDN 快、支持断点） |
+| ModelScope ✅ 备用（**被限流时首选**） | `API` 端点：`https://modelscope.cn/api/v1/models/<org>/<repo>/repo?Revision=master&FilePath=<urlencode(path)>` |
 | GitHub 源码/节点 zip | `https://ghfast.top/https://github.com/...` |
 | PyPI 轮子 | 官方源（清华源作备选） |
+
+> ⚠️ **ModelScope 的限流是按出口 IP / 路径而异的，不是全局**（2026-09-14 实测）：
+> - GPU #1：`resolve` 端点正常（27–30 MiB/s）
+> - GPU #2：`resolve` 端点**被限到 0.38 MB/s 且会中途挂死**；换 **API 端点**后 6.9 MB/s（单连）/
+>   **28–53 MiB/s**（10 路）—— 约 **18 倍**
+>
+> 所以 **resolve 端点在某台机上慢/挂死时，不要以为 ModelScope 不行 —— 换 API 端点重测**；
+> 同理 **换机器必须重测**（同一域名不同出口 IP 表现可能完全相反）。
 
 > 镜像可用性随域名/时段变化。**换镜像前先用 `curl -r 0-0 -D -` 核对能返回 `206` + `content-range`，并跑一次 4 MiB 测速**（`-w '%{speed_download}'`），再决定用哪个；不要盲信历史结论。
 
 `huggingface.co` 直连不可用，**禁止**在代码/脚本里写死 `huggingface.co` 作为权重来源（尤其禁止把 `hf_hub_download` / `snapshot_download` 写进节点初始化逻辑，见第 3/4 条）。
 
-**9）完成即校验**：下载器自动比对 `Content-Range` 总长并写 `<file>.done`；额外自检时用「本地字节数 == 服务端总长」，不一致就重跑（会自动续传剩余段）。
+**9）完成即校验 —— 字节数相符 ≠ 内容正确**：下载器会自动比对 `Content-Range` 总长并写 `<file>.done`；
+但**只看字节数是危险的**（2026-09-14 实测：umt5 文件**字节完全正确**但 `sha256` 不符 ——
+`871298ad…` ≠ 官方 `c3355d30…`，是污染/不完整副本，下游会在加载时报奇怪的错）。
+
+校验强度按下表分级（**大文件全量 sha256 在共享超卖的 CPU 上可能跑十几分钟且时间不可控**——
+实测 GPU 容器 cgroup 14 核 / load ~20）：
+
+| 文件尺寸 | 校验口径 | 能抓什么 |
+|---|---|---|
+| **≥ 1 GiB** | `quick`：字节数 + **safetensors 头结构**（JSON header 长度/张量数可解析） | 裁断、不完整、头损坏 |
+| **< 1 GiB** | `full`：字节数 + **全量 sha256** | 上表全部 + 内容污染 |
+| 关键小文件（config/json/LoRA） | `full` + 官方值硬编码在脚本里 | 版本错配 |
+
+> 口径：**期望字节数 + 期望 sha256/结构特征都写进下载脚本**，校验不过就**删残片重下**，
+> 不允许「字节对就放行」。
 
 **10）下载与其它任务并行**：下载是后台进程，**不要「等它跑完再干别的」**；在下载进行时继续推进其它工作，按第 6 条周期性播报进度即可。
+
+**11）禁止长 `sleep`（agent 与脚本同适用）**：
+
+- **单次等待 ≤ 60s**。禁止 `sleep 300` / `sleep 600` / `Start-Sleep -Seconds 600` 这类死等。
+- 需要等更久（如等模型加载、等任务收尾）→ **循环短等 + 每轮检查 + 每轮汇报一行**：
+
+```bash
+for i in $(seq 1 20); do        # 最多等 ~10 分钟，但每 30s 都看一次
+  sleep 30
+  <一次轻量状态查询>            # 端口/日志尾/进程/队列
+  有结果 && break
+  echo "  T+${i}x30s: <一行摘要>"
+ done
+```
+
+- **为什么**：长 `sleep` ① 把会话/终端堵死；② **掩盖卡死**（等 10 分钟醒来才发现根本没开始跑）；
+  ③ 无法中断、也没法根据中途变化改策略。
+- **反面案例（本会话实测）**：`sleep 420` 后才发现下载已被限流卡住；另一处 `sleep 300` 后才发现任务早失败。
+  → 正确做法是**短轮询 + 即时汇报**，或干脆后台化（第 4 条）+ 周期播报（第 6 条）。
+- 同样适用于「检查状态」类操作：**单次状态检查控制在 ≤ 2 分钟**，超时先汇报再继续。
+
+**12）用 `pkill` / `pgrep` 前先确认不会杀到自己**：
+
+- **根因**：`pkill -f <pattern>` / `pgrep -f <pattern>` 匹配的是**完整命令行**，
+  而你自己的那条命令里就含有该 pattern 字符串 → **会匹配到自己**（杀自己 → 会话中断；
+  或列出自己 → 误判为“进程还在”）。
+- **本会话反面案例（均实际发生）**：
+  - `pkill -f install_cosyvoice_deps` → 把自己的 shell 杀了（exit 255）
+  - `pgrep -f "comfy_win.ps1"` → 把自己的 powershell 也列进结果（误判“守护仍在”）
+  - `pgrep -f "[i]nstall_"` 后跟一行列出文件名 “install_xxx.sh” → 同样自匹配
+  - PowerShell 侧：`Get-CimInstance Win32_Process | Where CommandLine -like '*x*'` 也会命中**自己的 `-Command` 字符串**
+- **强制做法（四选一，优先前两个）**：
+  1. **字符类打断字面量**：`pgrep -f "[c]omfy_win"`、`pkill -f "[i]nstall_cosy"`
+     （自己的命令行里是 `[c]omfy_win`，不等于正则 `comfy_win`→ 不自匹配）
+  2. **按 PID 精确杀**：先用 `ss -ltnp` / `ps -eo pid,cmd` 取出 PID，再 `kill <pid>`；
+     不要用模式匹配去杀
+  3. **先 dry-run 列清单**：先跑 `pgrep -af <pattern>`，**人工看一眼里面有没有自己/无关进程**，再决定杀不杀
+  4. PowerShell 侧：**把进程列表导出到文件，再在别处 grep**（避免过滤串出现在被查进程里）；
+     或显式排除自身：`Where-Object { $_.ProcessId -ne $PID }`
+- **额外注意（守护脚本）**：这类项目大量使用 `while($true)` 自重启守护（`comfy_win.ps1` / `tunnel_comfy.ps1` /
+  `wsl_tts_win.ps1` / `worker_win.ps1`）。**必须先杀守护再杀服务**，否则服务 10 秒后就被拉回；
+  且**心跳计划任务要一并禁用**（`*Heartbeat` 每 10 分钟会把守护拉回），禁用**不会**终止已排队实例——可能还会被拉一次。
 
 ---
 
