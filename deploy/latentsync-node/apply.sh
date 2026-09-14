@@ -64,7 +64,15 @@ echo
 echo "补丁已应用 ✅  版本=$VER"
 echo "能力=$FEATS"
 echo
-echo "⚠️  现在必须**重启 ComfyUI**（节点代码只在启动时加载），例如："
-echo "    sudo systemctl restart <你的 ComfyUI 服务>   # 或 deploy/weaveora_boot.sh / services_up.sh 里定义的重启方式"
-echo "重启后自检（在 GPU 机本地）： curl -s http://127.0.0.1:8001/weaveora/version"
-echo "（公网经网关）：              curl -s http://<网关IP>:<端口>/weaveora/version"
+echo "⚠️  现在必须**重启 ComfyUI**（节点代码只在启动时加载）。"
+RESTART_HINT="$(dirname "$(dirname "$NODE_DIR")")/deploy/services_up.sh"
+if [ -f "$RESTART_HINT" ]; then
+  echo "  检测到本机启动脚本，执行："
+  echo "    pkill -f 'ComfyUI/main.py' ; sleep 3 ; bash $RESTART_HINT"
+else
+  echo "  例如： pkill -f 'ComfyUI/main.py' ; sleep 3 ; bash <你的 services_up.sh 路径>"
+  echo "  或：   sudo systemctl restart <你的 ComfyUI 服务>"
+fi
+echo "重启后自检（GPU 机本地）： curl -s http://127.0.0.1:8001/weaveora/version"
+echo "自检（本脚本带的 verify）： bash $(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/verify.sh http://127.0.0.1:8001"
+echo "自检（经公网网关）：       bash verify.sh http://36.103.182.217:30250"
