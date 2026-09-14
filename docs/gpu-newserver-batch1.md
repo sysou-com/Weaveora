@@ -415,3 +415,42 @@ WEAVEORA_LIPSYNC_VIDEO_TITLE / VIDEO_INPUT / AUDIO_TITLE / AUDIO_INPUT
 | 日志 | `/home/dataset-local/weaveora/logs/`（`comfyui.log` / `audio_tts.log` / `face.log` / `edge_proxy.log` / `services_up.log` / `boot.log`） |
 | 早期全量清单（云 API 前的 50 GiB 版本） | `docs/gpu-newserver-models.md` |
 | 对口型安装细节与 8 个坑 | `docs/lipsync-setup.md` |
+
+---
+
+## 13. Windows 侧退役（2026-09-14）
+
+引擎全部迁到新 GPU 服务器后，原 Windows 机器（`WIN-20240101MQK`，RTX 3070 Ti）不再承担生产任务，已**停止服务并禁用开机自启**。
+
+### 13.1 已停用 + 已禁用自启（计划任务全部 `Disabled`）
+
+| 计划任务 | 作用 | 对应服务/端口 |
+|---|---|---|
+| `ComfyUI` / `ComfyUIHeartbeat` | 出图 / 视频 / **配乐**（ACE-Step 原生节点） | `main.py --port 8188` |
+| `ComfyTTS` / `ComfyTTSHeartbeat` | **配音**（WSL CosyVoice） | `tts_server.py` `:8091` |
+| `ComfyWorker` / `ComfyWorkerHeartbeat` | GPU worker | `stub_worker.py` |
+| `ComfyTunnel` / `ComfyTunnelHeartbeat` | SSH 反向隧道（把本机服务暴露给生产机） | `tunnel_comfy.ps1` |
+
+另：**人脸服务**（`deploy/face/face_server.py` `:8093`）已停——它**没有自启入口**（计划任务 / 启动文件夹 / 注册表 Run / Windows 服务 均查过），属手工启动的孤儿进程。
+
+停用后核对：`8188 / 8091 / 8092 / 8093` 全部空闲，WSL 内 `tts_server` 进程 0 个，静默 90 秒无复活。
+
+### 13.2 坑：两个容易“停不干净”的点
+
+1. **守护脚本会“复活”服务**：`D:\ComfyUI\_setup\comfy_win.ps1` 是 `while($true)` 循环（服务退出后 10 秒重启，靠全局互斥锁保单实例）。
+   → 必须**先杀守护（`comfy_win.ps1`），再杀服务（`main.py`）**；只杀服务会被立刻拉回。同理 `tunnel_comfy.ps1`、`wsl_tts_win.ps1`、`worker_win.ps1`。
+2. **心跳任务必须一起禁用**：`*Heartbeat` 任务每 10 分钟跑一次同样的守护脚本（确保存活）。
+   → 只禁用主任务而不禁心跳，服务仍会被拉回。且**禁用不会终止已排队/在跑的实例**，所以禁用后仍可能被拉起一次，需再杀一遍。
+
+### 13.3 另一发现：定时唤醒从未生效（BIOS 层）
+
+- Windows 侧配置完全正确：`RTCWAKE`（允许唤醒计时器）AC/DC 均为 `0x1`、`WeaveWakeAuto` 任务 `WakeToRun=True`、`powercfg /waketimers` 能查到登记的计时器。
+- 但 `Power-Troubleshooter` 历史显示 **8 次唤醒全部是「电源按钮」，没有一次定时器唤醒**（`wake.log` 里的 `woken-by-WeaveWakeAuto` 都是人按电源键后任务靠 `StartWhenAvailable` 补跑产生的假象）。
+- 结论：**ACPI RTC 闹钟没有被固件兑现**。机器是 ASUS 主板 + AMI BIOS 2212（物理机）。
+- 修复方向：BIOS → `Advanced → APM Configuration`：
+  - **`ErP Ready` = Disabled**（最常见的元凶，启用它会切断 S3/S5 所有唤醒源）
+  - **`Power On By RTC` = Enabled**
+  - `Deep Sleep Control`（如有）= Disabled；`Fast Boot` 建议 Disabled
+- 备用方案：拿同局域网内一台常开设备发 WoL 魔法包（本机 `192.168.0.112`，MAC `C8-7F-54-A9-8B-09`，支持 `WakeOnMagicPacket`）。
+  ⚠️ **生产机不能当发送方**：它在 `10.0.0.3/24`，ping `192.168.0.112` 100% 丢包，不在同一局域网。
+- 另有：睡眠前记得清掉**已过期的 `WakeToRun` 残留任务**（曾用 `WeaveWake2h/3h/Test`），否则系统一挂起就被立刻唤醒去“补跑”，表现为“睡下 4 秒就醒”。
