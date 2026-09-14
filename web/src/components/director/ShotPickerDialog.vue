@@ -29,6 +29,15 @@ export interface PickerShot {
   needsFaceHint?: boolean
   /** 已指定人脸的人数 / 总说话人数（展示用，如 "1/2"） */
   faceHint?: string
+  /** 对口型专用：底片（驱动嘴型的那份画面） */
+  lipsyncSource?: 'clip' | 'still' | null
+  /** 对口型专用：该镜是否同时有 motion 片段与关键帧静帧（都有才能切底片） */
+  hasClip?: boolean
+  hasStill?: boolean
+  /** 对口型专用：底片是否是自动选的（用户没显式指定） */
+  lipsyncAuto?: boolean
+  /** 对口型专用：「底片里嘴本来就大张」的高危镜头（惊恐/喊叫）——建议静帧底片/改画外音 */
+  expressionRisk?: boolean
 }
 
 const props = withDefaults(
@@ -38,12 +47,14 @@ const props = withDefaults(
     title?: string
     /** 顶部说明（不传用通用文案；对口型这类有前置条件的操作应传入） */
     hint?: string
+    /** 当前操作类型（对口型行会多一个「底片」开关） */
+    kind?: 'still' | 'clip' | 'voice' | 'lipsync'
     shots: PickerShot[]
     /** 已封版镜号 */
     locked: number[]
     busy?: boolean
   }>(),
-  { title: '选择分镜', hint: '', busy: false },
+  { title: '选择分镜', hint: '', busy: false, kind: 'still' },
 )
 
 const emit = defineEmits<{
@@ -52,6 +63,8 @@ const emit = defineEmits<{
   confirm: [payload: { shotNos: number[]; lock: number[]; unlock: number[] }]
   /** 点「指定人脸」：为该镜打开对口型人脸点选弹窗 */
   'pick-face': [shotNo: number]
+  /** 对口型：切换该镜的底片（motion 片段 / 关键帧静帧） */
+  'set-base': [payload: { shotNo: number; source: 'clip' | 'still' }]
 }>()
 
 const message = useMessage()
@@ -198,6 +211,35 @@ function confirm(): void {
           >
             指定人脸<template v-if="s.faceHint">（{{ s.faceHint }}）</template>
           </button>
+          <!-- 对口型：底片切换（motion 片段 / 关键帧静帧）。
+               底片 = 驱动嘴型的那份画面；静帧只有一张干净的脸，嘴部状态单一，
+               比「已经在动/大张的 motion 片段」稳得多（LatentSync 要把大张的嘴先合上再重开）。 -->
+          <span v-if="kind === 'lipsync' && (s.hasClip || s.hasStill)" class="sp-base">
+            <span class="sp-base-label">{{ s.lipsyncAuto ? '底片(自动)' : '底片' }}</span>
+            <span class="sp-base-seg">
+              <button
+                type="button"
+                class="sp-base-btn"
+                :class="{ on: s.lipsyncSource === 'clip' }"
+                :disabled="!s.hasClip"
+                :title="s.hasClip ? '用该镜最新 motion 片段当底片（保留运镜，但底片里嘴在动时容易画坏）' : '该镜还没有 motion 片段'"
+                :data-testid="`sp-base-clip-${s.shotNo}`"
+                @click.stop="emit('set-base', { shotNo: s.shotNo, source: 'clip' })"
+              >片段</button>
+              <button
+                type="button"
+                class="sp-base-btn"
+                :class="{ on: s.lipsyncSource === 'still' }"
+                :disabled="!s.hasStill"
+                :title="s.hasStill ? '用关键帧静帧当底片（嘴部干净，推荐给近景对话镜）' : '该镜还没有关键帧静帧'"
+                :data-testid="`sp-base-still-${s.shotNo}`"
+                @click.stop="emit('set-base', { shotNo: s.shotNo, source: 'still' })"
+              >静帧</button>
+            </span>
+            <span v-if="s.expressionRisk" class="sp-risk" :title="'该镜文字里是喊叫/惊恐类表达：底片里嘴很可能大张，对口型会把嘴部画坏——建议用静帧底片，或把这句改成旁白/画外音'">
+              ⚠ 大张口风险
+            </span>
+          </span>
         </NCheckbox>
         <NCheckbox
           :checked="lockedSet.includes(s.shotNo)"
@@ -293,6 +335,44 @@ function confirm(): void {
 .sp-face.todo {
   border-color: var(--wv-warn, #d0a24e);
   color: var(--wv-warn, #d0a24e);
+}
+.sp-base {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 8px;
+}
+.sp-base-label {
+  font-size: 11px;
+  color: var(--wv-text-4);
+}
+.sp-base-seg {
+  display: inline-flex;
+  border: 1px solid var(--wv-line);
+  border-radius: 999px;
+  overflow: hidden;
+}
+.sp-base-btn {
+  padding: 1px 8px;
+  border: 0;
+  background: transparent;
+  font-size: 11px;
+  color: var(--wv-text-3);
+  cursor: pointer;
+}
+.sp-base-btn.on {
+  background: color-mix(in srgb, var(--wv-accent, #8fb9b4) 30%, transparent);
+  color: var(--wv-text-1);
+  font-weight: 500;
+}
+.sp-base-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.sp-risk {
+  font-size: 11px;
+  color: var(--wv-warn, #d0a24e);
+  white-space: nowrap;
 }
 .sp-no {
   font-size: 13px;

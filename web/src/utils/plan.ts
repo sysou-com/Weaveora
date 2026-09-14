@@ -20,6 +20,31 @@ export function canonicalJson(v: unknown): string {
   return JSON.stringify(sortKeysDeep(v))
 }
 
+/**
+ * C：「底片里嘴本来就大张」的高危镜头判定（与后端 `JobService.expressionRisk` 同一份词表）。
+ *
+ * 用于：① 选镜弹窗提前提醒（建议底片改静帧 / 改旁白/画外音）；② 展示自动选定的底片。
+ * 只做文字判定：判多一次的代价 = 多走一次静帧底片（静帧本身合法）；
+ * 判漏的代价 = 一段坏画面 + 十几分钟 GPU。
+ */
+export function expressionRiskOf(shot: {
+  action?: string | null
+  positive_prompt?: string | null
+  narration?: string | null
+  narrations?: Array<{ text?: string | null }> | null
+}): boolean {
+  const parts: string[] = [
+    shot.action ?? '',
+    shot.positive_prompt ?? '',
+    shot.narration ?? '',
+    ...((shot.narrations ?? []).map((n) => n.text ?? '')),
+  ]
+  return EXPRESSION_RISK_RE.test(parts.join(' ').toLowerCase())
+}
+
+const EXPRESSION_RISK_RE =
+  /喊叫|尖叫|惊叫|惊呼|失声|呼喊|大叫|吼叫|嚎叫|嘶喊|大喊|张口|张嘴|大张|口大张|scream|shriek|shout|yell|cry out|wail|mouth wide|wide.open.mouth|open mouth|mouth open/
+
 function sortKeysDeep(v: unknown): unknown {
   if (Array.isArray(v)) return v.map(sortKeysDeep)
   if (v && typeof v === 'object') {

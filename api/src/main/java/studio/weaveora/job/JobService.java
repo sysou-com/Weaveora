@@ -1593,12 +1593,34 @@ public class JobService {
                 continue;
             }
             int shotNo = shot.path("shot_no").asInt();
-            // 画面：该镜最新的 motion 片段（没有 motion 就用关键帧静帧，口型模型能处理静帧）
+            // 画面（底片）：默认该镜最新的 motion 片段；没有 motion 就用关键帧静帧（口型模型能处理静帧）。
+            //
+            // A（逐镜可选）：方案可写 `shots[].lipsync_source = "still" | "clip"`（选镜弹窗每行可切）；
+            // C（极端表情自动分流）：没显式指定时，如果这一镜是「惊叫/喊叫/失声…」这类
+            //   **底片里嘴本来就大张**的镜头，而有静帧可选 → **默认改用静帧**：静帧只有一张干净的脸，
+            //   嘴部状态单一；而 motion 片段里嘴已经在动，LatentSync 得先把嘴合上再按配音重开，
+            //   嘴部掩码区大幅形变（2026-09-14《那宝玉恍恍惚惚》第6镜实测「画面被破坏」）。
             studio.weaveora.asset.domain.Asset clip = pickNewestAsset(projectId, workspaceId, shotNo, "clip");
-            studio.weaveora.asset.domain.Asset still = clip != null ? clip : pickNewestAsset(projectId, workspaceId, shotNo, "still");
-            if (still == null) {
+            studio.weaveora.asset.domain.Asset stillAsset = pickNewestAsset(projectId, workspaceId, shotNo, "still");
+            String wantBase = shot.path("lipsync_source").asText("").trim().toLowerCase();
+            boolean expressionRisk = expressionRisk(shot);
+            boolean useStill;
+            if ("still".equals(wantBase)) {
+                useStill = stillAsset != null;                 // 要静帧：没静帧就退回片段（不静默不生成）
+            } else if ("clip".equals(wantBase)) {
+                useStill = clip == null;                       // 要片段：没片段就退回静帧
+            } else {
+                useStill = clip == null || (stillAsset != null && expressionRisk);
+            }
+            studio.weaveora.asset.domain.Asset base = useStill ? stillAsset : clip;
+            if (base == null) {
                 skipped.add("第" + shotNo + "镜（缺画面：无 motion 也无关键帧）");
                 continue;
+            }
+            if (useStill && clip != null && !"still".equals(wantBase)) {
+                log.warn("lipsync 第{}镜底片自动改用静帧（expressionRisk={}）—— motion 片段里嘴部已在大幅运动/大张，"
+                        + "直接当底片容易把嘴部画坏（如需强制用片段：方案里把 shots[].lipsync_source 设为 clip）",
+                        shotNo, expressionRisk);
             }
             // 音频：该镜全部配音段（按 line_index 升序，取每段最新）
             List<studio.weaveora.asset.domain.Asset> voices = newestVoicePerLine(projectId, workspaceId, shotNo);
@@ -1612,9 +1634,14 @@ public class JobService {
             payload.put("revisionId", req.revisionId().toString());
             payload.put("shotId", shotId.toString());
             payload.put("shot_no", shotNo);
-            payload.put("videoKey", still.storageKey());
-            payload.put("videoIsStill", clip == null);
-            payload.put("isStill", clip == null);
+            payload.put("videoKey", base.storageKey());
+            payload.put("videoIsStill", useStill);
+            payload.put("isStill", useStill);
+            // A/B/C 的下发字段：底片来源（给用户看 + worker 报告）+ 是否自动选的 + 极端表情标记
+            payload.put("lipsyncSource", useStill ? "still" : "clip");
+            payload.put("lipsyncSourceAuto", wantBase.isEmpty());
+            payload.put("expressionRisk", expressionRisk);
+            payload.put("lipsyncForce", shot.path("lipsync_force").asBoolean(false));
             com.fasterxml.jackson.databind.node.ArrayNode vk = payload.putArray("voiceKeys");
             for (studio.weaveora.asset.domain.Asset a : voices) {
                 vk.add(a.storageKey());
@@ -1710,6 +1737,36 @@ public class JobService {
                 projectId, created.size());
         return created;
     }
+
+    /**
+     * C：该镜是不是「底片里嘴本来就大张」的高危镜头（惊叫/喊叫/失声…）。
+     *
+     * <p>为什么要判定：LatentSync 是「先合上再重开」的嘴部重绘。底片里人本来就在喊/惊叫时，
+     * 嘴部掩码区形变最大，实测会把画面搞坏（2026-09-14《那宝玉恍恍惚惚》第6镜：
+     * action「梦醒…失声喊叫」+ 正词「eyes wide in terror」）。
+     *
+     * <p>只看文字信号（不做图像分析）：判错的代价 = 默认多走一次静帧底片（静帧本来是合法底片），
+     * 可接受；而漏判的代价是一段坏画面 + 十几分钟 GPU。用户仍可在选镜弹窗里手动改回片段。
+     */
+    static boolean expressionRisk(JsonNode shot) {
+        StringBuilder sb = new StringBuilder();
+        for (String f : new String[]{"action", "positive_prompt", "narration"}) {
+            sb.append(shot.path(f).asText("")).append(' ');
+        }
+        for (JsonNode n : shot.path("narrations")) {
+            sb.append(n.path("text").asText("")).append(' ');
+        }
+        String t = sb.toString().toLowerCase();
+        if (t.isEmpty()) {
+            return false;
+        }
+        return EXPRESSION_RISK_RE.matcher(t).find();
+    }
+
+    /** 喊叫/惊恐/大张口类词表（中英兼容）。 */
+    private static final java.util.regex.Pattern EXPRESSION_RISK_RE = java.util.regex.Pattern.compile(
+            "喊叫|尖叫|惊叫|惊呼|失声|呼喊|大叫|吼叫|嚎叫|嘶喊|大喊|张口|张嘴|大张|口大张"
+            + "|scream|shriek|shout|yell|cry out|wail|mouth wide|wide.open.mouth|open mouth|mouth open");
 
     /** 该项目/镜号下最新的一条某类产物。 */
     private studio.weaveora.asset.domain.Asset pickNewestAsset(UUID projectId, UUID workspaceId, int shotNo, String kind) {

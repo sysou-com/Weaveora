@@ -68,6 +68,58 @@ def _comfy(method, path, payload=None, files=None, timeout=120):
         raise ComfyError("comfy %s %s -> %s %s" % (method, path, e.code, e.read()[:300]))
 
 
+# ── 节点补丁版本/能力校验（2026-09-14）────────────────────────────────────
+# 为什么：worker 跑在 API 服务器、LatentSync 节点跑在 GPU 服务器，节点侧只能手工同步。
+# 曾实测：GPU 机上是旧副本（旧 inference.py 不认「内联 JSON 规格」）→ 退回「取最大脸」→
+# 两段台词都驱动同一张脸、画面被毁，而 worker 这边完全看不出异常，只表现为「效果不对」。
+# 所以这里先问节点要版本，缺能力就**直接失败**并给出修复指引，不再静默降级。
+REQUIRED_NODE_FEATURES = ("point_lock", "inline_spec", "track_lock", "quality_gate", "paste_mask", "fps_pin")
+NODE_PATCH_HOWTO = (
+    "修复：在 GPU 服务器上执行\n"
+    "  curl -fsSL https://sysou.com/weaveora-node/latentsync-node-patch.tar.gz -o /tmp/p.tar.gz"
+    " && tar xzf /tmp/p.tar.gz -C /tmp && bash /tmp/latentsync-node/apply.sh\n"
+    "然后**重启 ComfyUI**，再用 bash /tmp/latentsync-node/verify.sh 自检。"
+    "（应急跳过：worker 环境变量 WEAVEORA_SKIP_NODE_CHECK=1）"
+)
+_NODE_VERSION_CACHE = {"at": 0.0, "base": None, "payload": None}
+
+
+def _node_version(base, timeout=15, ttl=300):
+    """取节点补丁版本（带缓存，避免每个任务都问一次）。拿不到返回 None。"""
+    import time as _t
+    now = _t.time()
+    c = _NODE_VERSION_CACHE
+    if c["payload"] is not None and c["base"] == base and (now - float(c["at"])) < ttl:
+        return c["payload"]
+    try:
+        with urllib.request.urlopen(base + "/weaveora/version", timeout=timeout) as r:
+            payload = json.loads(r.read().decode("utf-8", "replace"))
+    except Exception:
+        payload = None
+    c.update({"at": now, "base": base, "payload": payload})
+    return payload
+
+
+def _require_node_features():
+    """跑对口型前强校验 GPU 机上节点补丁的版本与能力。"""
+    if os.environ.get("WEAVEORA_SKIP_NODE_CHECK", "") == "1":
+        print("[comfy] 已跳过节点版本校验（WEAVEORA_SKIP_NODE_CHECK=1）", flush=True)
+        return
+    info = _node_version(COMFY)
+    if info is None:
+        raise ComfyError(
+            "拿不到 GPU 服务器上 LatentSync 节点的版本接口（%s/weaveora/version）。\n"
+            "这说明那台机器的节点还是**旧副本**（没打 Weaveora 补丁）—— 旧副本不认「点选人脸/内联规格」，"
+            "会退回「取最大脸」，导致嘴型贴到别人脸上。\n%s" % (COMFY, NODE_PATCH_HOWTO))
+    feats = info.get("features") or []
+    missing = [f for f in REQUIRED_NODE_FEATURES if f not in feats]
+    if missing:
+        raise ComfyError(
+            "GPU 服务器上 LatentSync 节点补丁**版本过旧**（版本 %s），缺少能力：%s。\n%s"
+            % (info.get("version") or "未知", "、".join(missing), NODE_PATCH_HOWTO))
+    print("[comfy] 节点补丁版本 %s，能力齐全 ✅" % info.get("version"), flush=True)
+
+
 def _free_comfy_models():
     """让 ComfyUI 卸掉自己缓存的模型（SDXL / Wan 等占着 6+ GB），把显存让给 LatentSync。
 
@@ -749,6 +801,25 @@ LIPSYNC_NODE_CLASS = os.environ.get("WEAVEORA_LIPSYNC_NODE_CLASS", "LatentSyncNo
 # 填了就走远端 HTTP（见 deploy/face/face_server.py），便于把脸算力集中到新 GPU 机器。
 FACE_URL = os.environ.get("WEAVEORA_FACE_URL", "").rstrip("/")
 
+# --------------------------------------------------------------------------- #
+# 对口型「底片体检」（B）：底片（静帧/片段）本身就不适合做口型时，**宁可拒绝也不出坏画面**。
+#
+# 背景（2026-09-14 用户实测）：第 6 镜是「梦醒失声喊叫、惊恐张口」的镜头，底片（motion 片段）
+# 里嘴已经大张，LatentSync 要先把嘴「合上」再按音频重开 → 嘴部掩码区大幅形变 = 画面被破坏。
+# 两道硬门禁 + 一道软提醒：
+#   ① 脸太小（占画面比例 < LIPSYNC_FACE_MIN_RATIO）→ 拒绝（跑了也白跑）；
+#   ② 嘴张太大（张开度 ≥ LIPSYNC_MOUTH_MAX）→ 拒绝，提示换「嘴部自然的静帧」当底片；
+#   ③ 介于 WARN 与 MAX 之间 → 只提醒，不拦。
+# 指标来自人脸服务 / 本机 insightface（106 点）；**拿不到指标就跳过**（绝不误拦）。
+# 逃生门：payload.lipsyncForce=true 或 env WEAVEORA_LIPSYNC_FORCE=1（用户明确要硬跑）。
+# --------------------------------------------------------------------------- #
+LIPSYNC_FACE_MIN_RATIO = float(os.environ.get("WEAVEORA_LIPSYNC_FACE_MIN_RATIO", "0.015"))
+LIPSYNC_MOUTH_WARN = float(os.environ.get("WEAVEORA_LIPSYNC_MOUTH_WARN", "0.30"))
+LIPSYNC_MOUTH_MAX = float(os.environ.get("WEAVEORA_LIPSYNC_MOUTH_MAX", "0.50"))
+LIPSYNC_FORCE = os.environ.get("WEAVEORA_LIPSYNC_FORCE", "").strip().lower() in ("1", "true", "yes", "on")
+# 极端表情（惊恐/喊叫）镜头的嘴部驱动强度：工作流默认 1.5 → 降到 0.8，减少嘴部形变
+LIPSYNC_EXPRESSION_RISK = float(os.environ.get("WEAVEORA_LIPSYNC_EXPRESSION_RISK", "0.8"))
+
 
 # 文件名类输入的候选键（按优先级）：不同加载节点名字不一样
 _VIDEO_FILE_KEYS = ("file", "video", "video_file", "path", "filename", "image", "url")
@@ -888,17 +959,77 @@ def _apply_fps_policy(graph):
 # 6 帧检测在 CPU 上只多花几秒，但完全不吃显存。
 _FACE_CHECK = r'''
 import os, sys, json, cv2, numpy as np
-node = (LATENTSYNC_DIR or os.environ.get("WEAVEORA_LATENTSYNC_DIR") or r"D:\ComfyUI\custom_nodes\ComfyUI-LatentSyncWrapper")
+# 注：这里的常量**不能**写裸名 LATENTSYNC_DIR —— 本脚本是交给 `python -c` 的子进程，
+# 父进程的模块变量在子进程里并不存在（写裸名会 NameError → 子进程崩 → 父进程只看到
+# “预检无结果，不拦” → 门禁静默失效）。所以只能读 env + 默认值。
+node = (os.environ.get("WEAVEORA_LATENTSYNC_DIR") or r"D:\ComfyUI\custom_nodes\ComfyUI-LatentSyncWrapper")
 sys.path.insert(0, node)
 AUX = os.path.join(node, "checkpoints", "auxiliary")
 tgt_path = sys.argv[2] if len(sys.argv) > 2 else ""
 try:
     from insightface.app import FaceAnalysis
-    mods = ["detection"] + (["recognition"] if tgt_path else [])
+    # landmark_2d_106：底片体检用（脸太小 / 嘴张太大）。没有这个模型时 insightface 会报错，
+    # 外层 except 会打印 SKIP → 调用方跳过门禁（而不是误拦）。
+    mods = ["detection", "landmark_2d_106"] + (["recognition"] if tgt_path else [])
     app = FaceAnalysis(allowed_modules=mods, root=AUX, providers=["CPUExecutionProvider"])
     app.prepare(ctx_id=-1, det_size=(512, 512))
 except Exception as e:
     print("SKIP:init:" + str(e)[:160]); sys.exit(0)
+
+def mouth_ratio(face):
+    """嘴部张开度 ≈ (下唇均y − 上唇均y) / 嘴宽；判不出返 None。
+
+    与 deploy/face/face_server.py 里的 _mouth_open_ratio 同构（子进程无法 import 主进程函数）。
+    2d106 点序号可用 WEAVEORA_LIPSYNC_MOUTH_IDX 覆盖；过不了合理性校验就跳过。
+    """
+    try:
+        lm = getattr(face, "landmark_2d_106", None)
+        if lm is None:
+            return None
+        pts = np.asarray(lm, dtype=np.float32)
+        if pts.ndim != 2 or pts.shape[0] < 100:
+            return None
+        spec = (os.environ.get("WEAVEORA_LIPSYNC_MOUTH_IDX") or "87-105").strip()
+        sep = "-" if "-" in spec else ":"
+        try:
+            a, b = [int(x) for x in spec.split(sep, 1)]
+        except Exception:
+            a, b = 87, 105
+        if not (0 <= a < b <= 106):
+            a, b = 87, 105
+        mouth = pts[a:b + 1]
+        bx0, by0, bx1, by1 = [float(v) for v in face.bbox[:4]]
+        fw, fh = bx1 - bx0, by1 - by0
+        if fw <= 0 or fh <= 0 or mouth.shape[0] < 6:
+            return None
+        mx, my = mouth[:, 0], mouth[:, 1]
+        mw = float(mx.max() - mx.min())
+        if mw <= 0 or not (0.15 <= mw / fw <= 0.75):
+            return None
+        if abs(float(mx.mean()) - (bx0 + fw / 2.0)) > 0.35 * fw:
+            return None
+        if float(my.mean()) < by0 + 0.5 * fh:
+            return None
+        # 张开度 = 嘴部**中央区域**的上下唇最大间距 / 嘴宽。
+        # 不用「按中位数分组再取均值」：那会把极值平均掉（实测真值 0.5 只测出 0.237 → 漏判）。
+        cx = float(mx.mean())
+        cen = my[np.abs(mx - cx) <= 0.25 * mw]
+        if cen.size < 4:
+            return None
+        return float(cen.max() - cen.min()) / mw
+    except Exception:
+        return None
+
+def face_area_ratio(face, frame):
+    try:
+        bx0, by0, bx1, by1 = [float(v) for v in face.bbox[:4]]
+        h, w = frame.shape[0], frame.shape[1]
+        if w <= 0 or h <= 0:
+            return None
+        return max(0.0, (bx1 - bx0) * (by1 - by0)) / float(w * h)
+    except Exception:
+        return None
+
 tgt = None
 if tgt_path:
     try:
@@ -913,6 +1044,8 @@ n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 idx = sorted({int(i * (n - 1) / 5) for i in range(6)}) if n > 1 else [0]
 hits = total = 0
 best = -1.0
+face_ratio = None
+mouth_open = None
 for i in idx:
     cap.set(cv2.CAP_PROP_POS_FRAMES, i)
     ok, fr = cap.read()
@@ -925,6 +1058,14 @@ for i in idx:
         faces = []
     if len(faces) > 0:
         hits += 1
+    # 「底片体检」指标：取所有帧/所有脸的**最坏**值（最坏情况才是要拦的那个）
+    for f in faces:
+        r = face_area_ratio(f, fr)
+        if r is not None:
+            face_ratio = r if face_ratio is None else max(face_ratio, r)
+        mo = mouth_ratio(f)
+        if mo is not None:
+            mouth_open = mo if mouth_open is None else max(mouth_open, mo)
     if tgt is not None:
         for f in faces:
             emb = getattr(f, "normed_embedding", None)
@@ -936,7 +1077,10 @@ for i in idx:
             if s > best:
                 best = s
 cap.release()
-print("RESULT:%d/%d/%s" % (hits, total, ("%.4f" % best) if tgt is not None else ""))
+print("RESULT:%d/%d/%s/%s/%s" % (
+    hits, total, ("%.4f" % best) if tgt is not None else "",
+    ("%.5f" % face_ratio) if face_ratio is not None else "",
+    ("%.4f" % mouth_open) if mouth_open is not None else ""))
 '''
 
 
@@ -946,7 +1090,7 @@ NO_FACE_MSG = ("该镜检测不到人脸（可能是远景/背影/空镜）—�
 TARGET_MIN_SIM = 0.28
 
 # 预检失败原因（给调用方拼错误文案；单线程内单次使用，无需加锁）
-_face_reason = {"msg": NO_FACE_MSG}
+_face_reason = {"msg": NO_FACE_MSG, "warn": ""}
 
 # LatentSync 节点目录（本机人脸检测子进程用；可被「服务地址 → 人脸 → latentsyncDir」覆盖）
 LATENTSYNC_DIR = os.environ.get("WEAVEORA_LATENTSYNC_DIR", "").strip()
@@ -955,8 +1099,10 @@ LATENTSYNC_DIR = os.environ.get("WEAVEORA_LATENTSYNC_DIR", "").strip()
 def _face_probe(video_bytes, target_emb=None):
     """抽 6 帧跑人脸检测。
 
-    返回 (hits, total, best_target_sim)：
+    返回 (hits, total, best_target_sim, extra)：
       hits/total = 检出人脸的帧数；给了 target_emb 时额外给出「最像目标的相似度」。
+      extra = {"face_ratio": 最大脸框面积/画面面积, "mouth_open": 嘴部张开度}，
+              取不到则为 None（调用方必须跳过门禁，而不是当成 0）。
     无法判定时返回 None（不拦不传）。
     """
     import subprocess
@@ -974,7 +1120,11 @@ def _face_probe(video_bytes, target_emb=None):
             hits = int(resp.get("hits") or 0)
             total = int(resp.get("total") or 0)
             best = resp.get("best")
-            return hits, total, (float(best) if best is not None else None)
+            extra = {
+                "face_ratio": (float(resp["face_ratio"]) if resp.get("face_ratio") is not None else None),
+                "mouth_open": (float(resp["mouth_open"]) if resp.get("mouth_open") is not None else None),
+            }
+            return hits, total, (float(best) if best is not None else None), extra
         except Exception as e:
             print("[comfy] 远端人脸服务不可用，回退本机：%s" % e, flush=True)
     d = tempfile.mkdtemp(prefix="weaveora_facechk_")
@@ -999,7 +1149,9 @@ def _face_probe(video_bytes, target_emb=None):
                 # 无目标时脚本会输出 RESULT:h/t/（末段为空）——直接 float("") 会抛异常，
                 # 导致“预检异常→不拦”，静默失去这道拦截
                 best = float(parts[2]) if len(parts) > 2 and parts[2].strip() else None
-                return hits, total, best
+                fr = float(parts[3]) if len(parts) > 3 and parts[3].strip() else None
+                mo = float(parts[4]) if len(parts) > 4 and parts[4].strip() else None
+                return hits, total, best, {"face_ratio": fr, "mouth_open": mo}
         print("[comfy] 人脸预检无结果，不拦：%s" % out[:120], flush=True)
         return None
     except Exception as e:
@@ -1010,18 +1162,28 @@ def _face_probe(video_bytes, target_emb=None):
         _sh.rmtree(d, ignore_errors=True)
 
 
-def _face_precheck(video_bytes, where="lipsync", target_emb=None, speaker=""):
-    """对口型前置门禁。两道：① 画面里有人脸；② （给了目标特征时）**说话人的脸真在画面里**。
+def _face_precheck(video_bytes, where="lipsync", target_emb=None, speaker="", force=False):
+    """对口型前置门禁。三道：① 画面里有人脸；② （给了目标特征时）**说话人的脸真在画面里**；
+    ③ 「底片体检」：脸是否太小 / 嘴是否张得太大（B）。
 
     为什么要第二道（2026-09-13 实例）：第 6 镜说话人是「袭人」，但她与「警幻」的定妆照
     几乎同一张脸（相似度 0.71）——锁定她时最高相似度只有 0.18，低于阈值 0.28。
     这时不能硬跑（会去驱动最大脸=另一个人，画面坏掉），也不能报一句误导的
     "Face not detected"，而应该**说清楚原因并让用户去修定妆照**。
+
+    为什么要第三道（2026-09-14 实例，用户反馈）：第 6 镜是「惊恐失声喊叫」的镜头，
+    底片（motion 片段）里嘴本来就大张，LatentSync 要先把嘴合上再按音频重开 →
+    嘴部掩码区大幅形变 = 画面被破坏。底片本身不合格时应**提前拒绝并告诉他怎么换**，
+    而不是烧十几分钟 GPU 出一段坏画面。
+
+    逃生门：force=True（payload.lipsyncForce）或 env WEAVEORA_LIPSYNC_FORCE=1。
     """
+    _face_reason["warn"] = ""
     r = _face_probe(video_bytes, target_emb)
     if r is None:
         return True
-    hits, total, best = r
+    hits, total, best = r[0], r[1], r[2]
+    extra = r[3] if len(r) > 3 and isinstance(r[3], dict) else {}
     print("[comfy] 人脸预检 %s：%d/%d 帧可检出%s"
           % (where, hits, total, "，最像说话人的相似度=%.2f" % best if best is not None else ""),
           flush=True)
@@ -1044,6 +1206,40 @@ def _face_precheck(video_bytes, where="lipsync", target_emb=None, speaker=""):
             "此时按脸认人本身就不可能。请先核对「%s」的定妆照（导入图）选对了没有。"
             % (speaker or "?", best, TARGET_MIN_SIM, speaker or "?"))
         return False
+    return _base_health(extra, where, force, speaker)
+
+
+def _base_health(extra, where, force=False, speaker=""):
+    """底片体检（B）：脸太小 / 嘴张太大 → 拒绝；略大 → 只提醒。拿不到指标就放行。"""
+    if not isinstance(extra, dict):
+        return True
+    fr = extra.get("face_ratio")
+    mo = extra.get("mouth_open")
+    print("[comfy] 底片体检 %s：脸占比=%s，嘴张开度=%s%s"
+          % (where, ("%.3f%%" % (fr * 100)) if fr is not None else "n/a",
+             ("%.3f" % mo) if mo is not None else "n/a",
+             "（已开启强制，只记录不拦）" if force else ""), flush=True)
+    if force:
+        return True
+    if fr is not None and fr < LIPSYNC_FACE_MIN_RATIO:
+        _face_reason["msg"] = (
+            "该镜底片里的人脸太小（最大脸只占画面 %.2f%%，阈值 %.2f%%）——对口型对远景/小人物"
+            "没有可见效果。请改选一张**近景/特写**的静帧当底片，或该镜不跑口型。"
+            "（如需硬跑，让管理员把 WEAVEORA_LIPSYNC_FACE_MIN_RATIO 调小）"
+            % (fr * 100, LIPSYNC_FACE_MIN_RATIO * 100))
+        return False
+    if mo is not None and mo >= LIPSYNC_MOUTH_MAX:
+        _face_reason["msg"] = (
+            "该镜底片的**嘴部大张**（张开度 %.2f，阈值 %.2f）%s——LatentSync 要把大张的嘴先「合上」"
+            "再按配音重开，嘴部区域会大幅形变（实测就是把画面搞坏）。请任选其一：\n"
+            "① 换成该镜「嘴部自然（闭合/微张）」的**静帧关键帧**当底片（选镜弹窗 → 底片＝静帧）；\n"
+            "② 如该镜本就是喊叫/惊恐，建议改成旁白/画外音或侧脸（导演层「分镜规避」）；\n"
+            "③ 确实要试，打开「强制」后重跑（不保证画面完好）。"
+            % (mo, LIPSYNC_MOUTH_MAX, "（说话人：%s）" % speaker if speaker else ""))
+        return False
+    if mo is not None and mo >= LIPSYNC_MOUTH_WARN:
+        _face_reason["warn"] = ("底片嘴部偏大（%.2f）——对口型后嘴部可能变形；"
+                                "建议换一张嘴部自然的静帧当底片（选镜弹窗 → 底片＝静帧）" % mo)
     return True
 
 
@@ -1055,7 +1251,8 @@ def _face_precheck(video_bytes, where="lipsync", target_emb=None, speaker=""):
 # 用 CPU 同样是为了不占显存（ComfyUI 还缓存着模型）。
 _EMBED = r'''
 import os, sys, json, cv2, numpy as np
-node = (LATENTSYNC_DIR or os.environ.get("WEAVEORA_LATENTSYNC_DIR") or r"D:\ComfyUI\custom_nodes\ComfyUI-LatentSyncWrapper")
+# 注：不能写裸名 LATENTSYNC_DIR（子进程里不存在 → NameError → 静默回退最大脸）；只读 env + 默认值。
+node = (os.environ.get("WEAVEORA_LATENTSYNC_DIR") or r"D:\ComfyUI\custom_nodes\ComfyUI-LatentSyncWrapper")
 sys.path.insert(0, node)
 AUX = os.path.join(node, "checkpoints", "auxiliary")
 try:
@@ -1318,8 +1515,12 @@ def apply_services(svc):
              FACE_URL or "(本机)"), flush=True)
 
 
-def _run_lipsync_graph(client_id, vbytes, abytes, emb_path, on_tick=None):
-    """跑一次对口型工作流，返回产物 mp4 bytes（整镜 / 单段共用）。"""
+def _run_lipsync_graph(client_id, vbytes, abytes, emb_path, on_tick=None, lips_expression=None):
+    """跑一次对口型工作流，返回产物 mp4 bytes（整镜 / 单段共用）。
+
+    lips_expression：嘴部驱动强度（工作流默认 1.5）。极端表情（惊恐/喊叫）的底片降到 0.8，
+    减少「先合上再重开」造成的嘴部形变；None = 不改工作流原值。
+    """
     import uuid as _uuid
     if not LIPSYNC_WORKFLOW or not os.path.exists(LIPSYNC_WORKFLOW):
         raise ComfyError("对口型工作流不存在：检查 WEAVEORA_LIPSYNC_WORKFLOW=%s" % LIPSYNC_WORKFLOW)
@@ -1356,6 +1557,10 @@ def _run_lipsync_graph(client_id, vbytes, abytes, emb_path, on_tick=None):
     if emb_path:
         _n = _set_node_scalar(graph, LIPSYNC_NODE_CLASS, "target_embedding_path", emb_path)
         print("[comfy] 已注入 target_embedding_path（命中 %d 个 %s）" % (_n, LIPSYNC_NODE_CLASS), flush=True)
+    if lips_expression is not None:
+        _n = _set_node_scalar(graph, LIPSYNC_NODE_CLASS, "lips_expression", float(lips_expression))
+        print("[comfy] 嘴部驱动强度 lips_expression=%.2f（命中 %d 个 %s）"
+              % (float(lips_expression), _n, LIPSYNC_NODE_CLASS), flush=True)
     _mode, _nodes = _apply_fps_policy(graph)
     print("[comfy] 对口型 fps 策略：%s（节点：%s）" % (_mode, ",".join(str(x) for x in _nodes)), flush=True)
     # 裸节点图 → /prompt 要的是 {"prompt": 图, "client_id": ...}
@@ -1420,6 +1625,10 @@ def generate_lipsync(client_id, payload, progress_fn=None):
     import tempfile
     if not LIPSYNC_WORKFLOW or not os.path.exists(LIPSYNC_WORKFLOW):
         raise ComfyError("未配置对口型工作流：见 docs/lipsync-setup.md（WEAVEORA_LIPSYNC_WORKFLOW）")
+    # 先确认 GPU 机上的节点补丁版本/能力（缺就直接失败，不静默降级成「最大脸」）
+    _require_node_features()
+    if os.environ.get("WEAVEORA_LIPSYNC_DEBUG_BOX", "") == "1":
+        print("[comfy] 已开启对口型调试画框（产物上会标出锁定的脸与是否驱动）", flush=True)
     vkey = (payload.get("videoKey") or "").strip()
     vkeys = [k for k in (payload.get("voiceKeys") or []) if k]
     if not vkey or not vkeys:
@@ -1472,6 +1681,10 @@ def generate_lipsync(client_id, payload, progress_fn=None):
             spec["embedding"] = embs[name]
         if not spec:
             return ""
+        # 调试画框：worker 设 WEAVEORA_LIPSYNC_DEBUG_BOX=1 时，产物上会标出「锁定的哪张脸 + 这一帧有没有驱动」
+        # （cross-machine 排查用：worker 在 API 机、节点在 GPU 机，看不到节点日志）
+        if os.environ.get("WEAVEORA_LIPSYNC_DEBUG_BOX", "") == "1":
+            spec["debugBox"] = True
         try:
             # ★ 返回**内联 JSON**（不是文件路径）：worker 与 ComfyUI 可能不在同一台机
             # （worker 在 API 服务器、ComfyUI 在 GPU 服务器），文件路径在节点侧根本不存在。
@@ -1484,11 +1697,29 @@ def generate_lipsync(client_id, payload, progress_fn=None):
             print("[comfy] 锁定规格序列化失败（退回最大脸）: %s" % ex, flush=True)
             return ""
 
-    # 先预检：画面里有人脸；且（有特征时）说话人的脸真在画面里
+    # 先预检：画面里有人脸；且（有特征时）说话人的脸真在画面里；以及「底片体检」（B）
+    # ★ 但**有「点选人脸」提示时不做识别式预检**：识别在风格化/低分辨率素材上不可信
+    #   （实测「袭人」定妆照与「警幻」相似度 0.71＝同一张脸，画面里最高相似度仅 0.21
+    #   < 阈值 0.28 → 会把本来能跑的任务直接判失败）。用户点的位置本身就是权威信号，
+    #   点选没点到脸的情况交给管线的「就近选脸 + 沿用上一帧」兜底。
+    # 注：B 的底片体检（脸太小/嘴大张）**不看这个**——它用的是全部脸的最坏值，与锁谁无关。
     _first = next(iter(embs)) if len(embs) == 1 else ""
+    _emb_pre = None if (_first and face_hints.get(_first)) else embs.get(_first)
+    _force = bool(payload.get("lipsyncForce")) or LIPSYNC_FORCE
     if not _face_precheck(vdata, where="第%s镜" % shot_no,
-                          target_emb=embs.get(_first), speaker=_first):
+                          target_emb=_emb_pre, speaker=_first, force=_force):
         raise ComfyError(_face_reason["msg"])
+    _warn = _face_reason.get("warn") or ""
+    if _warn:
+        print("[comfy] 第%s镜底片体检提醒：%s" % (shot_no, _warn), flush=True)
+        if progress_fn:
+            progress_fn(18, _warn)
+    # C：方案侧标了「极端表情（惊恐/喊叫）」的镜头 → 降低嘴部驱动强度（1.5 → 0.8）
+    _lips_expr = None
+    if bool(payload.get("expressionRisk")):
+        _lips_expr = LIPSYNC_EXPRESSION_RISK
+        print("[comfy] 第%s镜标记为极端表情（张口/喊叫）→ lips_expression=%.2f"
+              % (shot_no, _lips_expr), flush=True)
 
     _free_comfy_models()
     _last_min = [-1]
@@ -1527,7 +1758,7 @@ def generate_lipsync(client_id, payload, progress_fn=None):
                       "可能出现时间轴异常；建议把该镜画面时长做到 ≥ 配音" % (shot_no, _asec, _vms), flush=True)
             if progress_fn:
                 progress_fn(40, "lipsync")
-            out = _run_lipsync_graph(client_id, vdata, adata, ep, on_tick=_tick)
+            out = _run_lipsync_graph(client_id, vdata, adata, ep, on_tick=_tick, lips_expression=_lips_expr)
         else:
             # ---------- 多人镜：按段驱动 ----------
             fps = _source_fps(vdata, tmp)
@@ -1590,7 +1821,8 @@ def generate_lipsync(client_id, payload, progress_fn=None):
                                TARGET_MIN_SIM, who or "?"))
                 if progress_fn:
                     progress_fn(40, "lipsync 第%d/%d段（%s）" % (i + 1, len(segs), who or "?"))
-                seg_mp4 = _run_lipsync_graph(client_id, seg_video, seg_audio, ep, on_tick=_tick)
+                seg_mp4 = _run_lipsync_graph(client_id, seg_video, seg_audio, ep, on_tick=_tick,
+                                             lips_expression=_lips_expr)
                 pf = _decode_frames(seg_mp4, tmp, "seg%d" % i)
                 results.append((a, b, pf))
                 cursor = b

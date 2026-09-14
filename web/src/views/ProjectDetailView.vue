@@ -46,6 +46,7 @@ import {
   autoLayoutShot,
   canonicalJson,
   clonePlan,
+  expressionRiskOf,
   isVideoPlan,
   normalizePlan,
   audioVideoHealthCheck,
@@ -322,14 +323,18 @@ const facePickSpeakers = computed<string[]>(() => {
 const facePickTargets = computed<Record<string, { x: number; y: number }>>(() =>
   facePickShot.value?.lipsync_targets ?? {},
 )
-/** 该镜最新的画面产物（clip 优先，退关键帧）—— 用来点人脸 */
+/** 该镜最新的画面产物（按对口型底片：指定静帧就用静帧）—— 用来点人脸 */
 const facePickNewest = computed(() => {
   if (facePickShotNo.value == null) return null
   const list = (assets.data.value ?? []).filter(
     (a) => a.shotNo === facePickShotNo.value && (a.kind === 'clip' || a.kind === 'still'),
   )
+  // A：人脸要在**真正当底片的那份画面**上点，否则点的坐标和实际驱动到的帧对不上
+  const want = facePickShot.value?.lipsync_source
+  const prefer = want === 'still' ? 'still' : want === 'clip' ? 'clip' : ''
+  const preferred = prefer ? list.filter((a) => a.kind === prefer) : []
   const clips = list.filter((a) => a.kind === 'clip')
-  const pool = clips.length ? clips : list
+  const pool = preferred.length ? preferred : (clips.length ? clips : list)
   return [...pool].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())[0] ?? null
 })
 const facePickMedia = computed(() => {
@@ -1539,8 +1544,18 @@ const pickerShots = computed(() => {
       const faceHint = speakers.length
         ? `${speakers.filter((n) => tg[n]).length}/${speakers.length}`
         : ''
-      // 最新画面产物的人脸结论（undefined = 未知/历史数据 → 不拦）
-      const pool = clips.length ? clips : stills
+      // A：底片（驱动嘴型的那份画面）——方案里显式指定优先；否则按后端同一套默认值算：
+      //    有 clip 用 clip；但「惊恐/喊叫」类镜头（底片里嘴本来就大张）默认用静帧。
+      //    必须先算底片，后面「无人脸」判定才能拿**真当底片的那份产物**去看人脸。
+      const wantBase = s.lipsync_source === 'still' || s.lipsync_source === 'clip' ? s.lipsync_source : null
+      const hasClip = clips.length > 0
+      const hasStill = stills.length > 0
+      const risk = expressionRiskOf(s)
+      const autoBase: 'clip' | 'still' = !hasClip || (hasStill && risk) ? 'still' : 'clip'
+      const lipsyncSource: 'clip' | 'still' = wantBase ?? autoBase
+      const baseWord = lipsyncSource === 'still' ? '关键帧静帧' : 'motion 片段'
+      // 底片产物的人脸结论（undefined = 未知/历史数据 → 不拦）
+      const pool = lipsyncSource === 'still' ? (stills.length ? stills : clips) : (clips.length ? clips : stills)
       const newestVisual = [...pool].sort(
         (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
       )[0]
@@ -1570,9 +1585,14 @@ const pickerShots = computed(() => {
         // 用户点一下最实在。多人镜额外用高亮提醒「还有谁没指定」。
         needsFaceHint: speakers.length > 0 && needFace > 0 && (speakers.length > 1 || multiHint !== ''),
         faceHint: speakers.length ? faceHint : '',
+        lipsyncSource,
+        lipsyncAuto: wantBase === null,
+        hasClip,
+        hasStill,
+        expressionRisk: risk,
         note: missing.length
           ? `不可：${missing.join('、')}`
-          : `可生成 · ${voice.length} 段语音${clips.length ? '' : '（用关键帧静帧）'}${multiHint ? ` · ${multiHint}` : ''}`,
+          : `可生成 · ${voice.length} 段语音 · 底片=${baseWord}${risk ? '（大张口风险镜）' : ''}${multiHint ? ` · ${multiHint}` : ''}`,
       }
     }
     const rel = succ(s.shot_no, kind)
@@ -2279,6 +2299,20 @@ async function startLipsync(shotNos?: number[] | null): Promise<void> {
   }
 }
 
+/** A：切某镜的对口型底片（motion 片段 / 关键帧静帧）——写进方案并就地保存 */
+async function onLipsyncBase(p: { shotNo: number; source: 'clip' | 'still' }): Promise<void> {
+  const plan = draft.value
+  if (!plan || !isVideoPlan(plan)) return
+  const shot = (plan.shots ?? []).find((s) => s.shot_no === p.shotNo)
+  if (!shot) return
+  shot.lipsync_source = p.source
+  await savePlanInPlace()
+  message.success(
+    `第 ${p.shotNo} 镜对口型底片 = ${p.source === 'still' ? '关键帧静帧' : 'motion 片段'}`
+    + `（下一批「对口型」会用它驱动嘴型）`,
+  )
+}
+
 /** 对口型按钮：**总是先弹分镜选择**（贵 + 按镜判断前置条件），再对该镜最新资产对口型 */
 function openLipsyncPicker(): void {
   void withShotPicker(
@@ -2288,8 +2322,7 @@ function openLipsyncPicker(): void {
     {
       always: true,
       hint:
-        '对口型按「镜」生成：只处理勾选的分镜，用该镜最新资产（优先 motion 片段，'+
-        '没有则退回关键帧静帧）+ 该镜全部配音。需同时具备「画面」与「配音」才能生成。',
+        '对口型按「镜」生成：只处理勾选的分镜，用该镜**底片**（默认 motion 片段；惊恐/喊叫等「底片里嘴本来就大张」的镜 + 只有一张干净的脸的**静帧**更稳，可在行内切「底片：片段/静帧」）+ 该镜全部配音。需同时具备「画面」与「配音」才能生成；底片体检查到「脸太小 / 嘴大张」会拒绝并告诉你怎么换。',
     },
   )
 }
@@ -3898,8 +3931,10 @@ const shotTotal = computed(() => {
         :shots="pickerShots"
         :locked="lockedShots"
         :busy="pickBusy"
+        :kind="pickerKind"
         @confirm="onShotPicked"
         @pick-face="openFacePicker"
+        @set-base="onLipsyncBase"
       />
 
       <!-- P13：对口型「谁在哪张脸」点选（多人同框必需） -->
