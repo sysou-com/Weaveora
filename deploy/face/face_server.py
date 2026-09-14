@@ -8,9 +8,12 @@
 
 接口（都是 POST + JSON，UTF-8）：
   GET  /health                     → {"ok":true,"device":"cpu|cuda"}
-  POST /face/probe                 → 抽样若干帧看有没有脸 / 最像目标特征多少
+  POST /face/probe                 → 抽样若干帧看有没有脸 / 最像目标特征多少 / 底片体检指标
        body: {"media_b64": "<视频或图片字节 base64>", "target_embedding": [512 floats]?}
-       resp: {"hits": 6, "total": 6, "best": 0.6537}
+       resp: {"hits": 6, "total": 6, "best": 0.6537,
+              "face_ratio": 0.0832,   # 最大脸框面积 / 画面面积（6 帧里的最大值）
+              "face_px": 220.5,         # 最大脸框宽度（像素，比占比更稳）
+              "mouth_open": 0.61}      # 嘴部张开度（6 帧/所有脸里的最大值；判不出则 null）
   POST /face/embed                 → 取一张图里最大的人脸特征（给「锁人」做参考）
        body: {"image_b64": "<图片字节 base64>"}
        resp: {"embedding": [512 floats], "face_px": 321}
@@ -90,17 +93,101 @@ def _read_media(b64: str, suffix: str):
     return frames
 
 
+def _mouth_open_ratio(face):
+    """嘴部张开度 ≈ (下唇均 y − 上唇均 y) / 嘴宽；判不出返 None。
+
+    用于「底片体检」：底片嘴本来就大张（惊恐/喊叫）时，LatentSync 要先把嘴合上再按音频
+    重开，嘴部掩码区会大幅形变（实测把画面搞坏）。
+
+    2d106 的「按点名排序」没有官方文本表 → 点序号可用 WEAVEORA_LIPSYNC_MOUTH_IDX 覆盖
+    （默认 52-71），并且**一律过合理性校验**（嘴宽占脸宽 15%~75%、嘴中心在脸下半部、
+    横向不过分偏离脸中心）；过不了就返 None（宁可不判，也不拿假指标去拦用户的活）。
+    """
+    try:
+        lm = getattr(face, "landmark_2d_106", None)
+        if lm is None:
+            return None
+        pts = np.asarray(lm, dtype=np.float32)
+        if pts.ndim != 2 or pts.shape[0] < 100:
+            return None
+        spec = (os.environ.get("WEAVEORA_LIPSYNC_MOUTH_IDX") or "52-71").strip()
+        sep = "-" if "-" in spec else ":"
+        try:
+            a, b = [int(x) for x in spec.split(sep, 1)]
+        except Exception:
+            a, b = 87, 105
+        if not (0 <= a < b <= 106):
+            a, b = 87, 105
+        mouth = pts[a:b + 1]
+        bx0, by0, bx1, by1 = [float(v) for v in face.bbox[:4]]
+        fw, fh = bx1 - bx0, by1 - by0
+        if fw <= 0 or fh <= 0 or mouth.shape[0] < 6:
+            return None
+        mx, my = mouth[:, 0], mouth[:, 1]
+        mw = float(mx.max() - mx.min())
+        if mw <= 0 or not (0.15 <= mw / fw <= 0.75):
+            return None
+        if abs(float(mx.mean()) - (bx0 + fw / 2.0)) > 0.35 * fw:
+            return None
+        if float(my.mean()) < by0 + 0.5 * fh:
+            return None
+        # 张开度 = 嘴部**中央区域**的上下唇最大间距 / 嘴宽。
+        # 不用「按中位数分组再取均值」：那会把极值平均掉（实测真值 0.5 只测出 0.237 → 漏判）。
+        cx = float(mx.mean())
+        cen = my[np.abs(mx - cx) <= 0.25 * mw]
+        if cen.size < 4:
+            return None
+        return float(cen.max() - cen.min()) / mw
+    except Exception:
+        return None
+
+
+def _face_area_ratio(face, frame):
+    try:
+        bx0, by0, bx1, by1 = [float(v) for v in face.bbox[:4]]
+        h, w = frame.shape[0], frame.shape[1]
+        if w <= 0 or h <= 0:
+            return None
+        return max(0.0, (bx1 - bx0) * (by1 - by0)) / float(w * h)
+    except Exception:
+        return None
+
+
+def _face_px(face):
+    """人脸框宽度（像素）。比「占画面占比」更稳：抽帧分辨率不同（2560x1440 静帧 vs
+    1280x720 片段，同一机位的占比差 4 倍），而对口型在乎的是脸到底有多少像素。"""
+    try:
+        return float(face.bbox[2]) - float(face.bbox[0])
+    except Exception:
+        return None
+
+
 def probe(media_b64: str, suffix: str, target=None):
-    """抽样帧的人脸统计：(hits, total, best_sim)。"""
+    """抽样帧的人脸统计：(hits, total, best_sim, face_ratio, mouth_open, face_px)。
+
+    face_ratio / mouth_open / face_px 取所有抽样帧、所有脸里的**最大值**
+    （最坏情况才是要拦的那个）。
+    """
     need_rec = target is not None
     app = _app(need_rec)
     frames = _read_media(media_b64, suffix)
     hits, total, best = 0, 0, None
+    face_ratio, mouth_open, face_px = None, None, None
     for fr in frames:
         total += 1
         faces = app.get(fr)
         if len(faces) > 0:
             hits += 1
+        for f in faces:
+            r = _face_area_ratio(f, fr)
+            if r is not None:
+                face_ratio = r if face_ratio is None else max(face_ratio, r)
+            wpx = _face_px(f)
+            if wpx is not None:
+                face_px = wpx if face_px is None else max(face_px, wpx)
+            mo = _mouth_open_ratio(f)
+            if mo is not None:
+                mouth_open = mo if mouth_open is None else max(mouth_open, mo)
         if need_rec:
             t = np.asarray(target, dtype=np.float32).reshape(-1)
             t = t / (float(np.linalg.norm(t)) or 1.0)
@@ -113,7 +200,7 @@ def probe(media_b64: str, suffix: str, target=None):
                 s = float(np.dot(v, t))
                 if best is None or s > best:
                     best = s
-    return hits, total, best
+    return hits, total, best, face_ratio, mouth_open, face_px
 
 
 def embed(image_b64: str, suffix: str):
@@ -160,8 +247,11 @@ class Handler(BaseHTTPRequestHandler):
             if self.path.startswith("/face/probe"):
                 media = body.get("media_b64") or ""
                 suffix = body.get("suffix") or ".mp4"
-                hits, total, best = probe(media, suffix, body.get("target_embedding"))
-                return self._json(200, {"hits": hits, "total": total, "best": best})
+                hits, total, best, face_ratio, mouth_open, face_px = probe(
+                    media, suffix, body.get("target_embedding"))
+                return self._json(200, {"hits": hits, "total": total, "best": best,
+                                        "face_ratio": face_ratio, "mouth_open": mouth_open,
+                                        "face_px": face_px})
             if self.path.startswith("/face/embed"):
                 emb, px = embed(body.get("image_b64") or "", body.get("suffix") or ".png")
                 return self._json(200, {"embedding": emb, "face_px": px})

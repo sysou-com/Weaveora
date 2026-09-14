@@ -481,38 +481,122 @@ def _post_prompt(prompt, client_id):
 
 
 
-def _motion_graph(client_id, payload, positive, negative, first_frame_name, prefix):
-    """Wan2.2 ti2v 5B i2v（新 wrapper 节点集）：Sampler → Decode → SaveImage 帧。
-    输出帧由 generate_motion 用 ffmpeg 合成 mp4（不依赖 VHS）。"""
-    fps = int(payload.get("fps") or 16)
-    steps = int((payload.get("params") or {}).get("steps", 20))
-    cfg = float((payload.get("params") or {}).get("cfg", 5.0))
-    duration = float(payload.get("duration_sec") or 2.0)
-    seed = int(payload.get("seed") or 1)
-    fuser = payload.get("frames")
-    if isinstance(fuser, int) and 32 <= fuser <= 128:
-        frames = int((fuser + 3) / 4) * 4  # 用户显式指定（后端已校验 32–96）
+# ---------------------------------------------------------------------------
+# 图生视频（motion）模型档案：Wan2.2 I2V-A14B **双专家 MoE**（ComfyUI 原生节点）
+#
+#   为什么不是单专家 5B、也不是「4 步蒸馏一路到底」：
+#     Wan2.2 A14B 的**高噪声专家**负责整体布局与**大幅运动**，低噪声专家负责细节收尾。
+#     把 4-step 蒸馏 LoRA 同样压在高噪声专家上 → 运动幅度被压扁（现象：慢动作 / 动态丢失）。
+#     ⇒ 修法：高噪声专家**少蒸馏或完全不蒸馏**（强度 0 = 该专家不加 LoRA），低噪声专家可足量蒸馏。
+#     经验口径（Kijai issue #998）：高噪声 LoRA 越大 → 动态越小；越小 → 越丢 Wan2.2 质感，
+#     故默认 high 0.6 / low 1.0（换 LoRA 家族时强度约定会变，见下）。
+#
+#   档位（payload["params"]["preset"]；每一项都能用显式键覆盖）：
+#     draft    4 步  switch 2   最快，动态最弱（只看构图）
+#     balanced 6 步  switch 3   默认生产档
+#     motion   8 步  switch 4   动态优先
+#     hero     6 步  switch 3   高噪声专家**完全不蒸馏** + CFG 3.5（关键镜）
+#     full    24 步  switch 12  完全不蒸馏（画质上限，配合 sageattention）
+#   切分口径：高/低噪声按总步数折半（4→2、6→3、8→4），与官方/社区一致。
+#
+#   显式覆盖键：steps / switch_step / cfg_high / cfg_low / cfg / lora_high / lora_low /
+#               lora_high_name / lora_low_name / shift / sampler_name / scheduler /
+#               model_high / model_low / model（单专家旧路径）/ vae / text_encoder / weight_dtype
+#   环境默认档：WEAVEORA_MOTION_PRESET（缺省 balanced）
+#   注：旧 engine settings 里的 params.steps / params.cfg 仍会被采纳（不静默替换用户设置），
+#       但「蒸馏 LoRA + steps>12」是异常组合，会打 WARN。
+# ---------------------------------------------------------------------------
+MOTION_MODEL_HIGH = "wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors"
+MOTION_MODEL_LOW = "wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors"
+MOTION_LORA_HIGH = "Wan_2_2_I2V_A14B_HIGH_lightx2v_4step_lora_260412_rank_64_fp16.safetensors"
+MOTION_LORA_LOW = "Wan_2_2_I2V_A14B_LOW_lightx2v_4step_lora_260412_rank_64_fp16.safetensors"
+MOTION_VAE = "wan_2.1_vae.safetensors"          # I2V-A14B 用 2.1 VAE；wan2.2_vae 是 TI2V-5B 的
+MOTION_TEXT_ENCODER = "umt5_xxl_fp8_e4m3fn_scaled.safetensors"
+
+MOTION_PRESETS = {
+    "draft":    {"steps": 4,  "switch": 2,  "cfg_high": 1.0, "cfg_low": 1.0, "lora_high": 0.6, "lora_low": 1.0, "shift": 5.0},
+    "balanced": {"steps": 6,  "switch": 3,  "cfg_high": 1.0, "cfg_low": 1.0, "lora_high": 0.6, "lora_low": 1.0, "shift": 5.0},
+    "motion":   {"steps": 8,  "switch": 4,  "cfg_high": 1.5, "cfg_low": 1.0, "lora_high": 0.5, "lora_low": 1.0, "shift": 5.0},
+    "hero":     {"steps": 6,  "switch": 3,  "cfg_high": 3.5, "cfg_low": 1.0, "lora_high": 0.0, "lora_low": 1.0, "shift": 5.0},
+    "full":     {"steps": 24, "switch": 12, "cfg_high": 3.5, "cfg_low": 3.5, "lora_high": 0.0, "lora_low": 0.0, "shift": 5.0},
+}
+MOTION_PRESET_ENV = os.environ.get("WEAVEORA_MOTION_PRESET", "balanced").strip().lower()
+
+
+def _motion_plan(params):
+    """preset 打底 + 显式键覆盖 → 采样计划（纯函数，便于扫描实验）。"""
+    params = params or {}
+    name = str(params.get("preset") or MOTION_PRESET_ENV or "balanced").strip().lower()
+    if name not in MOTION_PRESETS:
+        print("[comfy] 未知 motion preset=%s，回退 balanced" % name, flush=True)
+        name = "balanced"
+    plan = dict(MOTION_PRESETS[name])
+    plan["preset"] = name
+
+    plan["steps"] = max(1, int(params.get("steps") or plan["steps"]))
+    sw = params.get("switch_step")
+    if sw is None:
+        sw = params.get("switch")
+    if sw is not None:
+        plan["switch"] = max(1, min(plan["steps"] - 1, int(sw))) if plan["steps"] > 1 else 1
     else:
-        raw = max(32, min(64, int(round(duration * fps))))  # 缺省：>=32，封顶64
-        frames = int((raw + 3) / 4) * 4
-    width = int((payload.get("params") or {}).get("width", 768))
-    height = int((payload.get("params") or {}).get("height", 768))
-    length = frames + 1  # Comfy 原生 Wan latent 帧数 = 4n+1（32 采样帧 → 33）
-    nodes = {
-        "unet": {"class_type": "UNETLoader",
-                 "inputs": {"unet_name": (payload.get("params") or {}).get(
-                     "model", "wan2.2_ti2v_5B_fp16.safetensors"),
-                     "weight_dtype": (payload.get("params") or {}).get(
-                         "quantization", "fp8_e4m3fn")}},
+        plan["switch"] = max(1, plan["steps"] // 2)   # 4→2 / 6→3 / 8→4 / 24→12
+
+    plan["cfg_high"] = float(params.get("cfg_high", params.get("cfg", plan["cfg_high"])))
+    plan["cfg_low"] = float(params.get("cfg_low", params.get("cfg", plan["cfg_low"])))
+    plan["lora_high"] = float(params.get("lora_high", params.get("lora_strength_high", plan["lora_high"])))
+    plan["lora_low"] = float(params.get("lora_low", params.get("lora_strength_low", plan["lora_low"])))
+    plan["shift"] = float(params.get("shift", plan["shift"]))
+    plan["sampler"] = str(params.get("sampler_name") or "euler")
+    plan["scheduler"] = str(params.get("scheduler") or "simple")
+    if plan["steps"] > 12 and (plan["lora_high"] or plan["lora_low"]):
+        print("[comfy] WARN steps=%d 仍在用蒸馏 LoRA（>12 步时蒸馏意义不大；"
+              "若要高步数请用 preset=full 并把 lora_* 归零）" % plan["steps"], flush=True)
+    return plan
+
+
+def _motion_assets(params, dual):
+    """解析素材名并对 object_info 做存在性校验（错误信息直接点出缺哪个文件）。"""
+    p = params or {}
+
+    def _need(class_type, key, wanted, label):
+        opts = _node_input_options(class_type, key)
+        if opts and wanted not in opts:
+            raise ComfyError("%s 不存在：%s（ComfyUI %s 可用：%s）"
+                             % (label, wanted, class_type, "、".join(opts[:6]) or "无"))
+        return wanted
+
+    a = {"dual": bool(dual)}
+    a["clip"] = _need("CLIPLoader", "clip_name", p.get("text_encoder") or MOTION_TEXT_ENCODER, "文本编码器")
+    a["vae"] = _need("VAELoader", "vae_name", p.get("vae") or MOTION_VAE, "VAE")
+    if dual:
+        a["high"] = _need("UNETLoader", "unet_name", p.get("model_high") or MOTION_MODEL_HIGH, "高噪声专家")
+        a["low"] = _need("UNETLoader", "unet_name", p.get("model_low") or MOTION_MODEL_LOW, "低噪声专家")
+    else:
+        a["single"] = _need("UNETLoader", "unet_name", p.get("model") or MOTION_MODEL_HIGH, "扩散模型")
+    a["lora_high_name"] = p.get("lora_high_name") or MOTION_LORA_HIGH
+    a["lora_low_name"] = p.get("lora_low_name") or MOTION_LORA_LOW
+    # fp8_scaled 权重自带 scale：weight_dtype 必须 default（旧 settings 里的
+    # quantization=fp8_e4m3fn 是给 fp16 的 5B 文件用的，套到 fp8_scaled 上会掉画质）
+    wd = p.get("weight_dtype")
+    if not wd:
+        names = [a.get("high"), a.get("low"), a.get("single")]
+        if any(n and n.endswith("_fp8_scaled.safetensors") for n in names):
+            wd = "default"
+            if p.get("quantization"):
+                print("[comfy] 忽略 quantization=%s（fp8_scaled 权重用 default）" % p.get("quantization"), flush=True)
+        else:
+            wd = p.get("quantization") or "default"
+    a["weight_dtype"] = wd
+    return a
+
+
+def _motion_base_nodes(positive, negative, first_frame_name, a, width, height, length):
+    return {
         "clip": {"class_type": "CLIPLoader",
-                 "inputs": {"clip_name": (payload.get("params") or {}).get(
-                     "text_encoder", "umt5_xxl_fp8_e4m3fn_scaled.safetensors"),
-                     "type": "wan"}},
+                 "inputs": {"clip_name": a["clip"], "type": "wan"}},
         "vae": {"class_type": "VAELoader",
-                "inputs": {"vae_name": (payload.get("params") or {}).get(
-                    "vae", "wan2.2_vae.safetensors")}},
-        "shift": {"class_type": "ModelSamplingSD3",
-                  "inputs": {"model": ["unet", 0], "shift": 8.0}},
+                "inputs": {"vae_name": a["vae"]}},
         "pos": {"class_type": "CLIPTextEncode",
                 "inputs": {"text": positive, "clip": ["clip", 0]}},
         "neg": {"class_type": "CLIPTextEncode",
@@ -522,18 +606,131 @@ def _motion_graph(client_id, payload, positive, negative, first_frame_name, pref
                    "inputs": {"vae": ["vae", 0], "start_image": ["img", 0],
                               "width": width, "height": height, "length": length,
                               "batch_size": 1}},
-        "sampler": {"class_type": "KSampler",
-                    "inputs": {"model": ["shift", 0], "positive": ["pos", 0],
-                               "negative": ["neg", 0], "latent_image": ["latent", 0],
-                               "seed": seed, "steps": steps, "cfg": cfg,
-                               "sampler_name": "uni_pc", "scheduler": "simple",
-                               "denoise": 1.0}},
-        "dec": {"class_type": "VAEDecode",
-                "inputs": {"samples": ["sampler", 0], "vae": ["vae", 0]}},
-        "save": {"class_type": "SaveImage",
-                 "inputs": {"images": ["dec", 0], "filename_prefix": prefix}},
     }
+
+
+def _motion_expert(nodes, tag, unet_name, weight_dtype, lora_name, lora_strength, shift):
+    """一条专家支路：UNETLoader →（可选 LoRA）→ ModelSamplingSD3；返回 model 来源。"""
+    nodes["unet_" + tag] = {"class_type": "UNETLoader",
+                            "inputs": {"unet_name": unet_name, "weight_dtype": weight_dtype}}
+    src = ["unet_" + tag, 0]
+    if lora_name and lora_strength:
+        nodes["lora_" + tag] = {"class_type": "LoraLoaderModelOnly",
+                               "inputs": {"model": src, "lora_name": lora_name,
+                                          "strength_model": lora_strength}}
+        src = ["lora_" + tag, 0]
+    nodes["shift_" + tag] = {"class_type": "ModelSamplingSD3",
+                             "inputs": {"model": src, "shift": shift}}
+    return ["shift_" + tag, 0]
+
+
+def _motion_graph_frames(payload, params):
+    """帧数/分辨率口径（与旧实现一致）：frames=4n、latent length=frames+1。"""
+    fps = int(payload.get("fps") or 16)
+    duration = float(payload.get("duration_sec") or 2.0)
+    fuser = payload.get("frames")
+    if isinstance(fuser, int) and 32 <= fuser <= 128:
+        frames = int((fuser + 3) / 4) * 4          # 用户显式指定（后端已校验 32–96）
+    else:
+        raw = max(32, min(64, int(round(duration * fps))))   # 缺省：>=32，封顶 64
+        frames = int((raw + 3) / 4) * 4
+    width = int(params.get("width", 768))
+    height = int(params.get("height", 768))
+    return frames, width, height, frames + 1
+
+
+def _motion_graph(client_id, payload, positive, negative, first_frame_name, prefix):
+    """构造图生视频 prompt。
+
+    双专家（默认，Wan2.2 I2V-A14B 高/低噪声）或单专家（params.model 显式给了单文件时走旧路径）。
+    输出帧由 generate_motion 用 ffmpeg 合成 mp4（不依赖 VHS）。
+    """
+    params = payload.get("params") or {}
+    plan = _motion_plan(params)
+    dual = not params.get("model")          # 只有显式给单模型才退单专家
+    a = _motion_assets(params, dual)
+    seed = int(payload.get("seed") or 1)
+    frames, width, height, length = _motion_graph_frames(payload, params)
+    sampler = _pick_option("KSamplerAdvanced", "sampler_name", plan["sampler"], "euler")
+    scheduler = _pick_option("KSamplerAdvanced", "scheduler", plan["scheduler"], "simple")
+
+    nodes = _motion_base_nodes(positive, negative, first_frame_name, a, width, height, length)
+
+    if dual:
+        hi = _motion_expert(nodes, "hi", a["high"], a["weight_dtype"],
+                            a["lora_high_name"], plan["lora_high"], plan["shift"])
+        lo = _motion_expert(nodes, "lo", a["low"], a["weight_dtype"],
+                            a["lora_low_name"], plan["lora_low"], plan["shift"])
+        nodes["sampler_hi"] = {"class_type": "KSamplerAdvanced", "inputs": {
+            "model": hi, "add_noise": "enable", "noise_seed": seed,
+            "steps": plan["steps"], "cfg": plan["cfg_high"],
+            "sampler_name": sampler, "scheduler": scheduler,
+            "positive": ["pos", 0], "negative": ["neg", 0],
+            "latent_image": ["latent", 0], "start_at_step": 0,
+            "end_at_step": plan["switch"], "return_with_leftover_noise": "enable"}}
+        nodes["sampler_lo"] = {"class_type": "KSamplerAdvanced", "inputs": {
+            "model": lo, "add_noise": "disable", "noise_seed": seed,
+            "steps": plan["steps"], "cfg": plan["cfg_low"],
+            "sampler_name": sampler, "scheduler": scheduler,
+            "positive": ["pos", 0], "negative": ["neg", 0],
+            "latent_image": ["sampler_hi", 0], "start_at_step": plan["switch"],
+            "end_at_step": 10000, "return_with_leftover_noise": "disable"}}
+        tail = ["sampler_lo", 0]
+        shape = "dual 高/低噪声"
+    else:
+        one = _motion_expert(nodes, "hi", a["single"], a["weight_dtype"],
+                             a["lora_high_name"], plan["lora_high"], plan["shift"])
+        nodes["sampler"] = {"class_type": "KSamplerAdvanced", "inputs": {
+            "model": one, "add_noise": "enable", "noise_seed": seed,
+            "steps": plan["steps"], "cfg": plan["cfg_high"],
+            "sampler_name": sampler, "scheduler": scheduler,
+            "positive": ["pos", 0], "negative": ["neg", 0],
+            "latent_image": ["latent", 0], "start_at_step": 0,
+            "end_at_step": 10000, "return_with_leftover_noise": "disable"}}
+        tail = ["sampler", 0]
+        shape = "single 单专家"
+
+    nodes["dec"] = {"class_type": "VAEDecode",
+                    "inputs": {"samples": tail, "vae": ["vae", 0]}}
+    nodes["save"] = {"class_type": "SaveImage",
+                     "inputs": {"images": ["dec", 0], "filename_prefix": prefix}}
+
+    lora_txt = "hi=%s(%s) lo=%s(%s)" % (plan["lora_high"],
+                                        "—" if not plan["lora_high"] else a["lora_high_name"][:28],
+                                        plan["lora_low"],
+                                        "—" if not plan["lora_low"] else a["lora_low_name"][:28])
+    print("[comfy] motion %s preset=%s steps=%d(switch %d) cfg=%s/%s shift=%s "
+          "%dx%d %d帧 lora %s sampler=%s/%s weight=%s"
+          % (shape, plan["preset"], plan["steps"], plan["switch"], plan["cfg_high"],
+             plan["cfg_low"], plan["shift"], width, height, frames, lora_txt,
+             sampler, scheduler, a["weight_dtype"]), flush=True)
     return {"prompt": nodes, "client_id": client_id}
+
+
+def vram_stats():
+    """ComfyUI 视角的显存 (free_gb, total_gb)；取不到返回 (None, None)。
+
+    给 stub_worker 做「出视频前让 TTS 让出显存」的判据用（见 worker/stub_worker.py）。
+    """
+    try:
+        _, body = _comfy("GET", "/system_stats", timeout=20)
+        dev = (json.loads(body.decode()).get("devices") or [{}])[0]
+        return (float(dev.get("vram_free") or 0) / 1073741824.0,
+                float(dev.get("vram_total") or 0) / 1073741824.0)
+    except Exception:
+        return (None, None)
+
+
+def _vram_note(tag):
+    """打一行 ComfyUI 视角的显存体检；余量 <15GiB 时提示（TTS 常驻约 7GiB）。"""
+    free, total = vram_stats()
+    if free is None:
+        print("[comfy] %s 取显存失败（忽略）" % tag, flush=True)
+        return
+    print("[comfy] %s 显存 free=%.1f/%.1f GiB" % (tag, free, total), flush=True)
+    if free < 15.0:
+        print("[comfy] WARN 显存余量 <15GiB：14B 双专家会频繁换入换出，"
+              "请确认 TTS 未常驻（WEAVEORA_TTS_PRELOAD=0）或已让出显存", flush=True)
 
 
 def _encode_frames_mp4(frames_bytes, fps, out_dir):
@@ -594,6 +791,7 @@ def generate_motion(client_id, payload, progress_fn=None):
     _, body = _comfy("POST", "/upload/image",
                      files={"image": (key.split("/")[-1], data, ctype)})
     name = json.loads(body.decode()).get("name")
+    _vram_note("motion 前")
     prompt = _motion_graph(client_id, payload, positive, negative, name, prefix)
     st, resp = _comfy("POST", "/prompt", payload=prompt)
     pid = json.loads(resp.decode()).get("prompt_id")
@@ -801,6 +999,43 @@ LIPSYNC_NODE_CLASS = os.environ.get("WEAVEORA_LIPSYNC_NODE_CLASS", "LatentSyncNo
 # 填了就走远端 HTTP（见 deploy/face/face_server.py），便于把脸算力集中到新 GPU 机器。
 FACE_URL = os.environ.get("WEAVEORA_FACE_URL", "").rstrip("/")
 
+# --------------------------------------------------------------------------- #
+# 对口型「底片体检」（B）：底片（静帧/片段）本身就不适合做口型时，**宁可拒绝也不出坏画面**。
+#
+# 背景（2026-09-14 《那宝玉恍恍惚惚》实测，用户反馈「配口型时画面被破坏」）：
+#   第 5 镜 action「…抓住宝玉将他拖下溪去，**宝玉失声惊叫**」、正词里写着
+#   `his mouth open in a **terrified scream**` —— 底片（motion 片段）里嘴本来就大张，
+#   LatentSync 要先把嘴「合上」再按音频重开 → 嘴部掩码区大幅形变 = 画面被破坏。
+#
+# ★ 阈值是按「真实素材」量的，不是拍的（同项目实测 mouth_open）：
+#     正常/平静脸：0.44~0.66（第1镜 0.53、第4镜 0.66、定妆照 0.44、新闭嘴近景 0.41）
+#     略开（可接受）：0.59~0.78（第6镜：宝玉喊叫但镜头是「近景+被安抚」，实际没大张）
+#     真·大张嘴：1.23（第5镜 静帧 1.232 / 片段 1.238 —— 就是「画面被破坏」那一镜）
+#   所以 WARN=0.90 / MAX=1.05：平静脸绝不误伤，只拦真正张口喊叫的底片。
+#   别再照「0.3/0.5」这类拍的阈值 —— 那会把所有正常脸全判成「嘴大张」（实测过）。
+# 两道硬门禁 + 两道软提醒：
+#   ① 嘴张太大（张开度 ≥ LIPSYNC_MOUTH_MAX）→ 拒绝，提示换「嘴部自然的静帧」当底片；
+#   ② 脸极小（宽 < LIPSYNC_FACE_MIN_PX）→ 拒绝（跑了也没意义：脸都糊了）；
+#   ③ 嘴偏大（≥ WARN）/ 脸偏小（< LIPSYNC_FACE_WARN_PX，但 ≥ MIN_PX）→ 只提醒，不拦；
+# 指标来自人脸服务 / 本机 insightface（106 点）；**拿不到指标就跳过**（绝不误拦）。
+# 逃生门：payload.lipsyncForce=true 或 env WEAVEORA_LIPSYNC_FORCE=1（用户明确要硬跑）。
+# --------------------------------------------------------------------------- #
+LIPSYNC_FACE_MIN_RATIO = float(os.environ.get("WEAVEORA_LIPSYNC_FACE_MIN_RATIO", "0.015"))
+# 人脸像素宽度（比「占画面占比」稳：同机位 2560x1440 静帧的占比比 1280x720 片段小 4 倍）。
+# 注意两个阈值的分工：远小于 MIN_PX = 硬拒（脸都糊了）；MIN_PX~WARN_PX 之间 = 只提醒
+# （实测第 5 镜 1280x704 宽景的脸宽 95.7px —— 这种合法宽景不应该被“脸小”一刀切拦掉）。
+LIPSYNC_FACE_MIN_PX = float(os.environ.get("WEAVEORA_LIPSYNC_FACE_MIN_PX", "64"))
+LIPSYNC_FACE_WARN_PX = float(os.environ.get("WEAVEORA_LIPSYNC_FACE_WARN_PX", "96"))
+# 嘴张开度软提醒阈值（实测平静脸 0.44~0.66，真·大张 1.23 —— 见上面的量化表）
+LIPSYNC_MOUTH_WARN = float(os.environ.get("WEAVEORA_LIPSYNC_MOUTH_WARN", "0.90"))
+LIPSYNC_MOUTH_MAX = float(os.environ.get("WEAVEORA_LIPSYNC_MOUTH_MAX", "1.05"))
+LIPSYNC_FORCE = os.environ.get("WEAVEORA_LIPSYNC_FORCE", "").strip().lower() in ("1", "true", "yes", "on")
+# 极端表情（惊恐/喊叫）镜头的嘴部驱动强度：工作流写死 1.5 → 高危镜降到**节点允许的下限 1.0**
+# （LatentSyncNode 的 lips_expression = min 1.0 / max 3.0 / default 1.5；实测给它 0.8 会被
+#   ComfyUI 直接判 prompt_outputs_failed_validation → 任务秒失败。所以这里默认 1.0，并且
+#   注入前一律按节点 schema 夹一次区间，env 写错也不会再把任务打挂）
+LIPSYNC_EXPRESSION_RISK = float(os.environ.get("WEAVEORA_LIPSYNC_EXPRESSION_RISK", "1.0"))
+
 
 # 文件名类输入的候选键（按优先级）：不同加载节点名字不一样
 _VIDEO_FILE_KEYS = ("file", "video", "video_file", "path", "filename", "image", "url")
@@ -940,17 +1175,77 @@ def _apply_fps_policy(graph):
 # 6 帧检测在 CPU 上只多花几秒，但完全不吃显存。
 _FACE_CHECK = r'''
 import os, sys, json, cv2, numpy as np
-node = (LATENTSYNC_DIR or os.environ.get("WEAVEORA_LATENTSYNC_DIR") or r"D:\ComfyUI\custom_nodes\ComfyUI-LatentSyncWrapper")
+# 注：这里的常量**不能**写裸名 LATENTSYNC_DIR —— 本脚本是交给 `python -c` 的子进程，
+# 父进程的模块变量在子进程里并不存在（写裸名会 NameError → 子进程崩 → 父进程只看到
+# “预检无结果，不拦” → 门禁静默失效）。所以只能读 env + 默认值。
+node = (os.environ.get("WEAVEORA_LATENTSYNC_DIR") or r"D:\ComfyUI\custom_nodes\ComfyUI-LatentSyncWrapper")
 sys.path.insert(0, node)
 AUX = os.path.join(node, "checkpoints", "auxiliary")
 tgt_path = sys.argv[2] if len(sys.argv) > 2 else ""
 try:
     from insightface.app import FaceAnalysis
-    mods = ["detection"] + (["recognition"] if tgt_path else [])
+    # landmark_2d_106：底片体检用（脸太小 / 嘴张太大）。没有这个模型时 insightface 会报错，
+    # 外层 except 会打印 SKIP → 调用方跳过门禁（而不是误拦）。
+    mods = ["detection", "landmark_2d_106"] + (["recognition"] if tgt_path else [])
     app = FaceAnalysis(allowed_modules=mods, root=AUX, providers=["CPUExecutionProvider"])
     app.prepare(ctx_id=-1, det_size=(512, 512))
 except Exception as e:
     print("SKIP:init:" + str(e)[:160]); sys.exit(0)
+
+def mouth_ratio(face):
+    """嘴部张开度 ≈ (下唇均y − 上唇均y) / 嘴宽；判不出返 None。
+
+    与 deploy/face/face_server.py 里的 _mouth_open_ratio 同构（子进程无法 import 主进程函数）。
+    2d106 点序号可用 WEAVEORA_LIPSYNC_MOUTH_IDX 覆盖；过不了合理性校验就跳过。
+    """
+    try:
+        lm = getattr(face, "landmark_2d_106", None)
+        if lm is None:
+            return None
+        pts = np.asarray(lm, dtype=np.float32)
+        if pts.ndim != 2 or pts.shape[0] < 100:
+            return None
+        spec = (os.environ.get("WEAVEORA_LIPSYNC_MOUTH_IDX") or "52-71").strip()
+        sep = "-" if "-" in spec else ":"
+        try:
+            a, b = [int(x) for x in spec.split(sep, 1)]
+        except Exception:
+            a, b = 87, 105
+        if not (0 <= a < b <= 106):
+            a, b = 87, 105
+        mouth = pts[a:b + 1]
+        bx0, by0, bx1, by1 = [float(v) for v in face.bbox[:4]]
+        fw, fh = bx1 - bx0, by1 - by0
+        if fw <= 0 or fh <= 0 or mouth.shape[0] < 6:
+            return None
+        mx, my = mouth[:, 0], mouth[:, 1]
+        mw = float(mx.max() - mx.min())
+        if mw <= 0 or not (0.15 <= mw / fw <= 0.75):
+            return None
+        if abs(float(mx.mean()) - (bx0 + fw / 2.0)) > 0.35 * fw:
+            return None
+        if float(my.mean()) < by0 + 0.5 * fh:
+            return None
+        # 张开度 = 嘴部**中央区域**的上下唇最大间距 / 嘴宽。
+        # 不用「按中位数分组再取均值」：那会把极值平均掉（实测真值 0.5 只测出 0.237 → 漏判）。
+        cx = float(mx.mean())
+        cen = my[np.abs(mx - cx) <= 0.25 * mw]
+        if cen.size < 4:
+            return None
+        return float(cen.max() - cen.min()) / mw
+    except Exception:
+        return None
+
+def face_area_ratio(face, frame):
+    try:
+        bx0, by0, bx1, by1 = [float(v) for v in face.bbox[:4]]
+        h, w = frame.shape[0], frame.shape[1]
+        if w <= 0 or h <= 0:
+            return None
+        return max(0.0, (bx1 - bx0) * (by1 - by0)) / float(w * h)
+    except Exception:
+        return None
+
 tgt = None
 if tgt_path:
     try:
@@ -965,6 +1260,9 @@ n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 idx = sorted({int(i * (n - 1) / 5) for i in range(6)}) if n > 1 else [0]
 hits = total = 0
 best = -1.0
+face_ratio = None
+face_px = None
+mouth_open = None
 for i in idx:
     cap.set(cv2.CAP_PROP_POS_FRAMES, i)
     ok, fr = cap.read()
@@ -977,6 +1275,19 @@ for i in idx:
         faces = []
     if len(faces) > 0:
         hits += 1
+    # 「底片体检」指标：取所有帧/所有脸的**最坏**值（最坏情况才是要拦的那个）
+    for f in faces:
+        r = face_area_ratio(f, fr)
+        if r is not None:
+            face_ratio = r if face_ratio is None else max(face_ratio, r)
+        try:
+            wpx = float(f.bbox[2]) - float(f.bbox[0])
+            face_px = wpx if face_px is None else max(face_px, wpx)
+        except Exception:
+            pass
+        mo = mouth_ratio(f)
+        if mo is not None:
+            mouth_open = mo if mouth_open is None else max(mouth_open, mo)
     if tgt is not None:
         for f in faces:
             emb = getattr(f, "normed_embedding", None)
@@ -988,7 +1299,11 @@ for i in idx:
             if s > best:
                 best = s
 cap.release()
-print("RESULT:%d/%d/%s" % (hits, total, ("%.4f" % best) if tgt is not None else ""))
+print("RESULT:%d/%d/%s/%s/%s/%s" % (
+    hits, total, ("%.4f" % best) if tgt is not None else "",
+    ("%.5f" % face_ratio) if face_ratio is not None else "",
+    ("%.4f" % mouth_open) if mouth_open is not None else "",
+    ("%.1f" % face_px) if face_px is not None else ""))
 '''
 
 
@@ -998,7 +1313,7 @@ NO_FACE_MSG = ("该镜检测不到人脸（可能是远景/背影/空镜）—�
 TARGET_MIN_SIM = 0.28
 
 # 预检失败原因（给调用方拼错误文案；单线程内单次使用，无需加锁）
-_face_reason = {"msg": NO_FACE_MSG}
+_face_reason = {"msg": NO_FACE_MSG, "warn": ""}
 
 # LatentSync 节点目录（本机人脸检测子进程用；可被「服务地址 → 人脸 → latentsyncDir」覆盖）
 LATENTSYNC_DIR = os.environ.get("WEAVEORA_LATENTSYNC_DIR", "").strip()
@@ -1007,8 +1322,10 @@ LATENTSYNC_DIR = os.environ.get("WEAVEORA_LATENTSYNC_DIR", "").strip()
 def _face_probe(video_bytes, target_emb=None):
     """抽 6 帧跑人脸检测。
 
-    返回 (hits, total, best_target_sim)：
+    返回 (hits, total, best_target_sim, extra)：
       hits/total = 检出人脸的帧数；给了 target_emb 时额外给出「最像目标的相似度」。
+      extra = {"face_ratio": 最大脸框面积/画面面积, "mouth_open": 嘴部张开度}，
+              取不到则为 None（调用方必须跳过门禁，而不是当成 0）。
     无法判定时返回 None（不拦不传）。
     """
     import subprocess
@@ -1026,7 +1343,12 @@ def _face_probe(video_bytes, target_emb=None):
             hits = int(resp.get("hits") or 0)
             total = int(resp.get("total") or 0)
             best = resp.get("best")
-            return hits, total, (float(best) if best is not None else None)
+            extra = {
+                "face_ratio": (float(resp["face_ratio"]) if resp.get("face_ratio") is not None else None),
+                "mouth_open": (float(resp["mouth_open"]) if resp.get("mouth_open") is not None else None),
+                "face_px": (float(resp["face_px"]) if resp.get("face_px") is not None else None),
+            }
+            return hits, total, (float(best) if best is not None else None), extra
         except Exception as e:
             print("[comfy] 远端人脸服务不可用，回退本机：%s" % e, flush=True)
     d = tempfile.mkdtemp(prefix="weaveora_facechk_")
@@ -1051,7 +1373,10 @@ def _face_probe(video_bytes, target_emb=None):
                 # 无目标时脚本会输出 RESULT:h/t/（末段为空）——直接 float("") 会抛异常，
                 # 导致“预检异常→不拦”，静默失去这道拦截
                 best = float(parts[2]) if len(parts) > 2 and parts[2].strip() else None
-                return hits, total, best
+                fr = float(parts[3]) if len(parts) > 3 and parts[3].strip() else None
+                mo = float(parts[4]) if len(parts) > 4 and parts[4].strip() else None
+                px = float(parts[5]) if len(parts) > 5 and parts[5].strip() else None
+                return hits, total, best, {"face_ratio": fr, "mouth_open": mo, "face_px": px}
         print("[comfy] 人脸预检无结果，不拦：%s" % out[:120], flush=True)
         return None
     except Exception as e:
@@ -1062,18 +1387,30 @@ def _face_probe(video_bytes, target_emb=None):
         _sh.rmtree(d, ignore_errors=True)
 
 
-def _face_precheck(video_bytes, where="lipsync", target_emb=None, speaker=""):
-    """对口型前置门禁。两道：① 画面里有人脸；② （给了目标特征时）**说话人的脸真在画面里**。
+def _face_precheck(video_bytes, where="lipsync", target_emb=None, speaker="", force=False):
+    """对口型前置门禁。三道：① 画面里有人脸；② （给了目标特征时）**说话人的脸真在画面里**；
+    ③ 「底片体检」：脸是否太小 / 嘴是否张得太大（B）。
 
     为什么要第二道（2026-09-13 实例）：第 6 镜说话人是「袭人」，但她与「警幻」的定妆照
     几乎同一张脸（相似度 0.71）——锁定她时最高相似度只有 0.18，低于阈值 0.28。
     这时不能硬跑（会去驱动最大脸=另一个人，画面坏掉），也不能报一句误导的
     "Face not detected"，而应该**说清楚原因并让用户去修定妆照**。
+
+    为什么要第三道（2026-09-14 实测，用户反馈「画面被破坏」）：第 5 镜 action
+    「…抓住宝玉将他拖下溪去，宝玉失声惊叫」、正词 `his mouth open in a terrified scream`，
+    底片（motion 片段）里嘴本来就大张，LatentSync 要先把嘴合上再按音频重开 →
+    嘴部掩码区大幅形变。实测 mouth_open：第5镜 1.232/1.238（真·大张），
+    而平静脸 0.44~0.66、第6镜 0.59/0.78 —— 阈值就按这两档分的（见常量区量化表）。
+    底片本身不合格时应**提前拒绝并告诉他怎么换**，而不是烧十几分钟 GPU 出一段坏画面。
+
+    逃生门：force=True（payload.lipsyncForce）或 env WEAVEORA_LIPSYNC_FORCE=1。
     """
+    _face_reason["warn"] = ""
     r = _face_probe(video_bytes, target_emb)
     if r is None:
         return True
-    hits, total, best = r
+    hits, total, best = r[0], r[1], r[2]
+    extra = r[3] if len(r) > 3 and isinstance(r[3], dict) else {}
     print("[comfy] 人脸预检 %s：%d/%d 帧可检出%s"
           % (where, hits, total, "，最像说话人的相似度=%.2f" % best if best is not None else ""),
           flush=True)
@@ -1096,6 +1433,60 @@ def _face_precheck(video_bytes, where="lipsync", target_emb=None, speaker=""):
             "此时按脸认人本身就不可能。请先核对「%s」的定妆照（导入图）选对了没有。"
             % (speaker or "?", best, TARGET_MIN_SIM, speaker or "?"))
         return False
+    return _base_health(extra, where, force, speaker)
+
+
+def _base_health(extra, where, force=False, speaker=""):
+    """底片体检（B）：嘴大张 / 脸极小 → 拒绝；嘴偏大 / 脸偏小 → 只提醒。拿不到指标就放行。
+
+    为什么嘴优先于脸：① 嘴大张是「画面被破坏」的直接原因（第 5 镜实测）；② 合法宽景
+    （脸宽 ~96px）不应该被“脸小”一刀切拦掉，坏画面才是真损失。
+    拒绝时把**所有命中的原因**一起说出来，别让用户改完一条又撞下一条。
+    """
+    if not isinstance(extra, dict):
+        return True
+    fr = extra.get("face_ratio")
+    px = extra.get("face_px")
+    mo = extra.get("mouth_open")
+    print("[comfy] 底片体检 %s：脸占比=%s，脸宽=%s，嘴张开度=%s%s"
+          % (where, ("%.3f%%" % (fr * 100)) if fr is not None else "n/a",
+             ("%.0fpx" % px) if px is not None else "n/a",
+             ("%.3f" % mo) if mo is not None else "n/a",
+             "（已开启强制，只记录不拦）" if force else ""), flush=True)
+    if force:
+        return True
+    # 「脸太小」优先用像素宽（不受抽帧分辨率影响）；没有 px 才退到占画面比
+    tiny = (px is not None and px < LIPSYNC_FACE_MIN_PX) \
+        or (px is None and fr is not None and fr < LIPSYNC_FACE_MIN_RATIO)
+    small = px is not None and LIPSYNC_FACE_MIN_PX <= px < LIPSYNC_FACE_WARN_PX
+    mouth_bad = mo is not None and mo >= LIPSYNC_MOUTH_MAX
+    mouth_warn = mo is not None and LIPSYNC_MOUTH_WARN <= mo < LIPSYNC_MOUTH_MAX
+    if mouth_bad or tiny:
+        parts = []
+        if mouth_bad:
+            parts.append(
+                "**嘴部大张**（张开度 %.2f，阈值 %.2f）%s：LatentSync 要把大张的嘴先「合上」再按配音"
+                "重开，嘴部区域会大幅形变 —— 实测这就是「画面被破坏」的主因"
+                % (mo, LIPSYNC_MOUTH_MAX, "（说话人：%s）" % speaker if speaker else ""))
+        if tiny:
+            parts.append(
+                "**人脸太小**（%s）：对口型对远景/小人物没有可见效果"
+                % (("脸宽仅 %.0fpx，阈值 %.0fpx" % (px, LIPSYNC_FACE_MIN_PX)) if px is not None
+                   else ("最大脸只占画面 %.2f%%，阈值 %.2f%%" % (fr * 100, LIPSYNC_FACE_MIN_RATIO * 100))))
+        _face_reason["msg"] = (
+            "该镜的**底片**不适合跑对口型：\n- %s\n\n请任选其一：\n"
+            "① 换成该镜「嘴部自然（闭合/微张）」的**静帧关键帧**当底片（选镜弹窗 → 底片＝静帧）；\n"
+            "② 如该镜本就是喊叫/惊恐，建议改成旁白/画外音或侧脸（导演层「分镜规避」）；\n"
+            "③ 确实要试，打开「强制」后重跑（不保证画面完好）。"
+            % "\n- ".join(parts))
+        return False
+    warns = []
+    if mouth_warn:
+        warns.append("底片嘴部偏大（%.2f）——对口型后嘴部可能变形" % mo)
+    if small:
+        warns.append("底片人脸偏小（脸宽 %.0fpx，建议 ≥ %.0fpx）——口型会偏糊" % (px, LIPSYNC_FACE_WARN_PX))
+    if warns:
+        _face_reason["warn"] = "；".join(warns) + "（选镜弹窗 → 底片＝静帧，或挑近景镜）"
     return True
 
 
@@ -1107,7 +1498,8 @@ def _face_precheck(video_bytes, where="lipsync", target_emb=None, speaker=""):
 # 用 CPU 同样是为了不占显存（ComfyUI 还缓存着模型）。
 _EMBED = r'''
 import os, sys, json, cv2, numpy as np
-node = (LATENTSYNC_DIR or os.environ.get("WEAVEORA_LATENTSYNC_DIR") or r"D:\ComfyUI\custom_nodes\ComfyUI-LatentSyncWrapper")
+# 注：不能写裸名 LATENTSYNC_DIR（子进程里不存在 → NameError → 静默回退最大脸）；只读 env + 默认值。
+node = (os.environ.get("WEAVEORA_LATENTSYNC_DIR") or r"D:\ComfyUI\custom_nodes\ComfyUI-LatentSyncWrapper")
 sys.path.insert(0, node)
 AUX = os.path.join(node, "checkpoints", "auxiliary")
 try:
@@ -1370,8 +1762,40 @@ def apply_services(svc):
              FACE_URL or "(本机)"), flush=True)
 
 
-def _run_lipsync_graph(client_id, vbytes, abytes, emb_path, on_tick=None):
-    """跑一次对口型工作流，返回产物 mp4 bytes（整镜 / 单段共用）。"""
+def _clamp_node_scalar(class_type, key, value):
+    """按节点 schema 把标量夹进 min/max（越界会被 ComfyUI 直接 400）。
+
+    为什么必须夹：实测 LatentSyncNode 的 `lips_expression` 是 min 1.0 / max 3.0，
+    而「降低嘴部形变」的自然想法是给 0.8 → ComfyUI 报
+    `prompt_outputs_failed_validation: Value 0.8 smaller than min of 1.0`，整个对口型任务秒失败。
+    拿不到 schema 时原样返回（不因为探测失败而拦任务）。
+    """
+    lo = hi = None
+    try:
+        info = _node_info(class_type) or {}
+        node = next(iter(info.values()), None) or {}
+        spec = ((node.get("input") or {}).get("required") or {}).get(key)
+        if isinstance(spec, list) and len(spec) > 1 and isinstance(spec[1], dict):
+            lo, hi = spec[1].get("min"), spec[1].get("max")
+    except Exception:
+        lo = hi = None
+    try:
+        v = value
+        if lo is not None and float(v) < float(lo):
+            v = float(lo)
+        if hi is not None and float(v) > float(hi):
+            v = float(hi)
+        return v, lo, hi
+    except Exception:
+        return value, lo, hi
+
+
+def _run_lipsync_graph(client_id, vbytes, abytes, emb_path, on_tick=None, lips_expression=None):
+    """跑一次对口型工作流，返回产物 mp4 bytes（整镜 / 单段共用）。
+
+    lips_expression：嘴部驱动强度（工作流默认 1.5）。极端表情（惊恐/喊叫）的底片降到 0.8，
+    减少「先合上再重开」造成的嘴部形变；None = 不改工作流原值。
+    """
     import uuid as _uuid
     if not LIPSYNC_WORKFLOW or not os.path.exists(LIPSYNC_WORKFLOW):
         raise ComfyError("对口型工作流不存在：检查 WEAVEORA_LIPSYNC_WORKFLOW=%s" % LIPSYNC_WORKFLOW)
@@ -1408,6 +1832,11 @@ def _run_lipsync_graph(client_id, vbytes, abytes, emb_path, on_tick=None):
     if emb_path:
         _n = _set_node_scalar(graph, LIPSYNC_NODE_CLASS, "target_embedding_path", emb_path)
         print("[comfy] 已注入 target_embedding_path（命中 %d 个 %s）" % (_n, LIPSYNC_NODE_CLASS), flush=True)
+    if lips_expression is not None:
+        _val, _lo, _hi = _clamp_node_scalar(LIPSYNC_NODE_CLASS, "lips_expression", float(lips_expression))
+        _n = _set_node_scalar(graph, LIPSYNC_NODE_CLASS, "lips_expression", _val)
+        print("[comfy] 嘴部驱动强度 lips_expression=%.2f（请求 %.2f；节点允许 %s~%s；命中 %d 个 %s）"
+              % (_val, float(lips_expression), _lo, _hi, _n, LIPSYNC_NODE_CLASS), flush=True)
     _mode, _nodes = _apply_fps_policy(graph)
     print("[comfy] 对口型 fps 策略：%s（节点：%s）" % (_mode, ",".join(str(x) for x in _nodes)), flush=True)
     # 裸节点图 → /prompt 要的是 {"prompt": 图, "client_id": ...}
@@ -1490,7 +1919,7 @@ def generate_lipsync(client_id, payload, progress_fn=None):
                   or str(vctype or "").startswith("image"))
     if still_mode:
         vdata = _still_to_video(vdata, adata, payload.get("duration_sec"))
-        print("[comfy] lipsync 画面为静帧 → 已用 ffmpeg 转成与配音等长的 mp4", flush=True)
+        print("[comfy] lipsync 底片为静帧 → 已转成与配音等长的 mp4（等比缩放，不做 pad/裁切）", flush=True)
 
     speakers = payload.get("speakers") if isinstance(payload.get("speakers"), dict) else {}
     segs = payload.get("segments") if isinstance(payload.get("segments"), list) else []
@@ -1544,16 +1973,29 @@ def generate_lipsync(client_id, payload, progress_fn=None):
             print("[comfy] 锁定规格序列化失败（退回最大脸）: %s" % ex, flush=True)
             return ""
 
-    # 先预检：画面里有人脸；且（有特征时）说话人的脸真在画面里
+    # 先预检：画面里有人脸；且（有特征时）说话人的脸真在画面里；以及「底片体检」（B）
     # ★ 但**有「点选人脸」提示时不做识别式预检**：识别在风格化/低分辨率素材上不可信
     #   （实测「袭人」定妆照与「警幻」相似度 0.71＝同一张脸，画面里最高相似度仅 0.21
     #   < 阈值 0.28 → 会把本来能跑的任务直接判失败）。用户点的位置本身就是权威信号，
     #   点选没点到脸的情况交给管线的「就近选脸 + 沿用上一帧」兜底。
+    # 注：B 的底片体检（脸太小/嘴大张）**不看这个**——它用的是全部脸的最坏值，与锁谁无关。
     _first = next(iter(embs)) if len(embs) == 1 else ""
     _emb_pre = None if (_first and face_hints.get(_first)) else embs.get(_first)
+    _force = bool(payload.get("lipsyncForce")) or LIPSYNC_FORCE
     if not _face_precheck(vdata, where="第%s镜" % shot_no,
-                          target_emb=_emb_pre, speaker=_first):
+                          target_emb=_emb_pre, speaker=_first, force=_force):
         raise ComfyError(_face_reason["msg"])
+    _warn = _face_reason.get("warn") or ""
+    if _warn:
+        print("[comfy] 第%s镜底片体检提醒：%s" % (shot_no, _warn), flush=True)
+        if progress_fn:
+            progress_fn(18, _warn)
+    # C：方案侧标了「极端表情（惊恐/喊叫）」的镜头 → 降低嘴部驱动强度（1.5 → 0.8）
+    _lips_expr = None
+    if bool(payload.get("expressionRisk")):
+        _lips_expr = LIPSYNC_EXPRESSION_RISK
+        print("[comfy] 第%s镜标记为极端表情（张口/喊叫）→ lips_expression=%.2f"
+              % (shot_no, _lips_expr), flush=True)
 
     _free_comfy_models()
     _last_min = [-1]
@@ -1592,7 +2034,7 @@ def generate_lipsync(client_id, payload, progress_fn=None):
                       "可能出现时间轴异常；建议把该镜画面时长做到 ≥ 配音" % (shot_no, _asec, _vms), flush=True)
             if progress_fn:
                 progress_fn(40, "lipsync")
-            out = _run_lipsync_graph(client_id, vdata, adata, ep, on_tick=_tick)
+            out = _run_lipsync_graph(client_id, vdata, adata, ep, on_tick=_tick, lips_expression=_lips_expr)
         else:
             # ---------- 多人镜：按段驱动 ----------
             fps = _source_fps(vdata, tmp)
@@ -1655,7 +2097,8 @@ def generate_lipsync(client_id, payload, progress_fn=None):
                                TARGET_MIN_SIM, who or "?"))
                 if progress_fn:
                     progress_fn(40, "lipsync 第%d/%d段（%s）" % (i + 1, len(segs), who or "?"))
-                seg_mp4 = _run_lipsync_graph(client_id, seg_video, seg_audio, ep, on_tick=_tick)
+                seg_mp4 = _run_lipsync_graph(client_id, seg_video, seg_audio, ep, on_tick=_tick,
+                                             lips_expression=_lips_expr)
                 pf = _decode_frames(seg_mp4, tmp, "seg%d" % i)
                 results.append((a, b, pf))
                 cursor = b
@@ -1741,15 +2184,25 @@ def _wav_seconds(path):
         return None
 
 
-def _still_to_video(img_bytes, audio_bytes, duration_sec=None, size=512, fps=25):
+def _still_to_video(img_bytes, audio_bytes, duration_sec=None, fps=25, max_long=1280):
     """关键帧静帧 + 配音 → mp4（口型工作流需要视频轨）。时长以实际配音为准。
 
     为什么必须做：LatentSync 工作流是 LoadVideo → GetVideoComponents，
     直接把 png 当 mp4 传进去 LoadVideo 会解码失败。
+
+    为什么**不再 pad 成 512x512**（2026-09-14 实测）：原来是 scale=512:512 + pad=512:512，
+    于是 2560x1440 的 16:9 静帧被压成**带黑边的方片**，LatentSync 产物也就成了 512x512 方视频
+    —— 成片画幅被破坏，而且平白把脸缩小（黑边还占了一半像素）。现在只做**等比缩放**：
+    长边 ≤ max_long（默认 1280，与实测能跑通的片段底片 1280x720 同一量级），不 pad 不裁。
+    可用 WEAVEORA_LIPSYNC_STILL_MAX 覆盖。
     """
     import subprocess, tempfile
     if not img_bytes:
         raise ComfyError("静帧画面为空，无法生成对口型输入视频")
+    try:
+        max_long = int(os.environ.get("WEAVEORA_LIPSYNC_STILL_MAX") or max_long)
+    except Exception:
+        pass
     d = tempfile.mkdtemp(prefix="weaveora_still_")
     ip = os.path.join(d, "in.png")
     ap = os.path.join(d, "a.wav")
@@ -1759,14 +2212,16 @@ def _still_to_video(img_bytes, audio_bytes, duration_sec=None, size=512, fps=25)
     with open(ap, "wb") as fh:
         fh.write(audio_bytes or b"")
     dur = _wav_seconds(ap) or float(duration_sec or 0) or 3.0
+    vf = ("scale='if(gt(iw,ih),min(%d,iw),-2)':'if(gt(iw,ih),-2,min(%d,ih))'"
+          % (max_long, max_long))
     r = subprocess.run(
         [_ffmpeg_exe(), "-y", "-loglevel", "error", "-loop", "1", "-i", ip, "-t", "%.3f" % dur,
-         "-r", str(fps), "-vf",
-         "scale=%d:%d:force_original_aspect_ratio=decrease,pad=%d:%d:(ow-iw)/2:(oh-ih)/2"
-         % (size, size, size, size),
-         "-pix_fmt", "yuv420p", "-c:v", "libx264", op],
+         "-r", str(fps), "-vf", vf, "-pix_fmt", "yuv420p", "-c:v", "libx264", op],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=300)
     if r.returncode != 0 or not os.path.exists(op):
         raise ComfyError("静帧转视频失败: %s" % (r.stderr or "")[-300:])
+    _w, _h, _dur = _probe_video_meta(open(op, "rb").read())
+    print("[comfy] 静帧 → 视频：%sx%s（长边封顶 %d，等比不 pad）/ %.2fs"
+          % (_w, _h, max_long, dur), flush=True)
     with open(op, "rb") as fh:
         return fh.read()

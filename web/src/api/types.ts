@@ -203,6 +203,18 @@ export interface DirectorShot {
    */
   lipsync_targets?: Record<string, { x: number; y: number }> | null
   /**
+   * P13：对口型的**底片**（用哪份画面驱动嘴型）——`'clip'` = 该镜最新 motion 片段，
+   * `'still'` = 关键帧静帧；不设 = 自动（有 motion 用 motion，除非该镜是「惊恐/喊叫」
+   * 这类底片里嘴本来就大张的镜头 → 自动改用静帧）。
+   *
+   * 为什么需要人工选：LatentSync 是「先把嘴合上、再按配音重开」的重绘模型——
+   * 底片里嘴已经在动/大张时，嘴部掩码区形变最大（实测会把画面搞坏）；
+   * 而静帧只有一张干净的脸，适合做说话镜的底片。
+   */
+  lipsync_source?: 'clip' | 'still' | null
+  /** 对口型：即使底片体检（脸太小/嘴大张）不过也强制跑（默认 false，不推荐）。 */
+  lipsync_force?: boolean | null
+  /**
    * P10：该镜允许配音时长超出镜头。
    * 默认（不设）= 音频与字幕会自然溢到下一镜，但界面会提醒“配音总长超出镜头”；
    * 置 true 表示用户已确认，不再提醒。

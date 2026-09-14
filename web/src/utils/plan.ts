@@ -1,6 +1,62 @@
 import type { DirectorPlan, DirectorShot, ImagePlan, VideoPlan } from '@/api/types'
 
 /**
+ * 与存储格式无关的**稳定序列化**：对象键递归排序后再 stringify（数组顺序保留）。
+ *
+ * 为什么必须这么做（2026-09-14 定位到的真因）：`prompt_revisions.schema_json` 是
+ * PostgreSQL **jsonb** —— jsonb 会重排对象键（先按 key 长度、再按字节序），
+ * 而前端 `draft` 用的是客户端插入顺序（新加的键一定落在对象**末尾**）。
+ * 只要用 `JSON.stringify` 直接对比，就会出现「纯键序差异」被当成「方案有改动」：
+ *
+ *   例：第 N 镜点选人脸 → `shot.lipsync_targets = {...}` 追加到末尾 →
+ *       就地保存（PATCH plan/inplace）→ 回读的 jsonb 把它排到 negative_prompt 之前 →
+ *       `changeSummary` 报「分镜 N 镜有改动」→ 已确认版本上点「生成关键帧 / 对口型」
+ *       仍弹「保存并确认后生成」（用户实测反馈：已确认还一直要求保存）。
+ *
+ * 同理适用于 参考图区域（referenceAssets.subject/region）、新加的 narrations、
+ * 带 t/camera_move 的 keyframes 等一切「客户端新建的对象」。
+ */
+export function canonicalJson(v: unknown): string {
+  return JSON.stringify(sortKeysDeep(v))
+}
+
+/**
+ * C：「底片里嘴本来就大张」的高危镜头判定（与后端 `JobService.expressionRisk` 同一份词表）。
+ *
+ * 用于：① 选镜弹窗提前提醒（建议底片改静帧 / 改旁白/画外音）；② 展示自动选定的底片。
+ * 只做文字判定：判多一次的代价 = 多走一次静帧底片（静帧本身合法）；
+ * 判漏的代价 = 一段坏画面 + 十几分钟 GPU。
+ */
+export function expressionRiskOf(shot: {
+  action?: string | null
+  positive_prompt?: string | null
+  narration?: string | null
+  narrations?: Array<{ text?: string | null }> | null
+}): boolean {
+  const parts: string[] = [
+    shot.action ?? '',
+    shot.positive_prompt ?? '',
+    shot.narration ?? '',
+    ...((shot.narrations ?? []).map((n) => n.text ?? '')),
+  ]
+  return EXPRESSION_RISK_RE.test(parts.join(' ').toLowerCase())
+}
+
+const EXPRESSION_RISK_RE =
+  /喊叫|尖叫|惊叫|惊呼|失声|呼喊|大叫|吼叫|嚎叫|嘶喊|大喊|张口|张嘴|大张|口大张|scream|shriek|shout|yell|cry out|wail|mouth wide|wide.open.mouth|open mouth|mouth open/
+
+function sortKeysDeep(v: unknown): unknown {
+  if (Array.isArray(v)) return v.map(sortKeysDeep)
+  if (v && typeof v === 'object') {
+    const src = v as Record<string, unknown>
+    const out: Record<string, unknown> = {}
+    for (const k of Object.keys(src).sort()) out[k] = sortKeysDeep(src[k])
+    return out
+  }
+  return v
+}
+
+/**
  * P10：把某分镜的语音按**配音实际时长**铺到镜内时间轴上（只动没被手动改过的段）。
  *
  * 规则：

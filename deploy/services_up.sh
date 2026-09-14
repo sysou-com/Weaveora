@@ -42,8 +42,12 @@ if up 8001; then
   log "ComfyUI :8001 已在监听，跳过"
 else
   cd "$CX" || exit 1
+  # --disable-smart-memory：Wan2.2 I2V-A14B 是**双专家**（fp8 各 13.3GiB）。24G 卡上必须让
+  #   ComfyUI 在切换专家时主动释放上一个，否则两个专家同时驻留（26.6GiB）直接 OOM。
+  # --reserve-vram 0.5：给 CUDA 上下文 / VAE 解码留 0.5GiB 余量。
   start_bg "ComfyUI(:8001)" "$LOGD/comfyui.log" \
-    "$VENV_PY" "$CX/main.py" --listen 0.0.0.0 --port 8001
+    "$VENV_PY" "$CX/main.py" --listen 0.0.0.0 --port 8001 \
+    --disable-smart-memory --reserve-vram 0.5
 fi
 
 # ---------- TTS :8091 ----------
@@ -56,6 +60,9 @@ else
   export WEAVEORA_TTS_DEFAULT_VOICE="中文女"
   export WEAVEORA_TTS_PRELOAD=1
   export WEAVEORA_TTS_ALIGN=0
+  # 显存仲裁：TTS 常驻占 ~7GiB，与 Wan2.2 14B 双专家无法共存。
+  #   worker 在出视频前会看 ComfyUI 的显存余量，不够时 POST /unload 让 TTS 卸载模型
+  #   （tts_server 的 /unload；下次配音请求会自动懒加载回来）。所以 PRELOAD 可以保持 1。
   export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
   # wetext 的 FST 模型是运行时用 modelscope.snapshot_download 拉的（约 52MB / 38 文件）。
   # 默认缓存在 ~/.cache/modelscope（overlay，重启即丢）-> 指到持久盘，避免每次重启后
