@@ -238,6 +238,36 @@ grep -n "_NODE_ROOT" latentsync/utils/audio.py latentsync/utils/image_processor.
 curl -s localhost:8188/object_info/LatentSyncNode | grep -o '"fps"'
 ```
 
+### 9.2 轨迹锁人 / 收紧贴回遮罩 / 版本握手（2026-09-14，补丁版本 `2026-09-14.1`）
+
+这一批解决**效果与安全**（节点侧已改用 `deploy/latentsync-node/` 管理，GPU 服务器用 `apply.sh` 覆盖，
+不再靠人工记）：
+
+| 文件 | 补丁 | 为什么 |
+|---|---|---|
+| `latentsync/utils/face_detector.py` | **轨迹锁人**：点选/定妆照只用于**播种**，之后按「上一帧框 + 轨迹自累积人脸特征(EMA)」逐帧关联；**质量闸门**：跟丢 / 脸太窄(<64px) / 侧脸代理>0.55 → `last_driven=False`；点选最大距离 0.35；输出 `last_driven`/`last_reason`/`stats_line()` | 用户实测反馈：「一个视频里画面不停变，选定人脸的帧可能对，动作幅度大就不对了」——静态点选逐帧找最近脸，在走位/交错/出画时会**跳到别人脸上**（实测第4镜帧130 驱动了宝玉而不是警幻）。改成轨迹后：宝玉出画又回画，轨迹仍稳锁警幻（实测 165/165 帧，x≈534–548） |
+| `latentsync/utils/image_processor.py` | `build_paste_mask()`：把训练用遮罩**收紧到中央竖带 + 外扩 10px + 羽化 9px** 作为**贴回**遮罩；模型输入仍用原遮罩；`affine_transform` 无脸时不再抛 `Face not detected`；新增 `last_driven`/`last_paste_masks` | 原版 mask.png 的「重绘区」是整个下半脸+两侧脸颊（U 形，宽 80%×高 63%）——**贴回**时把脸颊一起覆盖，对齐稍偏就糊脸、甚至糊到隔壁那张脸（两张脸只隔 180px 时必然互相污染） |
+| `latentsync/pipelines/lipsync_pipeline.py` | 逐帧 `driven` 贯通（不驱动 → `restore_video` 直接输出原帧）；贴回改用 `last_paste_masks`；`write_video(..., fps=video_fps)`；`_debug_mark()` 调试画框 | 「宁可这帧嘴不动，也不要把画面搞坏」；中间片帧率口径对齐源片 |
+| `nodes.py` | `WEAVEORA_NODE_VERSION` / `WEAVEORA_NODE_FEATURES` + **`GET /weaveora/version`**；节点日志打印收到的锁定规格（内联 JSON 还是文件路径） | worker 与节点分处两台机，曾因 GPU 机是旧副本（不认内联 JSON → 退回「取最大脸」）而悄悄把两段台词配到同一张脸。现在 worker 跑前强校验，缺能力**直接失败**并给修复指引 |
+| `scripts/inference.py` | 锁定规格支持**内联 JSON**；解析 `debugBox` | 跨机不能传文件（节点侧那个临时路径根本不存在） |
+
+**改完必须重打**（详见 `deploy/latentsync-node/README.md`）：
+
+```bash
+# API 服务器（VPS）上托管补丁包：
+bash deploy/latentsync-node/pack.sh
+# GPU 服务器上执行：
+curl -fsSL https://sysou.com/weaveora-node/latentsync-node-patch.tar.gz -o /tmp/p.tar.gz \
+  && tar xzf /tmp/p.tar.gz -C /tmp && bash /tmp/latentsync-node/apply.sh   # 打完记得重启 ComfyUI
+bash /tmp/latentsync-node/verify.sh http://127.0.0.1:8001                    # 自检版本+能力
+```
+
+一键核对（节点侧）：
+
+```bash
+curl -s http://127.0.0.1:8001/weaveora/version     # 应有 version=2026-09-14.1 与 7 项能力
+```
+
 ---
 
 ## 十、未安装时的行为

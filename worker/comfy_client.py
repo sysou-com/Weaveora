@@ -68,6 +68,58 @@ def _comfy(method, path, payload=None, files=None, timeout=120):
         raise ComfyError("comfy %s %s -> %s %s" % (method, path, e.code, e.read()[:300]))
 
 
+# ── 节点补丁版本/能力校验（2026-09-14）────────────────────────────────────
+# 为什么：worker 跑在 API 服务器、LatentSync 节点跑在 GPU 服务器，节点侧只能手工同步。
+# 曾实测：GPU 机上是旧副本（旧 inference.py 不认「内联 JSON 规格」）→ 退回「取最大脸」→
+# 两段台词都驱动同一张脸、画面被毁，而 worker 这边完全看不出异常，只表现为「效果不对」。
+# 所以这里先问节点要版本，缺能力就**直接失败**并给出修复指引，不再静默降级。
+REQUIRED_NODE_FEATURES = ("point_lock", "inline_spec", "track_lock", "quality_gate", "paste_mask", "fps_pin")
+NODE_PATCH_HOWTO = (
+    "修复：在 GPU 服务器上执行\n"
+    "  curl -fsSL https://sysou.com/weaveora-node/latentsync-node-patch.tar.gz -o /tmp/p.tar.gz"
+    " && tar xzf /tmp/p.tar.gz -C /tmp && bash /tmp/latentsync-node/apply.sh\n"
+    "然后**重启 ComfyUI**，再用 bash /tmp/latentsync-node/verify.sh 自检。"
+    "（应急跳过：worker 环境变量 WEAVEORA_SKIP_NODE_CHECK=1）"
+)
+_NODE_VERSION_CACHE = {"at": 0.0, "base": None, "payload": None}
+
+
+def _node_version(base, timeout=15, ttl=300):
+    """取节点补丁版本（带缓存，避免每个任务都问一次）。拿不到返回 None。"""
+    import time as _t
+    now = _t.time()
+    c = _NODE_VERSION_CACHE
+    if c["payload"] is not None and c["base"] == base and (now - float(c["at"])) < ttl:
+        return c["payload"]
+    try:
+        with urllib.request.urlopen(base + "/weaveora/version", timeout=timeout) as r:
+            payload = json.loads(r.read().decode("utf-8", "replace"))
+    except Exception:
+        payload = None
+    c.update({"at": now, "base": base, "payload": payload})
+    return payload
+
+
+def _require_node_features():
+    """跑对口型前强校验 GPU 机上节点补丁的版本与能力。"""
+    if os.environ.get("WEAVEORA_SKIP_NODE_CHECK", "") == "1":
+        print("[comfy] 已跳过节点版本校验（WEAVEORA_SKIP_NODE_CHECK=1）", flush=True)
+        return
+    info = _node_version(COMFY)
+    if info is None:
+        raise ComfyError(
+            "拿不到 GPU 服务器上 LatentSync 节点的版本接口（%s/weaveora/version）。\n"
+            "这说明那台机器的节点还是**旧副本**（没打 Weaveora 补丁）—— 旧副本不认「点选人脸/内联规格」，"
+            "会退回「取最大脸」，导致嘴型贴到别人脸上。\n%s" % (COMFY, NODE_PATCH_HOWTO))
+    feats = info.get("features") or []
+    missing = [f for f in REQUIRED_NODE_FEATURES if f not in feats]
+    if missing:
+        raise ComfyError(
+            "GPU 服务器上 LatentSync 节点补丁**版本过旧**（版本 %s），缺少能力：%s。\n%s"
+            % (info.get("version") or "未知", "、".join(missing), NODE_PATCH_HOWTO))
+    print("[comfy] 节点补丁版本 %s，能力齐全 ✅" % info.get("version"), flush=True)
+
+
 def _free_comfy_models():
     """让 ComfyUI 卸掉自己缓存的模型（SDXL / Wan 等占着 6+ GB），把显存让给 LatentSync。
 
@@ -1420,6 +1472,10 @@ def generate_lipsync(client_id, payload, progress_fn=None):
     import tempfile
     if not LIPSYNC_WORKFLOW or not os.path.exists(LIPSYNC_WORKFLOW):
         raise ComfyError("未配置对口型工作流：见 docs/lipsync-setup.md（WEAVEORA_LIPSYNC_WORKFLOW）")
+    # 先确认 GPU 机上的节点补丁版本/能力（缺就直接失败，不静默降级成「最大脸」）
+    _require_node_features()
+    if os.environ.get("WEAVEORA_LIPSYNC_DEBUG_BOX", "") == "1":
+        print("[comfy] 已开启对口型调试画框（产物上会标出锁定的脸与是否驱动）", flush=True)
     vkey = (payload.get("videoKey") or "").strip()
     vkeys = [k for k in (payload.get("voiceKeys") or []) if k]
     if not vkey or not vkeys:
@@ -1472,6 +1528,10 @@ def generate_lipsync(client_id, payload, progress_fn=None):
             spec["embedding"] = embs[name]
         if not spec:
             return ""
+        # 调试画框：worker 设 WEAVEORA_LIPSYNC_DEBUG_BOX=1 时，产物上会标出「锁定的哪张脸 + 这一帧有没有驱动」
+        # （cross-machine 排查用：worker 在 API 机、节点在 GPU 机，看不到节点日志）
+        if os.environ.get("WEAVEORA_LIPSYNC_DEBUG_BOX", "") == "1":
+            spec["debugBox"] = True
         try:
             # ★ 返回**内联 JSON**（不是文件路径）：worker 与 ComfyUI 可能不在同一台机
             # （worker 在 API 服务器、ComfyUI 在 GPU 服务器），文件路径在节点侧根本不存在。
