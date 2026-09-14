@@ -514,12 +514,21 @@ MOTION_VAE = "wan_2.1_vae.safetensors"          # I2V-A14B 用 2.1 VAE；wan2.2_
 MOTION_TEXT_ENCODER = "umt5_xxl_fp8_e4m3fn_scaled.safetensors"
 
 MOTION_PRESETS = {
-    "draft":    {"steps": 4,  "switch": 2,  "cfg_high": 1.0, "cfg_low": 1.0, "lora_high": 0.6, "lora_low": 1.0, "shift": 5.0},
-    "balanced": {"steps": 6,  "switch": 3,  "cfg_high": 1.0, "cfg_low": 1.0, "lora_high": 0.6, "lora_low": 1.0, "shift": 5.0},
-    "motion":   {"steps": 8,  "switch": 4,  "cfg_high": 1.5, "cfg_low": 1.0, "lora_high": 0.5, "lora_low": 1.0, "shift": 5.0},
+    # ★ 2026-09-14 实测修正（GPU#2 48G）：**高噪声专家一律不蒸馏（lora_high=0）**。
+    #   原因：给 fp8 的高噪声专家挂 LoRA 时，ComfyUI 需额外 dequantize 一份权重
+    #   （13.3 GiB fp8 → 28 GiB fp16）× 两专家 → 在 **48GB 卡上也会 OOM**（实测 draft/balanced
+    #   报 "Allocation on device ... out of memory"）；而 lora_high=0 的 hero 档实测通过：
+    #   832×480 / 33 帧 / 6 步，**显存峰值 41.5 GiB、54 秒**出片。
+    #   这正合本方案的初衷：高噪声专家负责大幅运动，越蒸馏动态越扁 —— 所以只给**低噪声**专家
+    #   足量蒸馏，高噪声靠步数/cfg 调。需要旧行为时显式传 params.lora_high。
+    "draft":    {"steps": 4,  "switch": 2,  "cfg_high": 1.0, "cfg_low": 1.0, "lora_high": 0.0, "lora_low": 1.0, "shift": 5.0},
+    "balanced": {"steps": 6,  "switch": 3,  "cfg_high": 1.0, "cfg_low": 1.0, "lora_high": 0.0, "lora_low": 1.0, "shift": 5.0},
+    "motion":   {"steps": 8,  "switch": 4,  "cfg_high": 1.5, "cfg_low": 1.0, "lora_high": 0.0, "lora_low": 1.0, "shift": 5.0},
     "hero":     {"steps": 6,  "switch": 3,  "cfg_high": 3.5, "cfg_low": 1.0, "lora_high": 0.0, "lora_low": 1.0, "shift": 5.0},
     "full":     {"steps": 24, "switch": 12, "cfg_high": 3.5, "cfg_low": 3.5, "lora_high": 0.0, "lora_low": 0.0, "shift": 5.0},
 }
+# 给高噪声专家挂 LoRA 的显存风险阈值：超过它就在日志里点名提醒（48G 实测 0.6 也 OOM）
+MOTION_LORA_HIGH_WARN = 0.0
 MOTION_PRESET_ENV = os.environ.get("WEAVEORA_MOTION_PRESET", "balanced").strip().lower()
 
 
@@ -706,6 +715,10 @@ def _motion_graph(client_id, payload, positive, negative, first_frame_name, pref
                                         "—" if not plan["lora_high"] else a["lora_high_name"][:28],
                                         plan["lora_low"],
                                         "—" if not plan["lora_low"] else a["lora_low_name"][:28])
+    if float(plan.get("lora_high") or 0) > 0:
+        print("[comfy] WARN lora_high=%.2f：给高噪声 fp8 专家挂 LoRA 需额外 dequantize 一份权重"
+              "（13.3GiB fp8 → ~28GiB fp16），实测 48G 卡也会 OOM；动态也会被压扁。"
+              "除非显式要求，建议保持 0（只给低噪声专家蒸馏）。" % float(plan["lora_high"]), flush=True)
     print("[comfy] motion %s preset=%s steps=%d(switch %d) cfg=%s/%s shift=%s "
           "%dx%d %d帧 lora %s sampler=%s/%s weight=%s"
           % (shape, plan["preset"], plan["steps"], plan["switch"], plan["cfg_high"],
