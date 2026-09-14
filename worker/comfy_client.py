@@ -540,11 +540,30 @@ MOTION_SERVICE_KEYS = ("preset", "steps", "switch", "switch_step", "cfg", "cfg_h
                        "sampler_name", "scheduler", "model_high", "model_low", "mode", "dual",
                        "width", "height", "frames", "fps")
 
-# 显存口径（A14B 双专家实测：832×480/33 帧 **峰值 41.8~42.4 GiB**）：
-#   · 跑之前要求「ComfyUI 视角的剩余显存」≥ MOTION_MIN_FREE_GB，不够就让 TTS 让位；
-#   · 总显存 < MOTION_MIN_TOTAL_GB 直接**快速失败**并点名换机（24G 卡无论如何跑不了 A14B）。
+# 显存口径（A14B 双专家实测，GPU#2 48G，832×480）：
+#   · 33 帧 → 峰值 41.8 GiB；121 帧 → 峰值 47.3 GiB（线性拟合）
+#     ⇒ 峰值 ≈ BASE + PER_FRAME×帧数，BASE≈39.7 GiB、每帧≈0.0625 GiB（832×480）
+#   · 同时实测：**64/84 帧反而 OOM、而 121 帧能过** ⇒ OOM 不是帧数导致的，
+#     是**共存争显存**（CosyVoice 常驻 ~7GiB + ComfyUI 缓存双专家 26.6GiB）。
+#     所以阈值用「运行时可用显存 vs 预估需求」而非常量帧上限；不够先让 TTS 让位，再不够就明确报错。
+MOTION_VRAM_BASE_GB = float(os.environ.get("WEAVEORA_MOTION_VRAM_BASE_GB", "39.7") or 39.7)
+MOTION_VRAM_PER_FRAME_GB = float(os.environ.get("WEAVEORA_MOTION_VRAM_PER_FRAME_GB", "0.0625") or 0.0625)
+MOTION_VRAM_AREA_REF = 832.0 * 480.0   # 标定分辨率（换成其它分辨率按面积等比缩放）
+
+# 总显存低于这个值就别浪费 GPU 时间了（A14B 硬门槛：24G 卡无论如何跑不了）
 MOTION_MIN_FREE_GB = float(os.environ.get("WEAVEORA_MOTION_MIN_FREE_GB", "30") or 30)
 MOTION_MIN_TOTAL_GB = float(os.environ.get("WEAVEORA_MOTION_MIN_TOTAL_GB", "44") or 44)
+
+
+def _motion_vram_need_gb(frames, width, height):
+    """预估一次 A14B 双专家出片的峰值显存（GiB）。
+
+    按实测标定（832×480：33 帧 41.8 / 121 帧 47.3）+ 分辨率面积等比；
+    只用于**跑前体检与明确报错**，不追求精确：真正上限看运行时可用显存。
+    """
+    area = max(1.0, float(width) * float(height))
+    scale = area / MOTION_VRAM_AREA_REF
+    return MOTION_VRAM_BASE_GB + MOTION_VRAM_PER_FRAME_GB * float(frames) * scale
 
 
 def _snake_key(k):
@@ -849,13 +868,30 @@ def generate_motion(client_id, payload, progress_fn=None):
     # （旧行为：硬跑 → OOM，报一堆看不懂的错；24G 卡无论如何跑不了 A14B）
     if str(_mp.get("mode") or "").strip().lower() != "single":
         _free, _total = vram_stats()
+        _frames, _w, _h, _ = _motion_graph_frames(payload, _mp)
+        _need = _motion_vram_need_gb(_frames, _w, _h)
         if _total is not None and _total < MOTION_MIN_TOTAL_GB:
             raise ComfyError(
-                "本机 ComfyUI 总显存 %.1f GiB < A14B 双专家所需 %.0f GiB（实测峰值 ~42 GiB）："
+                "本机 ComfyUI 总显存 %.1f GiB < A14B 双专家所需 %.0f GiB（实测峰值 ~42–47 GiB）："
                 "Wan2.2 I2V-A14B 在这台机器上跑不了。\n"
                 "  修法一（推荐）：把 clip 任务路由到 48G 的 GPU#2（生成引擎配置 → GPU 服务器地址）\n"
                 "  修法二：显式降级单专家（params.mode=single + params.model=本地 5B 权重名）"
                 % (_total, MOTION_MIN_TOTAL_GB))
+        if _free is not None and _free < _need:
+            # 实测：64/84 帧曾 OOM 而 121 帧能过 —— 根因是**共存争显存**（CosyVoice 常驻
+            # ~7GiB + ComfyUI 缓存双专家），不是帧数本身。所以这里给出可执行的三个档杆。
+            _area_scale = (float(_w) * float(_h)) / MOTION_VRAM_AREA_REF
+            _suggest = max(32, int((_free - MOTION_VRAM_BASE_GB)
+                                   / max(1e-6, MOTION_VRAM_PER_FRAME_GB * _area_scale)))
+            raise ComfyError(
+                "显存不够跑这次 motion：%dx%d / %d 帧 预估需 %.1f GiB，当前可用 %.1f GiB。\n"
+                "  ① 降帧数（%d → %d 左右）或降分辨率（如 640x384）\n"
+                "  ② 让 TTS 先归还显存：POST {tts}/unload（或把 GPU 机 TTS 的 WEAVEORA_TTS_PRELOAD=0）\n"
+                "  ③ 跨镜并发时确认没有其它任务同时占卡（A14B 会独占）"
+                % (_w, _h, _frames, _need, _free, _frames, _suggest))
+        if _free is not None:
+            print("[comfy] motion 显存体检：预估需 %.1f GiB，可用 %.1f/%.1f GiB"
+                  % (_need, _free, _total or 0), flush=True)
     try:
         from PIL import Image as _PIL
         _im = _PIL.open(io.BytesIO(data)).convert("RGB").resize((mw, mh), _PIL.LANCZOS)
