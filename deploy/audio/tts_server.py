@@ -38,6 +38,16 @@ import time
 import wave
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+# 必须在起任何线程之前**一次性**导入 torch。
+# 起因（2026-09-14 实测卡死）：预热线程与 HTTP 线程若各自首次 `import torch`，
+# 会在 torch 的惰性导入（torch.serialization._rebuild_tensor → import torch._utils）
+# 上互相等待，把服务**永久卡死**（py-spy 抓到两线程同时停在 importlib._find_and_load）。
+# 导入完成后，函数内那些 `import torch` 都只是取缓存，安全。
+try:
+    import torch as _torch
+except Exception:      # torch 缺失时降级：各调用点自行回退
+    _torch = None
+
 COSY_DIR = os.environ.get("WEAVEORA_COSYVOICE_DIR", "/data/audio/CosyVoice")
 # zero-shot 克隆用（无内置音色）
 MODEL_DIR = os.environ.get("WEAVEORA_COSYVOICE_MODEL", "pretrained_models/CosyVoice2-0.5B")
@@ -74,15 +84,26 @@ def _resolve(p):
     return p if os.path.isabs(p) else os.path.join(COSY_DIR, p)
 
 
+_SFT_SPKS = None      # 缓存：spk2info.pt 只有 7.7KB，但 /health 会被高频轮询
+
+
 def _sft_spks():
-    """直接读 SFT 的 spk2info.pt 拿内置音色名。
+    """直接读 SFT 的 spk2info.pt 拿内置音色名（结果缓存，避免高频重复读盘）。
 
     只在需要判定路由时读一个 10KB 的文件，**避免为了判断而加载整个模型**。
     """
+    global _SFT_SPKS
+    if _SFT_SPKS is not None:
+        return _SFT_SPKS
     path = os.path.join(_resolve(SFT_DIR), "spk2info.pt")
     try:
-        import torch
-        return list(torch.load(path, map_location="cpu").keys())
+        t = _torch
+        if t is None:
+            import torch as t
+        spks = list(t.load(path, map_location="cpu").keys())
+        if spks:                     # 只在成功时缓存（失败时留待下次重试）
+            _SFT_SPKS = spks
+        return spks
     except Exception:
         return []
 
@@ -121,6 +142,52 @@ def _load(kind):
         print("[tts] %s 已加载: %s (sr=%s, spks=%d)"
               % (kind, path, getattr(m, "sample_rate", "?"), len(_state["spks"])), flush=True)
         return m
+
+
+def _vram_mb():
+    """当前显存 free/total（MiB）；无 CUDA 或取不到返回 None。"""
+    try:
+        t = _torch
+        if t is None:
+            import torch as t
+        if not t.cuda.is_available():
+            return None
+        free, total = t.cuda.mem_get_info()
+        return {"free_mb": int(free // 1048576), "total_mb": int(total // 1048576)}
+    except Exception:
+        return None
+
+
+def _unload():
+    """卸载所有已加载的 TTS 模型并归还显存（给视频任务让位）。
+
+    与 _load() 内部的「单卡互斥卸载」同一套做法：清引用 + gc + empty_cache。
+    下次 /tts 请求会自动懒加载（首次会慢一点，这是设计的权衡）。
+    """
+    with _lock:
+        kinds = list(_models)
+        _models.clear()
+        _state["warm"] = False
+        _state["kind"] = None
+    import gc
+    gc.collect()
+    try:
+        import torch
+        torch.cuda.empty_cache()
+        torch.cuda.ipc_collect()
+    except Exception:
+        pass
+    print("[tts] 已卸载 %s，显存归还后 %s" % (kinds or "（无）", _vram_mb()), flush=True)
+    return kinds
+
+
+def _reload(kind):
+    """显式预加载某个模型（kind 缺省 "v2"）。"""
+    kind = (kind or "v2").strip().lower()
+    if kind not in ("v2", "sft"):
+        kind = "v2"
+    _load(kind)
+    return kind
 
 
 def _tensors_to_wav(chunks, sample_rate):
@@ -339,6 +406,7 @@ class Handler(BaseHTTPRequestHandler):
             body = json.dumps({"ok": True, "loaded": bool(_models), "kind": _state["kind"],
                                "spks": _state["spks"], "sft_spks": _sft_spks(),
                                "preload": PRELOAD, "warm": _state["warm"],
+                               "vram": _vram_mb(),
                                "whisper": WHISPER_MODEL, "whisper_device": WHISPER_DEVICE}).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -349,6 +417,31 @@ class Handler(BaseHTTPRequestHandler):
         self.send_error(404)
 
     def do_POST(self):
+        # 显存让位：出视频（Wan2.2 14B 双专家）前由 worker 调 /unload 释放 CosyVoice 的 ~7GiB
+        if self.path.startswith(("/unload", "/load")):
+            try:
+                n = int(self.headers.get("Content-Length") or 0)
+                req = json.loads(self.rfile.read(n) or b"{}") if n > 0 else {}
+                if self.path.startswith("/unload"):
+                    freed = _unload()
+                    out = {"ok": True, "action": "unload", "freed": freed, "vram": _vram_mb()}
+                else:
+                    kind = _reload(req.get("kind"))
+                    out = {"ok": True, "action": "load", "kind": kind, "vram": _vram_mb()}
+                body = json.dumps(out).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            except Exception as e:
+                msg = ("显存让位失败: " + str(e)[:300]).encode()
+                self.send_response(500)
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.send_header("Content-Length", str(len(msg)))
+                self.end_headers()
+                self.wfile.write(msg)
+            return
         # P9：转写（body = 音频字节）
         if self.path.startswith("/transcribe"):
             try:

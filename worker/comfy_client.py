@@ -481,38 +481,122 @@ def _post_prompt(prompt, client_id):
 
 
 
-def _motion_graph(client_id, payload, positive, negative, first_frame_name, prefix):
-    """Wan2.2 ti2v 5B i2v（新 wrapper 节点集）：Sampler → Decode → SaveImage 帧。
-    输出帧由 generate_motion 用 ffmpeg 合成 mp4（不依赖 VHS）。"""
-    fps = int(payload.get("fps") or 16)
-    steps = int((payload.get("params") or {}).get("steps", 20))
-    cfg = float((payload.get("params") or {}).get("cfg", 5.0))
-    duration = float(payload.get("duration_sec") or 2.0)
-    seed = int(payload.get("seed") or 1)
-    fuser = payload.get("frames")
-    if isinstance(fuser, int) and 32 <= fuser <= 128:
-        frames = int((fuser + 3) / 4) * 4  # 用户显式指定（后端已校验 32–96）
+# ---------------------------------------------------------------------------
+# 图生视频（motion）模型档案：Wan2.2 I2V-A14B **双专家 MoE**（ComfyUI 原生节点）
+#
+#   为什么不是单专家 5B、也不是「4 步蒸馏一路到底」：
+#     Wan2.2 A14B 的**高噪声专家**负责整体布局与**大幅运动**，低噪声专家负责细节收尾。
+#     把 4-step 蒸馏 LoRA 同样压在高噪声专家上 → 运动幅度被压扁（现象：慢动作 / 动态丢失）。
+#     ⇒ 修法：高噪声专家**少蒸馏或完全不蒸馏**（强度 0 = 该专家不加 LoRA），低噪声专家可足量蒸馏。
+#     经验口径（Kijai issue #998）：高噪声 LoRA 越大 → 动态越小；越小 → 越丢 Wan2.2 质感，
+#     故默认 high 0.6 / low 1.0（换 LoRA 家族时强度约定会变，见下）。
+#
+#   档位（payload["params"]["preset"]；每一项都能用显式键覆盖）：
+#     draft    4 步  switch 2   最快，动态最弱（只看构图）
+#     balanced 6 步  switch 3   默认生产档
+#     motion   8 步  switch 4   动态优先
+#     hero     6 步  switch 3   高噪声专家**完全不蒸馏** + CFG 3.5（关键镜）
+#     full    24 步  switch 12  完全不蒸馏（画质上限，配合 sageattention）
+#   切分口径：高/低噪声按总步数折半（4→2、6→3、8→4），与官方/社区一致。
+#
+#   显式覆盖键：steps / switch_step / cfg_high / cfg_low / cfg / lora_high / lora_low /
+#               lora_high_name / lora_low_name / shift / sampler_name / scheduler /
+#               model_high / model_low / model（单专家旧路径）/ vae / text_encoder / weight_dtype
+#   环境默认档：WEAVEORA_MOTION_PRESET（缺省 balanced）
+#   注：旧 engine settings 里的 params.steps / params.cfg 仍会被采纳（不静默替换用户设置），
+#       但「蒸馏 LoRA + steps>12」是异常组合，会打 WARN。
+# ---------------------------------------------------------------------------
+MOTION_MODEL_HIGH = "wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors"
+MOTION_MODEL_LOW = "wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors"
+MOTION_LORA_HIGH = "Wan_2_2_I2V_A14B_HIGH_lightx2v_4step_lora_260412_rank_64_fp16.safetensors"
+MOTION_LORA_LOW = "Wan_2_2_I2V_A14B_LOW_lightx2v_4step_lora_260412_rank_64_fp16.safetensors"
+MOTION_VAE = "wan_2.1_vae.safetensors"          # I2V-A14B 用 2.1 VAE；wan2.2_vae 是 TI2V-5B 的
+MOTION_TEXT_ENCODER = "umt5_xxl_fp8_e4m3fn_scaled.safetensors"
+
+MOTION_PRESETS = {
+    "draft":    {"steps": 4,  "switch": 2,  "cfg_high": 1.0, "cfg_low": 1.0, "lora_high": 0.6, "lora_low": 1.0, "shift": 5.0},
+    "balanced": {"steps": 6,  "switch": 3,  "cfg_high": 1.0, "cfg_low": 1.0, "lora_high": 0.6, "lora_low": 1.0, "shift": 5.0},
+    "motion":   {"steps": 8,  "switch": 4,  "cfg_high": 1.5, "cfg_low": 1.0, "lora_high": 0.5, "lora_low": 1.0, "shift": 5.0},
+    "hero":     {"steps": 6,  "switch": 3,  "cfg_high": 3.5, "cfg_low": 1.0, "lora_high": 0.0, "lora_low": 1.0, "shift": 5.0},
+    "full":     {"steps": 24, "switch": 12, "cfg_high": 3.5, "cfg_low": 3.5, "lora_high": 0.0, "lora_low": 0.0, "shift": 5.0},
+}
+MOTION_PRESET_ENV = os.environ.get("WEAVEORA_MOTION_PRESET", "balanced").strip().lower()
+
+
+def _motion_plan(params):
+    """preset 打底 + 显式键覆盖 → 采样计划（纯函数，便于扫描实验）。"""
+    params = params or {}
+    name = str(params.get("preset") or MOTION_PRESET_ENV or "balanced").strip().lower()
+    if name not in MOTION_PRESETS:
+        print("[comfy] 未知 motion preset=%s，回退 balanced" % name, flush=True)
+        name = "balanced"
+    plan = dict(MOTION_PRESETS[name])
+    plan["preset"] = name
+
+    plan["steps"] = max(1, int(params.get("steps") or plan["steps"]))
+    sw = params.get("switch_step")
+    if sw is None:
+        sw = params.get("switch")
+    if sw is not None:
+        plan["switch"] = max(1, min(plan["steps"] - 1, int(sw))) if plan["steps"] > 1 else 1
     else:
-        raw = max(32, min(64, int(round(duration * fps))))  # 缺省：>=32，封顶64
-        frames = int((raw + 3) / 4) * 4
-    width = int((payload.get("params") or {}).get("width", 768))
-    height = int((payload.get("params") or {}).get("height", 768))
-    length = frames + 1  # Comfy 原生 Wan latent 帧数 = 4n+1（32 采样帧 → 33）
-    nodes = {
-        "unet": {"class_type": "UNETLoader",
-                 "inputs": {"unet_name": (payload.get("params") or {}).get(
-                     "model", "wan2.2_ti2v_5B_fp16.safetensors"),
-                     "weight_dtype": (payload.get("params") or {}).get(
-                         "quantization", "fp8_e4m3fn")}},
+        plan["switch"] = max(1, plan["steps"] // 2)   # 4→2 / 6→3 / 8→4 / 24→12
+
+    plan["cfg_high"] = float(params.get("cfg_high", params.get("cfg", plan["cfg_high"])))
+    plan["cfg_low"] = float(params.get("cfg_low", params.get("cfg", plan["cfg_low"])))
+    plan["lora_high"] = float(params.get("lora_high", params.get("lora_strength_high", plan["lora_high"])))
+    plan["lora_low"] = float(params.get("lora_low", params.get("lora_strength_low", plan["lora_low"])))
+    plan["shift"] = float(params.get("shift", plan["shift"]))
+    plan["sampler"] = str(params.get("sampler_name") or "euler")
+    plan["scheduler"] = str(params.get("scheduler") or "simple")
+    if plan["steps"] > 12 and (plan["lora_high"] or plan["lora_low"]):
+        print("[comfy] WARN steps=%d 仍在用蒸馏 LoRA（>12 步时蒸馏意义不大；"
+              "若要高步数请用 preset=full 并把 lora_* 归零）" % plan["steps"], flush=True)
+    return plan
+
+
+def _motion_assets(params, dual):
+    """解析素材名并对 object_info 做存在性校验（错误信息直接点出缺哪个文件）。"""
+    p = params or {}
+
+    def _need(class_type, key, wanted, label):
+        opts = _node_input_options(class_type, key)
+        if opts and wanted not in opts:
+            raise ComfyError("%s 不存在：%s（ComfyUI %s 可用：%s）"
+                             % (label, wanted, class_type, "、".join(opts[:6]) or "无"))
+        return wanted
+
+    a = {"dual": bool(dual)}
+    a["clip"] = _need("CLIPLoader", "clip_name", p.get("text_encoder") or MOTION_TEXT_ENCODER, "文本编码器")
+    a["vae"] = _need("VAELoader", "vae_name", p.get("vae") or MOTION_VAE, "VAE")
+    if dual:
+        a["high"] = _need("UNETLoader", "unet_name", p.get("model_high") or MOTION_MODEL_HIGH, "高噪声专家")
+        a["low"] = _need("UNETLoader", "unet_name", p.get("model_low") or MOTION_MODEL_LOW, "低噪声专家")
+    else:
+        a["single"] = _need("UNETLoader", "unet_name", p.get("model") or MOTION_MODEL_HIGH, "扩散模型")
+    a["lora_high_name"] = p.get("lora_high_name") or MOTION_LORA_HIGH
+    a["lora_low_name"] = p.get("lora_low_name") or MOTION_LORA_LOW
+    # fp8_scaled 权重自带 scale：weight_dtype 必须 default（旧 settings 里的
+    # quantization=fp8_e4m3fn 是给 fp16 的 5B 文件用的，套到 fp8_scaled 上会掉画质）
+    wd = p.get("weight_dtype")
+    if not wd:
+        names = [a.get("high"), a.get("low"), a.get("single")]
+        if any(n and n.endswith("_fp8_scaled.safetensors") for n in names):
+            wd = "default"
+            if p.get("quantization"):
+                print("[comfy] 忽略 quantization=%s（fp8_scaled 权重用 default）" % p.get("quantization"), flush=True)
+        else:
+            wd = p.get("quantization") or "default"
+    a["weight_dtype"] = wd
+    return a
+
+
+def _motion_base_nodes(positive, negative, first_frame_name, a, width, height, length):
+    return {
         "clip": {"class_type": "CLIPLoader",
-                 "inputs": {"clip_name": (payload.get("params") or {}).get(
-                     "text_encoder", "umt5_xxl_fp8_e4m3fn_scaled.safetensors"),
-                     "type": "wan"}},
+                 "inputs": {"clip_name": a["clip"], "type": "wan"}},
         "vae": {"class_type": "VAELoader",
-                "inputs": {"vae_name": (payload.get("params") or {}).get(
-                    "vae", "wan2.2_vae.safetensors")}},
-        "shift": {"class_type": "ModelSamplingSD3",
-                  "inputs": {"model": ["unet", 0], "shift": 8.0}},
+                "inputs": {"vae_name": a["vae"]}},
         "pos": {"class_type": "CLIPTextEncode",
                 "inputs": {"text": positive, "clip": ["clip", 0]}},
         "neg": {"class_type": "CLIPTextEncode",
@@ -522,18 +606,131 @@ def _motion_graph(client_id, payload, positive, negative, first_frame_name, pref
                    "inputs": {"vae": ["vae", 0], "start_image": ["img", 0],
                               "width": width, "height": height, "length": length,
                               "batch_size": 1}},
-        "sampler": {"class_type": "KSampler",
-                    "inputs": {"model": ["shift", 0], "positive": ["pos", 0],
-                               "negative": ["neg", 0], "latent_image": ["latent", 0],
-                               "seed": seed, "steps": steps, "cfg": cfg,
-                               "sampler_name": "uni_pc", "scheduler": "simple",
-                               "denoise": 1.0}},
-        "dec": {"class_type": "VAEDecode",
-                "inputs": {"samples": ["sampler", 0], "vae": ["vae", 0]}},
-        "save": {"class_type": "SaveImage",
-                 "inputs": {"images": ["dec", 0], "filename_prefix": prefix}},
     }
+
+
+def _motion_expert(nodes, tag, unet_name, weight_dtype, lora_name, lora_strength, shift):
+    """一条专家支路：UNETLoader →（可选 LoRA）→ ModelSamplingSD3；返回 model 来源。"""
+    nodes["unet_" + tag] = {"class_type": "UNETLoader",
+                            "inputs": {"unet_name": unet_name, "weight_dtype": weight_dtype}}
+    src = ["unet_" + tag, 0]
+    if lora_name and lora_strength:
+        nodes["lora_" + tag] = {"class_type": "LoraLoaderModelOnly",
+                               "inputs": {"model": src, "lora_name": lora_name,
+                                          "strength_model": lora_strength}}
+        src = ["lora_" + tag, 0]
+    nodes["shift_" + tag] = {"class_type": "ModelSamplingSD3",
+                             "inputs": {"model": src, "shift": shift}}
+    return ["shift_" + tag, 0]
+
+
+def _motion_graph_frames(payload, params):
+    """帧数/分辨率口径（与旧实现一致）：frames=4n、latent length=frames+1。"""
+    fps = int(payload.get("fps") or 16)
+    duration = float(payload.get("duration_sec") or 2.0)
+    fuser = payload.get("frames")
+    if isinstance(fuser, int) and 32 <= fuser <= 128:
+        frames = int((fuser + 3) / 4) * 4          # 用户显式指定（后端已校验 32–96）
+    else:
+        raw = max(32, min(64, int(round(duration * fps))))   # 缺省：>=32，封顶 64
+        frames = int((raw + 3) / 4) * 4
+    width = int(params.get("width", 768))
+    height = int(params.get("height", 768))
+    return frames, width, height, frames + 1
+
+
+def _motion_graph(client_id, payload, positive, negative, first_frame_name, prefix):
+    """构造图生视频 prompt。
+
+    双专家（默认，Wan2.2 I2V-A14B 高/低噪声）或单专家（params.model 显式给了单文件时走旧路径）。
+    输出帧由 generate_motion 用 ffmpeg 合成 mp4（不依赖 VHS）。
+    """
+    params = payload.get("params") or {}
+    plan = _motion_plan(params)
+    dual = not params.get("model")          # 只有显式给单模型才退单专家
+    a = _motion_assets(params, dual)
+    seed = int(payload.get("seed") or 1)
+    frames, width, height, length = _motion_graph_frames(payload, params)
+    sampler = _pick_option("KSamplerAdvanced", "sampler_name", plan["sampler"], "euler")
+    scheduler = _pick_option("KSamplerAdvanced", "scheduler", plan["scheduler"], "simple")
+
+    nodes = _motion_base_nodes(positive, negative, first_frame_name, a, width, height, length)
+
+    if dual:
+        hi = _motion_expert(nodes, "hi", a["high"], a["weight_dtype"],
+                            a["lora_high_name"], plan["lora_high"], plan["shift"])
+        lo = _motion_expert(nodes, "lo", a["low"], a["weight_dtype"],
+                            a["lora_low_name"], plan["lora_low"], plan["shift"])
+        nodes["sampler_hi"] = {"class_type": "KSamplerAdvanced", "inputs": {
+            "model": hi, "add_noise": "enable", "noise_seed": seed,
+            "steps": plan["steps"], "cfg": plan["cfg_high"],
+            "sampler_name": sampler, "scheduler": scheduler,
+            "positive": ["pos", 0], "negative": ["neg", 0],
+            "latent_image": ["latent", 0], "start_at_step": 0,
+            "end_at_step": plan["switch"], "return_with_leftover_noise": "enable"}}
+        nodes["sampler_lo"] = {"class_type": "KSamplerAdvanced", "inputs": {
+            "model": lo, "add_noise": "disable", "noise_seed": seed,
+            "steps": plan["steps"], "cfg": plan["cfg_low"],
+            "sampler_name": sampler, "scheduler": scheduler,
+            "positive": ["pos", 0], "negative": ["neg", 0],
+            "latent_image": ["sampler_hi", 0], "start_at_step": plan["switch"],
+            "end_at_step": 10000, "return_with_leftover_noise": "disable"}}
+        tail = ["sampler_lo", 0]
+        shape = "dual 高/低噪声"
+    else:
+        one = _motion_expert(nodes, "hi", a["single"], a["weight_dtype"],
+                             a["lora_high_name"], plan["lora_high"], plan["shift"])
+        nodes["sampler"] = {"class_type": "KSamplerAdvanced", "inputs": {
+            "model": one, "add_noise": "enable", "noise_seed": seed,
+            "steps": plan["steps"], "cfg": plan["cfg_high"],
+            "sampler_name": sampler, "scheduler": scheduler,
+            "positive": ["pos", 0], "negative": ["neg", 0],
+            "latent_image": ["latent", 0], "start_at_step": 0,
+            "end_at_step": 10000, "return_with_leftover_noise": "disable"}}
+        tail = ["sampler", 0]
+        shape = "single 单专家"
+
+    nodes["dec"] = {"class_type": "VAEDecode",
+                    "inputs": {"samples": tail, "vae": ["vae", 0]}}
+    nodes["save"] = {"class_type": "SaveImage",
+                     "inputs": {"images": ["dec", 0], "filename_prefix": prefix}}
+
+    lora_txt = "hi=%s(%s) lo=%s(%s)" % (plan["lora_high"],
+                                        "—" if not plan["lora_high"] else a["lora_high_name"][:28],
+                                        plan["lora_low"],
+                                        "—" if not plan["lora_low"] else a["lora_low_name"][:28])
+    print("[comfy] motion %s preset=%s steps=%d(switch %d) cfg=%s/%s shift=%s "
+          "%dx%d %d帧 lora %s sampler=%s/%s weight=%s"
+          % (shape, plan["preset"], plan["steps"], plan["switch"], plan["cfg_high"],
+             plan["cfg_low"], plan["shift"], width, height, frames, lora_txt,
+             sampler, scheduler, a["weight_dtype"]), flush=True)
     return {"prompt": nodes, "client_id": client_id}
+
+
+def vram_stats():
+    """ComfyUI 视角的显存 (free_gb, total_gb)；取不到返回 (None, None)。
+
+    给 stub_worker 做「出视频前让 TTS 让出显存」的判据用（见 worker/stub_worker.py）。
+    """
+    try:
+        _, body = _comfy("GET", "/system_stats", timeout=20)
+        dev = (json.loads(body.decode()).get("devices") or [{}])[0]
+        return (float(dev.get("vram_free") or 0) / 1073741824.0,
+                float(dev.get("vram_total") or 0) / 1073741824.0)
+    except Exception:
+        return (None, None)
+
+
+def _vram_note(tag):
+    """打一行 ComfyUI 视角的显存体检；余量 <15GiB 时提示（TTS 常驻约 7GiB）。"""
+    free, total = vram_stats()
+    if free is None:
+        print("[comfy] %s 取显存失败（忽略）" % tag, flush=True)
+        return
+    print("[comfy] %s 显存 free=%.1f/%.1f GiB" % (tag, free, total), flush=True)
+    if free < 15.0:
+        print("[comfy] WARN 显存余量 <15GiB：14B 双专家会频繁换入换出，"
+              "请确认 TTS 未常驻（WEAVEORA_TTS_PRELOAD=0）或已让出显存", flush=True)
 
 
 def _encode_frames_mp4(frames_bytes, fps, out_dir):
@@ -594,6 +791,7 @@ def generate_motion(client_id, payload, progress_fn=None):
     _, body = _comfy("POST", "/upload/image",
                      files={"image": (key.split("/")[-1], data, ctype)})
     name = json.loads(body.decode()).get("name")
+    _vram_note("motion 前")
     prompt = _motion_graph(client_id, payload, positive, negative, name, prefix)
     st, resp = _comfy("POST", "/prompt", payload=prompt)
     pid = json.loads(resp.decode()).get("prompt_id")

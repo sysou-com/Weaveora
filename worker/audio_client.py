@@ -47,6 +47,35 @@ class AudioError(Exception):
     pass
 
 
+def unload(timeout=120):
+    """让 TTS 服务卸载模型、归还显存（出视频前的让位动作）。
+
+    24G 卡上 Wan2.2 14B 双专家（13.3GiB/专家）与 CosyVoice 常驻的 ~7GiB 无法共存；
+    worker 在 clip 任务前调本函数，TTS 下次收到 /tts 会自动懒加载回来。
+    返回服务端回包的 dict；服务不可达则抛 AudioError（调用方应只告警不阻塞）。
+    """
+    body = json.dumps({}).encode()
+    req = urllib.request.Request(TTS_URL + "/unload", data=body,
+                                 headers={"Content-Type": "application/json"}, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read().decode() or "{}")
+    except Exception as e:
+        raise AudioError("TTS /unload 失败: %s" % e)
+
+
+def load(kind="v2", timeout=900):
+    """显式预加载 TTS 模型（一般不用；懒加载已足够）。"""
+    body = json.dumps({"kind": kind}).encode()
+    req = urllib.request.Request(TTS_URL + "/load", data=body,
+                                 headers={"Content-Type": "application/json"}, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read().decode() or "{}")
+    except Exception as e:
+        raise AudioError("TTS /load 失败: %s" % e)
+
+
 def _post(url, body, timeout):
     req = urllib.request.Request(url, data=json.dumps(body).encode(),
                                  headers={"Content-Type": "application/json"}, method="POST")

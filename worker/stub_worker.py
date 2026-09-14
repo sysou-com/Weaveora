@@ -219,6 +219,30 @@ def _complete(jid, payload, media):
     return True
 
 
+def _yield_vram_for_video(need_gb=15.0):
+    """出视频前让 TTS 让出显存。
+
+    背景：Wan2.2 I2V-A14B 是双专家（fp8 各 13.3GiB），而 CosyVoice 常驻要占 ~7GiB，
+    24G 卡上两者无法共存。这里先看 ComfyUI 的显存余量：够用就不打扰 TTS，
+    不够则 POST /unload 让 TTS 卸载模型（下次配音自动懒加载回来）。
+
+    失败只告警不阻塞：ComfyUI 仍可通过 offload 慢跑，不能因为让位失败就废掉整个任务。
+    """
+    try:
+        import comfy_client as _c
+        free, total = _c.vram_stats()
+        if free is not None and free >= need_gb:
+            print("[stub] 视频前显存余量 %.1f/%.1f GiB ≥ %.1f，TTS 无需卸载"
+                  % (free, total, need_gb), flush=True)
+            return
+        print("[stub] 视频前显存余量 %s，让 TTS 卸载归还显存…"
+              % ("未知" if free is None else "%.1f/%.1f GiB" % (free, total)), flush=True)
+        import audio_client as _a
+        print("[stub] TTS /unload -> %s" % (_a.unload(),), flush=True)
+    except Exception as e:
+        print("[stub] 显存让位失败（继续执行，可能变慢或换入换出）：%s" % e, flush=True)
+
+
 def execute_job(job):
     jid = job["jobId"]
     payload = job.get("payload") or {}
@@ -348,6 +372,7 @@ def execute_job(job):
         import comfy_client as engine
         try:
             if kind == "clip":
+                _yield_vram_for_video()
                 outs = engine.generate_motion("weaveora-stub-worker", payload,
                                               progress_fn=lambda p, s: _req(
                                                   "POST", "/internal/jobs/%s/progress" % jid,
