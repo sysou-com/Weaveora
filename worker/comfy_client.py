@@ -563,25 +563,33 @@ MOTION_DEFAULT_LONG_SIDE = int(os.environ.get("WEAVEORA_MOTION_LONG_SIDE", "832"
 
 
 def _motion_resolution(params, width, height):
-    """motion 实际出片尺寸：默认压到 480p 桶，显式要求才用原分辨率。
+    """motion 实际出片尺寸：按「分辨率上限」压到桶内（保持画幅，宽高 /16 对齐）。
 
-    · params.resolution ∈ {720p,1080p,full,original,source} → 原样（如 16:9 的 1280×704）
-    · 其它（含 480p/空）→ 长边缩到 ≤832，宽高对齐 /16（Wan 的桶对齐）
-    保持画幅比例，不改变项目构图。
+    params.resolution / services.motion.resolution 语义 = **上限**（来自引擎配置里的
+    「GPU 服务器最大支持分辨率」）：
+      480p → 长边 ≤ 832 ｜ 720p → ≤ 1280 ｜ 1080p → ≤ 1920
+      auto / full / original / source → 不限制
+      空/未识别 → 用环境默认上限（WEAVEORA_MOTION_LONG_SIDE，缺省 832，即 480p 级）
+    实测依据：48G 卡 1280×704/48 帧要 >600s（跑满显存反复换入换出），832×480 只要 27~50s；
+    A14B 的甜点本来就是 480p 级（ComfyUI 官方模板 = 640×640）。
     """
     res = str((params or {}).get("resolution") or "").strip().lower()
     w, h = int(width), int(height)
-    if res in ("720p", "720", "1080p", "1080", "full", "original", "source"):
+    if res in ("full", "original", "source", "auto", "none"):
         return w, h
-    long_side = MOTION_DEFAULT_LONG_SIDE
-    if max(w, h) <= long_side:
+    caps = {"480p": 832, "480": 832, "720p": 1280, "720": 1280, "1080p": 1920, "1080": 1920}
+    long_side = caps.get(res, MOTION_DEFAULT_LONG_SIDE)
+    if long_side <= 0 or max(w, h) <= long_side:
         return w, h
     scale = float(long_side) / float(max(w, h))
-    nw, nh = int(round(w * scale)), int(round(h * scale))
-    nw = max(16, int(round(nw / 16.0)) * 16)   # Wan 桶对齐：就近取整，别让 16:9 变成 1.857
-    nh = max(16, int(round(nh / 16.0)) * 16)
+    nw = max(16, int(round(w * scale / 16.0)) * 16)
+    nh = max(16, int(round(h * scale / 16.0)) * 16)
     return nw, nh
+
 MOTION_MIN_TOTAL_GB = float(os.environ.get("WEAVEORA_MOTION_MIN_TOTAL_GB", "44") or 44)
+# 出片轮询上限（秒）。旧值 600s 是 TI2V-5B 时代的；A14B 双专家在 720p 下光采样就要 10~30 分钟
+# （线上实测：1280x704/48 帧跑到 604s 被 timeout 打断）。默认 2700s（45 分钟），可用 env 调。
+MOTION_TIMEOUT = float(os.environ.get("WEAVEORA_MOTION_TIMEOUT", "2700") or 2700)
 
 
 def _motion_vram_need_gb(frames, width, height):

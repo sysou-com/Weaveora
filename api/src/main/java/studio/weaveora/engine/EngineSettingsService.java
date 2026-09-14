@@ -121,6 +121,11 @@ public class EngineSettingsService {
             com.fasterxml.jackson.databind.JsonNode cur, UserEngineSettings s) {
         com.fasterxml.jackson.databind.node.ObjectNode merged = (com.fasterxml.jackson.databind.node.ObjectNode)
                 merge(cur, "motion", mapper.createObjectNode());
+        // GPU 服务器「最大支持分辨率」→ motion 的默认出片上限（用户若在视频参数里显式写了
+        // resolution，由下面的循环覆盖它 —— 逐项优先）。这是**机器能力**，换卡改这里即可。
+        if (s != null && s.gpuMaxResolution() != null && !s.gpuMaxResolution().isBlank()) {
+            merged.put("resolution", s.gpuMaxResolution().trim());
+        }
         if (s != null && s.videoParams() != null && s.videoParams().isObject()) {
             s.videoParams().fields().forEachRemaining(e -> {
                 String key = snake(e.getKey());
@@ -227,7 +232,7 @@ public class EngineSettingsService {
                 s.imageCloudBaseUrl(), s.imageCloudAuthType(), s.imageCloudModel(),
                 AesGcm.mask(imgKey), s.imageCloudUsername(), pwdSet,
                 s.videoCloudModel(), AesGcm.mask(vidKey),
-                s.gpuServerUrl(), s.gpuServerPort(),
+                s.gpuServerUrl(), s.gpuServerPort(), s.gpuMaxResolution(),
                 fresh(true) ? s.imageModelSchema() : null,
                 fresh(false) ? s.videoModelSchema() : null,
                 s.imageParams(), s.videoParams(),
@@ -564,6 +569,7 @@ public class EngineSettingsService {
         if (req.videoCloudModel() != null) s.setVideoCloudModel(req.videoCloudModel());
         if (req.gpuServerUrl() != null) s.setGpuServerUrl(req.gpuServerUrl());
         if (req.gpuServerPort() != null) s.setGpuServerPort(req.gpuServerPort());
+        if (req.gpuMaxResolution() != null) s.setGpuMaxResolution(req.gpuMaxResolution());
         if (req.gatewayRefsMax() != null) s.setGatewayRefsMax(req.gatewayRefsMax() >= 0 ? req.gatewayRefsMax() : null);
         if (req.gatewaySample() != null) s.setGatewaySample(req.gatewaySample().isBlank() ? null : req.gatewaySample());
         // 服务地址（配音/配乐、对口型、转写、人脸）：整块替换；空串字段在 worker 侧会回退默认值

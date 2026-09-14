@@ -1,0 +1,13 @@
+-- V16：生成引擎配置 —— GPU 服务器「最大支持分辨率」
+--
+-- 背景：motion（Wan2.2 I2V-A14B 双专家）的出片分辨率原来**没有开关** ——
+--   项目画幅按 ASPECT_DIMS 固定映射（16:9 → 1280×704），于是 720p 被无条件丢给 GPU。
+--   实测（48G 4090，1280×704 / 48 帧）跑满 47.4/47.4 GiB、604s 被超时打断；
+--   而 832×480 只要 27~50s（A14B 的甜点本来就是 480p 级，ComfyUI 官方模板也是 640×640）。
+--
+-- 这个值是**机器能力**（换 GPU 就该改这里），所以放在引擎配置，而不是每镜参数：
+--   "480p" / "720p" / "1080p" / "auto"（auto/空 = 按画幅原分辨率，即旧行为）
+-- worker 侧据此把 motion 出片尺寸压到该上限以内（保持画幅，宽高 /16 桶对齐）。
+--
+-- 落库形式：与 video_model_schema 一样是**文本**（不是 JSON）：'480p' / '720p' / '1080p' / 'auto'
+ALTER TABLE user_engine_settings ADD COLUMN IF NOT EXISTS gpu_max_resolution text;

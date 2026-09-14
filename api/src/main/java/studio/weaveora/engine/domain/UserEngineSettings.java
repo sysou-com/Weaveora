@@ -53,6 +53,13 @@ public class UserEngineSettings {
     @Column(name = "gpu_server_port")
     private Integer gpuServerPort;
 
+    /**
+     * GPU 服务器「最大支持分辨率」（机器能力）：480p / 720p / 1080p / auto。
+     * motion 出片尺寸会被压到该上限以内（换 GPU 卡就改这个，而不是逐镜调）。
+     */
+    @Column(name = "gpu_max_resolution")
+    private String gpuMaxResolution;
+
     // P12：模型 input schema 缓存（展示「调用说明」+ 归一化参数映射给 worker）
     @org.hibernate.annotations.JdbcTypeCode(org.hibernate.type.SqlTypes.JSON)
     @Column(name = "image_model_schema")
@@ -173,6 +180,10 @@ public class UserEngineSettings {
     public void setGatewayRefsMax(Integer v) { this.gatewayRefsMax = v; }
     public com.fasterxml.jackson.databind.JsonNode services() { return services; }
     public void setServices(com.fasterxml.jackson.databind.JsonNode v) { this.services = v; }
+    public String gpuMaxResolution() { return gpuMaxResolution; }
+
+    public void setGpuMaxResolution(String v) { this.gpuMaxResolution = blankToNull(v); }
+
     public Integer gpuServerPort() { return gpuServerPort; }
     public void setGpuServerPort(Integer v) { this.gpuServerPort = v; }
 

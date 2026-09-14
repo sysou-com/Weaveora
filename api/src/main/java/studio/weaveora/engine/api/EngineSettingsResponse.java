@@ -16,6 +16,8 @@ public record EngineSettingsResponse(
         String videoCloudApiKeyMask,
         String gpuServerUrl,
         Integer gpuServerPort,
+        /** GPU 服务器「最大支持分辨率」：480p/720p/1080p/auto —— motion 出片上限（机器能力，换卡就改这里） */
+        String gpuMaxResolution,
         /** P12：模型调用参数说明（拉取缓存）：{provider,model,version,params[],mapping,notes[]} */
         com.fasterxml.jackson.databind.JsonNode imageModelSchema,
         com.fasterxml.jackson.databind.JsonNode videoModelSchema,

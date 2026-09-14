@@ -32,6 +32,15 @@ const videoCloudApiKeyMask = ref('')
 
 const gpuServerUrl = ref('')
 const gpuServerPort = ref<number | null>(null)
+// GPU 服务器「最大支持分辨率」——motion 出片上限（实测：720p 在 48G 卡上要 10 分钟+还容易超时，
+// 480p 只要 27~50s）。这是机器能力，换卡就改这里。
+const gpuMaxResolution = ref<string>('480p')
+const gpuMaxResOptions = [
+  { label: '480p（长边 ≤832，A14B 推荐）', value: '480p' },
+  { label: '720p（1280×704，慢 5~10 倍）', value: '720p' },
+  { label: '1080p（很慢，显存吃紧）', value: '1080p' },
+  { label: 'auto（不限制，按项目画幅）', value: 'auto' },
+]
 
 // P12：模型调用参数说明 + 全局参数（画质等）
 const imageSchema = ref<ModelSchema | null>(null)
@@ -239,6 +248,7 @@ async function load(): Promise<void> {
     videoCloudApiKeyMask.value = s.videoCloudApiKeyMask
     gpuServerUrl.value = s.gpuServerUrl ?? ''
     gpuServerPort.value = s.gpuServerPort
+    gpuMaxResolution.value = s.gpuMaxResolution || '480p'
     const sv = s.services ?? {}
     svcTtsUrl.value = sv.tts?.url ?? ''
     svcMusicEngine.value = sv.music?.engine ?? 'comfy'
@@ -276,6 +286,7 @@ async function save(): Promise<void> {
       videoCloudModel: videoCloudModel.value || null,
       gpuServerUrl: gpuServerUrl.value || null,
       gpuServerPort: gpuServerPort.value,
+      gpuMaxResolution: gpuMaxResolution.value,
       imageParams: imageParams.value,
       videoParams: videoParams.value,
       gatewayRefsMax: gatewayRefsMax.value,
@@ -488,7 +499,14 @@ onMounted(load)
           <NFormItem label="端口">
             <NInputNumber v-model:value="gpuServerPort" :min="1" :max="65535" placeholder="8188" style="width: 130px" />
           </NFormItem>
+          <NFormItem label="最大支持分辨率" style="width: 300px">
+            <NSelect v-model:value="gpuMaxResolution" :options="gpuMaxResOptions" size="small" />
+          </NFormItem>
         </div>
+        <p class="hint text-secondary" style="margin: -4px 0 10px">
+          最大支持分辨率决定 <b>motion 出片上限</b>（换 GPU 卡就改这里）：实测 48G 卡上
+          <b>720p/48 帧要 10 分钟以上且易超时</b>，<b>480p 只要 27~50 秒</b>；A14B 的甜点也是 480p 级。
+        </p>
 
         <!-- 自托管 motion 档位（Wan2.2 I2V-A14B 双专家）
              为什么单独放这里：上面“视频参数”面板被 `v-if="videoEngine === 'cloud'"` 包着，
