@@ -22,6 +22,17 @@ public final class DirectorPlanValidator {
             "blurry", "lowres", "deformed", "extra limbs", "badly drawn",
             "jpeg artifacts", "ugly", "nsfw");
 
+    /**
+     * 运动（clip）专属负面词：抑制「画面不动」。
+     *
+     * <p>背景（P-motion，2026-09-14）：图生视频模型只动「提示词里写出来的东西」，
+     * 提示词偏静态时会输出「几乎不动的慢动作」。除了在导演 Prompt 里要求 LLM 写动态描写，
+     * 这里再加一道**确定性兜底**——只作用于 clip（关键帧 still 不受影响）。
+     * 只需抑制「整帧冻结」，不会压掉微表情/眼神等小幅运动。
+     */
+    public static final List<String> MOTION_NEGATIVE = List.of(
+            "static", "motionless", "frozen", "still photo", "no movement", "freeze frame");
+
     /** 单镜正向提示词长度约束（§10.3）。 */
     public static final int SHOT_POSITIVE_MIN = 20;
     public static final int SHOT_POSITIVE_MAX = 1200;

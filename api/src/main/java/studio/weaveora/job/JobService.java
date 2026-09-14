@@ -2006,7 +2006,13 @@ public class JobService {
         String pos = styledPositive(style, positiveRaw);
         if (refs != null && !refs.anchor().isBlank()) pos = pos + refs.anchor();
         payload.put("positive_prompt", pos);
-        payload.put("negative_prompt", negWithRefGuard(styledNegative(style, shot.path("negative_prompt").asText("")), refs));
+        // P-motion：运动（clip）额外追加静态抑制负面词，只作用于 clip（关键帧 still 不受影响）
+        String neg = negWithRefGuard(styledNegative(style, shot.path("negative_prompt").asText("")), refs);
+        if ("clip".equals(kind)) {
+            neg = studio.weaveora.director.plan.DirectorPlanValidator.mergeNegative(
+                    neg, studio.weaveora.director.plan.DirectorPlanValidator.MOTION_NEGATIVE);
+        }
+        payload.put("negative_prompt", neg);
         stampRevisionMeta(payload, revisionNo, pos);
         payload.put("duration_sec", shot.path("duration_sec").asDouble(3));
         payload.put("fps", plan.path("edit_plan").path("fps").asInt(30));

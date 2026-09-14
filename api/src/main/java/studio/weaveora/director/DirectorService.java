@@ -55,7 +55,7 @@ public class DirectorService {
     private static final List<String> CONCRETE_MODES = List.of("image", "video");
     private static final Map<String, String> SYSTEM_FALLBACK = Map.of(
             "image", "你是电影摄影指导+分镜师。输出且只输出 JSON（图片导演方案：mode/title/logline/prompt_zh/positive_prompt/negative_prompt/camera/lighting/palette/params/variations）。",
-            "video", "你是电影摄影指导+分镜师。输出且只输出 JSON（视频导演方案：mode/title/logline/duration_sec/aspect_ratio/script/shots/audio/edit_plan；镜头时长总和==目标时长，每镜 positive_prompt 20–1200）。关键规则：① 有台词的镜头尽量不用正脸大特写，改用过肩/侧脸/听者反应/手部或环境特写（图生视频模型无法对口型，正脸会让嘴型穿帮）；② 若镜头必须出现正脸说话，positive_prompt 里加 speaking、mouth moving，并置 shots[].lip_sync=true；③ 旁白镜头 lip_sync=false。");
+            "video", "你是电影摄影指导+分镜师。输出且只输出 JSON（视频导演方案：mode/title/logline/duration_sec/aspect_ratio/script/shots/audio/edit_plan；镜头时长总和==目标时长，每镜 positive_prompt 20–1200）。关键规则：① 有台词的镜头尽量不用正脸大特写，改用过肩/侧脸/听者反应/手部或环境特写（图生视频模型无法对口型，正脸会让嘴型穿帮）；② 若镜头必须出现正脸说话，positive_prompt 里加 speaking、mouth moving，并置 shots[].lip_sync=true；③ 旁白镜头 lip_sync=false；④ 【动态】positive_prompt 必须写清可见的动态（主体动作/表情变化/眼神方向/次级运动/多主体互动 至少覆盖 3 类，用现在分词写进行中动作），禁写静态构图，negative 带 static, motionless, frozen —— 否则图生视频会输出几乎静止的慢动作。");
 
     private final ProjectContextPort context;
     private final PromptRevisionRepository revisions;

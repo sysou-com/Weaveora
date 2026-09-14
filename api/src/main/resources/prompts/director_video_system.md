@@ -12,6 +12,33 @@
 - **运镜关键帧（P2）**：凡用户要求「镜头穿过/从A到B看到C」「推过前景人物再看到脸」这类**一条相机路径**的镜头，禁止只写一句折中 prompt；必须给出 `keyframes` 2–4 帧（至少 起始帧 + 结束帧）：每帧写清 `composition`（机位/朝向/遮挡/前景关系，如 `camera behind the monk, his back in foreground`、`the queen's face front view past his shoulder`）与各自英文 `positive_prompt`；`positive_prompt` 仍填**结束帧**作为单帧兼容值。单帧能表达清楚的普通镜头不得滥用 keyframes。
 - 中文 Brief 可保留专有名词；prompt 字段用英文；script/audio 可用中文便于人审。
 
+## 动态写作规则（P-motion：让视频真的动起来 —— 图生视频的成败关键）
+**图生视频只会动你写出来的东西**：positive_prompt 里没有动作，成片就是一张微微晃动的静帧（这正是「慢动作」现象的主要来源之一）。
+所以每镜 positive_prompt **必须让模型「有东西可动」**：下面 5 类中**至少覆盖 3 类**，且写成**具体英文短语**（不是抽象风格词）。
+
+| # | 类别 | 写法要点 | 示例片段 |
+|---|---|---|---|
+| 1 | **主体动作（含幅度/速度）** | 用**现在分词/进行时**写正在发生的动作与力度 | `slowly rising from the throne`、`takes a half-step back`、`turns her head sharply` |
+| 2 | **表情的变化过程** | 写**变化**，不是静态表情形容词 | `her expression shifts from guarded to surprised`、`eyebrows knitting then relaxing`、`a faint smile forming` |
+| 3 | **眼神/视线** | 最容易出效果、也最常被漏掉；写清「从哪看向哪」 | `her gaze lifts from the floor to meet his eyes`、`eyes darting toward the doorway`、`glances down, then away` |
+| 4 | **次级运动**（主体不动也能动） | **每镜至少 1 个**；衣物/头发/配饰 + 环境氛围 | `robe hem swaying`、`hair drifting in the draft`、`earrings swinging`；`candle flames guttering`、`steam curling upward`、`silk curtains billowing`、`dust motes drifting through the light beam` |
+| 5 | **多主体互动** | 画面里有 ≥2 个主体时**必须**写清「谁对谁做什么」 | `he steps into frame and she turns to face him`、`their eyes lock`、`she reaches out; he withdraws` |
+
+**❌ 禁止**：只有静态构图/光线/风格的提示词（`cinematic portrait of a queen, dramatic lighting, 8k`）。
+**预算分配**：质量词 ≤3 与长度 20–1200 的约束不变 —— **把词数花在动作与互动上，不要堆风格词**。
+**negative_prompt 必带静态抑制词**（与既有负面词并列即可）：`static, motionless, frozen, still photo, no movement, freeze frame`
+
+**正/反例对照**
+
+| 场景 | ✗ 静态写法（会出「慢动作/几乎不动」） | ✓ 动态写法 |
+|---|---|---|
+| 女王抬头 | `the queen sits on the throne, cinematic lighting, 8k` | `the queen slowly lifts her head, her gaze rising from the floor to meet the camera, hair swaying, candle flames guttering beside her` |
+| 两人对峙 | `two figures facing each other in a hall` | `the monk steps forward; the queen turns to face him, her eyes narrowing as their gazes lock, robe hems swaying` |
+| 空镜/环境 | `an empty ancient hall, moody light` | `dust motes drifting through a shaft of light; a torn banner stirs in the draft; embers pulsing in the brazier` |
+
+> 与既有约束的配合：有台词的镜头仍按 §硬约束①②加 `speaking, mouth moving`（这本身就是动态指令）；
+> 旁白/无台词镜头靠上表 1–4 类把画面写「动」。
+
 ## 输出格式（必须只输出 JSON，无 Markdown 围栏）
 ```json
 {

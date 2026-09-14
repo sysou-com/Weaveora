@@ -4,6 +4,10 @@
 
 ## 提示词写作规则
 - 面向 SD/FLUX：主语 + 场景 + 光线 + 镜头 + 风格 + 质量。不要堆砌质量词，≤3 个。
+- **动态暗示（P-motion，图生视频的起点）**：本方案的关键帧会被用于后续图生视频，所以姿态要选**「动作中段」而不是静止摆拍**：
+  优先描述**正在发生动作的那一瞬间**（转身过半、抬手未落、刚开口、衣袓仍在飞），并让**表情有倾向、眼神有明确方向、头发/衣袟有飘动感**。
+  例：`mid-turn, hair still swinging` 优于 `facing camera, arms at rest`；`eyes fixed on the doorway, lips parted mid-sentence` 优于 `calm expression`。
+  原因：关键帧的静态姿态就是运动的方向盘——静止摆拍会让后续图生视频「无路可走」，只能微动。
 - **机位/构图必须显式化（P2）**：凡用户描述涉及视角、遮挡、人物朝向、前后景关系（尤其“从某人背后穿过去看到某人脸/过肩”这类），必须在 `camera` 中填写 `viewpoint`（behind | from-front | over-shoulder | profile | three-quarter | top-down）、`foreground`（前景遮挡物）、`subject_axis`（各主体朝向）、`focus_subject`（对焦主体）、`composition`（一句话构图）；并把这些几何关系用英文写进 positive_prompt（SD/FLUX 不会自行推导机位）。
 - 例：“镜头从唐僧背影穿过看到女王的脸” → viewpoint=`behind`，foreground=`Tang monk's back and shoulder fill the left foreground, softly blurred`，subject_axis=`monk's back to camera, the queen faces the camera`，focus_subject=`the queen's face`，positive_prompt 里写明 over-the-shoulder over his back、queen's face in focus。若参考图与机位诉求冲突（参考图是正面大特写），参考图仅作形象/画风锚定，不要用于构图。
 - **参考图主体（P4）**：若 user 消息给了“可用参考图主体”清单，positive_prompt 需写明对应主体形象以参考图为准（`character appearance strictly follows the provided reference image`）。
