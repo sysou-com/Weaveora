@@ -197,15 +197,19 @@ Start-ScheduledTask -TaskName ComfyWorker
 | 机制 | 行为 | 怎么用 / 怎么改 |
 |---|---|---|
 | **A 逐镜可选底片** | 选镜弹窗每行「底片：`片段` / `静帧`」；写方案 `shots[].lipsync_source`（不写=自动） | 对话近景建议 **静帧**（一张干净的脸）；需要保留运镜时才用片段 |
-| **B 底片体检**（worker 出片前） | ① 人脸宽度 < `WEAVEORA_LIPSYNC_FACE_MIN_PX`（默认 96px；没有像素口径时退到占画面比 `< WEAVEORA_LIPSYNC_FACE_MIN_RATIO` 1.5%）→ **拒绝**（脸太小，跑了也看不出）；② 嘴张开度 ≥ `WEAVEORA_LIPSYNC_MOUTH_MAX`（默认 0.50）→ **拒绝**并提示换底片；③ ≥ `WARN`（0.30）→ 只提醒不拦 | 指标来自人脸服务 / 本机 insightface（106 点），**拿不到指标就跳过**（绝不误拦）；嘴部点序号可用 `WEAVEORA_LIPSYNC_MOUTH_IDX` 覆盖（默认 `52-71`） |
+| **B 底片体检**（worker 出片前） | 硬拒（**嘴优先**）：① 嘴张开度 ≥ `WEAVEORA_LIPSYNC_MOUTH_MAX`（默认 0.50）→ **拒绝**并提示换底片；② 人脸宽度 < `WEAVEORA_LIPSYNC_FACE_MIN_PX`（默认 64px；无像素口径时退到占比 < `WEAVEORA_LIPSYNC_FACE_MIN_RATIO` 1.5%）→ **拒绝**（脸都糊了）。软提醒：嘴 ≥ `WARN`（默认 0.30）/ 脸宽 < `WEAVEORA_LIPSYNC_FACE_WARN_PX`（默认 96px）→ 只提醒不拦（合法宽景不该被“脸小”一刀切） | 指标来自人脸服务 / 本机 insightface（106 点），**拿不到指标就跳过**（绝不误拦）；嘴部点序号可用 `WEAVEORA_LIPSYNC_MOUTH_IDX` 覆盖（默认 `52-71`）；日志每跑一次都打印实测值，便于攒数据收紧 |
 | **C 极端表情自动分流** | action/正词/台词含 喊叫/尖叫/失声/惊恐张口/scream/mouth wide… → ① 默认底片**自动改成静帧**（有静帧时）；② 出片时 `lips_expression` 从 1.5 降到 `WEAVEORA_LIPSYNC_EXPRESSION_RISK`（默认 0.8）减少嘴部形变；③ 选镜弹窗标「⚠ 大张口风险」 | 这类镜更好的做法是**改成旁白/画外音或侧脸**（导演层「分镜规避」本就在做） |
 
 逃生门（明确要硬跑）：方案的 `shots[].lipsync_force = true`，或 worker 侧 `WEAVEORA_LIPSYNC_FORCE=1`。
 
-> 典型案例（2026-09-14《那宝玉恍恍惚惚》第 6 镜）：action「梦醒，宝玉**失声喊叫**」、正词
-> `eyes wide in terror`，底片用的是 5s motion 片段（嘴全程大张）→ LatentSync 先把嘴合上再
-> 按配音重开 → **画面被破坏**。现在：C 会自动改用静帧底片 + 降 lips_expression；若底片仍是
-> 大张口，B 会在开跑前直接拒绝并给出三条可选做法。
+> 典型案例（2026-09-14《那宝玉恍恍惚惚》第 5 镜，用户反馈「配口型时画面被破坏」的那一镜）：
+> action「…抓住宝玉将他拖下溪去，宝玉**失声惊叫**」、正词 `his mouth open in a **terrified scream**`，
+> 底片用的是 motion 片段（嘴全程大张）→ LatentSync 先把嘴合上再按配音重开 → **画面被破坏**。
+> GPU 人脸服务实测底片：静帧 `mouth_open=1.232 / 脸宽 283.6px`、片段 `1.238 / 95.7px`
+> （正常闭嘴只有 0.03~0.17）——两个底片都会被 B 拒绝（嘴大张），且体检查的就是「画面坏掉」的真因。
+> 第 6 镜（「梦醒…失声喊叫」+ `eyes wide in terror`）同样命中（静帧 0.589 / 片段 0.776）。
+> 现在：C 会自动改用静帧底片 + 降 lips_expression；若底片仍是大张口，B 会在开跑前直接拒绝
+> 并给出三条可选做法（换静帧底片 / 改旁白画外音 / 强制）。
 
 ### 6.2 底片体检查不出来的情况
 

@@ -11,10 +11,12 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /**
  * C：「极端表情（嘴大张）」判定 —— 决定对口型是否自动把底片从 motion 片段改成静帧。
  *
- * <p>背景（2026-09-14《那宝玉恍恍惚惚》第 6 镜，用户实测）：action「梦醒，宝玉失声喊叫」、
- * 正词「eyes wide in terror」，底片用的是 motion 片段 → LatentSync 先合上嘴再按配音重开，
- * 嘴部区域大幅形变 = 画面被破坏。这里只做文字侧判定（判多一次的代价是多走一次静帧底片，
- * 判漏的代价是一段坏画面 + 十几分钟 GPU）。
+ * <p>背景（2026-09-14《那宝玉恍恍惚惚》用户实测）：第 5 镜 action「…抓住宝玉将他拖下溪去，
+ * 宝玉失声惊叫」、正词 `his mouth open in a terrified scream` —— 底片用 motion 片段 →
+ * LatentSync 先合上嘴再按配音重开，嘴部区域大幅形变 = 画面被破坏
+ * （实测底片 mouth_open：静帧 1.232 / 片段 1.238；正常闭嘴 0.03~0.17）。
+ * 第 6 镜「梦醒…失声喊叫」也同样命中（静帧 0.589 / 片段 0.776）。
+ * 这里只做文字侧判定（判多一次的代价是多走一次静帧底片，判漏的代价是一段坏画面 + 十几分钟 GPU）。
  */
 class JobExpressionRiskTest {
 
@@ -38,7 +40,16 @@ class JobExpressionRiskTest {
 
     @Test
     void screamingShotIsExpressionRisk() {
-        // 线上实例原文（第 6 镜）
+        // 线上实例原文（第 5 镜，用户反馈「配口型时画面被破坏」的那一镜）
+        assertTrue(JobService.expressionRisk(shot(
+                "迷津内水声如雷，浪花暴涨，许多夜叉海鬼自黑水中探出，抓住宝玉将他拖下溪去，宝玉失声惊叫。",
+                "low angle wide shot, black river erupting with white foam, ... dragging him down, "
+                        + "his mouth open in a terrified scream, ash-grey sky")));
+    }
+
+    @Test
+    void secondShotAlsoHit() {
+        // 第 6 镜（宝玉失声喊叫）同样命中
         assertTrue(JobService.expressionRisk(shot(
                 "梦醒，宝玉在床上失声喊叫，袭人等众丫鬟忙上前搂住安抚，一遍遍低声唤他莫怕。",
                 "a young man ... sweat on his forehead, eyes wide in terror, several young maidservants ...")));

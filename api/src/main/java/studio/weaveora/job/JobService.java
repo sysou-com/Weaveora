@@ -1599,7 +1599,8 @@ public class JobService {
             // C（极端表情自动分流）：没显式指定时，如果这一镜是「惊叫/喊叫/失声…」这类
             //   **底片里嘴本来就大张**的镜头，而有静帧可选 → **默认改用静帧**：静帧只有一张干净的脸，
             //   嘴部状态单一；而 motion 片段里嘴已经在动，LatentSync 得先把嘴合上再按配音重开，
-            //   嘴部掩码区大幅形变（2026-09-14《那宝玉恍恍惚惚》第6镜实测「画面被破坏」）。
+            //   嘴部掩码区大幅形变（2026-09-14《那宝玉恍恍惚惚》第5镜实测「画面被破坏」：
+            //   action 宝玉失声惊叫、正词 `his mouth open in a terrified scream`）。
             studio.weaveora.asset.domain.Asset clip = pickNewestAsset(projectId, workspaceId, shotNo, "clip");
             studio.weaveora.asset.domain.Asset stillAsset = pickNewestAsset(projectId, workspaceId, shotNo, "still");
             String wantBase = shot.path("lipsync_source").asText("").trim().toLowerCase();
@@ -1742,8 +1743,10 @@ public class JobService {
      * C：该镜是不是「底片里嘴本来就大张」的高危镜头（惊叫/喊叫/失声…）。
      *
      * <p>为什么要判定：LatentSync 是「先合上再重开」的嘴部重绘。底片里人本来就在喊/惊叫时，
-     * 嘴部掩码区形变最大，实测会把画面搞坏（2026-09-14《那宝玉恍恍惚惚》第6镜：
-     * action「梦醒…失声喊叫」+ 正词「eyes wide in terror」）。
+     * 嘴部掩码区形变最大，实测会把画面搞坏。线上实例（2026-09-14《那宝玉恍恍惚惚》）：
+     * 第 5 镜 action「…抓住宝玉将他拖下溪去，宝玉失声惊叫」+ 正词 `his mouth open in a terrified
+     * scream`（实测底片 mouth_open 静帧 1.232 / 片段 1.238）；第 6 镜 action「梦醒…失声喊叫」+
+     * 正词「eyes wide in terror」也命中（静帧 0.589 / 片段 0.776）。
      *
      * <p>只看文字信号（不做图像分析）：判错的代价 = 默认多走一次静帧底片（静帧本来是合法底片），
      * 可接受；而漏判的代价是一段坏画面 + 十几分钟 GPU。用户仍可在选镜弹窗里手动改回片段。

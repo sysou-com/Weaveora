@@ -804,19 +804,24 @@ FACE_URL = os.environ.get("WEAVEORA_FACE_URL", "").rstrip("/")
 # --------------------------------------------------------------------------- #
 # 对口型「底片体检」（B）：底片（静帧/片段）本身就不适合做口型时，**宁可拒绝也不出坏画面**。
 #
-# 背景（2026-09-14 用户实测）：第 6 镜是「梦醒失声喊叫、惊恐张口」的镜头，底片（motion 片段）
-# 里嘴已经大张，LatentSync 要先把嘴「合上」再按音频重开 → 嘴部掩码区大幅形变 = 画面被破坏。
-# 两道硬门禁 + 一道软提醒：
-#   ① 脸太小（占画面比例 < LIPSYNC_FACE_MIN_RATIO）→ 拒绝（跑了也白跑）；
-#   ② 嘴张太大（张开度 ≥ LIPSYNC_MOUTH_MAX）→ 拒绝，提示换「嘴部自然的静帧」当底片；
-#   ③ 介于 WARN 与 MAX 之间 → 只提醒，不拦。
+# 背景（2026-09-14 《那宝玉恍恍惚惚》实测，用户反馈「配口型时画面被破坏」）：
+#   第 5 镜 action「…抓住宝玉将他拖下溪去，**宝玉失声惊叫**」、正词里写着
+#   `his mouth open in a **terrified scream**` —— 底片（motion 片段）里嘴本来就大张，
+#   LatentSync 要先把嘴「合上」再按音频重开 → 嘴部掩码区大幅形变 = 画面被破坏
+#   （实测 mouth_open：静帧 1.232 / 片段 1.238；正常闭嘴只有 0.03~0.17）。
+# 两道硬门禁 + 两道软提醒：
+#   ① 嘴张太大（张开度 ≥ LIPSYNC_MOUTH_MAX）→ 拒绝，提示换「嘴部自然的静帧」当底片；
+#   ② 脸极小（宽 < LIPSYNC_FACE_MIN_PX）→ 拒绝（跑了也没意义：脸都糊了）；
+#   ③ 嘴偏大（≥ WARN）/ 脸偏小（< LIPSYNC_FACE_WARN_PX，但 ≥ MIN_PX）→ 只提醒，不拦；
 # 指标来自人脸服务 / 本机 insightface（106 点）；**拿不到指标就跳过**（绝不误拦）。
 # 逃生门：payload.lipsyncForce=true 或 env WEAVEORA_LIPSYNC_FORCE=1（用户明确要硬跑）。
 # --------------------------------------------------------------------------- #
 LIPSYNC_FACE_MIN_RATIO = float(os.environ.get("WEAVEORA_LIPSYNC_FACE_MIN_RATIO", "0.015"))
-# 人脸最小像素宽度（更稳的口径：抽帧分辨率不同——同机位 2560x1440 静帧的「脸占比」会比
-# 1280x720 片段小 4 倍，纯用占比会误判「脸太小」）。实践：脸宽 < 96px 对口型已看不出效果。
-LIPSYNC_FACE_MIN_PX = float(os.environ.get("WEAVEORA_LIPSYNC_FACE_MIN_PX", "96"))
+# 人脸像素宽度（比「占画面占比」稳：同机位 2560x1440 静帧的占比比 1280x720 片段小 4 倍）。
+# 注意两个阈值的分工：远小于 MIN_PX = 硬拒（脸都糊了）；MIN_PX~WARN_PX 之间 = 只提醒
+# （实测第 5 镜 1280x704 宽景的脸宽 95.7px —— 这种合法宽景不应该被“脸小”一刀切拦掉）。
+LIPSYNC_FACE_MIN_PX = float(os.environ.get("WEAVEORA_LIPSYNC_FACE_MIN_PX", "64"))
+LIPSYNC_FACE_WARN_PX = float(os.environ.get("WEAVEORA_LIPSYNC_FACE_WARN_PX", "96"))
 LIPSYNC_MOUTH_WARN = float(os.environ.get("WEAVEORA_LIPSYNC_MOUTH_WARN", "0.30"))
 LIPSYNC_MOUTH_MAX = float(os.environ.get("WEAVEORA_LIPSYNC_MOUTH_MAX", "0.50"))
 LIPSYNC_FORCE = os.environ.get("WEAVEORA_LIPSYNC_FORCE", "").strip().lower() in ("1", "true", "yes", "on")
@@ -1183,10 +1188,11 @@ def _face_precheck(video_bytes, where="lipsync", target_emb=None, speaker="", fo
     这时不能硬跑（会去驱动最大脸=另一个人，画面坏掉），也不能报一句误导的
     "Face not detected"，而应该**说清楚原因并让用户去修定妆照**。
 
-    为什么要第三道（2026-09-14 实例，用户反馈）：第 6 镜是「惊恐失声喊叫」的镜头，
+    为什么要第三道（2026-09-14 实测，用户反馈「画面被破坏」）：第 5 镜 action
+    「…抓住宝玉将他拖下溪去，宝玉失声惊叫」、正词 `his mouth open in a terrified scream`，
     底片（motion 片段）里嘴本来就大张，LatentSync 要先把嘴合上再按音频重开 →
-    嘴部掩码区大幅形变 = 画面被破坏。底片本身不合格时应**提前拒绝并告诉他怎么换**，
-    而不是烧十几分钟 GPU 出一段坏画面。
+    嘴部掩码区大幅形变。实测 mouth_open：静帧 1.232 / 片段 1.238（正常闭嘴 0.03~0.17）。
+    底片本身不合格时应**提前拒绝并告诉他怎么换**，而不是烧十几分钟 GPU 出一段坏画面。
 
     逃生门：force=True（payload.lipsyncForce）或 env WEAVEORA_LIPSYNC_FORCE=1。
     """
@@ -1222,7 +1228,12 @@ def _face_precheck(video_bytes, where="lipsync", target_emb=None, speaker="", fo
 
 
 def _base_health(extra, where, force=False, speaker=""):
-    """底片体检（B）：脸太小 / 嘴张太大 → 拒绝；略大 → 只提醒。拿不到指标就放行。"""
+    """底片体检（B）：嘴大张 / 脸极小 → 拒绝；嘴偏大 / 脸偏小 → 只提醒。拿不到指标就放行。
+
+    为什么嘴优先于脸：① 嘴大张是「画面被破坏」的直接原因（第 5 镜实测）；② 合法宽景
+    （脸宽 ~96px）不应该被“脸小”一刀切拦掉，坏画面才是真损失。
+    拒绝时把**所有命中的原因**一起说出来，别让用户改完一条又撞下一条。
+    """
     if not isinstance(extra, dict):
         return True
     fr = extra.get("face_ratio")
@@ -1235,29 +1246,38 @@ def _base_health(extra, where, force=False, speaker=""):
              "（已开启强制，只记录不拦）" if force else ""), flush=True)
     if force:
         return True
-    # 脸太小：优先用「像素宽度」（不受抽帧分辨率影响），没有就退到「占画面比例」
-    too_small = (px is not None and px < LIPSYNC_FACE_MIN_PX) \
+    # 「脸太小」优先用像素宽（不受抽帧分辨率影响）；没有 px 才退到占画面比
+    tiny = (px is not None and px < LIPSYNC_FACE_MIN_PX) \
         or (px is None and fr is not None and fr < LIPSYNC_FACE_MIN_RATIO)
-    if too_small:
+    small = px is not None and LIPSYNC_FACE_MIN_PX <= px < LIPSYNC_FACE_WARN_PX
+    mouth_bad = mo is not None and mo >= LIPSYNC_MOUTH_MAX
+    mouth_warn = mo is not None and LIPSYNC_MOUTH_WARN <= mo < LIPSYNC_MOUTH_MAX
+    if mouth_bad or tiny:
+        parts = []
+        if mouth_bad:
+            parts.append(
+                "**嘴部大张**（张开度 %.2f，阈值 %.2f）%s：LatentSync 要把大张的嘴先「合上」再按配音"
+                "重开，嘴部区域会大幅形变 —— 实测这就是「画面被破坏」的主因"
+                % (mo, LIPSYNC_MOUTH_MAX, "（说话人：%s）" % speaker if speaker else ""))
+        if tiny:
+            parts.append(
+                "**人脸太小**（%s）：对口型对远景/小人物没有可见效果"
+                % (("脸宽仅 %.0fpx，阈值 %.0fpx" % (px, LIPSYNC_FACE_MIN_PX)) if px is not None
+                   else ("最大脸只占画面 %.2f%%，阈值 %.2f%%" % (fr * 100, LIPSYNC_FACE_MIN_RATIO * 100))))
         _face_reason["msg"] = (
-            "该镜底片里的人脸太小（%s）——对口型对远景/小人物没有可见效果。"
-            "请改选一张**近景/特写**的静帧当底片，或该镜不跑口型。"
-            "（如需硬跑，让管理员把 WEAVEORA_LIPSYNC_FACE_MIN_PX / _FACE_MIN_RATIO 调小）"
-            % (("脸宽仅 %.0fpx，阈值 %.0fpx" % (px, LIPSYNC_FACE_MIN_PX)) if px is not None
-               else ("最大脸只占画面 %.2f%%，阈值 %.2f%%" % (fr * 100, LIPSYNC_FACE_MIN_RATIO * 100))))
-        return False
-    if mo is not None and mo >= LIPSYNC_MOUTH_MAX:
-        _face_reason["msg"] = (
-            "该镜底片的**嘴部大张**（张开度 %.2f，阈值 %.2f）%s——LatentSync 要把大张的嘴先「合上」"
-            "再按配音重开，嘴部区域会大幅形变（实测就是把画面搞坏）。请任选其一：\n"
+            "该镜的**底片**不适合跑对口型：\n- %s\n\n请任选其一：\n"
             "① 换成该镜「嘴部自然（闭合/微张）」的**静帧关键帧**当底片（选镜弹窗 → 底片＝静帧）；\n"
             "② 如该镜本就是喊叫/惊恐，建议改成旁白/画外音或侧脸（导演层「分镜规避」）；\n"
             "③ 确实要试，打开「强制」后重跑（不保证画面完好）。"
-            % (mo, LIPSYNC_MOUTH_MAX, "（说话人：%s）" % speaker if speaker else ""))
+            % "\n- ".join(parts))
         return False
-    if mo is not None and mo >= LIPSYNC_MOUTH_WARN:
-        _face_reason["warn"] = ("底片嘴部偏大（%.2f）——对口型后嘴部可能变形；"
-                                "建议换一张嘴部自然的静帧当底片（选镜弹窗 → 底片＝静帧）" % mo)
+    warns = []
+    if mouth_warn:
+        warns.append("底片嘴部偏大（%.2f）——对口型后嘴部可能变形" % mo)
+    if small:
+        warns.append("底片人脸偏小（脸宽 %.0fpx，建议 ≥ %.0fpx）——口型会偏糊" % (px, LIPSYNC_FACE_WARN_PX))
+    if warns:
+        _face_reason["warn"] = "；".join(warns) + "（选镜弹窗 → 底片＝静帧，或挑近景镜）"
     return True
 
 
