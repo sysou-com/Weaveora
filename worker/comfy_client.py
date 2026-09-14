@@ -561,6 +561,13 @@ MOTION_MIN_FREE_GB = float(os.environ.get("WEAVEORA_MOTION_MIN_FREE_GB", "30") o
 # 默认把长边压到 ≤ MOTION_DEFAULT_LONG_SIDE；params.resolution=720p/原始 可放开。
 MOTION_DEFAULT_LONG_SIDE = int(os.environ.get("WEAVEORA_MOTION_LONG_SIDE", "832") or 832)
 
+# ★ Wan2.2 I2V-A14B 的**原生节奏 = 16fps**（ComfyUI 官方模板 CreateVideo fps=16）。
+#   踩过的坑（2026-09-15 线上）：按项目 fps(30) 生成同样帧数 → 运动被 1.875× 加速
+#   （用户反馈「像开了倍速」），而且时长变成 帧数/30（5s 的镜头只出 4.13s）。
+#   正确做法：**按 16fps 决定帧数**（= 时长 × 16），先按 16fps 出片（速度/时长都对），
+#   再插值到项目 fps（ffmpeg minterpolate，失败则退化为补帧）。
+MOTION_NATIVE_FPS = float(os.environ.get("WEAVEORA_MOTION_NATIVE_FPS", "16") or 16)
+
 
 def _motion_resolution(params, width, height):
     """motion 实际出片尺寸：按「分辨率上限」压到桶内（保持画幅，宽高 /16 对齐）。
@@ -733,15 +740,21 @@ def _motion_expert(nodes, tag, unet_name, weight_dtype, lora_name, lora_strength
 
 
 def _motion_graph_frames(payload, params):
-    """帧数/分辨率口径（与旧实现一致）：frames=4n、latent length=frames+1。"""
-    fps = int(payload.get("fps") or 16)
+    """帧数/分辨率口径：frames=4n、latent length=frames+1。
+
+    ★ 帧数按 **原生 16fps × 镜头时长** 取（16fps 是 A14B 的原生节奏），
+      payload.frames（UI 选的帧数）只当**上限**：min(时长×16, 上限)。
+      为什么不再直接用 payload.frames（2026-09-15 线上事故）：
+        UI 选 121 帧时按 30fps 出片 → 运动快 1.875×（像开了倍速），且 5s 镜头只剩 4.13s。
+    """
     duration = float(payload.get("duration_sec") or 2.0)
-    fuser = payload.get("frames")
-    if isinstance(fuser, int) and 32 <= fuser <= 128:
-        frames = int((fuser + 3) / 4) * 4          # 用户显式指定（后端已校验 32–96）
-    else:
-        raw = max(32, min(64, int(round(duration * fps))))   # 缺省：>=32，封顶 64
-        frames = int((raw + 3) / 4) * 4
+    native = MOTION_NATIVE_FPS
+    want = int(round(duration * native))              # 时长 × 原生 fps
+    cap = payload.get("frames")
+    if isinstance(cap, int) and 32 <= cap <= 128:
+        want = min(want, int(cap))                    # UI 只当上限
+    raw = max(32, min(121, want))                     # A14B 原生上限 121（官方模板）
+    frames = int((raw + 3) / 4) * 4                   # 4n 对齐（latent = frames+1）
     width = int(params.get("width", 768))
     height = int(params.get("height", 768))
     return frames, width, height, frames + 1
@@ -859,6 +872,52 @@ def _vram_note(tag):
         print("[comfy] WARN 显存余量 %.1f GiB < %.1f GiB：14B 双专家会频繁换入换出，"
               "请确认 TTS 未常驻（WEAVEORA_TTS_PRELOAD=0）或已让出显存"
               % (free, MOTION_MIN_FREE_GB), flush=True)
+
+
+def _retime_to_fps(mp4, src_fps, dst_fps):
+    """把 mp4 从 src_fps 重定时到 dst_fps（**保持时长与速度**）。
+
+    为什么：A14B 按原生 16fps 生成（速度正确），而项目成片是 30fps。
+    直接改容器 fps 会把时长缩短、速度变快；所以要**插值补帧**：
+      · 优先 ffmpeg `minterpolate=fps=N:mi_mode=mci`（运动补偿插值，画面顺滑）
+      · 失败/无此滤镜 → 退化为 `-r N`（重复帧，时长速度仍正确，只是略顿）
+    src == dst（或无效）时原样返回。
+    """
+    try:
+        src_fps = float(src_fps or 0)
+        dst_fps = float(dst_fps or 0)
+    except (TypeError, ValueError):
+        return mp4
+    if dst_fps <= 0 or abs(dst_fps - src_fps) < 0.01:
+        return mp4
+    import subprocess as _sp
+    import tempfile as _tf
+    ff = _ffmpeg_exe()
+    d = _tf.mkdtemp(prefix="wv_retime_")
+    try:
+        src = os.path.join(d, "in.mp4")
+        dst = os.path.join(d, "out.mp4")
+        with open(src, "wb") as fh:
+            fh.write(mp4)
+        for vf in ("minterpolate=fps=%g:mi_mode=mci" % dst_fps, None):
+            cmd = [ff, "-y", "-loglevel", "error", "-i", src]
+            if vf:
+                cmd += ["-vf", vf]
+            else:
+                cmd += ["-r", "%g" % dst_fps]
+            cmd += ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "18", dst]
+            r = _sp.run(cmd, stdout=_sp.PIPE, stderr=_sp.PIPE, universal_newlines=True)
+            if r.returncode == 0 and os.path.exists(dst) and os.path.getsize(dst) > 0:
+                with open(dst, "rb") as fh:
+                    out = fh.read()
+                print("[comfy] 帧率补齐 %g → %gfps（%s）"
+                      % (src_fps, dst_fps, "运动补偿插值" if vf else "重复帧退化"), flush=True)
+                return out
+        print("[comfy] 帧率补齐失败（保持 %gfps 原样输出）" % src_fps, flush=True)
+        return mp4
+    finally:
+        import shutil as _sh
+        _sh.rmtree(d, ignore_errors=True)
 
 
 def _encode_frames_mp4(frames_bytes, fps, out_dir):
@@ -1018,10 +1077,14 @@ def generate_motion(client_id, payload, progress_fn=None):
         raise ComfyError("motion 无输出帧（prefix=%s）" % prefix)
     out_dir = tempfile.mkdtemp(prefix="wv_mot_")
     try:
-        mp4 = _encode_frames_mp4(frames, fps, out_dir)
+        mp4 = _encode_frames_mp4(frames, fps, out_dir)   # fps = 原生 16（速度/时长正确）
     finally:
         import shutil as _sh
         _sh.rmtree(out_dir, ignore_errors=True)
+    # 再补齐到项目 fps（16 → 30）：保持时长与速度，只是补帧
+    mp4 = _retime_to_fps(mp4, fps, out_fps)
+    print("[comfy] motion 出片：%d 帧 @%gfps ≈ %.2fs → 输出 %gfps"
+          % (len(frames), fps, len(frames) / max(1.0, fps), out_fps), flush=True)
     # 上报**真实**产出规格：原先直接把 payload 里「请求的」width/height 当结果上报，
     # 于是资产库里记的是 1280×704，而实际文件是 Wan 真正出图桶（本例 832×464）——
     # 2026-09-13 排查时让人误以为「对口型把分辨率改小了」。

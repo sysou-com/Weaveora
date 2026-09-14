@@ -2004,6 +2004,16 @@ public class JobService {
         payload.put("shotId", shotId.toString());
         payload.put("shot_no", shot.path("shot_no").asInt());
         String pos = styledPositive(style, positiveRaw);
+        // ★ motion（clip）：把镜头的 **action** 也喂给模型。
+        //   线上反馈（2026-09-15）：「宝玉靠向可卿，可卿躲开」这种动作根本没被理解 ——
+        //   因为正词里只有画风/场景/参考图身份约束，动作中文只存在计划的 action 字段里。
+        //   umt5 是多语言编码器，中文动作可直接拼进正词。
+        if ("clip".equals(kind)) {
+            String act = shot.path("action").asText("").trim();
+            if (!act.isEmpty() && !pos.contains(act)) {
+                pos = pos + "\nAction: " + act;
+            }
+        }
         if (refs != null && !refs.anchor().isBlank()) pos = pos + refs.anchor();
         payload.put("positive_prompt", pos);
         // P-motion：运动（clip）额外追加静态抑制负面词，只作用于 clip（关键帧 still 不受影响）
