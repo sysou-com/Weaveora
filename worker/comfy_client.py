@@ -973,7 +973,13 @@ def generate_motion(client_id, payload, progress_fn=None):
     data, ctype = fetch_reference_bytes(key)
     positive = payload.get("positive_prompt", "")
     negative = payload.get("negative_prompt", "")
-    fps = int(payload.get("fps") or 16)
+    # ★ 帧率分两个：
+    #   out_fps = 项目导出帧率（payload.fps，如 30）→ 出片后由 _retime_to_fps() 补帧到它
+    #   fps     = 生成/编码帧率 = 模型原生节奏（A14B = 16fps）→ 保证**速度与时长正确**
+    #   踩过的坑（2026-09-15）：以前直接用 payload.fps 生成+编码 → 运动快 1.875×（“像开了倍速”），
+    #   且 5s 镜头只剩 4.13s。
+    out_fps = int(payload.get("fps") or 16)
+    fps = MOTION_NATIVE_FPS
     _mp = _motion_params(payload)
     # motion 固定 768×768（Comfy 原生 Wan2.2 方形档位；8GB fp8），关键帧缩放后上传保证一致
     mw = int(_mp.get("width", 768))
