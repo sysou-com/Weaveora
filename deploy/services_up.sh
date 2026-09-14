@@ -17,7 +17,8 @@
 # =============================================================================
 set -uo pipefail
 
-ROOT=/home/dataset-local/weaveora
+# 根目录可配：GPU#1（容器）=/home/dataset-local/weaveora（默认）；GPU#2（VM）=/opt/weaveora
+ROOT=${WEAVEORA_ROOT:-/home/dataset-local/weaveora}
 LOGD=$ROOT/logs
 CX=$ROOT/ComfyUI
 VENV_PY=$CX/venv/bin/python
@@ -84,18 +85,20 @@ else
     "$VENV_PY" "$ROOT/face/face_server.py" --port 8093 --device "$WEAVEORA_FACE_DEVICE"
 fi
 
-# ---------- 边缘网关 :8000 ----------
+# ---------- 边缘网关（端口可配：WEAVEORA_GATEWAY_PORT，缺省 8000）----------
+# GPU#2（180.127.11.166）平台给的公网映射是 10588→容器 8800，故那边要设 8800。
+GWPORT=${WEAVEORA_GATEWAY_PORT:-8000}
 # 必须最后起（依赖上面各服务）
-if up 8000; then
-  log "网关 :8000 已在监听，跳过"
+if up "$GWPORT"; then
+  log "网关 :$GWPORT 已在监听，跳过"
 else
   cd "$ROOT" || exit 1
-  start_bg "EdgeProxy(:8000)" "$LOGD/edge_proxy.log" \
-    "$VENV_PY" "$ROOT/edge_proxy.py" --port 8000
+  start_bg "EdgeProxy(:$GWPORT)" "$LOGD/edge_proxy.log" \
+    "$VENV_PY" "$ROOT/edge_proxy.py" --port "$GWPORT"
 fi
 
 log "---------------- 监听汇总 ----------------"
-for p in 8000 8001 8091 8093; do
+for p in "$GWPORT" 8001 8091 8093; do
   if up $p; then log "  :$p  LISTEN"; else log "  :$p  --"; fi
 done
 log "================ services_up DONE ================"
