@@ -139,6 +139,7 @@ public class JobService {
      * 本机（GPU/ComfyUI）仍用 {@link #motionFramesMax}（3070Ti 显存口径）。
      */
     private final int motionFramesMaxCloud;
+    private final boolean motionAppendAction;
     private final int queuedTimeoutMin;   // queued 超时回收阈值（分钟）
     private final int runningTimeoutMin;  // running 超时回收阈值（分钟）
 
@@ -161,7 +162,17 @@ public class JobService {
                       @org.springframework.beans.factory.annotation.Value(
                               "${weaveora.job.queued-timeout-minutes:1440}") int queuedTimeoutMin,
                       @org.springframework.beans.factory.annotation.Value(
-                              "${weaveora.job.running-timeout-minutes:60}") int runningTimeoutMin) {
+                              "${weaveora.job.running-timeout-minutes:60}") int runningTimeoutMin,
+                              /**
+                               * motion（clip）是否把计划里的 action 追加到正词末尾。
+                               *
+                               * <p>默认 false：导演生成的 positive_prompt 里**已经有**英文动作
+                               * （如 "Baoyu leans close to shy Keqing, she turns away…"），
+                               * 再拼一句中文动作 = 重复指令、反而稀释画面。
+                               * 只有当某个方案的 prompt 确实缺动作时才把它打开。
+                               */
+                              @org.springframework.beans.factory.annotation.Value(
+                                      "${weaveora.video.motion-append-action:false}") boolean motionAppendAction) {
         this.jobs = jobs;
         this.shotLocks = shotLocks;
         this.nodes = nodes;
@@ -181,6 +192,7 @@ public class JobService {
         this.motionFramesMin = motionFramesMin;
         this.motionFramesMax = motionFramesMax;
         this.motionFramesMaxCloud = motionFramesMaxCloud;
+        this.motionAppendAction = motionAppendAction;
         this.queuedTimeoutMin = queuedTimeoutMin;
         this.runningTimeoutMin = runningTimeoutMin;
     }
