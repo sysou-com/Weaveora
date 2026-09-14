@@ -280,9 +280,30 @@ if (schema == null || !schema.path("params").isArray() || schema.path("params").
 
 ## 9. 还未做的（交接清单）
 
-| # | 事项 | 说明 |
+| # | 事项 | 状态 |
 |---|---|---|
-| 1 | **看 sweep 结论** | 定下哪个档位（draft/balanced/motion/hero/full）+ LoRA 强度能治好慢动作（注意：合成图只能验链路/性能/显存，**幅度必须真实关键帧对比**） |
-| 2 | **worker 落位** | GPU #2 或生产机；若 GPU #2 需 `/internal` 白名单放行其出口 IP |
-| 3 | **实机全链路验收** | 「生成引擎配置」填 `preset` → `clip` 走 gpu 路由 → 渲染成片 |
-| 4 | **回写下载铁律** | §1.3 三条教训（resolve/API 端点限流差异、「字节对≠内容对」、校验强度折中）建议写入 `Weaveora.md §0.2` 与 `docs/gpu-newserver-batch1.md §4` |
+| 1 | **sweep 结论** | ✅ **已出**（`bc9549b`）—— 见 §9.1 |
+| 2 | **worker 落位** | ⏳ GPU #2 或生产机；若 GPU #2 需 `/internal` 白名单放行其出口 IP |
+| 3 | **实机全链路验收** | ⏳ 「生成引擎配置」填 `preset` → `clip` 走 gpu 路由 → 渲染成片 |
+| 4 | **回写下载铁律** | ⏳ §1.3 三条教训（resolve/API 端点限流差异、「字节对≠内容对」、校验强度折中）建议写入 `Weaveora.md §0.2` 与 `docs/gpu-newserver-batch1.md §4` |
+
+### 9.1 sweep 结论（`bc9549b`，GPU#2 48G，832×480/33帧）
+
+| 档位 | 步数 | 耗时 | 显存峰值 |
+|---|---|---|---|
+| draft | 4 | **21.0s** | ~41.8 GiB |
+| balanced | 6 | **27.0s** | ~42.0 GiB |
+| motion | 8 | **49.5s** | ~42.4 GiB |
+| hero | 6 | **37.5s** | ~42.0 GiB |
+
+**两个硬结论**：
+
+1. **高噪声专家不能挂 LoRA**（否则 OOM）：fp8 专家挂 LoRA 需额外 dequantize 一份 fp16 权重
+   （13.3 GiB → ~28 GiB），两专家叠加 > 48 GiB。→ 生产口径：**高噪声不蒸馏 + 低噪声足量蒸馏**。
+   这**正合本方案初衷**（高噪声专家负责大幅运动，越蒸馏动态越扁），动态改由 steps/switch/cfg 调。
+   代码：`MOTION_PRESETS` 四档 `lora_high` 全改 `0.0`；`lora_high>0` 时打 WARN（点名「会 OOM + 动态被压扁」）。
+2. **A14B 双专家上不了 24G 卡**：峰值 41.8–42.4 GiB，超出 24G 任何余量。
+   与 `7ce9bf7` 的 `MOTION_MIN_TOTAL_GB=44` 快速失败口径一致（那个阈值正是按此实测定的）。
+
+> ⚠️ 剩余未知：**「动态够不够」** sweep 的合成图验不了（脚本自己写明），
+> 必须拿**真实关键帧**逐档出一版肉眼/取帧对比。
