@@ -1485,9 +1485,14 @@ def generate_lipsync(client_id, payload, progress_fn=None):
             return ""
 
     # 先预检：画面里有人脸；且（有特征时）说话人的脸真在画面里
+    # ★ 但**有「点选人脸」提示时不做识别式预检**：识别在风格化/低分辨率素材上不可信
+    #   （实测「袭人」定妆照与「警幻」相似度 0.71＝同一张脸，画面里最高相似度仅 0.21
+    #   < 阈值 0.28 → 会把本来能跑的任务直接判失败）。用户点的位置本身就是权威信号，
+    #   点选没点到脸的情况交给管线的「就近选脸 + 沿用上一帧」兜底。
     _first = next(iter(embs)) if len(embs) == 1 else ""
+    _emb_pre = None if (_first and face_hints.get(_first)) else embs.get(_first)
     if not _face_precheck(vdata, where="第%s镜" % shot_no,
-                          target_emb=embs.get(_first), speaker=_first):
+                          target_emb=_emb_pre, speaker=_first):
         raise ComfyError(_face_reason["msg"])
 
     _free_comfy_models()
