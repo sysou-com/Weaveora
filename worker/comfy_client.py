@@ -807,8 +807,14 @@ FACE_URL = os.environ.get("WEAVEORA_FACE_URL", "").rstrip("/")
 # 背景（2026-09-14 《那宝玉恍恍惚惚》实测，用户反馈「配口型时画面被破坏」）：
 #   第 5 镜 action「…抓住宝玉将他拖下溪去，**宝玉失声惊叫**」、正词里写着
 #   `his mouth open in a **terrified scream**` —— 底片（motion 片段）里嘴本来就大张，
-#   LatentSync 要先把嘴「合上」再按音频重开 → 嘴部掩码区大幅形变 = 画面被破坏
-#   （实测 mouth_open：静帧 1.232 / 片段 1.238；正常闭嘴只有 0.03~0.17）。
+#   LatentSync 要先把嘴「合上」再按音频重开 → 嘴部掩码区大幅形变 = 画面被破坏。
+#
+# ★ 阈值是按「真实素材」量的，不是拍的（同项目实测 mouth_open）：
+#     正常/平静脸：0.44~0.66（第1镜 0.53、第4镜 0.66、定妆照 0.44、新闭嘴近景 0.41）
+#     略开（可接受）：0.59~0.78（第6镜：宝玉喊叫但镜头是「近景+被安抚」，实际没大张）
+#     真·大张嘴：1.23（第5镜 静帧 1.232 / 片段 1.238 —— 就是「画面被破坏」那一镜）
+#   所以 WARN=0.90 / MAX=1.05：平静脸绝不误伤，只拦真正张口喊叫的底片。
+#   别再照「0.3/0.5」这类拍的阈值 —— 那会把所有正常脸全判成「嘴大张」（实测过）。
 # 两道硬门禁 + 两道软提醒：
 #   ① 嘴张太大（张开度 ≥ LIPSYNC_MOUTH_MAX）→ 拒绝，提示换「嘴部自然的静帧」当底片；
 #   ② 脸极小（宽 < LIPSYNC_FACE_MIN_PX）→ 拒绝（跑了也没意义：脸都糊了）；
@@ -822,11 +828,15 @@ LIPSYNC_FACE_MIN_RATIO = float(os.environ.get("WEAVEORA_LIPSYNC_FACE_MIN_RATIO",
 # （实测第 5 镜 1280x704 宽景的脸宽 95.7px —— 这种合法宽景不应该被“脸小”一刀切拦掉）。
 LIPSYNC_FACE_MIN_PX = float(os.environ.get("WEAVEORA_LIPSYNC_FACE_MIN_PX", "64"))
 LIPSYNC_FACE_WARN_PX = float(os.environ.get("WEAVEORA_LIPSYNC_FACE_WARN_PX", "96"))
-LIPSYNC_MOUTH_WARN = float(os.environ.get("WEAVEORA_LIPSYNC_MOUTH_WARN", "0.30"))
-LIPSYNC_MOUTH_MAX = float(os.environ.get("WEAVEORA_LIPSYNC_MOUTH_MAX", "0.50"))
+# 嘴张开度软提醒阈值（实测平静脸 0.44~0.66，真·大张 1.23 —— 见上面的量化表）
+LIPSYNC_MOUTH_WARN = float(os.environ.get("WEAVEORA_LIPSYNC_MOUTH_WARN", "0.90"))
+LIPSYNC_MOUTH_MAX = float(os.environ.get("WEAVEORA_LIPSYNC_MOUTH_MAX", "1.05"))
 LIPSYNC_FORCE = os.environ.get("WEAVEORA_LIPSYNC_FORCE", "").strip().lower() in ("1", "true", "yes", "on")
-# 极端表情（惊恐/喊叫）镜头的嘴部驱动强度：工作流默认 1.5 → 降到 0.8，减少嘴部形变
-LIPSYNC_EXPRESSION_RISK = float(os.environ.get("WEAVEORA_LIPSYNC_EXPRESSION_RISK", "0.8"))
+# 极端表情（惊恐/喊叫）镜头的嘴部驱动强度：工作流写死 1.5 → 高危镜降到**节点允许的下限 1.0**
+# （LatentSyncNode 的 lips_expression = min 1.0 / max 3.0 / default 1.5；实测给它 0.8 会被
+#   ComfyUI 直接判 prompt_outputs_failed_validation → 任务秒失败。所以这里默认 1.0，并且
+#   注入前一律按节点 schema 夹一次区间，env 写错也不会再把任务打挂）
+LIPSYNC_EXPRESSION_RISK = float(os.environ.get("WEAVEORA_LIPSYNC_EXPRESSION_RISK", "1.0"))
 
 
 # 文件名类输入的候选键（按优先级）：不同加载节点名字不一样
@@ -1191,7 +1201,8 @@ def _face_precheck(video_bytes, where="lipsync", target_emb=None, speaker="", fo
     为什么要第三道（2026-09-14 实测，用户反馈「画面被破坏」）：第 5 镜 action
     「…抓住宝玉将他拖下溪去，宝玉失声惊叫」、正词 `his mouth open in a terrified scream`，
     底片（motion 片段）里嘴本来就大张，LatentSync 要先把嘴合上再按音频重开 →
-    嘴部掩码区大幅形变。实测 mouth_open：静帧 1.232 / 片段 1.238（正常闭嘴 0.03~0.17）。
+    嘴部掩码区大幅形变。实测 mouth_open：第5镜 1.232/1.238（真·大张），
+    而平静脸 0.44~0.66、第6镜 0.59/0.78 —— 阈值就按这两档分的（见常量区量化表）。
     底片本身不合格时应**提前拒绝并告诉他怎么换**，而不是烧十几分钟 GPU 出一段坏画面。
 
     逃生门：force=True（payload.lipsyncForce）或 env WEAVEORA_LIPSYNC_FORCE=1。
@@ -1553,6 +1564,34 @@ def apply_services(svc):
              FACE_URL or "(本机)"), flush=True)
 
 
+def _clamp_node_scalar(class_type, key, value):
+    """按节点 schema 把标量夹进 min/max（越界会被 ComfyUI 直接 400）。
+
+    为什么必须夹：实测 LatentSyncNode 的 `lips_expression` 是 min 1.0 / max 3.0，
+    而「降低嘴部形变」的自然想法是给 0.8 → ComfyUI 报
+    `prompt_outputs_failed_validation: Value 0.8 smaller than min of 1.0`，整个对口型任务秒失败。
+    拿不到 schema 时原样返回（不因为探测失败而拦任务）。
+    """
+    lo = hi = None
+    try:
+        info = _node_info(class_type) or {}
+        node = next(iter(info.values()), None) or {}
+        spec = ((node.get("input") or {}).get("required") or {}).get(key)
+        if isinstance(spec, list) and len(spec) > 1 and isinstance(spec[1], dict):
+            lo, hi = spec[1].get("min"), spec[1].get("max")
+    except Exception:
+        lo = hi = None
+    try:
+        v = value
+        if lo is not None and float(v) < float(lo):
+            v = float(lo)
+        if hi is not None and float(v) > float(hi):
+            v = float(hi)
+        return v, lo, hi
+    except Exception:
+        return value, lo, hi
+
+
 def _run_lipsync_graph(client_id, vbytes, abytes, emb_path, on_tick=None, lips_expression=None):
     """跑一次对口型工作流，返回产物 mp4 bytes（整镜 / 单段共用）。
 
@@ -1596,9 +1635,10 @@ def _run_lipsync_graph(client_id, vbytes, abytes, emb_path, on_tick=None, lips_e
         _n = _set_node_scalar(graph, LIPSYNC_NODE_CLASS, "target_embedding_path", emb_path)
         print("[comfy] 已注入 target_embedding_path（命中 %d 个 %s）" % (_n, LIPSYNC_NODE_CLASS), flush=True)
     if lips_expression is not None:
-        _n = _set_node_scalar(graph, LIPSYNC_NODE_CLASS, "lips_expression", float(lips_expression))
-        print("[comfy] 嘴部驱动强度 lips_expression=%.2f（命中 %d 个 %s）"
-              % (float(lips_expression), _n, LIPSYNC_NODE_CLASS), flush=True)
+        _val, _lo, _hi = _clamp_node_scalar(LIPSYNC_NODE_CLASS, "lips_expression", float(lips_expression))
+        _n = _set_node_scalar(graph, LIPSYNC_NODE_CLASS, "lips_expression", _val)
+        print("[comfy] 嘴部驱动强度 lips_expression=%.2f（请求 %.2f；节点允许 %s~%s；命中 %d 个 %s）"
+              % (_val, float(lips_expression), _lo, _hi, _n, LIPSYNC_NODE_CLASS), flush=True)
     _mode, _nodes = _apply_fps_policy(graph)
     print("[comfy] 对口型 fps 策略：%s（节点：%s）" % (_mode, ",".join(str(x) for x in _nodes)), flush=True)
     # 裸节点图 → /prompt 要的是 {"prompt": 图, "client_id": ...}
@@ -1681,7 +1721,7 @@ def generate_lipsync(client_id, payload, progress_fn=None):
                   or str(vctype or "").startswith("image"))
     if still_mode:
         vdata = _still_to_video(vdata, adata, payload.get("duration_sec"))
-        print("[comfy] lipsync 画面为静帧 → 已用 ffmpeg 转成与配音等长的 mp4", flush=True)
+        print("[comfy] lipsync 底片为静帧 → 已转成与配音等长的 mp4（等比缩放，不做 pad/裁切）", flush=True)
 
     speakers = payload.get("speakers") if isinstance(payload.get("speakers"), dict) else {}
     segs = payload.get("segments") if isinstance(payload.get("segments"), list) else []
@@ -1946,15 +1986,25 @@ def _wav_seconds(path):
         return None
 
 
-def _still_to_video(img_bytes, audio_bytes, duration_sec=None, size=512, fps=25):
+def _still_to_video(img_bytes, audio_bytes, duration_sec=None, fps=25, max_long=1280):
     """关键帧静帧 + 配音 → mp4（口型工作流需要视频轨）。时长以实际配音为准。
 
     为什么必须做：LatentSync 工作流是 LoadVideo → GetVideoComponents，
     直接把 png 当 mp4 传进去 LoadVideo 会解码失败。
+
+    为什么**不再 pad 成 512x512**（2026-09-14 实测）：原来是 scale=512:512 + pad=512:512，
+    于是 2560x1440 的 16:9 静帧被压成**带黑边的方片**，LatentSync 产物也就成了 512x512 方视频
+    —— 成片画幅被破坏，而且平白把脸缩小（黑边还占了一半像素）。现在只做**等比缩放**：
+    长边 ≤ max_long（默认 1280，与实测能跑通的片段底片 1280x720 同一量级），不 pad 不裁。
+    可用 WEAVEORA_LIPSYNC_STILL_MAX 覆盖。
     """
     import subprocess, tempfile
     if not img_bytes:
         raise ComfyError("静帧画面为空，无法生成对口型输入视频")
+    try:
+        max_long = int(os.environ.get("WEAVEORA_LIPSYNC_STILL_MAX") or max_long)
+    except Exception:
+        pass
     d = tempfile.mkdtemp(prefix="weaveora_still_")
     ip = os.path.join(d, "in.png")
     ap = os.path.join(d, "a.wav")
@@ -1964,14 +2014,16 @@ def _still_to_video(img_bytes, audio_bytes, duration_sec=None, size=512, fps=25)
     with open(ap, "wb") as fh:
         fh.write(audio_bytes or b"")
     dur = _wav_seconds(ap) or float(duration_sec or 0) or 3.0
+    vf = ("scale='if(gt(iw,ih),min(%d,iw),-2)':'if(gt(iw,ih),-2,min(%d,ih))'"
+          % (max_long, max_long))
     r = subprocess.run(
         [_ffmpeg_exe(), "-y", "-loglevel", "error", "-loop", "1", "-i", ip, "-t", "%.3f" % dur,
-         "-r", str(fps), "-vf",
-         "scale=%d:%d:force_original_aspect_ratio=decrease,pad=%d:%d:(ow-iw)/2:(oh-ih)/2"
-         % (size, size, size, size),
-         "-pix_fmt", "yuv420p", "-c:v", "libx264", op],
+         "-r", str(fps), "-vf", vf, "-pix_fmt", "yuv420p", "-c:v", "libx264", op],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=300)
     if r.returncode != 0 or not os.path.exists(op):
         raise ComfyError("静帧转视频失败: %s" % (r.stderr or "")[-300:])
+    _w, _h, _dur = _probe_video_meta(open(op, "rb").read())
+    print("[comfy] 静帧 → 视频：%sx%s（长边封顶 %d，等比不 pad）/ %.2fs"
+          % (_w, _h, max_long, dur), flush=True)
     with open(op, "rb") as fh:
         return fh.read()

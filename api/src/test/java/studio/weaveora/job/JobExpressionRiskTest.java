@@ -49,7 +49,8 @@ class JobExpressionRiskTest {
 
     @Test
     void secondShotAlsoHit() {
-        // 第 6 镜（宝玉失声喊叫）同样命中
+        // 第 6 镜（宝玉失声喊叫）：**文字口径**同样命中（保守走静帧底片）；
+        // 但实测它底片 mouth_open 只有 0.59~0.78（正常区间），所以 B 的硬拦不会命中它。
         assertTrue(JobService.expressionRisk(shot(
                 "梦醒，宝玉在床上失声喊叫，袭人等众丫鬟忙上前搂住安抚，一遍遍低声唤他莫怕。",
                 "a young man ... sweat on his forehead, eyes wide in terror, several young maidservants ...")));
