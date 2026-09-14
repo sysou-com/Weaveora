@@ -602,8 +602,15 @@ def _motion_base_nodes(positive, negative, first_frame_name, a, width, height, l
         "neg": {"class_type": "CLIPTextEncode",
                 "inputs": {"text": negative, "clip": ["clip", 0]}},
         "img": {"class_type": "LoadImage", "inputs": {"image": first_frame_name}},
-        "latent": {"class_type": "Wan22ImageToVideoLatent",
+        # ★ 必须用**原生** WanImageToVideo（2026-09-14 修）：它按 Wan2.2 14B 的
+        #   patch_size=2 口径造潜变量，并顺便把正/负条件一起吐出来（输出 0/1/2）。
+        #   之前这里用的是 Wan22ImageToVideoLatent（旧的自定义路径，按 patch=1 造 60×104）
+        #   → A14B 模型内部按 2×2 patchify 得 30×52，两者对不上，
+        #   报 “The expanded size of the tensor (52) must match the existing size (104)”。
+        #   对照：ComfyUI 自带官方模板 video_wan2_2_14B_i2v.json 用的就是 WanImageToVideo。
+        "latent": {"class_type": "WanImageToVideo",
                    "inputs": {"vae": ["vae", 0], "start_image": ["img", 0],
+                              "positive": ["pos", 0], "negative": ["neg", 0],
                               "width": width, "height": height, "length": length,
                               "batch_size": 1}},
     }
@@ -665,14 +672,14 @@ def _motion_graph(client_id, payload, positive, negative, first_frame_name, pref
             "model": hi, "add_noise": "enable", "noise_seed": seed,
             "steps": plan["steps"], "cfg": plan["cfg_high"],
             "sampler_name": sampler, "scheduler": scheduler,
-            "positive": ["pos", 0], "negative": ["neg", 0],
-            "latent_image": ["latent", 0], "start_at_step": 0,
+            "positive": ["latent", 0], "negative": ["latent", 1],
+            "latent_image": ["latent", 2], "start_at_step": 0,
             "end_at_step": plan["switch"], "return_with_leftover_noise": "enable"}}
         nodes["sampler_lo"] = {"class_type": "KSamplerAdvanced", "inputs": {
             "model": lo, "add_noise": "disable", "noise_seed": seed,
             "steps": plan["steps"], "cfg": plan["cfg_low"],
             "sampler_name": sampler, "scheduler": scheduler,
-            "positive": ["pos", 0], "negative": ["neg", 0],
+            "positive": ["latent", 0], "negative": ["latent", 1],
             "latent_image": ["sampler_hi", 0], "start_at_step": plan["switch"],
             "end_at_step": 10000, "return_with_leftover_noise": "disable"}}
         tail = ["sampler_lo", 0]
@@ -684,8 +691,8 @@ def _motion_graph(client_id, payload, positive, negative, first_frame_name, pref
             "model": one, "add_noise": "enable", "noise_seed": seed,
             "steps": plan["steps"], "cfg": plan["cfg_high"],
             "sampler_name": sampler, "scheduler": scheduler,
-            "positive": ["pos", 0], "negative": ["neg", 0],
-            "latent_image": ["latent", 0], "start_at_step": 0,
+            "positive": ["latent", 0], "negative": ["latent", 1],
+            "latent_image": ["latent", 2], "start_at_step": 0,
             "end_at_step": 10000, "return_with_leftover_noise": "disable"}}
         tail = ["sampler", 0]
         shape = "single 单专家"
