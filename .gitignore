@@ -1,5 +1,6 @@
 # ---- Java / Maven ----
 api/target/
+/build/
 *.class
 .mvn/timing.properties
 
