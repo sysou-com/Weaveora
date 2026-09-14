@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ArrowLeft, Save } from 'lucide-vue-next'
-import { NAlert, NButton, NForm, NFormItem, NIcon, NInput, NInputNumber, NRadio, NRadioGroup, NSelect, useMessage } from 'naive-ui'
-import { computed, onMounted, ref } from 'vue'
+import { NAlert, NButton, NDivider, NForm, NFormItem, NIcon, NInput, NInputNumber, NRadio, NRadioGroup, NSelect, useMessage } from 'naive-ui'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 
 import { getEngineSettings, refreshModelPreset, saveEngineSettings } from '@/api/engineSettings'
@@ -129,6 +129,67 @@ const isGateway = computed(() => (imageCloudBaseUrl.value ?? '').trim().startsWi
 const videoSchema = ref<ModelSchema | null>(null)
 const imageParams = ref<Record<string, unknown>>({})
 const videoParams = ref<Record<string, unknown>>({})
+
+// ---- 自托管 motion 档位（Wan2.2 I2V-A14B 双专家）----------------------------------
+// 这些键与后端 api/…/EngineSettingsService.MOTION_KEYS 白名单一致；保存后随任务下发为 services.motion。
+const MOTION_KEYS = [
+  'preset', 'steps', 'switch_step', 'cfg', 'cfg_high', 'cfg_low',
+  'lora_high', 'lora_low', 'lora_high_name', 'lora_low_name', 'shift',
+  'sampler_name', 'scheduler', 'model_high', 'model_low', 'mode', 'dual',
+  'width', 'height', 'frames', 'fps',
+]
+const motionPresetOptions = ['draft', 'balanced', 'motion', 'hero', 'full'].map((v) => ({ label: v, value: v }))
+const motionJson = ref('')
+
+function numOf(v: unknown): number | null {
+  return typeof v === 'number' && Number.isFinite(v) ? v : null
+}
+
+/** 写/删单个 motion 键（空值 = 删掉该键，回到档位默认）。 */
+function mSet(key: string, v: unknown): void {
+  const next = { ...(videoParams.value ?? {}) }
+  if (v === null || v === undefined || v === '') delete next[key]
+  else next[key] = v
+  videoParams.value = next
+}
+
+/** 只取白名单键（给 JSON 文本框回显）。 */
+function pickMotion(v: Record<string, unknown> | null | undefined): Record<string, unknown> {
+  const out: Record<string, unknown> = {}
+  const src = v ?? {}
+  for (const k of MOTION_KEYS) {
+    const val = src[k]
+    if (val !== undefined && val !== null && val !== '') out[k] = val
+  }
+  return out
+}
+
+watch(
+  videoParams,
+  (v) => { motionJson.value = JSON.stringify(pickMotion(v)) },
+  { immediate: true, deep: true },
+)
+
+/** JSON 文本框失焦时合并回 videoParams（只认白名单键，其余丢弃并提示）。 */
+function applyMotionJson(): void {
+  let parsed: Record<string, unknown>
+  const raw = (motionJson.value ?? '').trim()
+  try {
+    parsed = raw ? (JSON.parse(raw) as Record<string, unknown>) : {}
+  } catch {
+    message.error('motion JSON 解析失败，请检查格式')
+    return
+  }
+  const next = { ...(videoParams.value ?? {}) }
+  for (const k of MOTION_KEYS) delete next[k]
+  let ignored = 0
+  for (const [k, val] of Object.entries(parsed)) {
+    if (MOTION_KEYS.includes(k)) next[k] = val
+    else ignored += 1
+  }
+  videoParams.value = next
+  message.success(ignored ? `已更新 motion 档位（忽略 ${ignored} 个非 motion 键）` : '已更新 motion 档位（保存后随任务下发）')
+}
 
 /** 后端返回的配置 → 回填本地（保存/刷新后共用） */
 function applySettings(s: EngineSettings): void {
@@ -423,6 +484,66 @@ onMounted(load)
             <NInputNumber v-model:value="gpuServerPort" :min="1" :max="65535" placeholder="8188" style="width: 130px" />
           </NFormItem>
         </div>
+
+        <!-- 自托管 motion 档位（Wan2.2 I2V-A14B 双专家）
+             为什么单独放这里：上面“视频参数”面板被 `v-if="videoEngine === 'cloud'"` 包着，
+             切到自有引擎后就没有入口了 —— 而自托管恰恰最需要它（preset/lora_high 直接决定动态）。
+             这些键会被后端 services.motion 白名单收下并随任务下发给 worker。 -->
+        <NDivider style="margin: 6px 0 10px" />
+        <p class="hint text-secondary" style="margin-bottom: 10px">
+          <b>自托管 motion 档位</b>（Wan2.2 I2V-A14B 双专家）：高噪声专家负责大幅运动，
+          <b>默认不蒸馏（lora_high=0）</b>；动态靠 steps / switch / cfg 调。
+          保存后随任务下发（无需重启 worker）。留空 = 用 worker 默认档 <code>balanced</code>。
+        </p>
+        <div class="row" style="flex-wrap: wrap; gap: 8px">
+          <NFormItem label="档位 preset" style="width: 200px">
+            <NSelect
+              :value="(videoParams.preset as string) ?? null"
+              :options="motionPresetOptions"
+              size="small"
+              clearable
+              placeholder="balanced"
+              @update:value="(v: string | null) => mSet('preset', v)"
+            />
+          </NFormItem>
+          <NFormItem label="步数 steps" style="width: 150px">
+            <NInputNumber :value="numOf(videoParams.steps)" size="small" :min="1" :max="40"
+                          placeholder="档位默认" @update:value="(v: number | null) => mSet('steps', v)" />
+          </NFormItem>
+          <NFormItem label="切换步 switch" style="width: 160px">
+            <NInputNumber :value="numOf(videoParams.switch_step)" size="small" :min="1" :max="40"
+                          placeholder="总步数折半" @update:value="(v: number | null) => mSet('switch_step', v)" />
+          </NFormItem>
+          <NFormItem label="cfg 高噪声" style="width: 160px">
+            <NInputNumber :value="numOf(videoParams.cfg_high)" size="small" :min="0" :max="10" :step="0.5"
+                          placeholder="1.0（hero=3.5）" @update:value="(v: number | null) => mSet('cfg_high', v)" />
+          </NFormItem>
+          <NFormItem label="cfg 低噪声" style="width: 160px">
+            <NInputNumber :value="numOf(videoParams.cfg_low)" size="small" :min="0" :max="10" :step="0.5"
+                          placeholder="1.0" @update:value="(v: number | null) => mSet('cfg_low', v)" />
+          </NFormItem>
+          <NFormItem label="LoRA 高噪声" style="width: 170px">
+            <NInputNumber :value="numOf(videoParams.lora_high)" size="small" :min="0" :max="1.5" :step="0.1"
+                          placeholder="0（不蒸馏，推荐）" @update:value="(v: number | null) => mSet('lora_high', v)" />
+          </NFormItem>
+          <NFormItem label="LoRA 低噪声" style="width: 170px">
+            <NInputNumber :value="numOf(videoParams.lora_low)" size="small" :min="0" :max="1.5" :step="0.1"
+                          placeholder="1.0" @update:value="(v: number | null) => mSet('lora_low', v)" />
+          </NFormItem>
+          <NFormItem label="shift" style="width: 140px">
+            <NInputNumber :value="numOf(videoParams.shift)" size="small" :min="0" :max="20" :step="0.5"
+                          placeholder="5.0" @update:value="(v: number | null) => mSet('shift', v)" />
+          </NFormItem>
+        </div>
+        <NFormItem label="高级：直接编辑 motion JSON（白名单键，逗号分隔的任一子集即可）">
+          <NInput
+            v-model:value="motionJson"
+            type="textarea"
+            :autosize="{ minRows: 2, maxRows: 6 }"
+            placeholder='如 {"preset":"motion","lora_high":0}'
+            @blur="applyMotionJson"
+          />
+        </NFormItem>
       </section>
 
       <section class="card" data-testid="svc-card">
