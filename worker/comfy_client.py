@@ -852,6 +852,24 @@ def _encode_frames_mp4(frames_bytes, fps, out_dir):
     return mp4
 
 
+def _motion_tick(progress_fn):
+    """motion 采样期间的进度回调：每分钟报一次已耗时（720p 双专家可能跑很久）。
+
+    为什么需要：旧的 `_poll_history` 默认 600s 超时且不报进度 —— 用户看到「50%」卡住十分钟
+    然后 timeout，既不知道在跑、也不知道慢在哪。
+    """
+    state = {"last": -1}
+
+    def _tick(elapsed):
+        m = int(elapsed // 60)
+        if m > 0 and m != state["last"]:
+            state["last"] = m
+            if progress_fn:
+                progress_fn(60, "sampling 已 %d 分钟" % m)
+
+    return _tick
+
+
 def generate_motion(client_id, payload, progress_fn=None):
     """Wan2.2 i2v motion（关键帧→短视频 mp4）。返回 [{bytes,mime,width,height}]。"""
     import tempfile, uuid as _uuid
@@ -939,7 +957,7 @@ def generate_motion(client_id, payload, progress_fn=None):
         raise ComfyError("comfy /prompt 无 prompt_id")
     if progress_fn:
         progress_fn(50, "sampling")
-    rec = _poll_history(client_id, pid)
+    rec = _poll_history(client_id, pid, timeout=MOTION_TIMEOUT, on_tick=_motion_tick(progress_fn))
     # 收集输出帧
     frames = []
     outputs = rec.get("outputs") or {}
