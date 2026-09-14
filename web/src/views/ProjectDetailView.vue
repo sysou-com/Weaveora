@@ -44,6 +44,7 @@ import { aspectNote, modeLabel } from '@/utils/format'
 import {
   SOURCE_LABEL,
   autoLayoutShot,
+  canonicalJson,
   clonePlan,
   isVideoPlan,
   normalizePlan,
@@ -159,14 +160,16 @@ watch(
     refRegions.value = regions
     // P13：参考图默认**全部不选中**（它们只是生成定妆的素材；要用再点选）
     refUnchecked.value = [...ids]
-    pristineJson.value = JSON.stringify(draft.value)
+    // 用 canonicalJson（键序无关）：schema_json 是 jsonb，键序会被 PG 重排，
+    // 直接 JSON.stringify 比对会把「纯键序差异」当成「有改动」（见 utils/plan.ts 注释）
+    pristineJson.value = canonicalJson(draft.value)
     dirty.value = false
   },
   { immediate: true },
 )
 
 watch(draft, () => {
-  dirty.value = draft.value !== null && JSON.stringify(draft.value) !== pristineJson.value
+  dirty.value = draft.value !== null && canonicalJson(draft.value) !== pristineJson.value
 }, { deep: true })
 
 const detApproved = computed(() => detail.data.value?.approved === true)
@@ -1930,7 +1933,8 @@ async function startVoice(shotNos?: number[] | null): Promise<void> {
   if (!revId) return
   if (dirty.value && !(await savePlanInPlace())) return
   focusJobTab('voice')
-  if (dirty.value && !(await handleSave())) return
+  // 注：这里**不能**再兜一手 handleSave()。savePlanInPlace 已把草稿就地写入生成基准稿；
+  // 若它没清掉 dirty，handleSave 会在已确认稿上**另存 vN+1**（未确认）→ 反而要求重新确认。
   genBusy.value = true
   try {
     const created = await createJobs(workspaceId.value, projectId.value, {
@@ -2233,7 +2237,7 @@ async function startBgm(): Promise<void> {
   if (!revId) return
   if (dirty.value && !(await savePlanInPlace())) return
   focusJobTab('bgm')
-  if (dirty.value && !(await handleSave())) return
+  // 同上：禁止再兜 handleSave（会在已确认稿上另存未确认版本，导致又要重新确认）
   genBusy.value = true
   try {
     const created = await createJobs(workspaceId.value, projectId.value, { revisionId: revId, kind: 'bgm' })
@@ -2253,7 +2257,8 @@ async function startLipsync(shotNos?: number[] | null): Promise<void> {
   if (!revId) return
   focusJobTab('lipsync')
   if (dirty.value && !(await savePlanInPlace())) return
-  if (dirty.value && !(await handleSave())) return
+  // 同上：禁止再兜 handleSave —— 那会在已确认稿上另存 vN+1（未确认），
+  // 于是“对口型按钮总是提示保存/要求确认方案”。
   genBusy.value = true
   try {
     const created = await createJobs(workspaceId.value, projectId.value, {
@@ -2934,7 +2939,7 @@ async function savePlanInPlace(): Promise<boolean> {
   if (!revId || !plan) return false
   try {
     await patchPlanInPlace(workspaceId.value, projectId.value, revId, plan)
-    pristineJson.value = JSON.stringify(plan)   // 已落库 → 不再算脏
+    pristineJson.value = canonicalJson(plan)    // 已落库 → 不再算脏（键序无关）
     dirty.value = false
     await queryClient.invalidateQueries({ queryKey: ['revision', workspaceId.value, projectId.value, revId] })
     return true
@@ -3010,16 +3015,18 @@ const changeSummary = computed<string[]>(() => {
   const byNo = new Map(shotsA.map((x) => [Number(x.shot_no), x]))
   for (const cs of shotsC) {
     const as = byNo.get(Number(cs.shot_no))
-    if (!as || JSON.stringify(as) !== JSON.stringify(cs)) changedShots++
-    const la = JSON.stringify(as?.narrations ?? [])
-    const lc = JSON.stringify(cs.narrations ?? [])
+    // canonicalJson：schema_json 是 jsonb，键序会被 PG 重排；普通 stringify 会把
+    // 「纯键序差异」误报成「分镜有改动」→ 已确认版本上仍弹「保存并确认后生成」
+    if (!as || canonicalJson(as) !== canonicalJson(cs)) changedShots++
+    const la = canonicalJson(as?.narrations ?? [])
+    const lc = canonicalJson(cs.narrations ?? [])
     if (la !== lc) changedLines++
   }
   if (shotsC.length !== shotsA.length) out.push(`分镜数量 ${shotsA.length}→${shotsC.length}`)
   if (changedShots) out.push(`分镜 ${changedShots} 镜有改动`)
   if (changedLines) out.push(`台词/旁白 ${changedLines} 镜有改动`)
-  const vbA = JSON.stringify((ac.audio as { voiceBindings?: unknown } | undefined)?.voiceBindings ?? [])
-  const vbC = JSON.stringify((cc.audio as { voiceBindings?: unknown } | undefined)?.voiceBindings ?? [])
+  const vbA = canonicalJson((ac.audio as { voiceBindings?: unknown } | undefined)?.voiceBindings ?? [])
+  const vbC = canonicalJson((cc.audio as { voiceBindings?: unknown } | undefined)?.voiceBindings ?? [])
   if (vbA !== vbC) out.push('角色音色绑定')
   const vA = JSON.stringify((ac.audio as { voice?: unknown } | undefined)?.voice ?? '')
   const vC = JSON.stringify((cc.audio as { voice?: unknown } | undefined)?.voice ?? '')
@@ -3027,8 +3034,8 @@ const changeSummary = computed<string[]>(() => {
   const mA = JSON.stringify((ac.audio as { music?: unknown } | undefined)?.music ?? (ac.audio as { music_mood?: unknown } | undefined)?.music_mood ?? '')
   const mC = JSON.stringify((cc.audio as { music?: unknown } | undefined)?.music ?? (cc.audio as { music_mood?: unknown } | undefined)?.music_mood ?? '')
   if (mA !== mC) out.push('配乐')
-  const rA = JSON.stringify(ac.referenceAssets ?? [])
-  const rC = JSON.stringify(cc.referenceAssets ?? [])
+  const rA = canonicalJson(ac.referenceAssets ?? [])
+  const rC = canonicalJson(cc.referenceAssets ?? [])
   if (rA !== rC) out.push('参考图/区域')
   return out.length ? out : ['（仅有不影响生成的元数据变化）']
 })
