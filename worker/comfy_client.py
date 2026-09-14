@@ -556,6 +556,31 @@ MOTION_VRAM_SAFETY_GB = float(os.environ.get("WEAVEORA_MOTION_VRAM_SAFETY_GB", "
 
 # 总显存低于这个值就别浪费 GPU 时间了（A14B 硬门槛：24G 卡无论如何跑不了）
 MOTION_MIN_FREE_GB = float(os.environ.get("WEAVEORA_MOTION_MIN_FREE_GB", "30") or 30)
+# motion 出片分辨率：A14B 的甜点是 **480p 级**（官方模板就是 640×640；实测 832×480 比 1280×704
+# 快 5~10 倍，而且不会把 48G 卡跑到 47.4/47.4 GiB 反复换入换出 —— 实测 720p/48 帧要 >600s）。
+# 默认把长边压到 ≤ MOTION_DEFAULT_LONG_SIDE；params.resolution=720p/原始 可放开。
+MOTION_DEFAULT_LONG_SIDE = int(os.environ.get("WEAVEORA_MOTION_LONG_SIDE", "832") or 832)
+
+
+def _motion_resolution(params, width, height):
+    """motion 实际出片尺寸：默认压到 480p 桶，显式要求才用原分辨率。
+
+    · params.resolution ∈ {720p,1080p,full,original,source} → 原样（如 16:9 的 1280×704）
+    · 其它（含 480p/空）→ 长边缩到 ≤832，宽高对齐 /16（Wan 的桶对齐）
+    保持画幅比例，不改变项目构图。
+    """
+    res = str((params or {}).get("resolution") or "").strip().lower()
+    w, h = int(width), int(height)
+    if res in ("720p", "720", "1080p", "1080", "full", "original", "source"):
+        return w, h
+    long_side = MOTION_DEFAULT_LONG_SIDE
+    if max(w, h) <= long_side:
+        return w, h
+    scale = float(long_side) / float(max(w, h))
+    nw, nh = int(round(w * scale)), int(round(h * scale))
+    nw = max(16, int(round(nw / 16.0)) * 16)   # Wan 桶对齐：就近取整，别让 16:9 变成 1.857
+    nh = max(16, int(round(nh / 16.0)) * 16)
+    return nw, nh
 MOTION_MIN_TOTAL_GB = float(os.environ.get("WEAVEORA_MOTION_MIN_TOTAL_GB", "44") or 44)
 
 
@@ -886,6 +911,12 @@ def generate_motion(client_id, payload, progress_fn=None):
     # motion 固定 768×768（Comfy 原生 Wan2.2 方形档位；8GB fp8），关键帧缩放后上传保证一致
     mw = int(_mp.get("width", 768))
     mh = int(_mp.get("height", 768))
+    # 分辨率口径：默认压到 480p 桶（A14B 甜点 + 48G 卡不换入换出），显式 720p 才放开
+    _w0, _h0 = mw, mh
+    mw, mh = _motion_resolution(_mp, mw, mh)
+    if (mw, mh) != (_w0, _h0):
+        print("[comfy] motion 分辨率 %dx%d → %dx%d（默认 480p 桶；要原分辨率请设 resolution=720p）"
+              % (_w0, _h0, mw, mh), flush=True)
     # P2：A14B 双专家实测峰值 ~42 GiB → 总显存不够就**快速失败并点名换机**
     # （旧行为：硬跑 → OOM，报一堆看不懂的错；24G 卡无论如何跑不了 A14B）
     if str(_mp.get("mode") or "").strip().lower() != "single":

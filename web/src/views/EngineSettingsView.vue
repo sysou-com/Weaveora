@@ -139,6 +139,11 @@ const MOTION_KEYS = [
   'width', 'height', 'frames', 'fps',
 ]
 const motionPresetOptions = ['draft', 'balanced', 'motion', 'hero', 'full'].map((v) => ({ label: v, value: v }))
+// 分辨率：A14B 的甜点是 480p（快 5~10 倍、不会把 48G 卡跑到换入换出）；720p = 原分辨率（很慢）
+const motionResOptions = [
+  { label: '480p（推荐：长边 832）', value: '480p' },
+  { label: '720p（原分辨率，很慢）', value: '720p' },
+]
 const motionJson = ref('')
 
 function numOf(v: unknown): number | null {
@@ -529,6 +534,14 @@ onMounted(load)
           <NFormItem label="LoRA 低噪声" style="width: 170px">
             <NInputNumber :value="numOf(videoParams.lora_low)" size="small" :min="0" :max="1.5" :step="0.1"
                           placeholder="1.0" @update:value="(v: number | null) => mSet('lora_low', v)" />
+          </NFormItem>
+          <NFormItem label="分辨率" style="width: 230px">
+            <NSelect
+              :value="(videoParams.resolution as string) ?? '480p'"
+              :options="motionResOptions"
+              size="small"
+              @update:value="(v: string | null) => mSet('resolution', v ?? '480p')"
+            />
           </NFormItem>
           <NFormItem label="shift" style="width: 140px">
             <NInputNumber :value="numOf(videoParams.shift)" size="small" :min="0" :max="20" :step="0.5"

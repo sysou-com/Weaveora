@@ -75,7 +75,7 @@ public class EngineSettingsService {
             "preset", "steps", "switch", "switch_step", "cfg", "cfg_high", "cfg_low",
             "lora_high", "lora_low", "lora_high_name", "lora_low_name", "shift",
             "sampler_name", "scheduler", "model_high", "model_low",
-            "mode", "dual", "width", "height", "frames", "fps");
+            "mode", "dual", "width", "height", "frames", "fps", "resolution");
 
     /**
      * 视频引擎是自托管（GPU）时，sanitize 之后仍要保住 motion 档位键。
