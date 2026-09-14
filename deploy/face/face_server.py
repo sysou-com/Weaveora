@@ -12,6 +12,7 @@
        body: {"media_b64": "<视频或图片字节 base64>", "target_embedding": [512 floats]?}
        resp: {"hits": 6, "total": 6, "best": 0.6537,
               "face_ratio": 0.0832,   # 最大脸框面积 / 画面面积（6 帧里的最大值）
+              "face_px": 220.5,         # 最大脸框宽度（像素，比占比更稳）
               "mouth_open": 0.61}      # 嘴部张开度（6 帧/所有脸里的最大值；判不出则 null）
   POST /face/embed                 → 取一张图里最大的人脸特征（给「锁人」做参考）
        body: {"image_b64": "<图片字节 base64>"}
@@ -99,7 +100,7 @@ def _mouth_open_ratio(face):
     重开，嘴部掩码区会大幅形变（实测把画面搞坏）。
 
     2d106 的「按点名排序」没有官方文本表 → 点序号可用 WEAVEORA_LIPSYNC_MOUTH_IDX 覆盖
-    （默认 87-105），并且**一律过合理性校验**（嘴宽占脸宽 15%~75%、嘴中心在脸下半部、
+    （默认 52-71），并且**一律过合理性校验**（嘴宽占脸宽 15%~75%、嘴中心在脸下半部、
     横向不过分偏离脸中心）；过不了就返 None（宁可不判，也不拿假指标去拦用户的活）。
     """
     try:
@@ -109,7 +110,7 @@ def _mouth_open_ratio(face):
         pts = np.asarray(lm, dtype=np.float32)
         if pts.ndim != 2 or pts.shape[0] < 100:
             return None
-        spec = (os.environ.get("WEAVEORA_LIPSYNC_MOUTH_IDX") or "87-105").strip()
+        spec = (os.environ.get("WEAVEORA_LIPSYNC_MOUTH_IDX") or "52-71").strip()
         sep = "-" if "-" in spec else ":"
         try:
             a, b = [int(x) for x in spec.split(sep, 1)]
@@ -152,16 +153,26 @@ def _face_area_ratio(face, frame):
         return None
 
 
-def probe(media_b64: str, suffix: str, target=None):
-    """抽样帧的人脸统计：(hits, total, best_sim, face_ratio, mouth_open)。
+def _face_px(face):
+    """人脸框宽度（像素）。比「占画面占比」更稳：抽帧分辨率不同（2560x1440 静帧 vs
+    1280x720 片段，同一机位的占比差 4 倍），而对口型在乎的是脸到底有多少像素。"""
+    try:
+        return float(face.bbox[2]) - float(face.bbox[0])
+    except Exception:
+        return None
 
-    face_ratio / mouth_open 取所有抽样帧、所有脸里的**最大值**（最坏情况才是要拦的那个）。
+
+def probe(media_b64: str, suffix: str, target=None):
+    """抽样帧的人脸统计：(hits, total, best_sim, face_ratio, mouth_open, face_px)。
+
+    face_ratio / mouth_open / face_px 取所有抽样帧、所有脸里的**最大值**
+    （最坏情况才是要拦的那个）。
     """
     need_rec = target is not None
     app = _app(need_rec)
     frames = _read_media(media_b64, suffix)
     hits, total, best = 0, 0, None
-    face_ratio, mouth_open = None, None
+    face_ratio, mouth_open, face_px = None, None, None
     for fr in frames:
         total += 1
         faces = app.get(fr)
@@ -171,6 +182,9 @@ def probe(media_b64: str, suffix: str, target=None):
             r = _face_area_ratio(f, fr)
             if r is not None:
                 face_ratio = r if face_ratio is None else max(face_ratio, r)
+            wpx = _face_px(f)
+            if wpx is not None:
+                face_px = wpx if face_px is None else max(face_px, wpx)
             mo = _mouth_open_ratio(f)
             if mo is not None:
                 mouth_open = mo if mouth_open is None else max(mouth_open, mo)
@@ -186,7 +200,7 @@ def probe(media_b64: str, suffix: str, target=None):
                 s = float(np.dot(v, t))
                 if best is None or s > best:
                     best = s
-    return hits, total, best, face_ratio, mouth_open
+    return hits, total, best, face_ratio, mouth_open, face_px
 
 
 def embed(image_b64: str, suffix: str):
@@ -233,9 +247,11 @@ class Handler(BaseHTTPRequestHandler):
             if self.path.startswith("/face/probe"):
                 media = body.get("media_b64") or ""
                 suffix = body.get("suffix") or ".mp4"
-                hits, total, best, face_ratio, mouth_open = probe(media, suffix, body.get("target_embedding"))
+                hits, total, best, face_ratio, mouth_open, face_px = probe(
+                    media, suffix, body.get("target_embedding"))
                 return self._json(200, {"hits": hits, "total": total, "best": best,
-                                        "face_ratio": face_ratio, "mouth_open": mouth_open})
+                                        "face_ratio": face_ratio, "mouth_open": mouth_open,
+                                        "face_px": face_px})
             if self.path.startswith("/face/embed"):
                 emb, px = embed(body.get("image_b64") or "", body.get("suffix") or ".png")
                 return self._json(200, {"embedding": emb, "face_px": px})

@@ -197,7 +197,7 @@ Start-ScheduledTask -TaskName ComfyWorker
 | 机制 | 行为 | 怎么用 / 怎么改 |
 |---|---|---|
 | **A 逐镜可选底片** | 选镜弹窗每行「底片：`片段` / `静帧`」；写方案 `shots[].lipsync_source`（不写=自动） | 对话近景建议 **静帧**（一张干净的脸）；需要保留运镜时才用片段 |
-| **B 底片体检**（worker 出片前） | ① 最大脸 < `WEAVEORA_LIPSYNC_FACE_MIN_RATIO`（默认 1.5%）→ **拒绝**（脸太小，跑了也看不出）；② 嘴张开度 ≥ `WEAVEORA_LIPSYNC_MOUTH_MAX`（默认 0.50）→ **拒绝**并提示换底片；③ ≥ `WARN`（0.30）→ 只提醒不拦 | 指标来自人脸服务 / 本机 insightface（106 点），**拿不到指标就跳过**（绝不误拦）；嘴部点序号可用 `WEAVEORA_LIPSYNC_MOUTH_IDX` 覆盖（默认 `87-105`） |
+| **B 底片体检**（worker 出片前） | ① 人脸宽度 < `WEAVEORA_LIPSYNC_FACE_MIN_PX`（默认 96px；没有像素口径时退到占画面比 `< WEAVEORA_LIPSYNC_FACE_MIN_RATIO` 1.5%）→ **拒绝**（脸太小，跑了也看不出）；② 嘴张开度 ≥ `WEAVEORA_LIPSYNC_MOUTH_MAX`（默认 0.50）→ **拒绝**并提示换底片；③ ≥ `WARN`（0.30）→ 只提醒不拦 | 指标来自人脸服务 / 本机 insightface（106 点），**拿不到指标就跳过**（绝不误拦）；嘴部点序号可用 `WEAVEORA_LIPSYNC_MOUTH_IDX` 覆盖（默认 `52-71`） |
 | **C 极端表情自动分流** | action/正词/台词含 喊叫/尖叫/失声/惊恐张口/scream/mouth wide… → ① 默认底片**自动改成静帧**（有静帧时）；② 出片时 `lips_expression` 从 1.5 降到 `WEAVEORA_LIPSYNC_EXPRESSION_RISK`（默认 0.8）减少嘴部形变；③ 选镜弹窗标「⚠ 大张口风险」 | 这类镜更好的做法是**改成旁白/画外音或侧脸**（导演层「分镜规避」本就在做） |
 
 逃生门（明确要硬跑）：方案的 `shots[].lipsync_force = true`，或 worker 侧 `WEAVEORA_LIPSYNC_FORCE=1`。

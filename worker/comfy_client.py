@@ -814,6 +814,9 @@ FACE_URL = os.environ.get("WEAVEORA_FACE_URL", "").rstrip("/")
 # 逃生门：payload.lipsyncForce=true 或 env WEAVEORA_LIPSYNC_FORCE=1（用户明确要硬跑）。
 # --------------------------------------------------------------------------- #
 LIPSYNC_FACE_MIN_RATIO = float(os.environ.get("WEAVEORA_LIPSYNC_FACE_MIN_RATIO", "0.015"))
+# 人脸最小像素宽度（更稳的口径：抽帧分辨率不同——同机位 2560x1440 静帧的「脸占比」会比
+# 1280x720 片段小 4 倍，纯用占比会误判「脸太小」）。实践：脸宽 < 96px 对口型已看不出效果。
+LIPSYNC_FACE_MIN_PX = float(os.environ.get("WEAVEORA_LIPSYNC_FACE_MIN_PX", "96"))
 LIPSYNC_MOUTH_WARN = float(os.environ.get("WEAVEORA_LIPSYNC_MOUTH_WARN", "0.30"))
 LIPSYNC_MOUTH_MAX = float(os.environ.get("WEAVEORA_LIPSYNC_MOUTH_MAX", "0.50"))
 LIPSYNC_FORCE = os.environ.get("WEAVEORA_LIPSYNC_FORCE", "").strip().lower() in ("1", "true", "yes", "on")
@@ -989,7 +992,7 @@ def mouth_ratio(face):
         pts = np.asarray(lm, dtype=np.float32)
         if pts.ndim != 2 or pts.shape[0] < 100:
             return None
-        spec = (os.environ.get("WEAVEORA_LIPSYNC_MOUTH_IDX") or "87-105").strip()
+        spec = (os.environ.get("WEAVEORA_LIPSYNC_MOUTH_IDX") or "52-71").strip()
         sep = "-" if "-" in spec else ":"
         try:
             a, b = [int(x) for x in spec.split(sep, 1)]
@@ -1045,6 +1048,7 @@ idx = sorted({int(i * (n - 1) / 5) for i in range(6)}) if n > 1 else [0]
 hits = total = 0
 best = -1.0
 face_ratio = None
+face_px = None
 mouth_open = None
 for i in idx:
     cap.set(cv2.CAP_PROP_POS_FRAMES, i)
@@ -1063,6 +1067,11 @@ for i in idx:
         r = face_area_ratio(f, fr)
         if r is not None:
             face_ratio = r if face_ratio is None else max(face_ratio, r)
+        try:
+            wpx = float(f.bbox[2]) - float(f.bbox[0])
+            face_px = wpx if face_px is None else max(face_px, wpx)
+        except Exception:
+            pass
         mo = mouth_ratio(f)
         if mo is not None:
             mouth_open = mo if mouth_open is None else max(mouth_open, mo)
@@ -1077,10 +1086,11 @@ for i in idx:
             if s > best:
                 best = s
 cap.release()
-print("RESULT:%d/%d/%s/%s/%s" % (
+print("RESULT:%d/%d/%s/%s/%s/%s" % (
     hits, total, ("%.4f" % best) if tgt is not None else "",
     ("%.5f" % face_ratio) if face_ratio is not None else "",
-    ("%.4f" % mouth_open) if mouth_open is not None else ""))
+    ("%.4f" % mouth_open) if mouth_open is not None else "",
+    ("%.1f" % face_px) if face_px is not None else ""))
 '''
 
 
@@ -1123,6 +1133,7 @@ def _face_probe(video_bytes, target_emb=None):
             extra = {
                 "face_ratio": (float(resp["face_ratio"]) if resp.get("face_ratio") is not None else None),
                 "mouth_open": (float(resp["mouth_open"]) if resp.get("mouth_open") is not None else None),
+                "face_px": (float(resp["face_px"]) if resp.get("face_px") is not None else None),
             }
             return hits, total, (float(best) if best is not None else None), extra
         except Exception as e:
@@ -1151,7 +1162,8 @@ def _face_probe(video_bytes, target_emb=None):
                 best = float(parts[2]) if len(parts) > 2 and parts[2].strip() else None
                 fr = float(parts[3]) if len(parts) > 3 and parts[3].strip() else None
                 mo = float(parts[4]) if len(parts) > 4 and parts[4].strip() else None
-                return hits, total, best, {"face_ratio": fr, "mouth_open": mo}
+                px = float(parts[5]) if len(parts) > 5 and parts[5].strip() else None
+                return hits, total, best, {"face_ratio": fr, "mouth_open": mo, "face_px": px}
         print("[comfy] 人脸预检无结果，不拦：%s" % out[:120], flush=True)
         return None
     except Exception as e:
@@ -1214,19 +1226,25 @@ def _base_health(extra, where, force=False, speaker=""):
     if not isinstance(extra, dict):
         return True
     fr = extra.get("face_ratio")
+    px = extra.get("face_px")
     mo = extra.get("mouth_open")
-    print("[comfy] 底片体检 %s：脸占比=%s，嘴张开度=%s%s"
+    print("[comfy] 底片体检 %s：脸占比=%s，脸宽=%s，嘴张开度=%s%s"
           % (where, ("%.3f%%" % (fr * 100)) if fr is not None else "n/a",
+             ("%.0fpx" % px) if px is not None else "n/a",
              ("%.3f" % mo) if mo is not None else "n/a",
              "（已开启强制，只记录不拦）" if force else ""), flush=True)
     if force:
         return True
-    if fr is not None and fr < LIPSYNC_FACE_MIN_RATIO:
+    # 脸太小：优先用「像素宽度」（不受抽帧分辨率影响），没有就退到「占画面比例」
+    too_small = (px is not None and px < LIPSYNC_FACE_MIN_PX) \
+        or (px is None and fr is not None and fr < LIPSYNC_FACE_MIN_RATIO)
+    if too_small:
         _face_reason["msg"] = (
-            "该镜底片里的人脸太小（最大脸只占画面 %.2f%%，阈值 %.2f%%）——对口型对远景/小人物"
-            "没有可见效果。请改选一张**近景/特写**的静帧当底片，或该镜不跑口型。"
-            "（如需硬跑，让管理员把 WEAVEORA_LIPSYNC_FACE_MIN_RATIO 调小）"
-            % (fr * 100, LIPSYNC_FACE_MIN_RATIO * 100))
+            "该镜底片里的人脸太小（%s）——对口型对远景/小人物没有可见效果。"
+            "请改选一张**近景/特写**的静帧当底片，或该镜不跑口型。"
+            "（如需硬跑，让管理员把 WEAVEORA_LIPSYNC_FACE_MIN_PX / _FACE_MIN_RATIO 调小）"
+            % (("脸宽仅 %.0fpx，阈值 %.0fpx" % (px, LIPSYNC_FACE_MIN_PX)) if px is not None
+               else ("最大脸只占画面 %.2f%%，阈值 %.2f%%" % (fr * 100, LIPSYNC_FACE_MIN_RATIO * 100))))
         return False
     if mo is not None and mo >= LIPSYNC_MOUTH_MAX:
         _face_reason["msg"] = (
