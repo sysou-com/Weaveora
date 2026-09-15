@@ -65,7 +65,6 @@
 | 其余 `/*` | `127.0.0.1:8001` | ComfyUI（`/prompt` `/history` `/view` `/upload/image` `/ws`） |
 
 ### 1.4 软件版本矩阵
-
 | 组件 | 版本 | 位置 |
 |---|---|---|
 | ComfyUI | **0.34.0**（`__version__`） | `/opt/weaveora/ComfyUI`（venv 独立） |
@@ -74,7 +73,24 @@
 | 配音环境 | CosyVoice 依赖栈 | `/opt/weaveora/envs/cosy` |
 | 下载器 | Node `gpu_model_downloader.js`（10 路 Range + `.meta.json` 续传 + `.done`） | `/opt/weaveora/opt-node/bin/node` |
 
-### 1.5 目录约定
+### 1.5 配置项映射（能力 ↔ 平台配置页字段）
+
+| 能力 | 平台「生成引擎配置」里的字段 | 留空时的行为 |
+|---|---|---|
+| 文生图 | **图像引擎 = GPU 服务器** +「服务地址 → 文生图」：`出图引擎`（comfy/builtin）、`ComfyUI 地址`、`文生图工作流`、`图生图工作流`、`主模型名`、`步数`、`图生图 denoise` | 用 worker 自带默认（老 SDXL 路线）；ComfyUI 地址自动取 `<GPU 服务器>:8001` |
+| 图转视频（出片） | 「视频引擎 = GPU 服务器」+「视频参数」（preset/steps/cfg/lora/shift 等，透传为 `services.motion`） | worker 默认档 `balanced` |
+| 对口型 | 「服务地址 → 对口型 ComfyUI 地址 / 工作流路径 / 超时 / 帧率」 | ComfyUI 自动取 `<GPU 服务器>`；工作流路径用 worker 本机默认 |
+| **整脸口型（talk）** | 「服务地址 → 整脸口型服务地址 / 下颌曲线增益 jaw_gain」 | 自动取 `<GPU 服务器>/talk`；jaw_gain=1.0（原生） |
+| 配音 | 「服务地址 → 配音（TTS）服务地址」 | 自动取 `<GPU 服务器>/audio` |
+| 配乐 | 「服务地址 → 配乐引擎（comfy/http）/ 配乐服务地址 / 配乐权重名」 | comfy + `<GPU 服务器>`（ACE-Step） |
+| 转写 | 「服务地址 → 转写服务地址」 | 自动取 `<GPU 服务器>/audio` |
+| 人脸 | 「服务地址 → 人脸服务地址 / 节点目录」 | 自动取 `<GPU 服务器>`；再留空则用 worker 本机 insightface |
+| GPU 机器能力 | 「GPU 服务器地址 + 端口」「GPU 最大支持分辨率」 | —（必须配，否则走 worker 本地默认） |
+
+> 两道纪律（都是踩坑换的）：① 机器本地地址（`127.0.0.1:8091` 这类）**绝不能**当默认值下发——API 主机不是 worker 主机；
+> ② 但用户填了「GPU 服务器地址」后，各服务地址一律**从它推导**，这样公网 IP 变了只改一处。
+
+### 1.6 目录约定
 
 ```
 /opt/weaveora/
