@@ -7,6 +7,8 @@
 #   · 公网两个入口 10558 / 10588 均不可达（000）
 #   重建后必须逐项确认「持久卷还在 / 服务起来了 / 模型没丢 / 网关路由齐 / 配置页地址对」，
 #   否则会以「任务莫名失败」的形式暴露，排查成本极高。
+#   2026-09-15 实测踩到的两类问题：① 数据盘挂载点从 /media/vipuser/addDisk 变成 /addDisk
+#   → 既有软链全部悬空（Phase2/3 权重不可用）；② services_up.sh 缺 talk 块 → 重启后 8094 消失。
 #
 # 用法（在 GPU 机上）：
 #   bash /opt/weaveora/post_maint_check.sh            # 本地检查
@@ -38,6 +40,9 @@ curl -s -m 8 -o /dev/null -w "  TTS /health          = %{http_code}\n" http://12
 curl -s -m 8 -o /dev/null -w "  talk /health         = %{http_code}\n" http://127.0.0.1:8094/health
 
 echo "== 3/6 关键模型（字节数 + .done 标记）=="
+echo "  （含数据盘上的 Phase2/3 权重；若断链先看挂载点：df -h /addDisk）"
+chk_nodone(){ f="$ROOT/$1"; want="$2"; got=$(stat -Lc%s "$f" 2>/dev/null || echo 0)
+  if [ "$got" = "$want" ]; then ok "$(basename "$f") $got"; else bad "$(basename "$f") 期望 $want 实际 $got"; fi; }
 chk(){ f="$ROOT/$1"; want="$2"; got=$(stat -Lc%s "$f" 2>/dev/null || echo 0)
   if [ "$got" = "$want" ] && [ -f "$f.done" ]; then ok "$(basename "$f") $got"
   else bad "$(basename "$f") 期望 $want 实际 $got$( [ -f "$f.done" ] || echo '（缺 .done）')"; fi; }
@@ -52,7 +57,7 @@ chk models/vae/wan_2.1_vae.safetensors 253815318
 chk models/checkpoints/ace_step_1.5_turbo_aio.safetensors 10025478736
 chk latentsync/latentsync_unet.pt 5072222488
 chk latentsync/vae/diffusion_pytorch_model.safetensors 334643276
-chk latentsync/whisper/tiny.pt 75572083
+chk_nodone latentsync/whisper/tiny.pt 75572083   # 该文件历史清单里没有 .done 标记，只查字节
 chk models/echo_mimic/transformer/diffusion_pytorch_model.safetensors 3414541616
 chk models/echo_mimic/Wan2.1-Fun-V1.1-1.3B-InP/models_t5_umt5-xxl-enc-bf16.pth 11361920418
 # 节点需要的权重软链（重建后最容易丢）
@@ -68,7 +73,7 @@ V="$ROOT/ComfyUI/venv/bin/python"
   || bad "有依赖缺失（对口型会崩，见指南坑 29/30）"
 [ -f ~/.latentsync16_dependencies_installed ] && ok "节点自装标记存在" || bad "缺 ~/.latentsync16_dependencies_installed（节点会 pip 自装并可能抛错）"
 grep -q "weaveora-hf-guard" /etc/hosts 2>/dev/null && ok "HF 防直连 hosts 条目在" || warn "缺 weaveora-hf-guard（节点可能去 HF 下 5GB 卡死队列）"
-[ -d "$ROOT/workflows" ] && ls "$ROOT/workflows" | sed 's/^/    workflow: /' || bad "缺 $ROOT/workflows（worker 文生图工作流 JSON）"
+if [ -d "$ROOT/workflows" ]; then ls "$ROOT/workflows" | sed 's/^/    workflow: /'; else warn "本机无 $ROOT/workflows —— 文生图工作流 JSON 在 **worker 机器**（VPS：/opt/weaveora/workflows/），不是 GPU 机，属正常"; fi
 
 echo "== 5/6 网关路由${GW:+（GW=$GW）}=="
 if [ -n "$GW" ]; then

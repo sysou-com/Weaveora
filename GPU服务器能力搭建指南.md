@@ -29,20 +29,21 @@
 
 ### 1.1 主机
 
-> ⚠️ **本文里的公网 IP/端口只是当时的事实记录**：GPU 服务器公网地址会变（同一容器可能同时有**电信**与**移动**两个公网入口，端口相同、IP 不同；实测见过 `180.127.11.166:10558` → `223.109.239.32:10558`）。
+> ⚠️ **本文里的公网 IP/端口只是当时的事实记录**：GPU 服务器公网地址会变（同一容器同时有**电信**与**移动**两个公网入口，IP 不同、端口相同；历史演变 `180.127.11.166:10558` → `223.109.239.32:10558` → 现 `180.127.11.167:21264`）。
 > **唯一权威来源 = 平台「生成引擎配置 → GPU 服务器地址 + 端口」**（保存后随任务下发给 worker，保存即生效）。
 > 代码/脚本里**不写死任何 GPU IP**：填了 GPU 服务器地址后，ComfyUI 推导为 `<gpu>:8001`、配音/转写为 `<gpu>/audio`、整脸口型为 `<gpu>/talk`、人脸为 `<gpu>`；换机/换线路只改这一处。
 
 | 项 | 值 |
 |---|---|
 | 机型 | GPU#2（ssh 别名 `weaveora-gpu-a14b`） |
-| 公网 | `180.127.11.166`，ssh `-p 10512` |
-| 对外网关 | `http://180.127.11.166:10558` → 容器 `8800`（`edge_proxy.py`） |
+| 公网（电信） | `180.127.11.167`，ssh `-p 21216`；网关 **`http://180.127.11.167:21264`** |
+| 公网（移动） | `223.109.239.30`，ssh `-p 21216`；网关 **`http://223.109.239.30:21264`**（备用线路，实测同样 200） |
+| 平台端口映射 | **外网 21264→容器 8800**（网关，唯一入口）；21265→8801、21266→8802、21267→8803、21268→8804、21269→8805（备用，当前未占用） |
 | GPU | **RTX 4090 48G**（`vram_total` 47.4 GiB） |
 | CPU / 内存 | 16 vCPU / 50 GB |
-| OS | Ubuntu 24.04 |
-| 系统盘 | `/dev/vda1` 196 G（已用 ~164 G，余 ~23 G） |
-| 数据盘 | `/dev/vdb1` ext4 **98 G** → `/media/vipuser/addDisk`（2026-09-15 新增，余 ~81 G） |
+| OS | Ubuntu 24.04（主机名 `ubuntu24`） |
+| 系统盘 | `/dev/vda1` 200 G（已用 ~164 G，余 ~23 G） |
+| 数据盘 | `/dev/vdb1` ext4 **100 G** → **`/addDisk`**（2026-09-15 维护后挂载点变更；另建兼容软链 `/media/vipuser/addDisk → /addDisk` 以兼容既有软链；余 ~53 G） |
 | 持久卷 | **`/opt/weaveora`**（所有模型/脚本/日志/产物，禁写 /tmp 与系统盘） |
 | 已知瑕疵 | `nvidia-smi` NVML 版本错配（内核 595.71.05 vs 用户态 595.84）→ 计算正常；**显存以 ComfyUI `/system_stats` 为准** |
 
@@ -421,6 +422,10 @@ HTTP 兜底 `music_server.py`（:8092）默认不起，主线走 ComfyUI。
 | 30 | 节点一实例化就卡死，ComfyUI 队列（FIFO）被占 52 分钟 | ① venv 无 `pip` 且缺 `accelerate` → 节点自装依赖抛错；② 节点 `checkpoints/` 里 `latentsync_unet.pt` / `whisper/tiny.pt` 不见了 → 节点 `setup_models()` 转去 **huggingface.co 下 5 GB**（国内 ~0.6 MB/s） | ① 装回 `accelerate`（不动其它版本）；② 补节点自装标记 `~/.latentsync16_dependencies_installed`；③ **软链** `/opt/weaveora/latentsync/{latentsync_unet.pt,whisper/tiny.pt}` 回节点目录（零拷贝、不再触发下载）；④ `/etc/hosts` 加 `weaveora-hf-guard` 禁直连 HF/xet（§0.2 本就要求走 ModelScope/aifasthub） |
 | 31 | 卡住的任务**无法从外部清除** | `/interrupt` 只在**节点之间**生效，节点内部（`setup_models` 下载）卡住时无效；`ss -K` 内核不支持（Invalid argument）；定向 iptables REJECT 也没断掉在途连接；删半成品文件后它仍写已删除的 inode | 只能**等它自己报错退出**或重启 ComfyUI；重启前务必确认 `/queue` 为空（否则打断生产任务）。本次实测：52 分 44 秒后以 `Model download failed` 自行退出，队列清空，**没重启** |
 | 32 | 改节点/依赖后必须重启才生效 | ComfyUI 进程内 `sys.modules` 缓存：改 `.py` 或换包版本都不会热加载（`inference.py` 也是 `import_inference_script()` **进程内**导入） | 与 §4.5 #23 同款纪律：能靠“换工作流 JSON / 改配置”解决的绝不重启；确实要改节点代码才重启，且**先确认队列为空** |
+| 33 | 维护/重建后“模型突然不可用”（Phase2/3 权重全部断链） | **数据盘挂载点变了**（`/media/vipuser/addDisk` → `/addDisk`），而 `/opt/weaveora/models/*` 里的软链仍指向旧路径 → 悬空 | 重建**兼容软链** `mkdir -p /media/vipuser && ln -sfn /addDisk /media/vipuser/addDisk`（一条命令让所有既有软链重新生效，比逐个重写安全）；并用 `deploy/gpu2_post_maint_check.sh` 逐项验可读 |
+| 34 | 重启后**整脸口型（:8094）消失** | `services_up.sh` 里**没有 talk 启动块**（当初是手工 `start_talk.sh` 起的）→ 平台重启后就只剩 ComfyUI/TTS/Face/网关 | 已把 talk 启动块写进 `services_up.sh`（幂等 + 监听汇总含 8094）；**新增服务必须同时进启动脚本**，否则“重启即丢” |
+| 35 | 网关路由配了却不生效：`/talk/health` 404 | 「去前缀」实现是 `path[len(prefix):] or "/"` —— 当**前缀本身就是完整路径**时，剥完是空 → 转发到 `/` → 上游 404 | 这类“路径就是全路径”的路由必须 **strip=False**（并让上游服务认该路径，如 talk 服务端同时认 `/health` 与 `/talk/health`）。另：`/talk_batch` 不匹配前缀 `/talk`（规则要求完全相等或前缀+/），必须单独列 |
+| 36 | `start_talk.sh` 报 “already running” 但它其实没跑 | `ps | grep "[t]alk_server.py"` 匹配到了**执行这条命令的 shell 自身**（命令行里含该字符串）→ 误判 | 用更严格的模式（两段式 `grep "[e]cho_mimic_v3" | grep "[t]alk_server"`）或直接 `pgrep -f 'envs/talk/bin/python .*talk_server.py'`；这就是 §4.1 #6 「`pkill -f` 自匹配」的同族坑 |
 | 26 | 前端显示"方案有改动"但其实没改 | `prompt_revisions.schema_json` 是 **jsonb**（PG 重排对象键），前端 `JSON.stringify` 把**纯键序差异**当改动 | 新增 `canonicalJson()` 统一 dirty/pristine 比对；删掉 `startVoice/startBgm/startLipsync` 里会另存未确认版本的兜底保存 |
 | 27 | 部署与生产任务互踩 | 同一张卡 | 纪律：**串行、不插队、不抢显存**；部署只在任务空隙；只做 ≤5 s 短查，禁止长轮询（单次等待 ≤60 s） |
 | 28 | 许可风险 | FLUX.1-dev 系（含 IP-Adapter/PuLID 派生）**非商用** | 生产禁用 dev 派生权重；一致性改用 **Qwen-Image-Edit**（Apache-2.0）；T2 用 **FLUX.1-schnell**（Apache-2.0） |
