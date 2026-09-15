@@ -407,10 +407,19 @@ def execute_job(job):
                           int(float(payload.get("duration_sec", 3.0)) * 1000),
                           {"faceDetected": o.get("face_detected")}) for o in outs]
             else:
-                outs = engine.generate("weaveora-stub-worker", payload,
-                                       progress_fn=lambda p, s: _req(
-                                           "POST", "/internal/jobs/%s/progress" % jid,
-                                           {"progress": p, "stage": s}))
+                # 文生图：配了「本机 ComfyUI 工作流」（engine=comfy + 工作流 JSON）就走工作流出图，
+                # 否则用 worker 自带的 SDXL/IP-Adapter 代码路径（builtin）。
+                if engine.image_workflow_ready():
+                    print("[worker] 文生图走工作流：%s" % engine.IMAGE_TXT2IMG_WF, flush=True)
+                    outs = engine.generate_via_workflow("weaveora-stub-worker", payload,
+                                                        progress_fn=lambda p, s: _req(
+                                                            "POST", "/internal/jobs/%s/progress" % jid,
+                                                            {"progress": p, "stage": s}))
+                else:
+                    outs = engine.generate("weaveora-stub-worker", payload,
+                                           progress_fn=lambda p, s: _req(
+                                               "POST", "/internal/jobs/%s/progress" % jid,
+                                               {"progress": p, "stage": s}))
                 media = [(o["bytes"], "image/png", width, height, None) for o in outs]
             return _complete(jid, payload, media)
         except Exception as e:
@@ -434,6 +443,13 @@ def register():
     if MODE == "comfy":
         caps = {"engine": "gpu", "gpu": "comfy", "audio": True,
                 "workflows": ["sdxl_txt2img", "wan_i2v", "ipadapter", "cosyvoice_tts", "ace_step_music"]}
+        try:
+            import comfy_client as _ccap
+            if _ccap.image_workflow_ready():
+                caps["workflows"].append("workflow_txt2img")
+                caps["imageWorkflow"] = _ccap.IMAGE_TXT2IMG_WF
+        except Exception:
+            pass
     st, body = _req("POST", "/internal/nodes/register", {
         "name": NAME,
         "workspaceId": WORKSPACE or None,

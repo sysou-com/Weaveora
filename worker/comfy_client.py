@@ -23,6 +23,196 @@ COMFY = os.environ.get("WEAVEORA_COMFY_URL", "http://127.0.0.1:8188").rstrip("/"
 # IP-Adapter 工作流节点缺失或失败时是否降级 txt2img（默认降级，保证能出图）
 FALLBACK = os.environ.get("WEAVEORA_COMFY_FALLBACK_TXT2IMG", "1") == "1"
 
+# ── 文生图（本机 ComfyUI 工作流，Qwen-Image / FLUX）──────────────────────────────
+# 为什么用「工作流 JSON」而不是在代码里拼节点：换模型（SDXL → Qwen-Image → FLUX）
+# 只要换一个 JSON，不用改 worker、不用重启；参数注入靠 class_type/接线约定（见 generate_via_workflow）。
+# 这些值优先由「生成引擎配置 → 服务地址 → 文生图」随任务下发（apply_services），环境变量只作回退。
+IMAGE_COMFY = os.environ.get("WEAVEORA_IMAGE_COMFY_URL", "").strip()        # 空 = 用 COMFY
+IMAGE_ENGINE = os.environ.get("WEAVEORA_IMAGE_ENGINE", "builtin").strip().lower()
+IMAGE_TXT2IMG_WF = os.environ.get("WEAVEORA_IMAGE_WORKFLOW", "").strip()
+IMAGE_IMG2IMG_WF = os.environ.get("WEAVEORA_IMAGE_IMG2IMG_WORKFLOW", "").strip()
+IMAGE_MODEL = os.environ.get("WEAVEORA_IMAGE_MODEL", "").strip()
+IMAGE_STEPS = int(os.environ.get("WEAVEORA_IMAGE_STEPS", "0") or 0)
+IMAGE_DENOISE = float(os.environ.get("WEAVEORA_IMAGE_DENOISE", "0.65") or 0.65)
+
+
+def _image_comfy():
+    return (IMAGE_COMFY or COMFY).rstrip("/")
+
+
+def image_workflow_ready():
+    """文生图是否走「本机 ComfyUI 工作流」（engine=comfy + 工作流 JSON 存在）。"""
+    return (IMAGE_ENGINE == "comfy" and bool(IMAGE_TXT2IMG_WF) and os.path.exists(IMAGE_TXT2IMG_WF))
+
+
+def _wf_load(path):
+    with open(path, encoding="utf-8") as fh:
+        graph = json.load(fh)
+    graph.pop("_comment", None)
+    return graph
+
+
+def _wf_of_class(graph, class_type):
+    return [(nid, n) for nid, n in graph.items()
+            if isinstance(n, dict) and n.get("class_type") == class_type]
+
+
+def _wf_inject_size(graph, width, height):
+    for ct in ("EmptySD3LatentImage", "EmptyLatentImage"):
+        for _nid, n in _wf_of_class(graph, ct):
+            if "width" in n.get("inputs", {}):
+                n["inputs"]["width"], n["inputs"]["height"] = int(width), int(height)
+                return True
+    return False
+
+
+def _wf_inject_text(graph, positive, negative):
+    """正/负词：按 KSampler 的接线分辨那两 CLIPTextEncode，再用 _meta.title 兑底。"""
+    ks = _wf_of_class(graph, "KSampler") or _wf_of_class(graph, "KSamplerAdvanced")
+    pos_id = neg_id = None
+    if ks:
+        ins = ks[0][1].get("inputs", {})
+        for key, which in (("positive", "pos"), ("negative", "neg")):
+            ref = ins.get(key)
+            if isinstance(ref, list) and ref and isinstance(ref[0], str):
+                if which == "pos":
+                    pos_id = ref[0]
+                else:
+                    neg_id = ref[0]
+    texts = _wf_of_class(graph, "CLIPTextEncode")
+    if not pos_id or not neg_id:
+        for nid, n in texts:
+            title = ((n.get("_meta") or {}).get("title") or "").lower()
+            if not pos_id and ("pos" in title or "正" in title):
+                pos_id = nid
+            elif not neg_id and ("neg" in title or "负" in title):
+                neg_id = nid
+    if not pos_id and texts:
+        pos_id = texts[0][0]
+    if not neg_id:
+        for nid, _n in texts:
+            if nid != pos_id:
+                neg_id = nid
+                break
+    if pos_id and pos_id in graph:
+        graph[pos_id]["inputs"]["text"] = positive or ""
+    if neg_id and neg_id in graph:
+        graph[neg_id]["inputs"]["text"] = negative or ""
+    return pos_id, neg_id
+
+
+def _wf_inject_sampler(graph, seed, steps, cfg, denoise):
+    for ct in ("KSampler", "KSamplerAdvanced"):
+        for _nid, n in _wf_of_class(graph, ct):
+            ins = n.setdefault("inputs", {})
+            if seed is not None:
+                ins["seed"] = int(seed)
+            if steps and int(steps) > 0:
+                ins["steps"] = int(steps)
+            if cfg is not None:
+                ins["cfg"] = float(cfg)
+            if denoise is not None and "denoise" in ins:
+                ins["denoise"] = float(denoise)
+            return True
+    return False
+
+
+def _wf_inject_model(graph, model):
+    """把主模型名换成配置里的（留空 = 不改，工作流写什么就用什么）。"""
+    if not model:
+        return False
+    hit = False
+    for ct, key in (("UNETLoader", "unet_name"), ("CheckpointLoaderSimple", "ckpt_name")):
+        for _nid, n in _wf_of_class(graph, ct):
+            if key in n.get("inputs", {}):
+                n["inputs"][key] = model
+                hit = True
+    return hit
+
+
+def _wf_set_image(graph, filename):
+    nodes = _wf_of_class(graph, "LoadImage")
+    for _nid, n in nodes:
+        n.setdefault("inputs", {})["image"] = filename
+    return bool(nodes)
+
+
+def _wf_save_prefix(graph, prefix):
+    for _nid, n in _wf_of_class(graph, "SaveImage"):
+        n.setdefault("inputs", {})["filename_prefix"] = prefix
+    return True
+
+
+def _wf_watch_nodes(graph):
+    """采样/解码节点 id：让 worker 能用 /ws 或 /history 看进度（拿不到也不影响出图）。"""
+    ids = []
+    for ct in ("KSampler", "KSamplerAdvanced", "VAEDecode", "SaveImage"):
+        ids += [nid for nid, _n in _wf_of_class(graph, ct)]
+    return ids
+
+
+def generate_via_workflow(client_id, payload, progress_fn=None):
+    """用「本机 ComfyUI 工作流」出图（Qwen-Image / FLUX 等）。
+
+    工作流路径来自「生成引擎配置 → 服务地址 → 文生图」（worker 机器上的绕对路径）。参数注入规则：
+      · 正/负词 → KSampler.positive/negative 接的那两个 CLIPTextEncode；
+      · seed/steps/cfg/denoise → KSampler；
+      · 尺寸 → EmptySD3LatentImage / EmptyLatentImage；
+      · 主模型名 → UNETLoader.unet_name（配了 IMAGE_MODEL 才改）；
+      · 参考图（本镜关键帧/定妆照）→ 上传后写入 LoadImage.image，并自动改走 img2img 工作流+denoise。
+
+    返回与 generate() 同口径：[{filename, bytes, subfolder}]。
+    """
+    global COMFY
+    params = payload.get("params") or {}
+    positive = payload.get("positive_prompt") or ""
+    negative = payload.get("negative_prompt") or ""
+    seed = payload.get("seed")
+    width = params.get("width") if isinstance(params.get("width"), int) else 1344
+    height = params.get("height") if isinstance(params.get("height"), int) else 768
+    prefix = "weaveora_wf%s" % (("_shot" + str(payload.get("shot_no"))) if payload.get("shot_no") else "")
+
+    ref_name = None
+    ref_keys = payload.get("referenceKeys") or []
+    if ref_keys:
+        try:
+            data, ctype = fetch_reference_bytes(ref_keys[0])
+            ref_name = _upload_image(data, (ref_keys[0].split("/")[-1] or "ref.png"), ctype or "image/png")
+        except Exception as e:
+            print("[comfy] 文生图参考图上传失败（降为纯文生图）：%s" % e, flush=True)
+    path = IMAGE_IMG2IMG_WF if (ref_name and IMAGE_IMG2IMG_WF and os.path.exists(IMAGE_IMG2IMG_WF)) \
+        else IMAGE_TXT2IMG_WF
+    graph = _wf_load(path)
+    if progress_fn:
+        progress_fn(40, "sampling")
+    _wf_inject_text(graph, positive, negative)
+    _wf_inject_model(graph, IMAGE_MODEL)
+    _wf_inject_size(graph, width, height)
+    steps = IMAGE_STEPS or (params.get("steps") if isinstance(params.get("steps"), (int, float)) else 0)
+    cfg = params.get("cfg") if isinstance(params.get("cfg"), (int, float)) else None
+    denoise = (params.get("denoise") if isinstance(params.get("denoise"), (int, float)) else IMAGE_DENOISE) \
+        if ref_name else 1.0
+    _wf_inject_sampler(graph, seed, steps, cfg, denoise)
+    if ref_name and not _wf_set_image(graph, ref_name):
+        raise ComfyError("图生图工作流里没有 LoadImage 节点，无法接入参考图：%s" % path)
+    _wf_save_prefix(graph, prefix)
+    print("[comfy] 工作流出图：%s%s size=%dx%d steps=%s denoise=%s ref=%s"
+          % (os.path.basename(path), "(img2img)" if ref_name else "(txt2img)", width, height,
+             steps or "-", denoise, ref_name or "-"), flush=True)
+
+    saved, COMFY = COMFY, _image_comfy()
+    try:
+        pid = _post_prompt({"prompt": graph, "client_id": client_id}, client_id)
+        if progress_fn:
+            progress_fn(70, "decoding")
+        rec = _poll_history(client_id, pid)
+        outs = _download_outputs(rec, prefix)
+        if not outs:
+            raise ComfyError("工作流出图无输出（%s）" % os.path.basename(path))
+        return outs
+    finally:
+        COMFY = saved
+
 
 class ComfyError(Exception):
     pass
@@ -2111,6 +2301,36 @@ def apply_services(svc):
     face = g("face", "url")
     if isinstance(face, str) and face.strip():
         FACE_URL = face.strip().rstrip("/")
+    # ── 文生图（本机 ComfyUI 工作流，Qwen-Image / FLUX）────────────────────────────
+    # 为什么用「工作流 JSON」而不是代码里拼节点：换模型（SDXL → Qwen-Image → FLUX）
+    # 只要换一个 JSON，不用改 worker、不用重启；参数注入靠 class_type/标题约定（见 generate_via_workflow）。
+    img = g("image")
+    if isinstance(img, dict):
+        global IMAGE_ENGINE, IMAGE_COMFY, IMAGE_TXT2IMG_WF, IMAGE_IMG2IMG_WF, IMAGE_MODEL, IMAGE_STEPS, IMAGE_DENOISE
+        eng = img.get("engine")
+        if isinstance(eng, str) and eng.strip():
+            IMAGE_ENGINE = eng.strip().lower()
+        cu = img.get("comfyUrl")
+        if isinstance(cu, str) and cu.strip():
+            IMAGE_COMFY = cu.strip().rstrip("/")
+        w = img.get("workflow")
+        if isinstance(w, str) and w.strip():
+            IMAGE_TXT2IMG_WF = w.strip()
+        w2 = img.get("img2imgWorkflow") or img.get("img2img_workflow")
+        if isinstance(w2, str) and w2.strip():
+            IMAGE_IMG2IMG_WF = w2.strip()
+        m = img.get("model")
+        if isinstance(m, str) and m.strip():
+            IMAGE_MODEL = m.strip()
+        st = img.get("steps")
+        if isinstance(st, (int, float)) and st > 0:
+            IMAGE_STEPS = int(st)
+        dn = img.get("denoise")
+        if isinstance(dn, (int, float)) and 0 < float(dn) <= 1:
+            IMAGE_DENOISE = float(dn)
+        print("[comfy] 文生图配置（引擎配置下发）：engine=%s workflow=%s img2img=%s model=%s steps=%s denoise=%s"
+              % (IMAGE_ENGINE, IMAGE_TXT2IMG_WF or "-", IMAGE_IMG2IMG_WF or "-", IMAGE_MODEL or "-",
+                 IMAGE_STEPS or "-", IMAGE_DENOISE), flush=True)
     node = g("face", "latentsyncDir")
     if isinstance(node, str) and node.strip():
         LATENTSYNC_DIR = node.strip()
