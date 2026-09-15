@@ -1,0 +1,38 @@
+# EchoMimicV3 / jaw-lip 权重清单（GPU#2 · /opt/weaveora/models/echo_mimic）
+# 用途：换机重装时按此拉取；也用于回答「同名模型是不是同一个东西」。
+# 规则（勿违）：
+#   1) 本目录只给 talk 引擎（EchoMimicV3，/opt/weaveora/envs/talk）用；
+#      ComfyUI（LatentSync / A14B 出片）**只**用 /opt/weaveora/models/text_encoders 下的那份。
+#   2) **两个 umt5 不是同一个文件**：架构同为 umt5-xxl，但格式/键名/精度不同，不能互换加载：
+#        · models/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors  → fp8 + 每张量 scale（412 张量，ComfyUI 键名）
+#        · echo_mimic/.../models_t5_umt5-xxl-enc-bf16.pth              → bf16 原始 .pth（242 张量，官方 Wan 键名）
+#      禁止把 fp8 那份软链/改名给 EchoMimic 用（它的加载器按官方 .pth 键名读取，喂错会静默错值）。
+#   3) 不删任何一份：fp8 那份是 Wan2.2 I2V-A14B 出片的文本编码器，删了会打断生产出片。
+#   4) 显存：两份合计 ~17.7G；与 A14B 出片（峰值 42G）**必须串行**，不得同时驻留。
+
+## 已就绪
+file=transformer/diffusion_pytorch_model.safetensors
+  bytes=3414541616  source=ModelScope API BadToBest/EchoMimicV3 (transformer/)
+  sha256=(Xet 存储，官方未给 lfs oid)  verify=bytes+safetensors头
+file=transformer/config.json
+  source=ModelScope BadToBest/EchoMimicV3
+file=wav2vec2-base-960h/model.safetensors
+  bytes=377607901  source=ModelScope facebook/wav2vec2-base-960h（HF 镜像副本）
+  sha256=8aa76ab2243c81747a1f832954586bc566090c83a0ac167df6f31f0fa917d74a
+file=Wan2.1-Fun-V1.1-1.3B-InP/models_t5_umt5-xxl-enc-bf16.pth
+  bytes=11361920418  source=aifasthub alibaba-pai/Wan2.1-Fun-V1.1-1.3B-InP
+  sha256_official=7cace0da2b446bbbbc57d031ab6cf163a3d59b366da94e5afe36745b746fd81d
+  verify=bytes ✓（全量 sha256 见 logs/sha_umt5.log）
+file=Wan2.1-Fun-V1.1-1.3B-InP/diffusion_pytorch_model.safetensors
+  bytes=3128957992  sha256_official=4ec199076538b946935ebcb3ba808d3c427e638f29519a3c3c98d31d821e5eed
+file=Wan2.1-Fun-V1.1-1.3B-InP/Wan2.1_VAE.pth
+  bytes=507609880  sha256_official=38071ab59bd94681c686fa51d75a1968f64e470262043be31f7a094e442fd981
+file=Wan2.1-Fun-V1.1-1.3B-InP/models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth
+  bytes=4772359047  source=hf-mirror alibaba-pai/Wan2.1-Fun-V1.1-1.3B-InP
+file=Wan2.1-Fun-V1.1-1.3B-InP/{config.json,configuration.json,google/umt5-xxl/*,xlm-roberta-large/*}
+  source=hf-mirror（tokenizer 相关小文件）
+
+## 为什么需要 umt5/CLIP 两份「看着重复」的东西
+EchoMimicV3 官方管线是**完整 Wan-Fun diffusers 管线**（text encoder + image encoder + VAE + transformer），
+即使它是音频驱动也要把 text/image encoder 建起来（text CFG / mask 条件）。所以这 ~16G 是**官方代码结构决定的**，
+不是我们多下的。后续优化（可选、非必须）：把 fp8 反量化为官方键名的 bf16 .pth 以省 11.4G —— 有静默错值风险，磁盘紧张时再评估。
