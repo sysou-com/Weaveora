@@ -480,6 +480,11 @@ def main():
                     _ac.apply_services(_svc)
                 except Exception as e:
                     print("[stub] 应用音频服务地址失败：%s" % e, flush=True)
+                try:
+                    import talk_client as _tc
+                    _tc.apply_services(_svc)
+                except Exception as e:
+                    print("[stub] 应用整脸口型服务地址失败：%s" % e, flush=True)
             if not job:
                 if args.once and worked == 0:
                     time.sleep(1)

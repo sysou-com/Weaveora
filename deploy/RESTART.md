@@ -34,7 +34,7 @@ bash /home/dataset-local/weaveora/weaveora_boot.sh
 | 8093 | `face_server.py` | 人脸 `/face/probe` `/face/embed` |
 | 8092 | `music_server.py` | 配乐 HTTP 兜底（默认不起） |
 
-公网入口：`http://36.103.182.217:30250`
+公网入口：`http://<GPU公网地址:端口>`
 - `/` → ComfyUI
 - `/audio/*` → 配音 + 转写
 - `/face/*` → 人脸
@@ -63,15 +63,15 @@ systemctl status weaveora-gpu-worker --no-pager
 # 日志里应看到: [stub] node 0a000003 registered (workspace=pool)
 ```
 
-**「生成引擎配置 → ③ 服务地址」里的值不用改**（都指向 `36.103.182.217:30250`，随任务下发，保存过就一直有效）。
+**「生成引擎配置 → ③ 服务地址」里的值不用改**（都指向 `<GPU公网地址:端口>`，随任务下发，保存过就一直有效）。
 
 | 表单项 | 值 |
 |---|---|
 | 对口型工作流 | `/opt/weaveora/lipsync_workflow_api.json` |
-| 对口型 ComfyUI 地址 | `http://36.103.182.217:30250` |
-| 配音（TTS）服务地址 | `http://36.103.182.217:30250/audio` |
-| 转写服务地址 | `http://36.103.182.217:30250/audio` |
-| 人脸服务地址 | `http://36.103.182.217:30250` |
+| 对口型 ComfyUI 地址 | `http://<GPU公网地址:端口>` |
+| 配音（TTS）服务地址 | `http://<GPU公网地址:端口>/audio` |
+| 转写服务地址 | `http://<GPU公网地址:端口>/audio` |
+| 人脸服务地址 | `http://<GPU公网地址:端口>` |
 | 配乐引擎 / 权重名 | `comfy` / `ace_step_1.5_turbo_aio.safetensors` |
 
 ---

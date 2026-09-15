@@ -48,19 +48,37 @@ public class EngineSettingsService {
     public com.fasterxml.jackson.databind.node.ObjectNode servicesWithDefaults(UserEngineSettings s) {
         com.fasterxml.jackson.databind.node.ObjectNode out = mapper.createObjectNode();
         com.fasterxml.jackson.databind.JsonNode cur = s == null ? null : s.services();
-        // ★ 机器相关的 URL **一律不填默认值**，留空 = 用 worker 机器自己的默认。
-        //   踩过的坑：API 侧默认 tts 是 127.0.0.1:18091（那是 API 主机上的 SSH 隧道口），
-        //   而 worker 机器上的 TTS 在 127.0.0.1:8091 —— 若把 API 的默认下发过去，
-        //   worker 会用错端口、配音直接失败。只有用户显式配了才下发。
-        //   非机器相关的行为默认值（引擎类型/超时/帧率）可以填。
-        out.set("tts", merge(cur, "tts", mapper.createObjectNode().put("url", "")));
+        // ★ 两类地址要分清（踩过坑，不要混）：
+        //   ① **机器本地**地址（127.0.0.1:8091 这类）绝不能由 API 侧填默认值 —— API 主机与 worker 主机不是同一台，
+        //      填了会让 worker 用错端口（当时 API 默认 tts=127.0.0.1:18091 是 API 机上的 SSH 隧道口，
+        //      worker 机的 TTS 在 :8091，下发过去配音直接失败）。所以 gpu 为空时一律留空 = 用 worker 自己的默认。
+        //   ② 但**用户已在配置页填了「GPU 服务器地址」**时，各服务都从它推导：
+        //      `<gpu>:8001`（ComfyUI）、`<gpu>/audio`（配音/转写）、`<gpu>/talk`（整脸口型）、`<gpu>`（人脸）。
+        //      理由：**GPU 公网 IP/端口会变**，只改「GPU 服务器地址」这一处就能全量跟随，
+        //      不必也不应该把 IP 写进 worker 脚本 / 部署脚本 / 代码。
+        String gpu = gpuComfyUrlOrEmpty(s); // 已带端口；空 = 用户没配 GPU
+        out.set("tts", merge(cur, "tts", urlNode(gpu, "/audio")));
         out.set("music", merge(cur, "music", mapper.createObjectNode()
                 .put("engine", "comfy").put("url", "").put("ckpt", "")));
         out.set("lipsync", merge(cur, "lipsync", mapper.createObjectNode()
-                .put("comfyUrl", gpuComfyUrlOrEmpty(s)).put("workflow", "")
+                .put("comfyUrl", gpu).put("workflow", "")
                 .put("timeout", 1800).put("fps", 0)));
-        out.set("transcribe", merge(cur, "transcribe", mapper.createObjectNode().put("url", "")));
-        out.set("face", merge(cur, "face", mapper.createObjectNode().put("url", "").put("latentsyncDir", "")));
+        out.set("transcribe", merge(cur, "transcribe", urlNode(gpu, "/audio")));
+        out.set("face", merge(cur, "face", mapper.createObjectNode()
+                .put("url", gpu).put("latentsyncDir", "")));
+        // ★ talk（整脸音频驱动 / jaw-lip）：喊叫、尖叫、吟唱这类"嘴大张"镜，用它替代 LatentSync。
+        //   跑在 GPU 机的 talk_server.py（默认 :8094，网关路径 /talk）。
+        //   jawGain=1.0 零改动（原生 EchoMimic 输出），1.25 = 增强档（按响度包络把下半脸再往下拉）。
+        out.set("talk", merge(cur, "talk", mapper.createObjectNode()
+                .put("url", gpu.isBlank() ? "" : gpu + "/talk")
+                .put("enabled", true).put("jawGain", 1.0)));
+        // ★ image（文生图，本机 ComfyUI）：engine=comfy 时 worker 直接把 workflow（文生图）/
+        //   img2imgWorkflow（关键帧当底图）两个 API 格式 JSON POST 给 ComfyUI（当前 Qwen-Image + Lightning 8 步）。
+        //   两个路径是 **worker 机器上的绝对路径**（装在哪台机就填哪台的）→ 默认留空 = worker 自带默认（老 SDXL 路线）。
+        out.set("image", merge(cur, "image", mapper.createObjectNode()
+                .put("engine", "builtin").put("comfyUrl", gpu)
+                .put("workflow", "").put("img2imgWorkflow", "").put("model", "")
+                .put("steps", 0).put("denoise", 0.65)));
         // ★ motion：自托管图生视频（Wan2.2 I2V-A14B 双专家）的**档位**随任务下发。
         //   为什么必须走这里：clip 的 payload.params 在 JobService.videoShotPayload() 里只塞了
         //   {width,height}，preset/steps/lora_*/cfg_* 若不靠这条链路下发就永远到不了 worker ——
@@ -152,6 +170,18 @@ public class EngineSettingsService {
             return base;
         }
         return base + ":" + port;
+    }
+
+    /**
+     * 服务地址节点：**配了 GPU 服务器地址**时推导成 `<gpu><path>`，否则留空（= 用 worker 机器自己的默认）。
+     *
+     * <p>为什么这么定：GPU 公网 IP/端口会变，用户只该在「生成引擎配置 → GPU 服务器地址」改一处；
+     * 把 IP 填进 worker 脚本/部署脚本/代码都会在换机后静默失效。
+     */
+    private com.fasterxml.jackson.databind.node.ObjectNode urlNode(String gpuBase, String path) {
+        com.fasterxml.jackson.databind.node.ObjectNode n = mapper.createObjectNode();
+        n.put("url", (gpuBase == null || gpuBase.isBlank()) ? "" : gpuBase + path);
+        return n;
     }
 
     /** 取某项服务配置（用户值覆盖默认值，逐字段合并）。 */

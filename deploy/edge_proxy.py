@@ -2,7 +2,7 @@
 # =============================================================================
 # Weaveora 单端口入口网关（edge proxy）
 #
-# 背景：平台只开放一个公网端口 36.103.182.217:30250 → 容器内 8000。
+# 背景：平台只开放一个公网端口 <GPU公网地址:端口> → 容器内 8000。
 #       但本机有 4 个服务，必须在容器内做「按路径多路复用」。
 #
 # 路由表（公网 30250 → 容器 8000 → 本脚本）：
@@ -12,10 +12,10 @@
 #   /*         -> 127.0.0.1:8001   (保留)    ComfyUI（含 /ws WebSocket）
 #
 # 对应 worker 环境变量：
-#   WEAVEORA_COMFY_URL=http://36.103.182.217:30250
-#   WEAVEORA_TTS_URL  =http://36.103.182.217:30250/audio
-#   WEAVEORA_MUSIC_URL=http://36.103.182.217:30250/bgm
-#   WEAVEORA_FACE_URL =http://36.103.182.217:30250
+#   WEAVEORA_COMFY_URL=http://<GPU公网地址:端口>
+#   WEAVEORA_TTS_URL  =http://<GPU公网地址:端口>/audio
+#   WEAVEORA_MUSIC_URL=http://<GPU公网地址:端口>/bgm
+#   WEAVEORA_FACE_URL =http://<GPU公网地址:端口>
 #
 # 启动：<venv>/bin/python edge_proxy.py [--port 8000]
 # 依赖：aiohttp（ComfyUI venv 自带，无需额外安装）

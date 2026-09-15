@@ -62,6 +62,17 @@ const svcLipsyncFps = ref<number | null>(0)
 const svcTranscribeUrl = ref('')
 const svcFaceUrl = ref('')
 const svcFaceDir = ref('')
+// 整脸口型（EchoMimicV3）：喊叫/尖叫/吟唱镜替代 LatentSync；留空=用 GPU 服务器地址推导 <gpu>/talk
+const svcTalkUrl = ref('')
+const svcTalkJawGain = ref<number | null>(1.0)
+// 文生图（本机 ComfyUI）：workflow/img2imgWorkflow 是 worker 机器上的绝对路径
+const svcImageEngine = ref('comfy')
+const svcImageComfy = ref('')
+const svcImageWorkflow = ref('')
+const svcImageImg2img = ref('')
+const svcImageModel = ref('')
+const svcImageSteps = ref<number | null>(null)
+const svcImageDenoise = ref<number | null>(0.65)
 const imagePresets = ref<ModelPreset[]>([])
 const videoPresets = ref<ModelPreset[]>([])
 const presetBusy = ref(false)
@@ -261,6 +272,15 @@ async function load(): Promise<void> {
     svcTranscribeUrl.value = sv.transcribe?.url ?? ''
     svcFaceUrl.value = sv.face?.url ?? ''
     svcFaceDir.value = sv.face?.latentsyncDir ?? ''
+    svcTalkUrl.value = sv.talk?.url ?? ''
+    svcTalkJawGain.value = sv.talk?.jawGain ?? 1.0
+    svcImageEngine.value = sv.image?.engine ?? 'comfy'
+    svcImageComfy.value = sv.image?.comfyUrl ?? ''
+    svcImageWorkflow.value = sv.image?.workflow ?? ''
+    svcImageImg2img.value = sv.image?.img2imgWorkflow ?? ''
+    svcImageModel.value = sv.image?.model ?? ''
+    svcImageSteps.value = sv.image?.steps ?? null
+    svcImageDenoise.value = sv.image?.denoise ?? 0.65
     applySettings(s)
     ready.value = true
   } catch (e) {
@@ -302,6 +322,16 @@ async function save(): Promise<void> {
         },
         transcribe: { url: svcTranscribeUrl.value || null },
         face: { url: svcFaceUrl.value || null, latentsyncDir: svcFaceDir.value || null },
+        talk: { url: svcTalkUrl.value || null, enabled: true, jawGain: svcTalkJawGain.value ?? 1.0 },
+        image: {
+          engine: svcImageEngine.value,
+          comfyUrl: svcImageComfy.value || null,
+          workflow: svcImageWorkflow.value || null,
+          img2imgWorkflow: svcImageImg2img.value || null,
+          model: svcImageModel.value || null,
+          steps: svcImageSteps.value,
+          denoise: svcImageDenoise.value,
+        },
       },
     })
     message.success('已保存生成引擎配置')
@@ -580,7 +610,11 @@ onMounted(load)
       <section class="card" data-testid="svc-card">
         <h2 class="card-title">{{ cloudActive ? '⑤' : '③' }} 服务地址（换 GPU 机器只改这里）</h2>
         <p class="mdl-hint text-secondary">
-          这些服务原先只由 worker 机器的环境变量决定（TTS :8091 / 音乐 :8092 / ComfyUI :8188 / 对口型工作流路径）。
+          ★ <b>GPU 公网 IP/端口会变</b>：只改上面的「GPU 服务器地址 + 端口」，下面这些<b>留空即自动跟随</b>
+          （后端会推导成 <code>&lt;gpu&gt;:8001</code>（ComfyUI）、<code>&lt;gpu&gt;/audio</code>（配音/转写）、
+          <code>&lt;gpu&gt;/talk</code>（整脸口型））。<b>不要</b>把 IP 写进 worker 脚本、部署脚本或代码。
+        </p>
+        <p class="mdl-hint text-secondary">
           填在这里后随任务下发给 worker，<b>保存即生效</b>，不用改脚本、不用重启 worker。留空 = 用 worker 机器上的默认值。
         </p>
 
@@ -628,6 +662,57 @@ onMounted(load)
         <NFormItem label="人脸/LatentSync 节点目录（本机人脸检测用，可留空）">
           <NInput v-model:value="svcFaceDir" placeholder="如 D:\ComfyUI\custom_nodes\ComfyUI-LatentSyncWrapper" />
         </NFormItem>
+
+        <NDivider />
+        <p class="mdl-hint text-secondary">
+          <b>整脸口型（EchoMimicV3 / jaw-lip）</b>：喊叫、尖叫、吟唱这类「嘴大张」镜用它替代 LatentSync，
+          跑在 GPU 机的 <code>talk_server.py</code>（默认 :8094，网关路径 <code>/talk</code>）。留空 = 自动用 GPU 服务器地址推导。
+        </p>
+        <div class="mdl-row">
+          <NFormItem label="整脸口型服务地址" class="grow">
+            <NInput v-model:value="svcTalkUrl" placeholder="留空=自动 &lt;GPU 服务器&gt;/talk（如 http://your-gpu-host:10558/talk）" />
+          </NFormItem>
+          <NFormItem label="下颌曲线增益 jaw_gain" style="width: 230px">
+            <NInputNumber v-model:value="svcTalkJawGain" :min="0" :max="2" :step="0.05" placeholder="1.0" style="width: 150px" />
+          </NFormItem>
+        </div>
+        <p class="mdl-hint text-secondary">
+          <code>jaw_gain=1.0</code> 零改动（原生 EchoMimic 输出）；<code>1.25</code> 是增强档（喊叫时下半脸张得更开）。
+        </p>
+
+        <NDivider />
+        <p class="mdl-hint text-secondary">
+          <b>文生图（本机 ComfyUI）</b>：走 GPU 机上的 ComfyUI（当前 Qwen-Image + Lightning 8 步，实测 1344×768 ≈ 40s/张）。
+          两个工作流是 <b>worker 机器上的绝对路径</b>（装在哪台机就填哪台的）；留空 = 用 worker 自带默认（老 SDXL 路线）。
+        </p>
+        <div class="mdl-row">
+          <NFormItem label="出图引擎" style="width: 220px">
+            <NSelect v-model:value="svcImageEngine" :options="[
+              { label: 'comfy（本机 ComfyUI 工作流）', value: 'comfy' },
+              { label: '内置（worker 自带 SDXL）', value: 'builtin' },
+            ]" />
+          </NFormItem>
+          <NFormItem label="ComfyUI 地址" class="grow">
+            <NInput v-model:value="svcImageComfy" placeholder="留空=自动 &lt;GPU 服务器&gt;:8001" />
+          </NFormItem>
+        </div>
+        <NFormItem label="文生图工作流（API 格式 JSON 绝对路径）">
+          <NInput v-model:value="svcImageWorkflow" placeholder="如 /opt/weaveora/qwen_image_txt2img_api.json" />
+        </NFormItem>
+        <NFormItem label="图生图工作流（关键帧当底图；可留空）">
+          <NInput v-model:value="svcImageImg2img" placeholder="如 /opt/weaveora/qwen_image_img2img_api.json" />
+        </NFormItem>
+        <div class="mdl-row">
+          <NFormItem label="主模型名（留空=用工作流里的）" class="grow">
+            <NInput v-model:value="svcImageModel" placeholder="如 qwen_image_fp8_e4m3fn.safetensors" />
+          </NFormItem>
+          <NFormItem label="步数" style="width: 160px">
+            <NInputNumber v-model:value="svcImageSteps" :min="1" :max="60" placeholder="8" style="width: 110px" />
+          </NFormItem>
+          <NFormItem label="图生图 denoise" style="width: 200px">
+            <NInputNumber v-model:value="svcImageDenoise" :min="0.1" :max="1" :step="0.05" placeholder="0.65" style="width: 110px" />
+          </NFormItem>
+        </div>
       </section>
 
       <div class="actions">

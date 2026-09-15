@@ -75,4 +75,4 @@ else
 fi
 echo "重启后自检（GPU 机本地）： curl -s http://127.0.0.1:8001/weaveora/version"
 echo "自检（本脚本带的 verify）： bash $(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/verify.sh http://127.0.0.1:8001"
-echo "自检（经公网网关）：       bash verify.sh http://36.103.182.217:30250"
+echo "自检（经公网网关）：       bash verify.sh http://<GPU公网地址:端口>"

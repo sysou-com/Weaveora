@@ -60,7 +60,7 @@ fi
 cat > /home/start.sh <<'EOS'
 #!/bin/sh
 # Weaveora: 拉起全部服务（ComfyUI:8001 + TTS:8091 + Face:8093 + 边缘网关:8000）
-# 公网唯一入口 36.103.182.217:30250 -> 容器 8000(网关) -> 按路径分发
+# 公网唯一入口 <GPU公网地址:端口> -> 容器 8000(网关) -> 按路径分发
 bash /home/dataset-local/weaveora/services_up.sh
 sleep 10s
 chrome 127.0.0.1:8000 &
@@ -86,5 +86,5 @@ log "---------------- 端口验收 ----------------"
 for p in 8000 8001 8091 8093; do
   if ss -ltn 2>/dev/null | grep -q ":$p "; then log "  :$p LISTEN"; else log "  :$p --"; fi
 done
-log "公网入口: http://36.103.182.217:30250  （/  → ComfyUI；/audio/* → 配音+转写；/face/* → 人脸；/bgm/* → 配乐兜底）"
+log "公网入口: http://<GPU公网地址:端口>  （/  → ComfyUI；/audio/* → 配音+转写；/face/* → 人脸；/bgm/* → 配乐兜底）"
 log "================ weaveora bootstrap DONE ================"

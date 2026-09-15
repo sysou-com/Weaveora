@@ -10,10 +10,10 @@
 #   8093  face_server.py           (人脸 /face/probe /face/embed)
 #
 # 对外 URL（给 worker 用）：
-#   WEAVEORA_COMFY_URL=http://36.103.182.217:30250
-#   WEAVEORA_TTS_URL  =http://36.103.182.217:30250/audio
-#   WEAVEORA_MUSIC_URL=http://36.103.182.217:30250/bgm
-#   WEAVEORA_FACE_URL =http://36.103.182.217:30250
+#   WEAVEORA_COMFY_URL=http://<GPU公网地址:端口>
+#   WEAVEORA_TTS_URL  =http://<GPU公网地址:端口>/audio
+#   WEAVEORA_MUSIC_URL=http://<GPU公网地址:端口>/bgm
+#   WEAVEORA_FACE_URL =http://<GPU公网地址:端口>
 # =============================================================================
 set -uo pipefail
 
@@ -86,7 +86,7 @@ else
 fi
 
 # ---------- 边缘网关（端口可配：WEAVEORA_GATEWAY_PORT，缺省 8000）----------
-# GPU#2（180.127.11.166）平台给的公网映射是 10588→容器 8800，故那边要设 8800。
+# GPU#2：平台给的公网映射是 <公网端口>→容器 8800，故那边要设 8800（具体公网地址/端口见「生成引擎配置 → GPU 服务器地址」）。
 GWPORT=${WEAVEORA_GATEWAY_PORT:-8000}
 # 必须最后起（依赖上面各服务）
 if up "$GWPORT"; then

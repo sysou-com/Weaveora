@@ -1,13 +1,13 @@
 #!/bin/bash
 # =============================================================================
-# Weaveora 第一批模型下载 —— GPU 服务器 #2（root@180.127.11.166:10532, Ubuntu 24.04, RTX 4090 48G）
+# Weaveora 第一批模型下载 —— GPU 服务器 #2（root@<GPU公网地址:ssh端口>, Ubuntu 24.04, RTX 4090 48G）
 #
 # 规则（Weaveora.md §0.2「大文件下载铁律」）：
 #   · ≥200 MiB → gpu_model_downloader.js（**10 路 Range 分片 + .meta.json 断点续传 + .done**）
 #   · <200 MiB → curl -L -C -
 #   · **必须后台静默启动**（setsid nohup），不得前台阻塞；只出进度日志
 #
-# 与 GPU #1（36.103.182.217:30203）的差异（本机实测 2026-09-14）：
+# 与 GPU #1（<GPU#1公网地址:ssh端口>）的差异（本机实测 2026-09-14）：
 #   · ModelScope 单连 10.7 MB/s（#1 是 3.2）→ 主线源
 #   · **GitHub 直连可用 2.4 MB/s**；ghfast.top 在本机**不通**（#1 可用）→ 改用直连
 #   · aifasthub 1.2 MB/s（LatentSync 权重）

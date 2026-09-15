@@ -16,11 +16,43 @@ import urllib.request
 
 import comfy_client as cc
 
+# 服务地址：优先用「生成引擎配置 → 服务地址」下发的值（换 GPU 机器/换 IP 只改配置页，不改代码）；
+# 只有没配时才回退到环境变量 WEAVEORA_TALK_URL。
+# ★ 这里**不写任何具体 IP**：GPU 公网 IP 会变，写死必然在换机后静默失效。
+TALK_URL = (os.environ.get("WEAVEORA_TALK_URL") or "").strip().rstrip("/")
+TALK_ENABLED = True
+JAW_GAIN_DEFAULT = 1.0
+
+
+def apply_services(svc):
+    """应用后端随任务下发的服务配置（`services.talk`）。
+
+    svc 形如 {"talk": {"url": "http://<gpu>/talk", "enabled": true, "jawGain": 1.0}, ...}
+    url 留空 = 保留环境变量/默认。与 comfy_client.apply_services / audio_client.apply_services 同构。
+    """
+    global TALK_URL, TALK_ENABLED, JAW_GAIN_DEFAULT
+    if not isinstance(svc, dict):
+        return
+    t = svc.get("talk")
+    if not isinstance(t, dict):
+        return
+    url = (t.get("url") or "").strip().rstrip("/")
+    if url:
+        TALK_URL = url
+    if t.get("enabled") is not None:
+        TALK_ENABLED = bool(t.get("enabled"))
+    try:
+        if t.get("jawGain") is not None:
+            JAW_GAIN_DEFAULT = float(t["jawGain"])
+    except (TypeError, ValueError):
+        pass
+    print("[talk] 服务地址=%s enabled=%s jaw_gain默认=%s" % (TALK_URL or "(未配置)", TALK_ENABLED, JAW_GAIN_DEFAULT),
+          flush=True)
+
 
 def talk_url():
-    """talk 服务地址（含路径），例：http://180.127.11.166:10558/talk 。未配置则报错（不静默降级）。"""
-    u = (os.environ.get("WEAVEORA_TALK_URL") or "").strip().rstrip("/")
-    return u
+    """talk 服务地址（含路径），如 http://<gpu-host>:<port>/talk 。未配置则报错（不静默降级）。"""
+    return TALK_URL
 
 
 def _probe_size(payload):
@@ -38,10 +70,10 @@ def _probe_size(payload):
 def generate_talk(jid, payload, progress_fn=None):
     """返回 [{bytes, mime, width, height, duration_ms}]（与 comfy_client.generate_lipsync 同口径）。"""
     url = talk_url()
-    if not url:
+    if not url or not TALK_ENABLED:
         raise cc.ComfyError(
-            "未配置整脸口型服务地址：请设置 worker 环境变量 WEAVEORA_TALK_URL"
-            "（例：http://<gpu-host>:<port>/talk，由 deploy/gpu2_talk_server.py 提供）")
+            "未配置整脸口型服务地址：请在「生成引擎配置 → GPU 服务器 → 服务地址 → 整脸口型」里填/留空让它自动跟随"
+            "（或设 worker 环境变量 WEAVEORA_TALK_URL，如 http://<gpu-host>:<port>/talk）")
 
     image_key = (payload.get("imageKey") or "").strip()
     voice_keys = [k for k in (payload.get("voiceKeys") or []) if k]
@@ -60,7 +92,7 @@ def generate_talk(jid, payload, progress_fn=None):
         "audio_b64": base64.b64encode(audio).decode("ascii"),
         "audio_suffix": ".wav",
         "prompt": (payload.get("prompt") or "").strip(),
-        "jaw_gain": float(payload.get("jawGain") or 1.0),
+        "jaw_gain": float(payload.get("jawGain") or JAW_GAIN_DEFAULT),
         "jaw_strength": float(payload.get("jawStrength") or 0.35),
         "jaw_attack_ms": float(payload.get("jawAttackMs") or 50),
         "jaw_decay_ms": float(payload.get("jawDecayMs") or 130),

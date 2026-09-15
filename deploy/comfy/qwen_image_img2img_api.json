@@ -1,0 +1,22 @@
+{
+  "_comment": "Weaveora · Qwen-Image **图生图/参考帧**（ComfyUI API 格式，GPU#2）。用「该镜关键帧」当底图（VAEEncode）+ denoise 控制改动幅度：denoise 0.5–0.7 = 保构图/人物、换风格或补细节；1.0 = 纯文生图。worker 注入 6.text / 12.image / 9.denoise / 9.seed / 8？(无) 。注意：这不是「参考图锚定」（那走 Qwen-Image-Edit），它是**以关键帧为底图重新采样**，构图/人物来自底图。",
+  "1": { "class_type": "UNETLoader", "_meta": { "title": "unet" }, "inputs": { "unet_name": "qwen_image_fp8_e4m3fn.safetensors", "weight_dtype": "default" } },
+  "2": { "class_type": "CLIPLoader", "_meta": { "title": "clip" }, "inputs": { "clip_name": "qwen_2.5_vl_7b_fp8_scaled.safetensors", "type": "qwen_image", "device": "default" } },
+  "3": { "class_type": "VAELoader", "_meta": { "title": "vae" }, "inputs": { "vae_name": "qwen_image_vae.safetensors" } },
+  "4": { "class_type": "LoraLoaderModelOnly", "_meta": { "title": "lightning" }, "inputs": { "model": ["1", 0], "lora_name": "Qwen-Image-Lightning-8steps-V1.0.safetensors", "strength_model": 1.0 } },
+  "5": { "class_type": "ModelSamplingAuraFlow", "_meta": { "title": "shift" }, "inputs": { "model": ["4", 0], "shift": 3.0 } },
+  "6": { "class_type": "CLIPTextEncode", "_meta": { "title": "positive" }, "inputs": { "clip": ["2", 0], "text": "" } },
+  "7": { "class_type": "CLIPTextEncode", "_meta": { "title": "negative" }, "inputs": { "clip": ["2", 0], "text": "" } },
+  "12": { "class_type": "LoadImage", "_meta": { "title": "ref_frame" }, "inputs": { "image": "shot5_keyframe.jpg" } },
+  "13": { "class_type": "VAEEncode", "_meta": { "title": "encode_ref" }, "inputs": { "pixels": ["12", 0], "vae": ["3", 0] } },
+  "9": {
+    "class_type": "KSampler",
+    "_meta": { "title": "sampler" },
+    "inputs": {
+      "model": ["5", 0], "positive": ["6", 0], "negative": ["7", 0], "latent_image": ["13", 0],
+      "seed": 43, "steps": 8, "cfg": 1.0, "sampler_name": "euler", "scheduler": "simple", "denoise": 0.65
+    }
+  },
+  "10": { "class_type": "VAEDecode", "_meta": { "title": "decode" }, "inputs": { "samples": ["9", 0], "vae": ["3", 0] } },
+  "11": { "class_type": "SaveImage", "_meta": { "title": "save" }, "inputs": { "images": ["10", 0], "filename_prefix": "weaveora_qwen_i2i" } }
+}

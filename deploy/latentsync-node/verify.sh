@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # 远程自检：确认 GPU 服务器上的 LatentSync 节点补丁版本与能力（在**任意能访问网关的机器**上跑）。
-#   bash verify.sh [网关地址]      默认 http://36.103.182.217:30250
+#   bash verify.sh <网关地址>      （无默认值：必须传入，或设 WEAVEORA_GPU_GATEWAY；生产请在「生成引擎配置 → GPU 服务器地址」里配）
 set -euo pipefail
-GW="${1:-http://36.103.182.217:30250}"
+GW="${1:-${WEAVEORA_GPU_GATEWAY:?请传入 GPU 网关地址（如 bash verify.sh http://<gpu-host>:<port>）；生产环境请在「生成引擎配置 → GPU 服务器地址」里配置，不要写死 IP}}"
 echo "查询 $GW/weaveora/version ..."
 BODY="$(curl -fsS -m 20 "$GW/weaveora/version" || true)"
 if [ -z "$BODY" ]; then

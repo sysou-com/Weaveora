@@ -1,33 +1,29 @@
 #!/usr/bin/env python3
-"""Weaveora jaw-lip 服务（GPU#2 上常驻，默认 :8094）—— EchoMimicV3 整脸音频驱动 + 下颌曲线层
+"""Weaveora jaw-lip 服务（GPU#2 常驻，默认 :8094）—— EchoMimicV3 整脸音频驱动 + 下颌曲线层
 
-为什么单独一个服务（对齐 tts_server/face_server 的形态）：
-  · EchoMimicV3 需要独立 venv（/opt/weaveora/envs/talk，含 diffusers/transformers/insightface），
-    与 ComfyUI 的 venv 隔离，避免污染 LatentSync 生产环境；
-  · GPU#2 与 worker 不在同一台机（worker 在 VPS），所以用 HTTP 传字节，不共享文件系统。
+设计要点（与 v1 的差别）：
+  · **批量摊薄加载**：官方推理是"加载 ~20GB 权重 → 逐镜头采样"。一次请求只跑一镜时，
+    加载成本会重复付（单镜 10–20 分钟）。所以提供 `/talk_batch`：**一次加载处理 N 个镜头**，
+    第 2..N 镜只付采样时间。单镜接口 `/talk` 保留（内部就是 1 镜的批量）。
+  · 独立 venv（/opt/weaveora/envs/talk），与 ComfyUI 隔离；GPU 单卡串行（一次性只跑一个推理）。
+  · 下颌曲线层：音频响度包络 → 下半脸向下位移（remap）。`jaw_gain=1.0` = **零改动**（原生效果），
+    >1 更开、<1 更闭。
 
 接口（POST + JSON，UTF-8）：
-  GET  /health  → {"ok":true,"device":"cuda","vram_free_gb":…,"want":…}
-  POST /talk    → 入参：
-      { "image_b64": "<静帧字节 base64>", "image_suffix": ".jpg",
-        "audio_b64": "<配音字节 base64>", "audio_suffix": ".wav",
-        "jaw_gain": 1.0,          # 1.0 = 完全不动（原生 EchoMimic）；>1 下颌更开，<1 更闭
-        "jaw_strength": 0.35,     # 曲线层强度系数 α（gain≠1 时才生效）
-        "jaw_attack_ms": 50, "jaw_decay_ms": 130,
-        "steps": 25, "guidance": 4.0, "audio_guidance": 2.9, "seed": 43, "fps": 25,
-        "max_seconds": 12.0 }     # 安全阀：超长音频直接拒绝（避免一次跑太久）
-    → { "video_b64": "<mp4 base64>", "meta": {…耗时/帧数/下颌增益...} }
-
-下颌曲线层（我们的增量，先做「后置形变」，不动生成模型）：
-  音频响度包络 → jaw_open(t) 曲线（attack/decay 平滑）→ 对**下半脸**做向下位移的 remap 形变，
-  位移量 = α·(jaw_gain−1)·env(t)·嘴宽；gain=1.0 时**零改动**（identity），保证第一版产物就是原生效果。
+  GET  /health → {"ok":true,"vram_free_gb":…}
+  POST /talk   → {"image_b64","audio_b64","image_suffix"?,"audio_suffix"?,"prompt"?,
+                  "jaw_gain"?, "jaw_strength"?, "jaw_attack_ms"?, "jaw_decay_ms"?,
+                  "steps"?, "guidance"?, "audio_guidance"?, "seed"?, "fps"?, "partial_video_length"?}
+                 → {"video_b64":…, "meta":{…}}
+  POST /talk_batch → {"items":[{同上单镜字段}...], 其余为公共参数}
+                 → {"results":[{video_b64, meta}...], "meta":{"infer_seconds":…,"count":N}}
 """
 import base64
 import json
 import os
+import re
 import shutil
 import subprocess
-import sys
 import tempfile
 import threading
 import time
@@ -43,7 +39,11 @@ WORK = os.path.join(ROOT, "talk_work")
 FACE_AUX = os.environ.get("WEAVEORA_FACE_AUX", os.path.join(ROOT, "models/face_aux"))
 PORT = int(os.environ.get("WEAVEORA_TALK_PORT", "8094"))
 
-_LOCK = threading.Lock()          # 单卡串行：一次只跑一个推理
+# 官方脚本每个 demo 都要 prompts/<name>.txt（文本 CFG）；缺了会 FileNotFoundError
+DEFAULT_PROMPT = ("cinematic medium close-up of a young man in Qing-dynasty silk robes, "
+                  "natural skin texture, soft warm candle light, film grain, high detail")
+
+_LOCK = threading.Lock()          # 单卡串行
 _FACE_APP = None
 
 
@@ -83,7 +83,7 @@ def _face_app():
 
 
 def _mouth_from_landmarks(face):
-    """(cx, cy, mouth_width) —— 嘴部点位 52..71 是 InsightFace 2d106 的实测口径（见 worker 注释）。"""
+    """(cx, cy, mouth_width)；嘴部点位 52..71 是 InsightFace 2d106 的实测口径。"""
     lm = getattr(face, "landmark_2d_106", None)
     if lm is None:
         return None
@@ -97,12 +97,7 @@ def _mouth_from_landmarks(face):
 
 def jaw_boost(in_mp4, out_mp4, audio_path, gain=1.0, strength=0.35,
               attack_ms=50.0, decay_ms=130.0):
-    """按音频包络给"下半脸"做向下位移（下颌更开）。gain=1.0 → 原样拷贝（零改动）。
-
-    实现取舍：v1 用"羽化高斯位移场 + remap"，不做 TPS/网格与口腔内层合成——
-    ① 不引入新的网络/权重；② gain=1.0 时完全不碰像素；③ 位移只作用在嘴线以下并向外羽化，
-       不会把眼睛/鼻子拉走。口腔内部（牙齿/舌）的合成属于 S2b，先留着看效果再决定要不要做。
-    """
+    """按音频包络给"下半脸"做向下位移。gain=1.0 → 原样拷贝（零改动）。"""
     import cv2
     if abs(gain - 1.0) < 0.02:
         shutil.copyfile(in_mp4, out_mp4)
@@ -118,48 +113,39 @@ def jaw_boost(in_mp4, out_mp4, audio_path, gain=1.0, strength=0.35,
     tmpdir = tempfile.mkdtemp(prefix="talk_boost_")
     vpath = os.path.join(tmpdir, "v.mp4")
     writer = cv2.VideoWriter(vpath, cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
-    idx = 0
-    applied = 0
+    idx = applied = 0
     try:
         while True:
             ok, frame = cap.read()
             if not ok:
                 break
-            faces = app.get(frame)
             m = None
+            faces = app.get(frame)
             if faces:
                 f = max(faces, key=lambda x: (x.bbox[2] - x.bbox[0]) * (x.bbox[3] - x.bbox[1]))
                 m = _mouth_from_landmarks(f)
             if m is None:
-                writer.write(frame)
-                idx += 1
-                continue
+                writer.write(frame); idx += 1; continue
             cx, cy, mw = m
             e = float(env[min(idx, len(env) - 1)]) if len(env) else 0.0
-            dy_max = strength * (gain - 1.0) * e * mw        # 像素：正=更开，负=更闭
+            dy_max = strength * (gain - 1.0) * e * mw
             if abs(dy_max) < 0.5:
-                writer.write(frame)
-                idx += 1
-                continue
+                writer.write(frame); idx += 1; continue
             sx, sy = 0.95 * mw, 0.75 * mw
             ys, xs = np.mgrid[0:h, 0:w].astype(np.float32)
             gauss = np.exp(-(((xs - cx) ** 2) / (2 * sx * sx) + ((ys - cy) ** 2) / (2 * sy * sy)))
-            below = np.clip((ys - cy) / max(1.0, 0.35 * mw), 0.0, 1.0)   # 嘴线以上不动
+            below = np.clip((ys - cy) / max(1.0, 0.35 * mw), 0.0, 1.0)
             dy = dy_max * gauss * below
             map_x = xs
             map_y = np.clip(ys - dy, 0, h - 1).astype(np.float32)
-            out = cv2.remap(frame, map_x, map_y, interpolation=cv2.INTER_LINEAR,
-                            borderMode=cv2.BORDER_REFLECT101)
-            writer.write(out)
-            applied += 1
-            idx += 1
+            writer.write(cv2.remap(frame, map_x, map_y, interpolation=cv2.INTER_LINEAR,
+                                   borderMode=cv2.BORDER_REFLECT101))
+            applied += 1; idx += 1
     finally:
-        cap.release()
-        writer.release()
+        cap.release(); writer.release()
 
-    # 用 ffmpeg 重新封装并接回原音轨（笔者的 mp4v 轨道无音频）
-    subprocess.run([os.path.join(ROOT, "ffmpeg") if os.path.exists(os.path.join(ROOT, "ffmpeg")) else "ffmpeg",
-                    "-y", "-loglevel", "error", "-i", vpath, "-i", audio_path,
+    ff = "ffmpeg"
+    subprocess.run([ff, "-y", "-loglevel", "error", "-i", vpath, "-i", audio_path,
                     "-map", "0:v:0", "-map", "1:a:0", "-c:v", "libx264", "-pix_fmt", "yuv420p",
                     "-c:a", "aac", "-shortest", out_mp4], check=True)
     shutil.rmtree(tmpdir, ignore_errors=True)
@@ -167,80 +153,134 @@ def jaw_boost(in_mp4, out_mp4, audio_path, gain=1.0, strength=0.35,
             "alpha": strength, "attack_ms": attack_ms, "decay_ms": decay_ms}
 
 
-# ---------------------------------------------------------------- 推理
-def run_echo(image_bytes, image_suffix, audio_bytes, audio_suffix, params):
-    """调用官方 EchoMimicV3 推理（每请求一个临时 base_dir + 打补丁的 infer 脚本）。"""
-    jid = uuid.uuid4().hex[:8]
-    d = os.path.join(WORK, jid)
-    os.makedirs(os.path.join(d, "imgs"), exist_ok=True)
-    os.makedirs(os.path.join(d, "audios"), exist_ok=True)
-    os.makedirs(os.path.join(d, "masks"), exist_ok=True)
-    img = os.path.join(d, "imgs", "shot" + (image_suffix or ".jpg"))
-    aud = os.path.join(d, "audios", "shot" + (audio_suffix or ".wav"))
-    with open(img, "wb") as fh:
-        fh.write(image_bytes)
-    with open(aud, "wb") as fh:
-        fh.write(audio_bytes)
-
-    src = io_read(os.path.join(REPO, "infer_preview.py"))
-    src = src.replace('self.base_dir = "datasets/echomimicv3_demos/"', 'self.base_dir = "%s/"' % d)
-    src = src.replace("self.test_name_list = ['shot5']", "self.test_name_list = ['shot']")
-    if "self.test_name_list = ['shot']" not in src:      # 兜底：替换掉原始长列表
-        import re
-        src = re.sub(r"self\.test_name_list\s*=\s*\[.*?\]", "self.test_name_list = ['shot']", src, flags=re.S)
-    for k, attr in (("steps", "num_inference_steps"), ("guidance", "guidance_scale"),
-                    ("audio_guidance", "audio_guidance_scale"), ("seed", "seed"), ("fps", "fps")):
-        if params.get(k) is not None:
-            src = sub_src(src, attr, params[k])
-    runner = os.path.join(d, "infer_req.py")
-    io_write(runner, src)
-
-    env = dict(os.environ)
-    env["PYTHONUNBUFFERED"] = "1"
-    env["PYTHONPATH"] = REPO
-    log = open(os.path.join(d, "run.log"), "wb")
-    t0 = time.time()
-    p = subprocess.Popen([PY, runner], cwd=REPO, stdout=log, stderr=subprocess.STDOUT, env=env)
-    rc = p.wait()
-    log.close()
-    if rc != 0:
-        raise RuntimeError("EchoMimic 推理失败(rc=%d)：%s" % (rc, io_read(os.path.join(d, "run.log"))[-1500:]))
-
-    # 产物：outputs/<ts>_gs*/shot_audio.mp4（带音轨的那份）
-    outdir = os.path.join(REPO, "outputs")
-    cands = []
-    for root, _dirs, files in os.walk(outdir):
-        for n in files:
-            if n.endswith(".mp4"):
-                cands.append(os.path.join(root, n))
-    cands = [c for c in cands if os.path.getmtime(c) >= t0 - 5]
-    if not cands:
-        raise RuntimeError("找不到推理产物（outputs/ 下无新 mp4）")
-    with_audio = [c for c in cands if c.endswith("_audio.mp4")] or cands
-    raw = max(with_audio, key=os.path.getmtime)
-    return raw, d, aud, time.time() - t0
-
-
-def io_read(p):
+# ---------------------------------------------------------------- 官方推理（批量）
+def _io_read(p):
     with open(p, "r", encoding="utf-8") as fh:
         return fh.read()
 
 
-def io_write(p, s):
+def _io_write(p, s):
     with open(p, "w", encoding="utf-8") as fh:
         fh.write(s)
 
 
-def sub_src(src, attr, value):
-    import re
+def _sub_src(src, attr, value):
     return re.sub(r"self\.%s\s*=\s*[^\n]+" % attr, "self.%s = %r" % (attr, value), src, count=1)
+
+
+def run_echo_multi(items, params):
+    """一次加载 → 处理 N 个镜头。返回 ([(raw_mp4, audio_path)], workdir, infer_seconds)。"""
+    jid = uuid.uuid4().hex[:8]
+    d = os.path.join(WORK, jid)
+    for sub in ("imgs", "audios", "masks", "prompts"):
+        os.makedirs(os.path.join(d, sub), exist_ok=True)
+    names, auds = [], []
+    for i, it in enumerate(items):
+        name = "shot%d" % i
+        names.append(name)
+        img = os.path.join(d, "imgs", name + (it.get("image_suffix") or ".jpg"))
+        aud = os.path.join(d, "audios", name + (it.get("audio_suffix") or ".wav"))
+        with open(img, "wb") as fh:
+            fh.write(it["image_bytes"])
+        with open(aud, "wb") as fh:
+            fh.write(it["audio_bytes"])
+        with open(os.path.join(d, "prompts", name + ".txt"), "w", encoding="utf-8") as fh:
+            fh.write((it.get("prompt") or params.get("prompt") or DEFAULT_PROMPT).strip() + "\n")
+        auds.append(aud)
+
+    src = _io_read(os.path.join(REPO, "infer_preview.py"))
+    src = src.replace('self.base_dir = "datasets/echomimicv3_demos/"', 'self.base_dir = "%s/"' % d)
+    src = re.sub(r"self\.test_name_list\s*=\s*\[.*?\]", "self.test_name_list = %r" % names, src, flags=re.S)
+    for k, attr in (("steps", "num_inference_steps"), ("guidance", "guidance_scale"),
+                    ("audio_guidance", "audio_guidance_scale"), ("seed", "seed"), ("fps", "fps"),
+                    ("partial_video_length", "partial_video_length"), ("sample_size", "sample_size")):
+        if params.get(k) is not None:
+            src = _sub_src(src, attr, params[k])
+    runner = os.path.join(d, "infer_req.py")
+    _io_write(runner, src)
+
+    env = dict(os.environ)
+    env["PYTHONUNBUFFERED"] = "1"
+    env["PYTHONPATH"] = REPO
+    logp = os.path.join(d, "run.log")
+    t0 = time.time()
+    with open(logp, "wb") as log:
+        p = subprocess.Popen([PY, runner], cwd=REPO, stdout=log, stderr=subprocess.STDOUT, env=env)
+        rc = p.wait()
+    if rc != 0:
+        raise RuntimeError("EchoMimic 推理失败(rc=%d)：%s" % (rc, _io_read(logp)[-1500:]))
+
+    cands = []
+    for root, _dirs, files in os.walk(os.path.join(REPO, "outputs")):
+        for n in files:
+            fp = os.path.join(root, n)
+            if n.endswith(".mp4") and os.path.getmtime(fp) >= t0 - 5:
+                cands.append(fp)
+    out = []
+    for name, aud in zip(names, auds):
+        pick = [c for c in cands if os.path.basename(c) == name + "_audio.mp4"] or \
+               [c for c in cands if os.path.basename(c) == name + ".mp4"]
+        if not pick:
+            raise RuntimeError("找不到 %s 的推理产物（outputs/ 下无新 mp4）" % name)
+        out.append((max(pick, key=os.path.getmtime), aud))
+    return out, d, time.time() - t0
+
+
+def _infer_with_oom_retry(items, body):
+    """跑推理；遇到显存不足（CUDA OOM）自动降档重试一次。
+
+    为什么：官方 preview 路径默认 768+113 帧，在 48G 卡上与 umt5/CLIP 同时驻留会 OOM
+    （实测 25 步时 PyTorch 已分配 38 GiB、再要 5.5 GiB）。降档顺序（README 建议）：
+      ① partial_video_length 113 → 81（分段变短）
+      ② sample_size 768 → 512（token 数大降）
+      ③ steps 降为 min(steps, 8)
+    返回 (raws, workdir, secs, used_params, retried)
+    """
+    try:
+        raws, workdir, secs = run_echo_multi(items, body)
+        return raws, workdir, secs, body, False
+    except RuntimeError as e:
+        if "out of memory" not in str(e).lower():
+            raise
+        safe = dict(body)
+        safe.setdefault("partial_video_length", 81)
+        if safe.get("partial_video_length", 999) > 81:
+            safe["partial_video_length"] = 81
+        safe["sample_size"] = [512, 512]
+        try:
+            if safe.get("steps") is None or int(safe["steps"]) > 8:
+                safe["steps"] = 8
+        except Exception:
+            safe["steps"] = 8
+        print("[talk] CUDA OOM → 自动降档重试：partial_video_length=%s sample_size=%s steps=%s"
+              % (safe["partial_video_length"], safe["sample_size"], safe["steps"]), flush=True)
+        raws, workdir, secs = run_echo_multi(items, safe)
+        return raws, workdir, secs, safe, True
+
+
+def _one(it, common, workdir):
+    """单镜：推理产物 →（可选）下颌曲线层 → mp4 bytes + meta。"""
+    gain = float(it.get("jaw_gain", common.get("jaw_gain", 1.0)))
+    raw, aud = it["_raw"], it["_aud"]
+    if abs(gain - 1.0) < 0.02:
+        out, boost = raw, {"applied": False, "gain": gain}
+    else:
+        out = os.path.join(workdir, "boost_%s.mp4" % uuid.uuid4().hex[:6])
+        boost = jaw_boost(raw, out, aud, gain,
+                          float(it.get("jaw_strength", common.get("jaw_strength", 0.35))),
+                          float(it.get("jaw_attack_ms", common.get("jaw_attack_ms", 50))),
+                          float(it.get("jaw_decay_ms", common.get("jaw_decay_ms", 130))))
+    with open(out, "rb") as fh:
+        vb = fh.read()
+    return {"video_b64": base64.b64encode(vb).decode(),
+            "meta": {"raw": os.path.basename(raw), "bytes": len(vb), "boost": boost}}
 
 
 # ---------------------------------------------------------------- HTTP
 class Handler(BaseHTTPRequestHandler):
-    server_version = "weaveora-talk/1.0"
+    server_version = "weaveora-talk/2.0"
 
-    def log_message(self, fmt, *args):     # 静默（避免刷屏；进度看 run.log）
+    def log_message(self, fmt, *args):
         pass
 
     def _json(self, code, obj):
@@ -256,51 +296,64 @@ class Handler(BaseHTTPRequestHandler):
             free = None
             try:
                 import torch
-                f, t = torch.cuda.mem_get_info()
+                f, _t = torch.cuda.mem_get_info()
                 free = round(f / 2 ** 30, 1)
             except Exception:
                 pass
             return self._json(200, {"ok": True, "device": "cuda", "vram_free_gb": free,
-                                    "venv": PY, "repo": REPO, "face_aux": FACE_AUX})
+                                    "venv": PY, "repo": REPO, "face_aux": FACE_AUX,
+                                    "default_steps": 25})
         return self._json(404, {"error": "not found"})
 
     def do_POST(self):
-        if not self.path.startswith("/talk"):
+        batch = self.path.startswith("/talk_batch")
+        if not (batch or self.path.startswith("/talk")):
             return self._json(404, {"error": "not found"})
         try:
             n = int(self.headers.get("Content-Length") or 0)
             body = json.loads(self.rfile.read(n).decode("utf-8")) if n else {}
         except Exception as e:
             return self._json(400, {"error": "bad json: %s" % e})
+
+        items_in = body.get("items") if batch else [body]
+        if not items_in:
+            return self._json(400, {"error": "items 为空"})
+        items = []
         try:
-            ib = base64.b64decode(body.get("image_b64") or "")
-            ab = base64.b64decode(body.get("audio_b64") or "")
-            if not ib or not ab:
-                return self._json(400, {"error": "image_b64 / audio_b64 必填"})
-            gain = float(body.get("jaw_gain", 1.0))
-            strength = float(body.get("jaw_strength", 0.35))
-            att = float(body.get("jaw_attack_ms", 50))
-            dec = float(body.get("jaw_decay_ms", 130))
-            if not _LOCK.acquire(blocking=False):
-                return self._json(429, {"error": "本机正在跑另一个 talk 任务（显存互斥），请稍后重试"})
-            try:
-                raw, workdir, audpath, secs = run_echo(ib, body.get("image_suffix") or ".jpg",
-                                                       ab, body.get("audio_suffix") or ".wav", body)
-                if abs(gain - 1.0) < 0.02:
-                    out = raw
-                    boost = {"applied": False, "gain": gain}
-                else:
-                    out = os.path.join(workdir, "out_boost.mp4")
-                    boost = jaw_boost(raw, out, audpath, gain, strength, att, dec)
-            finally:
-                _LOCK.release()
-            with open(out, "rb") as fh:
-                vb = fh.read()
-            return self._json(200, {"video_b64": base64.b64encode(vb).decode(),
-                                    "meta": {"infer_seconds": round(secs, 1), "vram_free_gb": None,
-                                             "raw": os.path.basename(raw), "boost": boost}})
+            for it in items_in:
+                ib = base64.b64decode(it.get("image_b64") or "")
+                ab = base64.b64decode(it.get("audio_b64") or "")
+                if not ib or not ab:
+                    return self._json(400, {"error": "每个 item 都要 image_b64 / audio_b64"})
+                items.append({"image_bytes": ib, "audio_bytes": ab,
+                              "image_suffix": it.get("image_suffix") or ".jpg",
+                              "audio_suffix": it.get("audio_suffix") or ".wav",
+                              "prompt": it.get("prompt")})
         except Exception as e:
-            return self._json(500, {"error": str(e)[:600]})
+            return self._json(400, {"error": "base64 解码失败: %s" % e})
+
+        if not _LOCK.acquire(blocking=False):
+            return self._json(429, {"error": "本机正在跑另一个 talk 任务（显存互斥），请稍后重试"})
+        try:
+            raws, workdir, secs, used, retried = _infer_with_oom_retry(items, body)
+            results = []
+            for i, it in enumerate(items):
+                it["_raw"], it["_aud"] = raws[i]
+                results.append(_one(it, body, workdir))
+        except Exception as e:
+            return self._json(500, {"error": str(e)[:800]})
+        finally:
+            _LOCK.release()
+
+        meta = {"infer_seconds": round(secs, 1), "count": len(results),
+                "per_item_seconds": round(secs / max(1, len(results)), 1),
+                "steps": used.get("steps"), "sample_size": used.get("sample_size"),
+                "partial_video_length": used.get("partial_video_length"),
+                "oom_retry": retried, "jaw_gain": body.get("jaw_gain", 1.0)}
+        if batch:
+            return self._json(200, {"results": results, "meta": meta})
+        return self._json(200, {"video_b64": results[0]["video_b64"],
+                                "meta": dict(results[0]["meta"], **meta)})
 
 
 def main():

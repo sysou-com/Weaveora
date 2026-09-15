@@ -480,9 +480,11 @@ export interface EngineSettings {
   imageModelPresets: ModelPreset[] | null
   videoModelPresets: ModelPreset[] | null
   /**
-   * 服务地址（配音/配乐、对口型、转写、人脸），后端已填默认值。
+   * 服务地址（配音/配乐、对口型、整脸口型、文生图、转写、人脸），后端已填默认值。
    *
-   * 换 GPU 服务器时只改这里（随任务下发给 worker），不用改 worker 脚本/重启。
+   * ★ GPU 公网 IP/端口会变：**只改「GPU 服务器地址 + 端口」这一处**，
+   *   下面这些留空即自动跟随（后端推导成 `<gpu>/audio`、`<gpu>/talk`、`<gpu>:8001` …）。
+   *   不要把 IP 写进 worker 脚本、部署脚本或代码里。
    */
   services?: ServiceEndpoints | null
 }
@@ -499,6 +501,33 @@ export interface ServiceEndpoints {
   transcribe?: { url?: string | null } | null
   /** 人脸（人脸预检/锁人；空 = 用 worker 本机 insightface，填了则调远端服务） */
   face?: { url?: string | null; latentsyncDir?: string | null } | null
+  /**
+   * 整脸口型（EchoMimicV3「jaw-lip」；喊叫/尖叫/吟唱镜用它替代 LatentSync）。
+   *
+   * 跑在 GPU 机的 `talk_server.py`（默认 :8094，网关路径 `/talk`）。**留空** = worker 读环境变量
+   * `WEAVEORA_TALK_URL`；配了「GPU 服务器地址」时后端会自动把它推导成 `<gpu>/talk`。
+   */
+  talk?: { url?: string | null; enabled?: boolean | null; jawGain?: number | null } | null
+  /**
+   * 文生图（本机 ComfyUI 出图，Qwen-Image / FLUX）。
+   *
+   * `engine=comfy` 时 worker 用 `workflow`（文生图）/`img2imgWorkflow`（关键帧当底图）两个 API 格式 JSON
+   * 直接 POST 给 ComfyUI；两个路径是**worker 机器上的绝对路径**（装在哪台机就填哪台机的）。
+   * 留空 = worker 用自带默认（老 SDXL/IP-Adapter 路线）。
+   */
+  image?: {
+    engine?: string | null
+    comfyUrl?: string | null
+    workflow?: string | null
+    img2imgWorkflow?: string | null
+    model?: string | null
+    sampler?: string | null
+    steps?: number | null
+    cfg?: number | null
+    width?: number | null
+    height?: number | null
+    denoise?: number | null
+  } | null
 }
 
 /** P12 模型库条目（一个已配置过的 baseUrl + 模型 + 参数 + 参数说明） */
