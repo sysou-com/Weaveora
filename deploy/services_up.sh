@@ -48,7 +48,9 @@ else
   # --reserve-vram 0.5：给 CUDA 上下文 / VAE 解码留 0.5GiB 余量。
   start_bg "ComfyUI(:8001)" "$LOGD/comfyui.log" \
     "$VENV_PY" "$CX/main.py" --listen 0.0.0.0 --port 8001 \
-    --disable-smart-memory --reserve-vram 0.5
+    --disable-smart-memory \
+    --cache-none \
+    --reserve-vram 0.5
 fi
 
 # ---------- TTS :8091 ----------

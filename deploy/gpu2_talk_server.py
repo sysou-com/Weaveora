@@ -277,6 +277,32 @@ def _one(it, common, workdir):
 
 
 # ---------------------------------------------------------------- HTTP
+def _resources():
+    """(vram_free_gb, ram_available_gb) —— 给"换能力/并发"当预算依据。
+
+    为什么需要：talk 每次请求 fork 子进程加载整套 EchoMimic（~24G 权重 / RSS 29.4G）。
+    与 ComfyUI 的内存缓存并存会超过 62G → 内核 oom_kill（还连带 weaveora-stack 整体 failed）。
+    开工前先自检，不够就返回 503 让调用方先让 ComfyUI 交还资源后重试。
+    """
+    vram = None
+    ram = None
+    try:
+        import torch
+        f, _t = torch.cuda.mem_get_info()
+        vram = round(f / 2 ** 30, 1)
+    except Exception:
+        pass
+    try:
+        with open("/proc/meminfo") as fh:
+            for line in fh:
+                if line.startswith("MemAvailable:"):
+                    ram = round(float(line.split()[1]) / 1048576.0, 1)
+                    break
+    except Exception:
+        pass
+    return vram, ram
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "weaveora-talk/2.0"
 
@@ -300,7 +326,10 @@ class Handler(BaseHTTPRequestHandler):
                 free = round(f / 2 ** 30, 1)
             except Exception:
                 pass
-            return self._json(200, {"ok": True, "device": "cuda", "vram_free_gb": free,
+            _v, _r = _resources()
+            _free, _ram = (free if free is not None else _v), _r
+            return self._json(200, {"ok": True, "device": "cuda", "vram_free_gb": _free,
+                                    "ram_available_gb": _ram,
                                     "venv": PY, "repo": REPO, "face_aux": FACE_AUX,
                                     "default_steps": 25})
         return self._json(404, {"error": "not found"})
@@ -332,6 +361,16 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:
             return self._json(400, {"error": "base64 解码失败: %s" % e})
 
+        _vram, _ram = _resources()
+        _need_ram = float(body.get("need_ram_gb") or 34.0)
+        _need_vram = float(body.get("need_vram_gb") or 20.0)
+        if _ram is not None and _ram < _need_ram:
+            return self._json(503, {"error": "内存不足：talk 需要约 %.0fG 可用，当前仅 %.1fG；请先让 ComfyUI 交还缓存（POST /free）后重试" % (_need_ram, _ram),
+                                "ram_available_gb": _ram, "vram_free_gb": _vram,
+                                "need_ram_gb": _need_ram})
+        if _vram is not None and _vram < _need_vram:
+            return self._json(503, {"error": "显存不足：talk 需要约 %.0fG 可用，当前仅 %.1fG" % (_need_vram, _vram), "vram_free_gb": _vram, "ram_available_gb": _ram,
+                                "need_vram_gb": _need_vram})
         if not _LOCK.acquire(blocking=False):
             return self._json(429, {"error": "本机正在跑另一个 talk 任务（显存互斥），请稍后重试"})
         try:

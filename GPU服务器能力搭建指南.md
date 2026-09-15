@@ -52,7 +52,7 @@
 | 端口 | 服务 | 启动脚本 | 能力 |
 |---|---|---|---|
 | **8800** | `edge_proxy.py` | `/opt/weaveora/edge_proxy.py` | 单端口多路复用（公网只有 10558 一个口） |
-| **8001** | ComfyUI **0.34.0** | `ComfyUI/main.py --listen 0.0.0.0 --port 8001 --disable-smart-memory --reserve-vram 0.5` | 出图 / 出片 / 对口型 / 配乐 的宿主 |
+| **8001** | ComfyUI **0.34.0** | `ComfyUI/main.py --listen 0.0.0.0 --port 8001 **--disable-smart-memory --cache-none** --reserve-vram 0.5` | 出图 / 出片 / 对口型 / 配乐 的宿主（详见坑 43：这两个 flag 是 48G 卡 + 62G 内存下的必需配置） |
 | **8091** | `tts_server.py` | `audio/tts_server.py 8091` | 配音 `/tts`、转写 `/transcribe`、`/load` `/unload` |
 | 8092 | `music_server.py` | 默认**不起**（HTTP 兜底） | 配乐（主线走 ComfyUI 原生节点） |
 | **8093** | `face_server.py --device cpu` | `face/face_server.py` | `/face/probe`（关键点/嘴张开度）、`/face/embed`（身份向量） |
@@ -442,6 +442,9 @@ HTTP 兜底 `music_server.py`（:8092）默认不起，主线走 ComfyUI。
 | 38 | **A14B 出片 OOM**（`KSamplerAdvanced: torch.OutOfMemoryError: Allocation on device`），即使 `/free` 后可用 46.5 GiB、并自动降帧到 56 帧仍复现 | 去掉 `--disable-smart-memory`（想省冷加载）后，ComfyUI 会让**双专家同时驻留**（高/低各 13.3 G）+ umt5 6.7 G，再加注意力/解码峰值就超过 47.4 G | **恢复 `--disable-smart-memory`**（双专家必须"用完即卸"）；"首图 12 分钟"的真因是**内存不足+swap**，不是这个 flag（扩容到 62 G 后已消失）。脚本：`deploy/gpu2_restore_smart_memory.py` |
 | 39 | `/free` 调了但显存没回来 | ComfyUI 的卸载是**异步**的：发完立刻量 `vram_free` 还是旧值（实测 19.9 → 19.5 G），旧代码量一次就往下走 → 后续任务 OOM | `_free_comfy_models(wait_gb=…)`：POST `/free` 后**轮询等到显存真的回来**（最多 120 s），日志打「卸载完成：可用显存 X GiB（目标 Y）」 |
 | 40 | 体检"过得去"但实际 OOM（预估 44.5 G / 总 47.4 G） | VRAM 预估模型没算**碎片/CUDA 上下文/解码瞬时峰值**，且 `MOTION_VRAM_SAFETY_GB` 旧默认是 **0**（等于没有余量）；判定为"根本放不下"时旧代码直接 `raise`（任务失败） | ① 预留默认改 **4 GiB**；② 能放下但余量不足时**自动降帧**（80 → 56 帧，4n 对齐）并打印原因，输出仍由 `_retime_to_fps()` 补到目标时长 → **任务不再失败，只损失运动稠密度**（仅当连 40 帧都放不下才报错） |
+| 42 | **重启撞死正在跑的任务**：用户 21:49 发起的对口型任务，21:52 报 `502 edge proxy: upstream error: Cannot connect to host 127.0.0.1:8001` | 我为部署 talk 的 `/health` 改动直接 `systemctl restart weaveora-stack.service` —— **ComfyUI 正在重启**，任务的 `/history` 轮询直接 502。worker 是**单线程认领**（任务不会真并发），所以"重启撞车"才是最大生产风险 | 新增唯一入口 **`deploy/gpu2_restart.sh`**：先查库（queued/running 有就拦下，除非 `FORCE=1`）→ 再重启 → 自检端口与 ComfyUI 就绪。**以后任何重启都走它** |
+| 43 | talk 被内核 `oom_kill`（anon-rss 29.4G），连带 `weaveora-stack` 整体 failed | ComfyUI 的默认 RAM 缓存阈值是「系统内存的 10%（min 2G / max 10G）」→ 在 62G 机器上会把 **20–28G 权重留在内存里**；talk 每次请求 fork 的子进程要 **29.4G** → 相加超 62G → 内核 OOM。`--disable-smart-memory` 只管显存，**不管内存** | ComfyUI 加 **`--cache-none`**（不在 RAM 缓存模型；改从页缓存/磁盘重读，700MB/s 且页缓存可被内核回收）→ **根治 RAM OOM**。想换回速度可用 `--cache-ram 32`（保留 32G 空闲的软阈值）。另：talk 服务加资源预检，内存不够返回 **503 + 原因**（而不是被内核杀掉） |
+| 44 | 资源让出散落在各分支、且内存读数读错机器 | ① 出图/出片/对口型/配乐/talk 各自零散调 `/free`、`/unload`；② worker 跑在 **VPS** 上，`/proc/meminfo` 读到的是 VPS 的内存（日志里一直显示 5.0 GiB，而 GPU 机实际 49.5G） | ① worker 收口成一个 **`_yield_resources(need_vram_gb, need_ram_gb, label)`**：`/free`(ComfyUI，并等显存真的回来) + `/unload`(TTS) + 打印让出前后资源，**五个重任务全走它**；② 内存预算改从 **GPU 机**取（talk 的 `/health` 新增 `ram_available_gb`，worker 经 `<talk_url>/health` 读取） |
 | 41 | 任务按创建顺序跑，`still→clip→still` 来回换大模型（每次重载 20–28 G） | 旧 claim 逻辑严格 FIFO，不同能力交错执行 → 反复卸载/加载 | **A3 同 kind 优先**：claim 时先收集候选再优先挑「与本节点上一个任务同类型」的（`JobService.lastClaimedKind`，进程内 Map）。**单跑行为不变**、跨 kind 不饿死（没同 kind 就取最早的）。实测：入队 `still(6) → clip(5) → still(4)`，实际执行为 `still(6) → still(4) → clip(5)` |
 | 36 | `start_talk.sh` 报 “already running” 但它其实没跑 | `ps | grep "[t]alk_server.py"` 匹配到了**执行这条命令的 shell 自身**（命令行里含该字符串）→ 误判 | 用更严格的模式（两段式 `grep "[e]cho_mimic_v3" | grep "[t]alk_server"`）或直接 `pgrep -f 'envs/talk/bin/python .*talk_server.py'`；这就是 §4.1 #6 「`pkill -f` 自匹配」的同族坑 |
 | 26 | 前端显示"方案有改动"但其实没改 | `prompt_revisions.schema_json` 是 **jsonb**（PG 重排对象键），前端 `JSON.stringify` 把**纯键序差异**当改动 | 新增 `canonicalJson()` 统一 dirty/pristine 比对；删掉 `startVoice/startBgm/startLipsync` 里会另存未确认版本的兜底保存 |

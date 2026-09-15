@@ -249,6 +249,95 @@ def _yield_vram_for_video(need_gb=None):
         print("[stub] 显存让位失败（继续执行，可能变慢或换入换出）：%s" % e, flush=True)
 
 
+def _ram_available_gb():
+    """系统可用内存（GiB）：/proc/meminfo 的 MemAvailable。拿不到返回 None。"""
+    try:
+        with open("/proc/meminfo") as fh:
+            for line in fh:
+                if line.startswith("MemAvailable:"):
+                    return round(float(line.split()[1]) / 1048576.0, 1)
+    except Exception:
+        pass
+    return None
+
+
+def _gpu_resources():
+    """从 **GPU 机**读 (vram_free_gb, ram_available_gb)。
+
+    ★ 为什么不能读本地 /proc/meminfo：worker 跑在 VPS 上，读出来的是 **VPS 的内存**
+    （实测日志里一直是 5.0 GiB，而 GPU 机 `free -m` 是 49.5G）—— 内存预算必须看跑模型的那台。
+    走 talk 服务的 `/health`（talk 服务在 GPU 机上，已返回 `ram_available_gb`）；
+    talk 不可达时退回 ComfyUI 的 `/system_stats`（只有显存）。
+    """
+    ram = None
+    vram = None
+    try:
+        import talk_client as _tc
+        base = _tc.talk_url()
+        if base:
+            import json as _json
+            import urllib.request as _u
+            with _u.urlopen(base.rstrip("/") + "/health", timeout=8) as r:
+                d = _json.loads(r.read().decode())
+            vram = d.get("vram_free_gb")
+            ram = d.get("ram_available_gb")
+    except Exception:
+        pass
+    if vram is None:
+        try:
+            import comfy_client as _cc
+            vram, _t = _cc.vram_stats()
+        except Exception:
+            pass
+    return vram, ram
+
+
+def _yield_resources(need_vram_gb=0.0, need_ram_gb=0.0, label=""):
+    """切换能力前的**统一资源让出入口**（所有重任务都必须走这里）。
+
+    为什么需要收口：这台机器上三个“重资产”在争同一份 47G 显存 / 62G 内存 ——
+      · ComfyUI（出图 Qwen-Image ~28G、出片 A14B 双专家 ~33G、对口型、配乐 的宿主，且默认会把权重缓存在**内存**里）；
+      · talk 服务（每次请求 fork 子进程加载整套 EchoMimic 管线，实测 anon-rss **29.4G**）；
+      · TTS（CosyVoice 常驻 ~7G 显存）。
+    踩过的两个坑：① 显存：A14B 双专家与 Qwen-Image 同时驻留 → `KSamplerAdvanced` OOM；
+                  ② 内存：ComfyUI 缓存 28G + talk 子进程 29.4G > 62G → **内核 oom_kill**（连 `weaveora-stack` 一起挂）。
+
+    本函数做三件事（失败均不致命，但要打日志）：
+      ① 请 ComfyUI `/free`（unload_models + free_memory）并**等显存真的回来**（`/free` 是异步的）；
+      ② 请 TTS `/unload`（让 CosyVoice 交还显存，下次配音会自动懒加载回来）；
+      ③ 打印让出前后的显存/内存，便于事后复盘。
+    """
+    tag = ("[%s] " % label) if label else ""
+    vram0, ram0 = _gpu_resources()
+    try:
+        import comfy_client as _cc
+        if need_vram_gb > 0:
+            try:
+                _cc._free_comfy_models(wait_gb=float(need_vram_gb), timeout=120)
+            except Exception as e:
+                print("[worker] %s让 ComfyUI 交还显存失败（忽略）：%s" % (tag, e), flush=True)
+    except Exception as e:
+        print("[worker] %s调用 comfy_client 失败（忽略）：%s" % (tag, e), flush=True)
+    try:
+        import audio_client as _ac
+        _ac.unload()   # TTS 交还显存（常驻 ~7G）
+    except Exception as e:
+        print("[worker] %sTTS /unload 失败（忽略）：%s" % (tag, e), flush=True)
+    vram1, ram1 = _gpu_resources()
+    print("[worker] %s资源让出（GPU 机）：显存 %s → %s GiB（目标≥%.0f）｜可用内存 %s → %s GiB%s"
+          % (tag,
+             ("%.1f" % vram0) if vram0 is not None else "?",
+             ("%.1f" % vram1) if vram1 is not None else "?",
+             need_vram_gb,
+             ("%.1f" % ram0) if ram0 is not None else "?",
+             ("%.1f" % ram1) if ram1 is not None else "?",
+             ("（talk 需≥%.0f）" % need_ram_gb) if need_ram_gb else ""), flush=True)
+    if need_ram_gb and ram1 is not None and ram1 < need_ram_gb:
+        print("[worker] %sWARN GPU 机可用内存 %.1f GiB < talk 需要 %.0f GiB：talk 服务会返回 503"
+              "（不会再被内核 oom_kill，但要等资源真正空出来）" % (tag, ram1, need_ram_gb), flush=True)
+    return vram1, ram1
+
+
 def execute_job(job):
     jid = job["jobId"]
     payload = job.get("payload") or {}
@@ -265,6 +354,8 @@ def execute_job(job):
             if kind == "voice":
                 media = _voice_media(payload)
             else:
+                # 配乐跑在本机 ComfyUI（ACE-Step），先把别的模型/TTS 让出去
+                _yield_resources(need_vram_gb=12.0, label="bgm")
                 media = _bgm_media(jid, payload)
             return _complete(jid, payload, media)
         except Exception as e:
@@ -279,6 +370,8 @@ def execute_job(job):
     if kind == "lipsync":
         import comfy_client as comfy
         try:
+            # LatentSync 跑在 ComfyUI 里：先让出资源（含卸载缓存模型 + TTS 让位）
+            _yield_resources(need_vram_gb=12.0, label="lipsync")
             outs = comfy.generate_lipsync(
                 "weaveora-stub-worker", payload,
                 progress_fn=lambda p, st: _req("POST", "/internal/jobs/%s/progress" % jid,
@@ -298,6 +391,9 @@ def execute_job(job):
     if kind == "talk":
         import talk_client
         try:
+            # talk 服务要起 EchoMimic 全管线（~24G 权重 / 实测 RSS 29.4G），而它**不在 ComfyUI 里**：
+            # 必须让 ComfyUI 把内存/显存都交出来，否则 28G(ComfyUI 缓存) + 29.4G(talk) > 62G → 内核 oom_kill。
+            _yield_resources(need_vram_gb=1.0, need_ram_gb=34.0, label="talk")
             outs = talk_client.generate_talk(
                 jid, payload,
                 progress_fn=lambda p, st: _req("POST", "/internal/jobs/%s/progress" % jid,
@@ -397,6 +493,8 @@ def execute_job(job):
         import comfy_client as engine
         try:
             if kind == "clip":
+                # 出片：A14B 双专家要 ~44G，先把别的模型让出去（含等 /free 真生效）
+                _yield_resources(need_vram_gb=float(payload.get("motionNeedVramGb") or 44.0), label="clip")
                 _yield_vram_for_video()
                 outs = engine.generate_motion("weaveora-stub-worker", payload,
                                               progress_fn=lambda p, s: _req(
@@ -409,6 +507,8 @@ def execute_job(job):
             else:
                 # 文生图：配了「本机 ComfyUI 工作流」（engine=comfy + 工作流 JSON）就走工作流出图，
                 # 否则用 worker 自带的 SDXL/IP-Adapter 代码路径（builtin）。
+                # 先让出资源：出图栈要 ~28-31G（Qwen-Image 20.4 + VL 7.9 + VAE/LoRA），别让 TTS 占着
+                _yield_resources(need_vram_gb=31.0, label="still")
                 if engine.image_workflow_ready():
                     print("[worker] 文生图走工作流：%s" % engine.IMAGE_TXT2IMG_WF, flush=True)
                     outs = engine.generate_via_workflow("weaveora-stub-worker", payload,
