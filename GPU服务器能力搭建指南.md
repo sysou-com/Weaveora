@@ -29,6 +29,10 @@
 
 ### 1.1 主机
 
+> ⚠️ **本文里的公网 IP/端口只是当时的事实记录**：GPU 服务器公网地址会变（同一容器可能同时有**电信**与**移动**两个公网入口，端口相同、IP 不同；实测见过 `180.127.11.166:10558` → `223.109.239.32:10558`）。
+> **唯一权威来源 = 平台「生成引擎配置 → GPU 服务器地址 + 端口」**（保存后随任务下发给 worker，保存即生效）。
+> 代码/脚本里**不写死任何 GPU IP**：填了 GPU 服务器地址后，ComfyUI 推导为 `<gpu>:8001`、配音/转写为 `<gpu>/audio`、整脸口型为 `<gpu>/talk`、人脸为 `<gpu>`；换机/换线路只改这一处。
+
 | 项 | 值 |
 |---|---|
 | 机型 | GPU#2（ssh 别名 `weaveora-gpu-a14b`） |
@@ -412,7 +416,11 @@ HTTP 兜底 `music_server.py`（:8092）默认不起，主线走 ComfyUI。
 |---|---|---|---|
 | 23 | **绝不自行重启 ComfyUI** | 平台会回收/重置容器，重启即事故 | 只热改"工作流 JSON / 脚本"；ComfyUI 每次 `/prompt` 现读工作流；新增模型靠**扫目录**自动发现 |
 | 24 | 平台只开一个公网端口 | 网关限制 | `edge_proxy.py` 单端口按路径多路复用（不用 nginx：容器重启会重置 overlay，apt 装的东西会丢） |
-| 25 | GPU IP/端口变更后生产 404/拒连 | EngineSettings 里写死了旧地址 | 6 个服务 URL 从 `180.127.11.167:15264` → **`180.127.11.166:10558`**（备份 `engine_services_backup_20260915.json`） |
+| 25 | GPU IP/端口变更后生产 404/拒连 | EngineSettings 里写死了旧地址 | 6 个服务 URL 从 `180.127.11.167:15264` → **`180.127.11.166:10558`**（备份 `engine_services_backup_20260915.json`）；现已改成**只配「GPU 服务器地址+端口」一处**，其余服务地址留空自动跟随 |
+| 29 | 对口型 100% 失败：`PyAVPlugin.write() got an unexpected keyword argument 'macro_block_size'` | ComfyUI venv 被换过（`ImageIO 2.37 + av 18`，无 `imageio-ffmpeg`）→ `imageio` 选中 **pyav 插件**，而它不支持 `macro_block_size`（`torchvision.io.write_video` 内部正是这么调） | 改 `deploy/latentsync-node/files/nodes.py`：**优先用 PyAV 写输入帧**（本机已装 av，ComfyUI 原生 LoadVideo 也用它），torchvision 仅作回退。⚠️ 补丁必须**保留函数内 `import torchvision.io as io` 的局部绑定**，否则后面 `io.read_video` 会 `UnboundLocalError: cannot access local variable 'io'` |
+| 30 | 节点一实例化就卡死，ComfyUI 队列（FIFO）被占 52 分钟 | ① venv 无 `pip` 且缺 `accelerate` → 节点自装依赖抛错；② 节点 `checkpoints/` 里 `latentsync_unet.pt` / `whisper/tiny.pt` 不见了 → 节点 `setup_models()` 转去 **huggingface.co 下 5 GB**（国内 ~0.6 MB/s） | ① 装回 `accelerate`（不动其它版本）；② 补节点自装标记 `~/.latentsync16_dependencies_installed`；③ **软链** `/opt/weaveora/latentsync/{latentsync_unet.pt,whisper/tiny.pt}` 回节点目录（零拷贝、不再触发下载）；④ `/etc/hosts` 加 `weaveora-hf-guard` 禁直连 HF/xet（§0.2 本就要求走 ModelScope/aifasthub） |
+| 31 | 卡住的任务**无法从外部清除** | `/interrupt` 只在**节点之间**生效，节点内部（`setup_models` 下载）卡住时无效；`ss -K` 内核不支持（Invalid argument）；定向 iptables REJECT 也没断掉在途连接；删半成品文件后它仍写已删除的 inode | 只能**等它自己报错退出**或重启 ComfyUI；重启前务必确认 `/queue` 为空（否则打断生产任务）。本次实测：52 分 44 秒后以 `Model download failed` 自行退出，队列清空，**没重启** |
+| 32 | 改节点/依赖后必须重启才生效 | ComfyUI 进程内 `sys.modules` 缓存：改 `.py` 或换包版本都不会热加载（`inference.py` 也是 `import_inference_script()` **进程内**导入） | 与 §4.5 #23 同款纪律：能靠“换工作流 JSON / 改配置”解决的绝不重启；确实要改节点代码才重启，且**先确认队列为空** |
 | 26 | 前端显示"方案有改动"但其实没改 | `prompt_revisions.schema_json` 是 **jsonb**（PG 重排对象键），前端 `JSON.stringify` 把**纯键序差异**当改动 | 新增 `canonicalJson()` 统一 dirty/pristine 比对；删掉 `startVoice/startBgm/startLipsync` 里会另存未确认版本的兜底保存 |
 | 27 | 部署与生产任务互踩 | 同一张卡 | 纪律：**串行、不插队、不抢显存**；部署只在任务空隙；只做 ≤5 s 短查，禁止长轮询（单次等待 ≤60 s） |
 | 28 | 许可风险 | FLUX.1-dev 系（含 IP-Adapter/PuLID 派生）**非商用** | 生产禁用 dev 派生权重；一致性改用 **Qwen-Image-Edit**（Apache-2.0）；T2 用 **FLUX.1-schnell**（Apache-2.0） |

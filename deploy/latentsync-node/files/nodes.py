@@ -682,10 +682,34 @@ class LatentSyncNode:
 
             # Move frames to CPU for saving to video
             frames_cpu = frames.cpu()
+            # ★ 保持 torchvision.io 的**局部绑定**（函数后面 io.read_video 还要用）。
+            #   踩过的坑：只在 except 里 import 会让 `io` 变成局部名；PyAV 成功时不走 except
+            #   → 后面 io.read_video 直接 UnboundLocalError: cannot access local variable 'io'。
+            import torchvision.io as io
+            # ★ Weaveora 2026-09-15 修复：优先用 PyAV 写输入帧。
+            # 旧实现先走 torchvision.io.write_video → 它内部调 imageio，而本机 imageio 2.37 + av 18
+            # 会让 imageio 选中 pyav 插件，该插件**不接受 macro_block_size** →
+            #   TypeError: PyAVPlugin.write() got an unexpected keyword argument 'macro_block_size'
+            # 对口型因此 100% 失败（依赖检查/模型加载/推理都正常，只在写视频时崩）。
             try:
-                import torchvision.io as io
+                import av as _av
+                _c = _av.open(temp_video_path, mode='w')
+                _s = _c.add_stream('libx264', rate=int(round(_fps)))
+                _h, _w = int(frames_cpu.shape[1]), int(frames_cpu.shape[2])
+                _s.width, _s.height = _w - (_w % 2), _h - (_h % 2)
+                try:
+                    _s.pix_fmt = 'yuv420p'
+                except Exception:
+                    pass
+                for _f in frames_cpu:
+                    _arr = _f.numpy()[:_s.height, :_s.width]
+                    _c.mux(_s.encode(_av.VideoFrame.from_ndarray(_arr, format='rgb24')))
+                _c.mux(_s.encode(None))
+                _c.close()
+            except Exception as _e:
+                print('[weaveora] PyAV 写输入帧失败，回退 torchvision：%s' % _e, flush=True)
                 io.write_video(temp_video_path, frames_cpu, fps=int(round(_fps)), video_codec='h264')
-            except TypeError as e:
+            if False:
                 # Check if the error is specifically about macro_block_size
                 if "macro_block_size" in str(e):
                     import imageio
