@@ -874,21 +874,31 @@ def _vram_note(tag):
               % (free, MOTION_MIN_FREE_GB), flush=True)
 
 
-def _retime_to_fps(mp4, src_fps, dst_fps):
+def _retime_to_fps(mp4, src_fps, dst_fps, target_frames=None):
     """把 mp4 从 src_fps 重定时到 dst_fps（**保持时长与速度**）。
 
     为什么：A14B 按原生 16fps 生成（速度正确），而项目成片是 30fps。
     直接改容器 fps 会把时长缩短、速度变快；所以要**插值补帧**：
       · 优先 ffmpeg `minterpolate=fps=N:mi_mode=mci`（运动补偿插值，画面顺滑）
       · 失败/无此滤镜 → 退化为 `-r N`（重复帧，时长速度仍正确，只是略顿）
-    src == dst（或无效）时原样返回。
+
+    target_frames：目标总帧数（= round(镜头时长 × dst_fps)）。给了就把它**做成帧精确**：
+      短了用 tpad 克隆尾帧补齐、长了截断。
+      为什么（2026-09-15 线上）：81 帧@16fps 插值到 30fps 得到 149 帧 = 4.97s，
+      播放器按整秒显示就是「4 秒」——用户会以为时长又不对。
+    src == dst（且无需补帧）时原样返回。
     """
     try:
         src_fps = float(src_fps or 0)
         dst_fps = float(dst_fps or 0)
     except (TypeError, ValueError):
         return mp4
-    if dst_fps <= 0 or abs(dst_fps - src_fps) < 0.01:
+    need_retime = dst_fps > 0 and abs(dst_fps - src_fps) >= 0.01
+    try:
+        tf = int(target_frames) if target_frames else 0
+    except (TypeError, ValueError):
+        tf = 0
+    if not need_retime and tf <= 0:
         return mp4
     import subprocess as _sp
     import tempfile as _tf
@@ -899,22 +909,79 @@ def _retime_to_fps(mp4, src_fps, dst_fps):
         dst = os.path.join(d, "out.mp4")
         with open(src, "wb") as fh:
             fh.write(mp4)
-        for vf in ("minterpolate=fps=%g:mi_mode=mci" % dst_fps, None):
+        base = "minterpolate=fps=%g:mi_mode=mci" % dst_fps if need_retime else "null"
+        attempts = []
+        if need_retime:
+            attempts.append((base, "运动补偿插值"))
+            attempts.append((None, "重复帧退化"))
+        else:
+            attempts.append((base, "仅补/截帧"))
+        for vf, label in attempts:
             cmd = [ff, "-y", "-loglevel", "error", "-i", src]
-            if vf:
+            if vf == "null":
+                pass
+            elif vf:
                 cmd += ["-vf", vf]
             else:
                 cmd += ["-r", "%g" % dst_fps]
+            if tf > 0:
+                # 先克隆尾帧保证够长，再按目标帧数截断 → 帧精确
+                if vf and vf != "null":
+                    cmd += ["-vf", vf + ",tpad=stop_mode=clone:stop_duration=2"]
+                else:
+                    cmd += ["-vf", "tpad=stop_mode=clone:stop_duration=2"]
+                cmd += ["-frames:v", str(tf)]
             cmd += ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "18", dst]
             r = _sp.run(cmd, stdout=_sp.PIPE, stderr=_sp.PIPE, universal_newlines=True)
             if r.returncode == 0 and os.path.exists(dst) and os.path.getsize(dst) > 0:
                 with open(dst, "rb") as fh:
                     out = fh.read()
-                print("[comfy] 帧率补齐 %g → %gfps（%s）"
-                      % (src_fps, dst_fps, "运动补偿插值" if vf else "重复帧退化"), flush=True)
+                nf = "?"
+                try:
+                    _w, _h, _du, _n = _probe_video_meta_ex(out)
+                    nf = str(_n or "?")
+                except Exception:
+                    pass
+                print("[comfy] 帧率补齐 %g → %gfps（%s）%s"
+                      % (src_fps, dst_fps, label,
+                         "，帧数 → %s（目标 %d）" % (nf, tf) if tf > 0 else ""), flush=True)
                 return out
         print("[comfy] 帧率补齐失败（保持 %gfps 原样输出）" % src_fps, flush=True)
         return mp4
+    finally:
+        import shutil as _sh
+        _sh.rmtree(d, ignore_errors=True)
+
+
+def _probe_video_meta_ex(mp4_bytes):
+    """更详细的探测：返回 (w, h, duration_ms, nb_frames)。ffprobe 不可用时退到 ffmpeg -i 解析。"""
+    import subprocess as _sp
+    import tempfile as _tf
+    import re as _re
+    d = _tf.mkdtemp(prefix="wv_probe2_")
+    try:
+        p = os.path.join(d, "o.mp4")
+        with open(p, "wb") as fh:
+            fh.write(mp4_bytes)
+        ff = _ffmpeg_exe()
+        probe = os.path.join(os.path.dirname(ff), "ffprobe")
+        if os.path.exists(probe):
+            r = _sp.run([probe, "-v", "error", "-select_streams", "v:0",
+                         "-show_entries", "stream=width,height,nb_frames",
+                         "-show_entries", "format=duration", "-of", "default=nw=1", p],
+                        stdout=_sp.PIPE, stderr=_sp.PIPE, universal_newlines=True, timeout=120)
+            out = r.stdout or ""
+            w = _re.search(r"^width=(\d+)", out, _re.M)
+            h = _re.search(r"^height=(\d+)", out, _re.M)
+            n = _re.search(r"^nb_frames=(\d+)", out, _re.M)
+            du = _re.search(r"^duration=([\d.]+)", out, _re.M)
+            return (int(w.group(1)) if w else None, int(h.group(1)) if h else None,
+                    int(round(float(du.group(1)) * 1000)) if du else None,
+                    int(n.group(1)) if n else None)
+        w, h, du = _probe_video_meta(mp4_bytes)
+        return w, h, du, None
+    except Exception:
+        return None, None, None, None
     finally:
         import shutil as _sh
         _sh.rmtree(d, ignore_errors=True)
@@ -1087,10 +1154,17 @@ def generate_motion(client_id, payload, progress_fn=None):
     finally:
         import shutil as _sh
         _sh.rmtree(out_dir, ignore_errors=True)
-    # 再补齐到项目 fps（16 → 30）：保持时长与速度，只是补帧
-    mp4 = _retime_to_fps(mp4, fps, out_fps)
-    print("[comfy] motion 出片：%d 帧 @%gfps ≈ %.2fs → 输出 %gfps"
-          % (len(frames), fps, len(frames) / max(1.0, fps), out_fps), flush=True)
+    # 再补齐到项目 fps（16 → 30）：保持时长与速度，只是补帧；并做成**帧精确**
+    # （否则 81 帧@16 → 149 帧 = 4.97s，播放器按整秒显示成「4 秒」）
+    _target = 0
+    try:
+        _target = int(round(float(payload.get("duration_sec") or 0) * out_fps))
+    except (TypeError, ValueError):
+        _target = 0
+    mp4 = _retime_to_fps(mp4, fps, out_fps, target_frames=_target)
+    print("[comfy] motion 出片：%d 帧 @%gfps ≈ %.2fs → 输出 %gfps（目标 %d 帧 = %.2fs）"
+          % (len(frames), fps, len(frames) / max(1.0, fps), out_fps, _target,
+             _target / max(1.0, float(out_fps))), flush=True)
     # 上报**真实**产出规格：原先直接把 payload 里「请求的」width/height 当结果上报，
     # 于是资产库里记的是 1280×704，而实际文件是 Wan 真正出图桶（本例 832×464）——
     # 2026-09-13 排查时让人误以为「对口型把分辨率改小了」。
