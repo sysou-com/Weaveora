@@ -34,6 +34,11 @@ IMAGE_IMG2IMG_WF = os.environ.get("WEAVEORA_IMAGE_IMG2IMG_WORKFLOW", "").strip()
 IMAGE_MODEL = os.environ.get("WEAVEORA_IMAGE_MODEL", "").strip()
 IMAGE_STEPS = int(os.environ.get("WEAVEORA_IMAGE_STEPS", "0") or 0)
 IMAGE_DENOISE = float(os.environ.get("WEAVEORA_IMAGE_DENOISE", "0.65") or 0.65)
+# 轮询超时：默认 30 分钟。踩过的坑（2026-09-15）：ComfyUI 重启后的**首张图**要从磁盘冷加载 ~28GB
+# （Qwen-Image 20.4G + Qwen2.5-VL 7.9G），而且 fp8 权重在 CPU 上手动 cast 成 bf16 很耗时，
+# 实测首张 prompt 花了 12 分 05 秒 —— 旧的 600s 超时会让 worker 先报 timeout，
+# 而 ComfyUI 那头其实还在跑、图最终也出来了（白跑一趟）。
+IMAGE_TIMEOUT = int(os.environ.get("WEAVEORA_IMAGE_TIMEOUT", "1800") or 1800)
 
 
 def _image_comfy():
@@ -151,7 +156,7 @@ def _wf_watch_nodes(graph):
     return ids
 
 
-def generate_via_workflow(client_id, payload, progress_fn=None):
+def generate_via_workflow(client_id, payload, progress_fn=None, on_tick=None):
     """用「本机 ComfyUI 工作流」出图（Qwen-Image / FLUX 等）。
 
     工作流路径来自「生成引擎配置 → 服务地址 → 文生图」（worker 机器上的绕对路径）。参数注入规则：
@@ -205,7 +210,7 @@ def generate_via_workflow(client_id, payload, progress_fn=None):
         pid = _post_prompt({"prompt": graph, "client_id": client_id}, client_id)
         if progress_fn:
             progress_fn(70, "decoding")
-        rec = _poll_history(client_id, pid)
+        rec = _poll_history(client_id, pid, timeout=IMAGE_TIMEOUT, on_tick=on_tick)
         outs = _download_outputs(rec, prefix)
         if not outs:
             raise ComfyError("工作流出图无输出（%s）" % os.path.basename(path))

@@ -40,7 +40,7 @@
 | 公网（移动） | `223.109.239.30`，ssh `-p 21216`；网关 **`http://223.109.239.30:21264`**（备用线路，实测同样 200） |
 | 平台端口映射 | **外网 21264→容器 8800**（网关，唯一入口）；21265→8801、21266→8802、21267→8803、21268→8804、21269→8805（备用，当前未占用） |
 | GPU | **RTX 4090 48G**（`vram_total` 47.4 GiB） |
-| CPU / 内存 | 16 vCPU / 50 GB |
+| CPU / 内存 | 16 vCPU / **31 GB RAM（实测，非 50 GB）+ 8 GB swap（`/swap.img`）** —— 见 §4 坑 37：内存是首图/首镜慢的真正瓶颈 |
 | OS | Ubuntu 24.04（主机名 `ubuntu24`） |
 | 系统盘 | `/dev/vda1` 200 G（已用 ~164 G，余 ~23 G） |
 | 数据盘 | `/dev/vdb1` ext4 **100 G** → **`/addDisk`**（2026-09-15 维护后挂载点变更；另建兼容软链 `/media/vipuser/addDisk → /addDisk` 以兼容既有软链；余 ~53 G） |
@@ -425,6 +425,7 @@ HTTP 兜底 `music_server.py`（:8092）默认不起，主线走 ComfyUI。
 | 33 | 维护/重建后“模型突然不可用”（Phase2/3 权重全部断链） | **数据盘挂载点变了**（`/media/vipuser/addDisk` → `/addDisk`），而 `/opt/weaveora/models/*` 里的软链仍指向旧路径 → 悬空 | 重建**兼容软链** `mkdir -p /media/vipuser && ln -sfn /addDisk /media/vipuser/addDisk`（一条命令让所有既有软链重新生效，比逐个重写安全）；并用 `deploy/gpu2_post_maint_check.sh` 逐项验可读 |
 | 34 | 重启后**整脸口型（:8094）消失** | `services_up.sh` 里**没有 talk 启动块**（当初是手工 `start_talk.sh` 起的）→ 平台重启后就只剩 ComfyUI/TTS/Face/网关 | 已把 talk 启动块写进 `services_up.sh`（幂等 + 监听汇总含 8094）；**新增服务必须同时进启动脚本**，否则“重启即丢” |
 | 35 | 网关路由配了却不生效：`/talk/health` 404 | 「去前缀」实现是 `path[len(prefix):] or "/"` —— 当**前缀本身就是完整路径**时，剥完是空 → 转发到 `/` → 上游 404 | 这类“路径就是全路径”的路由必须 **strip=False**（并让上游服务认该路径，如 talk 服务端同时认 `/health` 与 `/talk/health`）。另：`/talk_batch` 不匹配前缀 `/talk`（规则要求完全相等或前缀+/），必须单独列 |
+| 37 | 重启后**首张图要 12 分钟**（ComfyUI 日志 `Prompt executed in 00:12:05`） | **RAM 不够**：机器只有 **31 GB** 内存，而 Qwen-Image 出图一套权重 = 20.4 G（主模型）+ 7.9 G（Qwen2.5-VL 文本编码器）≈ **28 GB**，加上 ComfyUI 自身开销直接超了 → `free` 显示 available ≈ 3 GB、**swap 已用 4.7 GB/8 GB**，加载过程在换页。实测**磁盘不是瓶颈**（顺序读 426–703 MB/s、4K 随机读也正常）、**显存也不是**（47.4 G 够） | 方案（按性价比排序）：① **平台侧把内存加到 64 GB**（最直接，12 min → ~1 min）；② **同类任务批处理**（整批出图/整批出片，把加载摊薄——talk 的 `/talk_batch` 就是这个思路）；③ **重启后预热一次**（极短 prompt 把权重读进 RAM/VRAM，让用户任务不付冷启动）；④ worker 侧**同 kind 优先调度**，避免 still→clip→still 反复换入换出；⑤ 换 **GGUF 量化**的 Qwen-Image+文本编码器（一套 ~15 GB，Q8 近无损）或草稿用 SDXL/FLUX-schnell、精稿才用 Qwen-Image；⑥ 架构级：做**常驻出图服务**（照抄 talk 的做法，进程内常驻 Qwen-Image，单张稳定 ~40 s），彻底绕开 ComfyUI 的换入换出 |
 | 36 | `start_talk.sh` 报 “already running” 但它其实没跑 | `ps | grep "[t]alk_server.py"` 匹配到了**执行这条命令的 shell 自身**（命令行里含该字符串）→ 误判 | 用更严格的模式（两段式 `grep "[e]cho_mimic_v3" | grep "[t]alk_server"`）或直接 `pgrep -f 'envs/talk/bin/python .*talk_server.py'`；这就是 §4.1 #6 「`pkill -f` 自匹配」的同族坑 |
 | 26 | 前端显示"方案有改动"但其实没改 | `prompt_revisions.schema_json` 是 **jsonb**（PG 重排对象键），前端 `JSON.stringify` 把**纯键序差异**当改动 | 新增 `canonicalJson()` 统一 dirty/pristine 比对；删掉 `startVoice/startBgm/startLipsync` 里会另存未确认版本的兜底保存 |
 | 27 | 部署与生产任务互踩 | 同一张卡 | 纪律：**串行、不插队、不抢显存**；部署只在任务空隙；只做 ≤5 s 短查，禁止长轮询（单次等待 ≤60 s） |
