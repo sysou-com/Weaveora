@@ -1140,13 +1140,157 @@ public class JobService {
                   + " " + shot.path("positive_prompt").asText("");
         // P13：按「剧情主体」取锚定资产 —— **定妆图优先**（一致性靠它），没有定妆图才退回勾选的素材图
         RefCtx fromSubjects = bindFromSubjects(plan, text, workspaceId);
-        if (fromSubjects != null) return fromSubjects;
-        RefCtx fromPlan = bindFrom(plan == null ? null : plan.get("referenceAssets"), text, workspaceId);
-        if (fromPlan != null) return fromPlan;
-        RefCtx fromBrief = bindFrom(briefReferenceAssets(userId, workspaceId, projectId, revisionId), text, workspaceId);
-        if (fromBrief != null) return fromBrief;
-        RefCtx legacy = loadRefs(userId, workspaceId, projectId, revisionId);
-        return new RefCtx(legacy.ids(), legacy.keys(), legacy.subjects(), legacy.regions(), "", legacy.primarySubject());
+        RefCtx picked = null;
+        if (fromSubjects != null) {
+            picked = fromSubjects;
+        } else {
+            RefCtx fromPlan = bindFrom(plan == null ? null : plan.get("referenceAssets"), text, workspaceId);
+            if (fromPlan != null) {
+                picked = fromPlan;
+            } else {
+                RefCtx fromBrief = bindFrom(briefReferenceAssets(userId, workspaceId, projectId, revisionId), text, workspaceId);
+                if (fromBrief != null) {
+                    picked = fromBrief;
+                } else {
+                    RefCtx legacy = loadRefs(userId, workspaceId, projectId, revisionId);
+                    picked = new RefCtx(legacy.ids(), legacy.keys(), legacy.subjects(), legacy.regions(), "", legacy.primarySubject());
+                }
+            }
+        }
+        return enforcePortraits(picked, plan, projectId, workspaceId,
+                shot == null ? 0 : shot.path("shot_no").asInt());
+    }
+
+    /**
+     * ★ 身份锚定必须是**定妆照（kind=portrait）**：缺 / 绑错就“要么明确报错、要么踢掉”，绝不静默拿别的图凑合。
+     *
+     * <p>为什么（2026-09-15 用户实测：《那宝玉忧恍惚》）：方案里 4 个主体的 portraitAssetId 里
+     * 有 3 个指向的是 **kind=reference 的上传素材**（不是定妆照），而资产库里真实存在的定妆照只有
+     * 「警幻」1 张 + 「袭人」2 张 —— **根本没有宝玉的定妆照**。旧逻辑在这种情况下会把无关主体的图
+     * 当身份锚定交给出图（甚至因为“镜文本没命中主体 → 带回全部”而把袭人的图塞进宝玉的镜）
+     * → 关键帧里人物脸型不对、与分镜提示词脱节。
+     *
+     * <p>规则：
+     * <ol>
+     *   <li>逐主体找定妆照：
+     *       <b>① 方案里 {@code portraitAssetId} 指定的那张就用它</b>（不论资产类型 —— 界面上
+     *       「把所选参考图设为定妆照」就是把人选的上传/生成参考图直接指定为定妆照，
+     *       资产 kind 仍是 reference；这是**用户明确指定**，必须尊重，不能因为 kind 不是 portrait 就丢掉）；
+     *       ② 没绑定时才扫描资产库里 prompt_snapshot 命中主体名的 portrait（生成定妆照时写的是「标准角色设定图：<名字>…」）。</li>
+     *   <li>有定妆照 → 用它的 key；</li>
+     *   <li>真的没有（没绑定 + 库里也无）时：**主主体**直接报错（要用户去绑定，而不是偷偷生成错脸的图）；
+     *       其他主体剔除并记日志。</li>
+     * </ol>
+     */
+    private RefCtx enforcePortraits(RefCtx refs, JsonNode plan, UUID projectId, UUID workspaceId, int shotNo) {
+        if (refs == null || refs.subjects() == null || refs.subjects().isEmpty()) {
+            return refs;   // 没有主体标注（纯风格参考图）→ 保持原样
+        }
+        List<String> ids = new java.util.ArrayList<>();
+        List<String> keys = new java.util.ArrayList<>();
+        List<String> subjects = new java.util.ArrayList<>();
+        List<String> regions = new java.util.ArrayList<>();
+        List<String> missing = new java.util.ArrayList<>();
+        List<String> fixed = new java.util.ArrayList<>();
+        for (int i = 0; i < refs.subjects().size(); i++) {
+            String name = refs.subjects().get(i);
+            if (name == null || name.isBlank()) {
+                // 无主体标注的通用参考图：保留（它不是“某人的定妆照”）
+                ids.add(i < refs.ids().size() ? refs.ids().get(i) : null);
+                keys.add(i < refs.keys().size() ? refs.keys().get(i) : null);
+                subjects.add(name == null ? "" : name);
+                regions.add(i < refs.regions().size() ? refs.regions().get(i) : null);
+                continue;
+            }
+            studio.weaveora.asset.domain.Asset p = portraitOf(plan, projectId, workspaceId, name);
+            if (p == null) {
+                missing.add(name);
+                continue;                       // 没定妆照 → 不能拿别的图冒充当身份锚定
+            }
+            String oldKey = i < refs.keys().size() ? refs.keys().get(i) : null;
+            if (oldKey != null && !oldKey.equals(p.storageKey())) {
+                fixed.add(name);                // 原来绑的不是定妆照 → 改用真定妆照
+            }
+            ids.add(p.id().toString());
+            keys.add(p.storageKey());
+            subjects.add(name);
+            regions.add(i < refs.regions().size() ? refs.regions().get(i) : null);
+        }
+        String primary = refs.primarySubject();
+        boolean primaryMissing = primary != null && !primary.isBlank() && missing.contains(primary);
+        if (primaryMissing) {
+            throw new BizException(ErrorCode.VALIDATION,
+                    (shotNo > 0 ? "第" + shotNo + "镜" : "本镜") + "主体「" + primary + "」没有可用的**定妆照**，已中止出图（不静默用别的图凑合）。\n"
+                    + "  修法：到「资产库 → 人物」给「" + primary + "」生成/上传一张定妆照并在方案里绑定；"
+                    + "或到「方案 → 主体」把 portrait 绑定改成该主体的定妆照。\n"
+                    + (missing.size() > 1 ? "  另外这些主体也缺定妆照：" + String.join("、", missing) : ""));
+        }
+        if (!missing.isEmpty()) {
+            log.warn("refs: 第{}镜 这些主体缺定妆照，已从锚定里剔除（避免拿错人的图）：{}", shotNo, missing);
+        }
+        if (!fixed.isEmpty()) {
+            log.info("refs: 第{}镜 这些主体的绑定不是定妆照，已自动改用其定妆照：{}", shotNo, fixed);
+        }
+        if (keys.isEmpty()) {
+            return RefCtx.empty();   // 剔除后没有可用锚定
+        }
+        StringBuilder mapping = new StringBuilder();
+        for (int i = 0; i < subjects.size(); i++) {
+            if (subjects.get(i).isBlank()) continue;
+            if (mapping.length() > 0) mapping.append("; ");
+            mapping.append(i + 1).append(") ").append(subjects.get(i)).append("(定妆图)");
+        }
+        String anchor = mapping.length() > 0
+                ? "\nReference images in order: " + mapping
+                  + ". Each subject MUST strictly match its own portrait (face / hair / costume);"
+                  + " keep subjects distinct and never blend or swap their identities."
+                : refs.anchor();
+        return new RefCtx(ids, keys, subjects, regions, anchor,
+                (primary == null || primary.isBlank()) ? refs.primarySubject() : primary);
+    }
+
+    /**
+     * 主体 → 可用定妆照；找不到返回 null。
+     *
+     * <p>① **方案 {@code subjects[].portraitAssetId} 指定的那张**（只要资产存在就用 —— 不论 kind）：
+     *   界面「把所选参考图设为定妆照」就是把人选的上传/生成参考图直接指定为定妆照，这是用户明确指定，
+     *   不能因为它的 kind 是 reference 就当成“没定妆照”（否则会出现“UI 里明明显示了头像、出图却说缺定妆照”的矛盾）。
+     *   kind 不是 portrait 时只记一条 info，便于排查。
+     * <p>② 没绑定时才扫本项目 portrait 资产，看 {@code prompt_snapshot} 文本里是否命中主体名。
+     */
+    private studio.weaveora.asset.domain.Asset portraitOf(JsonNode plan, UUID projectId, UUID workspaceId,
+                                                         String subject) {
+        JsonNode p = plan == null ? com.fasterxml.jackson.databind.node.MissingNode.getInstance() : plan;
+        for (JsonNode s : p.path("subjects")) {
+            if (!subject.equals(s.path("name").asText(""))) {
+                continue;
+            }
+            String pid = s.path("portraitAssetId").asText("");
+            if (pid.isBlank()) {
+                continue;
+            }
+            try {
+                var a = assetRepo.findByIdAndWorkspaceId(UUID.fromString(pid), workspaceId).orElse(null);
+                if (a != null && projectId.equals(a.projectId())) {
+                    if (!"portrait".equals(a.kind())) {
+                        log.info("refs: 主体「{}」的定妆照是本地上传/参考图（kind={}，用户指定）→ 照用不误",
+                                subject, a.kind());
+                    }
+                    return a;
+                }
+            } catch (IllegalArgumentException ignored) {
+                // 脏数据 → 继续下面扫描
+            }
+        }
+        for (studio.weaveora.asset.domain.Asset a : assetRepo
+                .findByProjectIdAndWorkspaceIdAndKindOrderByCreatedAtDesc(projectId, workspaceId, "portrait")) {
+            com.fasterxml.jackson.databind.JsonNode snap = a.promptSnapshot();
+            String txt = snap == null ? "" : snap.toString();
+            if (txt.contains(subject)) {
+                return a;
+            }
+        }
+        return null;
     }
 
     /**
@@ -1662,21 +1806,34 @@ public class JobService {
             studio.weaveora.asset.domain.Asset clip = pickNewestAsset(projectId, workspaceId, shotNo, "clip");
             studio.weaveora.asset.domain.Asset stillAsset = pickNewestAsset(projectId, workspaceId, shotNo, "still");
             String wantBase = shot.path("lipsync_source").asText("").trim().toLowerCase();
+            // ★ 「片段首帧」底片（2026-09-15 新增）：既能跟随该镜 motion 画面的**画面/风格/人物**
+            //   （底片就是片段本身的第一帧），又只有一张静止干净的嘴（避开了“片段里嘴一直在动/
+            //   大张 → LatentSync 先把嘴合上再重开 → 嘴部区大幅形变”的老问题）。
+            //   用户口径：“对口型要参考 motion 画面、别用新生成的图”。
+            boolean firstFrame = "clip_first_frame".equals(wantBase) || "clip_first".equals(wantBase)
+                    || "clip_best_frame".equals(wantBase) || "clip_best".equals(wantBase);
+            // clip_best_frame：从片段里**挑嘴型最干净的一帧**当静帧底片（第5镜这种整段大张嘴的镜必需）
+            boolean bestFrame = "clip_best_frame".equals(wantBase) || "clip_best".equals(wantBase);
             boolean expressionRisk = expressionRisk(shot);
             boolean useStill;
-            if ("still".equals(wantBase)) {
+            if (firstFrame) {
+                // 用片段首帧 → 必须先有片段；没片段就退回静帧/自动
+                useStill = clip == null ? (stillAsset != null) : true;
+            } else if ("still".equals(wantBase)) {
                 useStill = stillAsset != null;                 // 要静帧：没静帧就退回片段（不静默不生成）
             } else if ("clip".equals(wantBase)) {
                 useStill = clip == null;                       // 要片段：没片段就退回静帧
             } else {
                 useStill = clip == null || (stillAsset != null && expressionRisk);
             }
-            studio.weaveora.asset.domain.Asset base = useStill ? stillAsset : clip;
+            // 片段首帧模式下，底片资产取**片段**（worker 会抽第一帧当静帧用）
+            studio.weaveora.asset.domain.Asset base = (firstFrame && clip != null) ? clip
+                    : (useStill ? stillAsset : clip);
             if (base == null) {
                 skipped.add("第" + shotNo + "镜（缺画面：无 motion 也无关键帧）");
                 continue;
             }
-            if (useStill && clip != null && !"still".equals(wantBase)) {
+            if (useStill && clip != null && !"still".equals(wantBase) && !firstFrame) {
                 log.warn("lipsync 第{}镜底片自动改用静帧（expressionRisk={}）—— motion 片段里嘴部已在大幅运动/大张，"
                         + "直接当底片容易把嘴部画坏（如需强制用片段：方案里把 shots[].lipsync_source 设为 clip）",
                         shotNo, expressionRisk);
@@ -1696,8 +1853,13 @@ public class JobService {
             payload.put("videoKey", base.storageKey());
             payload.put("videoIsStill", useStill);
             payload.put("isStill", useStill);
+            // 片段首帧模式：底片是片段，但要让 worker **抽第一帧**当静帧用（并告知前端/审计真实来源）
+            payload.put("useFirstFrame", firstFrame && clip != null);
+            payload.put("useBestFrame", bestFrame && clip != null);
             // A/B/C 的下发字段：底片来源（给用户看 + worker 报告）+ 是否自动选的 + 极端表情标记
-            payload.put("lipsyncSource", useStill ? "still" : "clip");
+            payload.put("lipsyncSource", bestFrame && clip != null ? "clip_best_frame"
+                    : (firstFrame && clip != null ? "clip_first_frame"
+                    : (useStill ? "still" : "clip")));
             payload.put("lipsyncSourceAuto", wantBase.isEmpty());
             payload.put("expressionRisk", expressionRisk);
             payload.put("lipsyncForce", shot.path("lipsync_force").asBoolean(false));

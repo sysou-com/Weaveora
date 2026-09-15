@@ -237,6 +237,20 @@ def generate_via_workflow(client_id, payload, progress_fn=None, on_tick=None):
     graph = _wf_load(path)
     if progress_fn:
         progress_fn(40, "sampling")
+    # ★ Edit 档（Qwen-Image-Edit）：模型本来就是**「prompt + 参考图」同时输入**——
+    #   一遍就能两头兼顾（人物按参考图、场景按分镜提示词），不需要“先场景再换脸”的两遍法
+    #   （那样耗时翻倍、还可能中途跑偏）。这里只做两件小事：
+    #   ① 正词前加一句“怎么用这些参考图”的指令（人不变、场景按下面描述、别把参考图的纯色背景搬过来）；
+    #   ② 负词补上“白色背景/证件照/角色设定图”这类词（定妆照就是纯色背景，不补它很容易被沿习）。
+    if mode == "edit" and ref_names:
+        positive = ("The reference image(s) show this shot's character(s) in order; keep each character's face, "
+                    "hairstyle, age and costume strictly consistent with their own reference, and place them into "
+                    "the scene described below (background / lighting / camera framing / action follow the "
+                    "description; do NOT keep the plain or white studio backdrop of the reference image(s)). "
+                    "Scene: " + (positive or ""))
+        negative = ((negative + ", ") if negative else "") + \
+                   "white background, plain backdrop, solid color background, studio portrait, character sheet, " \
+                   "front facing ID photo, 3d render, cgi"
     _wf_inject_text(graph, positive, negative)
     _wf_inject_model(graph, IMAGE_MODEL)
     _wf_inject_size(graph, width, height)
@@ -256,7 +270,6 @@ def generate_via_workflow(client_id, payload, progress_fn=None, on_tick=None):
     print("[comfy] 工作流出图：%s(%s) size=%dx%d steps=%s cfg=%s denoise=%s refs=%s"
           % (os.path.basename(path), mode, width, height, steps or "-", cfg if cfg is not None else "-",
              denoise, ",".join(ref_names) or "-"), flush=True)
-
     saved, COMFY = COMFY, _image_comfy()
     try:
         pid = _post_prompt({"prompt": graph, "client_id": client_id}, client_id)
@@ -975,8 +988,30 @@ def _motion_assets(params, dual):
     return a
 
 
-def _motion_base_nodes(positive, negative, first_frame_name, a, width, height, length):
-    return {
+def _flf_node_inputs():
+    """探测「首尾帧→视频」节点的可用入参名；返回 (class_type, {start:name, end:name}) 或 None。
+
+    为什么要探测而不是写死：Wan 的首尾帧节点在不同 ComfyUI 版本里叫法/入参不同
+    （`WanFirstLastFrameToVideo` / `Wan22FirstLastFrameToVideo`，入参 start_image/end_image
+    或 first_frame/last_frame）。**拿不到就回退到只吃首帧**，并在日志里说清楚，不静默。
+    """
+    for ct in ("WanFirstLastFrameToVideo", "Wan22FirstLastFrameToVideo"):
+        info = _node_info(ct)
+        if not info:
+            continue
+        req = (info.get("input") or {}).get("required") or {}
+        opt = (info.get("input") or {}).get("optional") or {}
+        names = set(req) | set(opt)
+        start = next((n for n in ("start_image", "first_frame", "start_frame") if n in names), None)
+        end = next((n for n in ("end_image", "last_frame", "end_frame") if n in names), None)
+        if start and end:
+            return ct, {"start": start, "end": end}
+    return None
+
+
+def _motion_base_nodes(positive, negative, first_frame_name, a, width, height, length,
+                       last_frame_name=None):
+    nodes = {
         "clip": {"class_type": "CLIPLoader",
                  "inputs": {"clip_name": a["clip"], "type": "wan"}},
         "vae": {"class_type": "VAELoader",
@@ -986,18 +1021,35 @@ def _motion_base_nodes(positive, negative, first_frame_name, a, width, height, l
         "neg": {"class_type": "CLIPTextEncode",
                 "inputs": {"text": negative, "clip": ["clip", 0]}},
         "img": {"class_type": "LoadImage", "inputs": {"image": first_frame_name}},
+    }
+    flf = _flf_node_inputs() if last_frame_name else None
+    if flf:
+        ct, keys = flf
+        nodes["img_last"] = {"class_type": "LoadImage", "inputs": {"image": last_frame_name}}
+        nodes["latent"] = {"class_type": ct,
+                           "inputs": {"vae": ["vae", 0],
+                                      keys["start"]: ["img", 0],
+                                      keys["end"]: ["img_last", 0],
+                                      "positive": ["pos", 0], "negative": ["neg", 0],
+                                      "width": width, "height": height, "length": length,
+                                      "batch_size": 1}}
+        print("[comfy] motion 使用首尾帧引导：%s（%s / %s）" % (ct, keys["start"], keys["end"]), flush=True)
+    else:
+        if last_frame_name:
+            print("[comfy] WARN 未找到首尾帧节点（WanFirstLastFrameToVideo），本次只用首帧；"
+                  "尾帧引导未生效（该镜的起始/结束帧衔接依赖后续镜头首帧一致）", flush=True)
         # ★ 必须用**原生** WanImageToVideo（2026-09-14 修）：它按 Wan2.2 14B 的
         #   patch_size=2 口径造潜变量，并顺便把正/负条件一起吐出来（输出 0/1/2）。
         #   之前这里用的是 Wan22ImageToVideoLatent（旧的自定义路径，按 patch=1 造 60×104）
         #   → A14B 模型内部按 2×2 patchify 得 30×52，两者对不上，
         #   报 “The expanded size of the tensor (52) must match the existing size (104)”。
         #   对照：ComfyUI 自带官方模板 video_wan2_2_14B_i2v.json 用的就是 WanImageToVideo。
-        "latent": {"class_type": "WanImageToVideo",
-                   "inputs": {"vae": ["vae", 0], "start_image": ["img", 0],
-                              "positive": ["pos", 0], "negative": ["neg", 0],
-                              "width": width, "height": height, "length": length,
-                              "batch_size": 1}},
-    }
+        nodes["latent"] = {"class_type": "WanImageToVideo",
+                           "inputs": {"vae": ["vae", 0], "start_image": ["img", 0],
+                                      "positive": ["pos", 0], "negative": ["neg", 0],
+                                      "width": width, "height": height, "length": length,
+                                      "batch_size": 1}}
+    return nodes
 
 
 def _motion_expert(nodes, tag, unet_name, weight_dtype, lora_name, lora_strength, shift):
@@ -1036,7 +1088,8 @@ def _motion_graph_frames(payload, params):
     return frames, width, height, frames + 1
 
 
-def _motion_graph(client_id, payload, positive, negative, first_frame_name, prefix):
+def _motion_graph(client_id, payload, positive, negative, first_frame_name, prefix,
+                  last_frame_name=None):
     """构造图生视频 prompt。
 
     双专家（默认，Wan2.2 I2V-A14B 高/低噪声）或单专家（params.model 显式给了单文件时走旧路径）。
@@ -1063,7 +1116,8 @@ def _motion_graph(client_id, payload, positive, negative, first_frame_name, pref
     sampler = _pick_option("KSamplerAdvanced", "sampler_name", plan["sampler"], "euler")
     scheduler = _pick_option("KSamplerAdvanced", "scheduler", plan["scheduler"], "simple")
 
-    nodes = _motion_base_nodes(positive, negative, first_frame_name, a, width, height, length)
+    nodes = _motion_base_nodes(positive, negative, first_frame_name, a, width, height, length,
+                               last_frame_name=last_frame_name)
 
     if dual:
         hi = _motion_expert(nodes, "hi", a["high"], a["weight_dtype"],
@@ -1408,8 +1462,22 @@ def generate_motion(client_id, payload, progress_fn=None):
     _, body = _comfy("POST", "/upload/image",
                      files={"image": (key.split("/")[-1], data, ctype)})
     name = json.loads(body.decode()).get("name")
+    # ★ 尾帧（多关键帧镜头）：payload.tailKey 是后端选的**末帧**（如第3镜的「结束帧」）。
+    #   有它就做首尾帧引导（FLF2V），让这一镜从起始帧演到结束帧 → 前后镜能接上。
+    tail_name = None
+    tail_key = (payload.get("tailKey") or "").strip()
+    if tail_key:
+        try:
+            tdata, tctype = fetch_reference_bytes(tail_key)
+            tail_name = _upload_image(tdata, (tail_key.split("/")[-1] or "tail.png"),
+                                      tctype or "image/png")
+            print("[comfy] 尾帧已上传（%s），将做首尾帧引导" % tail_name, flush=True)
+        except Exception as e:
+            print("[comfy] WARN 尾帧上传失败，本次只用首帧：%s" % e, flush=True)
+            tail_name = None
     _vram_note("motion 前")
-    prompt = _motion_graph(client_id, payload, positive, negative, name, prefix)
+    prompt = _motion_graph(client_id, payload, positive, negative, name, prefix,
+                           last_frame_name=tail_name)
     st, resp = _comfy("POST", "/prompt", payload=prompt)
     pid = json.loads(resp.decode()).get("prompt_id")
     if not pid:
@@ -2592,6 +2660,17 @@ def generate_lipsync(client_id, payload, progress_fn=None):
     adata = _concat_voice(vkeys)          # 完整配音（最终音轨用它，音画同一时间轴）
     still_mode = (bool(payload.get("videoIsStill")) or bool(payload.get("isStill"))
                   or str(vctype or "").startswith("image"))
+    # ★ 「片段首帧」底片（2026-09-15）：底片传的是**片段**，但只用它的第一帧当静帧——
+    #   既跟随该镜 motion 画面的画面/风格/人物（不再用新生成的图当底片），又只有一张静止干净的嘴。
+    if payload.get("useFirstFrame") and not str(vctype or "").startswith("image"):
+        # 先试「挑最干净的一帧」（第5镜这种整段大张嘴的镜必需）；拿不到指标再回退首帧
+        png = _best_frame_png(vdata) if payload.get("useBestFrame") else _first_frame_png(vdata)
+        if png:
+            vdata = png
+            still_mode = True
+            print("[comfy] 底片＝片段取帧：已从片子里取出 1 帧当静帧（%d bytes）" % len(png), flush=True)
+        else:
+            print("[comfy] WARN 片段取帧失败，改用整段片段当底片", flush=True)
     if still_mode:
         vdata = _still_to_video(vdata, adata, payload.get("duration_sec"))
         print("[comfy] lipsync 底片为静帧 → 已转成与配音等长的 mp4（等比缩放，不做 pad/裁切）", flush=True)
@@ -2857,6 +2936,120 @@ def _wav_seconds(path):
             return w.getnframes() / float(w.getframerate() or 1)
     except Exception:
         return None
+
+
+def _sample_frames_png(video_bytes, max_long=1280, max_frames=12, fps=2.0):
+    """从视频里均匀抽帧，返回 [PNG bytes]（失败返回 []）。"""
+    import shutil as _shutil
+    import subprocess as _sp
+    import tempfile
+    ff = os.environ.get("WEAVEORA_FFMPEG", "ffmpeg")
+    if not (_shutil.which(ff) or os.path.exists(ff)):
+        return []
+    d = tempfile.mkdtemp(prefix="wf_frames_")
+    try:
+        vin = os.path.join(d, "in.bin")
+        with open(vin, "wb") as fh:
+            fh.write(video_bytes)
+        pat = os.path.join(d, "f_%03d.png")
+        _sp.run([ff, "-v", "error", "-y", "-i", vin, "-vf",
+                 "fps=%.2f,scale='min(%d,iw)':-2" % (float(fps), int(max_long)),
+                 "-frames:v", str(int(max_frames)), pat],
+                check=True, timeout=180, stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
+        return [open(os.path.join(d, f), "rb").read()
+                for f in sorted(os.listdir(d)) if f.startswith("f_") and f.endswith(".png")]
+    except Exception as e:
+        print("[comfy] 抽帧失败：%s" % e, flush=True)
+        return []
+    finally:
+        _shutil.rmtree(d, ignore_errors=True)
+
+
+def _best_frame_png(video_bytes, max_long=1280):
+    """从片段里挑「最适合当对口型底片」的一帧：**脸够大 + 嘴张开度最小**。
+
+    为什么需要（2026-09-15 用户反馈）：用户要求对口型要参考该镜的 motion 画面，
+    但片段往往整段都在张嘴（第5镜实测 mouth_open 1.23–1.25）—— 拿首帧当底片会被 B 保护拒（阀 1.05）；
+    用整段当底片又会“先把嘴合上再重开”把嘴部区改坏。
+    均匀抽 N 帧（默认 2fps、最多 12 帧）逐帧量 mouth_open / face_px，挑最干净的一帧 →
+    画面/风格/人物依旧来自片段，但底片只有一张静止且嘴型干净的癱。
+    取不到指标时返回 None（由调用方回退到首帧）。
+    """
+    frames = _sample_frames_png(video_bytes, max_long=max_long)
+    if not frames:
+        return None
+    best = None      # (score, png)  score 越小越好
+    stats = []
+    for i, png in enumerate(frames):
+        mo = px = None
+        try:
+            body = {"media_b64": base64.b64encode(png).decode("ascii"), "suffix": ".png"}
+            _st, resp = _post_json(FACE_URL + "/face/probe", body, timeout=120)
+            if resp.get("mouth_open") is not None:
+                mo = float(resp["mouth_open"])
+            if resp.get("face_px") is not None:
+                px = float(resp["face_px"])
+            elif resp.get("hits") in (0, "0"):
+                mo = None      # 没人脸
+        except Exception as e:
+            print("[comfy] 逐帧人脸探测失败（第%d帧）：%s" % (i, e), flush=True)
+            return None
+        stats.append((i, mo, px))
+        if mo is None:
+            continue
+        # 打分：脸太小直接排除（优先）；其余取 mouth_open 最小
+        if px is not None and px < FACE_MIN_PX:
+            continue
+        score = mo
+        if best is None or score < best[0]:
+            best = (score, png, i)
+    if best is None:
+        # 没有同时满足“有脸+脸够大”的帧 → 退一步：取 mouth_open 最小的帧（哪怕脸小）
+        cand = [(mo, png, i) for (i, mo, px), png in zip(stats, frames) if mo is not None]
+        if cand:
+            cand.sort(key=lambda x: x[0])
+            best = cand[0]
+    if best is None:
+        print("[comfy] 片段里量不到人脸/嘴型，回退首帧", flush=True)
+        return None
+    print("[comfy] 片段抽帧 %d 张，选中第 %d 帧当底片（mouth_open=%.3f，阈值 %.2f）"
+          % (len(frames), best[2], best[0], MOUTH_MAX), flush=True)
+    return best[1]
+
+
+def _first_frame_png(video_bytes, max_long=1280):
+    """从视频字节里抽第 1 帧，返回 PNG 字节（失败返回 None）。
+
+    为什么需要：用户要求对口型要**参考该镜 motion 的画面**（而不是拿新生成的关键帧当底片），
+    但直接用整段片段当底片又会碰上“片段里嘴一直在动/大张 → 嘴部区大幅形变”的老问题。
+    取首帧能两头兼顾：画面/风格/人物来自片段，嘴部状态却只有一种。
+    人 2026-09-15。
+    """
+    import shutil as _shutil
+    import subprocess as _sp
+    import tempfile
+    ff = os.environ.get("WEAVEORA_FFMPEG", "ffmpeg")
+    if not (_shutil.which(ff) or os.path.exists(ff)):
+        return None
+    d = tempfile.mkdtemp(prefix="wf_first_frame_")
+    vin = os.path.join(d, "in.bin")
+    vout = os.path.join(d, "f1.png")
+    try:
+        with open(vin, "wb") as fh:
+            fh.write(video_bytes)
+        cmd = [ff, "-v", "error", "-y", "-i", vin, "-frames:v", "1",
+               "-vf", "scale='min(%d,iw)':-2" % int(max_long), vout]
+        _sp.run(cmd, check=True, timeout=120, stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
+        with open(vout, "rb") as fh:
+            return fh.read()
+    except Exception as e:
+        print("[comfy] 首帧抽取失败：%s" % e, flush=True)
+        return None
+    finally:
+        try:
+            _shutil.rmtree(d, ignore_errors=True)
+        except Exception:
+            pass
 
 
 def _still_to_video(img_bytes, audio_bytes, duration_sec=None, fps=25, max_long=1280):
