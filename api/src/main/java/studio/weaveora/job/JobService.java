@@ -963,6 +963,14 @@ public class JobService {
         nodes.save(n);
     }
 
+    /**
+     * A3：每个 worker 节点「上一个任务类型」，用于同 kind 优先认领（避免 still→clip→still 反复换大模型）。
+     *
+     * <p>进程内缓存即可：多实例部署时亲和只在各自实例内生效，最坏情况退化为旧行为（不会出错）。
+     * 不落库是为了避免为这点优化加一次 schema 迁移。
+     */
+    private final Map<UUID, String> lastClaimedKind = new java.util.concurrent.ConcurrentHashMap<>();
+
     @Transactional
     public Map<String, Object> claim(UUID nodeId) {
         WorkerNode n = node(nodeId);
@@ -970,6 +978,13 @@ public class JobService {
         // 引擎路由匹配：节点能力 engine（缺省 gpu）只认领同引擎任务
         String nodeEngine = n.capabilities() == null ? "gpu"
                 : n.capabilities().path("engine").asText("gpu");
+
+        // ── A3 同 kind 优先（重要）：先收集全部可选任务，再优先挑「与本节点上一个任务同类型」的那个。──
+        // 为什么：ComfyUI 里出图（Qwen-Image ~28GB）、出片（A14B 双专家 ~26.6GB）、对口型、配乐
+        // 各自要一套大权重；若按创建顺序交错认领（still→clip→still），每换一次都要卸载一套再加载另一套
+        // （实测重启后首张图曾要 12 分钟）。同 kind 连跑可以让模型一直待在显存里。
+        // 注意：**不影响单跑** —— 只有一个候选时行为与从前完全一致；跨 kind 也不会饿死（没同 kind 就取最早的）。
+        List<GenerationJob> candidates = new ArrayList<>();
         for (GenerationJob candidate : jobs.findQueuedForClaim()) {
             if (scope != null && !scope.equals(candidate.workspaceId())) {
                 continue;
@@ -977,13 +992,33 @@ public class JobService {
             if (!nodeEngine.equals(candidate.engineRoute())) {
                 continue;
             }
-            int updated = jobs.claim(candidate.id(), nodeId.toString(), OffsetDateTime.now());
+            candidates.add(candidate);
+        }
+        String lastKind = lastClaimedKind.get(nodeId);
+        GenerationJob picked = null;
+        if (lastKind != null) {
+            for (GenerationJob c : candidates) {
+                if (lastKind.equals(c.kind())) {
+                    picked = c;
+                    break;
+                }
+            }
+        }
+        if (picked == null && !candidates.isEmpty()) {
+            picked = candidates.get(0);
+        }
+        if (picked != null && lastKind != null && !lastKind.equals(picked.kind()) && candidates.size() > 1) {
+            log.info("claim 切换任务类型（队列里没有同类型任务）：{} -> {}", lastKind, picked.kind());
+        }
+        if (picked != null) {
+            int updated = jobs.claim(picked.id(), nodeId.toString(), OffsetDateTime.now());
             if (updated == 1) {
-                GenerationJob running = jobs.findById(candidate.id()).orElseThrow();
+                GenerationJob running = jobs.findById(picked.id()).orElseThrow();
+                lastClaimedKind.put(nodeId, running.kind());
                 emit(running, Map.of("type", "job.queued", "state", "running"));
                 Map<String, Object> out = new LinkedHashMap<>();
                 out.put("job", workerJobView(running));
-                // 服务地址（配音/配乐、对口型、转写、人脸）随任务下发：
+                // 服务地址（配音/配乐、对口型、整脸口型、文生图、转写、人脸）随任务下发：
                 // 换 GPU 服务器时用户在界面里改即可，不用再去改 worker 脚本/环境变量。
                 // 空值/未配置的字段已在 servicesWithDefaults 里填了默认值。
                 out.put("services", engineSettings.servicesOf(running.createdBy()));

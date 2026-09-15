@@ -1,0 +1,23 @@
+{
+  "_comment": "Weaveora · FLUX.1-schnell **img2img**（参考帧当底图）。T2 档：写实/摄影质感强、4 步出图、Apache-2.0（无负向，cfg 必须 1.0）。worker 注入 4.text / 12.image / 5 尺寸 / 6.seed / 6.denoise。",
+  "1": { "class_type": "UNETLoader", "_meta": { "title": "unet" }, "inputs": { "unet_name": "flux1-schnell-fp8.safetensors", "weight_dtype": "default" } },
+  "2": {
+    "class_type": "DualCLIPLoader",
+    "_meta": { "title": "clip" },
+    "inputs": { "clip_name1": "t5xxl_fp8_e4m3fn.safetensors", "clip_name2": "clip_l.safetensors", "type": "flux" }
+  },
+  "3": { "class_type": "VAELoader", "_meta": { "title": "vae" }, "inputs": { "vae_name": "ae.safetensors" } },
+  "4": { "class_type": "CLIPTextEncode", "_meta": { "title": "positive" }, "inputs": { "clip": ["2", 0], "text": "" } },
+  "12": { "class_type": "LoadImage", "_meta": { "title": "ref_frame" }, "inputs": { "image": "" } },
+  "13": { "class_type": "VAEEncode", "_meta": { "title": "encode_ref" }, "inputs": { "pixels": ["12", 0], "vae": ["3", 0] } },
+  "6": {
+    "class_type": "KSampler",
+    "_meta": { "title": "sampler" },
+    "inputs": {
+      "model": ["1", 0], "positive": ["4", 0], "negative": ["4", 0], "latent_image": ["13", 0],
+      "seed": 0, "steps": 4, "cfg": 1.0, "sampler_name": "euler", "scheduler": "simple", "denoise": 0.5
+    }
+  },
+  "7": { "class_type": "VAEDecode", "_meta": { "title": "decode" }, "inputs": { "samples": ["6", 0], "vae": ["3", 0] } },
+  "8": { "class_type": "SaveImage", "_meta": { "title": "save" }, "inputs": { "images": ["7", 0], "filename_prefix": "weaveora_flux_i2i" } }
+}

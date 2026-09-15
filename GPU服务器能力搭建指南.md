@@ -12,7 +12,7 @@
 
 | 能力 | 任务 kind | 跑在哪 | 主模型 | 许可 | 状态 |
 |---|---|---|---|---|---|
-| **文生图（T3 主力）** | `still`（imageEngine=gpu） | ComfyUI :8001 | **Qwen-Image fp8** + Qwen2.5-VL 7B + Lightning 8 步 LoRA | Apache-2.0 | ✅ 已出图（1344×768 约 40s/张） |
+| **文生图（T3 主力）** | `still`（imageEngine=gpu） | ComfyUI :8001 | **Qwen-Image fp8 + Qwen2.5-VL 7B**（默认**高步数电影档**：去 Lightning / cfg 3.5 / 24 步；参考图走 img2img denoise 0.50） | Apache-2.0 | ✅ 已出图（1280×704 实测 86–180s/张，视档位与是否冷加载） |
 | **一致性/改图** | `still`（一致性） | ComfyUI :8001 | **Qwen-Image-Edit fp8** | Apache-2.0 | ⏳ 下载中（Phase 2） |
 | **文生图（T2 备选）** | — | ComfyUI :8001 | **FLUX.1-schnell fp8** + T5-XXL fp8 + CLIP-L + AE | Apache-2.0 | ⏳ 排队（Phase 3） |
 | **图转视频（出片）** | `clip` | ComfyUI :8001 | **Wan2.2 I2V-A14B 双专家** fp8 + lightx2v 4 步 LoRA | Apache-2.0 | ✅ 生产在用 |
@@ -40,7 +40,7 @@
 | 公网（移动） | `223.109.239.30`，ssh `-p 21216`；网关 **`http://223.109.239.30:21264`**（备用线路，实测同样 200） |
 | 平台端口映射 | **外网 21264→容器 8800**（网关，唯一入口）；21265→8801、21266→8802、21267→8803、21268→8804、21269→8805（备用，当前未占用） |
 | GPU | **RTX 4090 48G**（`vram_total` 47.4 GiB） |
-| CPU / 内存 | 16 vCPU / **31 GB RAM（实测，非 50 GB）+ 8 GB swap（`/swap.img`）** —— 见 §4 坑 37：内存是首图/首镜慢的真正瓶颈 |
+| CPU / 内存 | 16 vCPU / **62 GB RAM**（2026-09-15 已从 31 GB 扩容）+ 8 GB swap（`/swap.img`，扩容后实测 0 占用）—— 见 §4 坑 37/38 |
 | OS | Ubuntu 24.04（主机名 `ubuntu24`） |
 | 系统盘 | `/dev/vda1` 200 G（已用 ~164 G，余 ~23 G） |
 | 数据盘 | `/dev/vdb1` ext4 **100 G** → **`/addDisk`**（2026-09-15 维护后挂载点变更；另建兼容软链 `/media/vipuser/addDisk → /addDisk` 以兼容既有软链；余 ~53 G） |
@@ -275,7 +275,20 @@ UNETLoader(qwen_image_fp8_e4m3fn, weight_dtype=default)
 
 **图生图（关键帧当底图）**：把 `EmptySD3LatentImage` 换成 `LoadImage(关键帧) → VAEEncode`，`denoise` 控改动幅度（**0.65 保构图人物 / 0.85 大改**）。
 **显存**：Qwen-Image 20G + Qwen2.5-VL 9.4G + VAE/LoRA ≈ **31 GB**（48G 卡单跑轻松；**不能与 A14B 出片同时驻留**）。
-**实测**：1344×768、8 步、**≈ 40 s/张**（模型已加载）。
+**实测（2026-09-15，62G 内存 + 已恢复 `--disable-smart-memory`）**：
+
+| 档 | 配置 | 出图耗时（含加载） |
+|---|---|---|
+| **默认（B 高步数电影档）** | Qwen-Image **去 Lightning**、`cfg 3.5`、**24 步**、参考图走 img2img `denoise 0.50` | 86–180 s |
+| A（旧档） | Lightning **8 步**、**cfg 1.0** → **负向词完全失效**、风格遵从弱（**这是"偏插画/古典、与云端差距大"的主因**） | 86 s |
+| C（参考图锚定） | **Qwen-Image-Edit**（2 张参考图编码进 conditioning） | 121 s |
+| D（快档/写实） | **FLUX.1-schnell** img2img 0.50 / 4 步 | 43 s |
+
+> 档位通过「生成引擎配置 → 服务地址 → 文生图」切换：`workflow`（无参考图）、`img2imgWorkflow`（有参考图）、
+> `editWorkflow`（填了它则**参考图锚定**优先，否则走 img2img）、`steps`、`cfg`、`denoise`。
+> 对应工作流文件在 worker 机器 `/opt/weaveora/workflows/`：`qwen_image_{txt2img,img2img}_film_api.json`（B）、
+> `qwen_image_{txt2img,img2img}_api.json`（A）、`qwen_image_edit_api.json`（C）、`flux_schnell_{txt2img,img2img}_api.json`（D）。
+> **风格永远来自项目配置**（payload 里的正/负词已由后端注入项目风格模板），档位只改模型/步数/引导，不写死风格。
 
 ### 3.2 图转视频（Wan2.2 I2V-A14B 双专家）
 
@@ -426,6 +439,10 @@ HTTP 兜底 `music_server.py`（:8092）默认不起，主线走 ComfyUI。
 | 34 | 重启后**整脸口型（:8094）消失** | `services_up.sh` 里**没有 talk 启动块**（当初是手工 `start_talk.sh` 起的）→ 平台重启后就只剩 ComfyUI/TTS/Face/网关 | 已把 talk 启动块写进 `services_up.sh`（幂等 + 监听汇总含 8094）；**新增服务必须同时进启动脚本**，否则“重启即丢” |
 | 35 | 网关路由配了却不生效：`/talk/health` 404 | 「去前缀」实现是 `path[len(prefix):] or "/"` —— 当**前缀本身就是完整路径**时，剥完是空 → 转发到 `/` → 上游 404 | 这类“路径就是全路径”的路由必须 **strip=False**（并让上游服务认该路径，如 talk 服务端同时认 `/health` 与 `/talk/health`）。另：`/talk_batch` 不匹配前缀 `/talk`（规则要求完全相等或前缀+/），必须单独列 |
 | 37 | 重启后**首张图要 12 分钟**（ComfyUI 日志 `Prompt executed in 00:12:05`） | **RAM 不够**：机器只有 **31 GB** 内存，而 Qwen-Image 出图一套权重 = 20.4 G（主模型）+ 7.9 G（Qwen2.5-VL 文本编码器）≈ **28 GB**，加上 ComfyUI 自身开销直接超了 → `free` 显示 available ≈ 3 GB、**swap 已用 4.7 GB/8 GB**，加载过程在换页。实测**磁盘不是瓶颈**（顺序读 426–703 MB/s、4K 随机读也正常）、**显存也不是**（47.4 G 够） | 方案（按性价比排序）：① **平台侧把内存加到 64 GB**（最直接，12 min → ~1 min）；② **同类任务批处理**（整批出图/整批出片，把加载摊薄——talk 的 `/talk_batch` 就是这个思路）；③ **重启后预热一次**（极短 prompt 把权重读进 RAM/VRAM，让用户任务不付冷启动）；④ worker 侧**同 kind 优先调度**，避免 still→clip→still 反复换入换出；⑤ 换 **GGUF 量化**的 Qwen-Image+文本编码器（一套 ~15 GB，Q8 近无损）或草稿用 SDXL/FLUX-schnell、精稿才用 Qwen-Image；⑥ 架构级：做**常驻出图服务**（照抄 talk 的做法，进程内常驻 Qwen-Image，单张稳定 ~40 s），彻底绕开 ComfyUI 的换入换出 |
+| 38 | **A14B 出片 OOM**（`KSamplerAdvanced: torch.OutOfMemoryError: Allocation on device`），即使 `/free` 后可用 46.5 GiB、并自动降帧到 56 帧仍复现 | 去掉 `--disable-smart-memory`（想省冷加载）后，ComfyUI 会让**双专家同时驻留**（高/低各 13.3 G）+ umt5 6.7 G，再加注意力/解码峰值就超过 47.4 G | **恢复 `--disable-smart-memory`**（双专家必须"用完即卸"）；"首图 12 分钟"的真因是**内存不足+swap**，不是这个 flag（扩容到 62 G 后已消失）。脚本：`deploy/gpu2_restore_smart_memory.py` |
+| 39 | `/free` 调了但显存没回来 | ComfyUI 的卸载是**异步**的：发完立刻量 `vram_free` 还是旧值（实测 19.9 → 19.5 G），旧代码量一次就往下走 → 后续任务 OOM | `_free_comfy_models(wait_gb=…)`：POST `/free` 后**轮询等到显存真的回来**（最多 120 s），日志打「卸载完成：可用显存 X GiB（目标 Y）」 |
+| 40 | 体检"过得去"但实际 OOM（预估 44.5 G / 总 47.4 G） | VRAM 预估模型没算**碎片/CUDA 上下文/解码瞬时峰值**，且 `MOTION_VRAM_SAFETY_GB` 旧默认是 **0**（等于没有余量）；判定为"根本放不下"时旧代码直接 `raise`（任务失败） | ① 预留默认改 **4 GiB**；② 能放下但余量不足时**自动降帧**（80 → 56 帧，4n 对齐）并打印原因，输出仍由 `_retime_to_fps()` 补到目标时长 → **任务不再失败，只损失运动稠密度**（仅当连 40 帧都放不下才报错） |
+| 41 | 任务按创建顺序跑，`still→clip→still` 来回换大模型（每次重载 20–28 G） | 旧 claim 逻辑严格 FIFO，不同能力交错执行 → 反复卸载/加载 | **A3 同 kind 优先**：claim 时先收集候选再优先挑「与本节点上一个任务同类型」的（`JobService.lastClaimedKind`，进程内 Map）。**单跑行为不变**、跨 kind 不饿死（没同 kind 就取最早的）。实测：入队 `still(6) → clip(5) → still(4)`，实际执行为 `still(6) → still(4) → clip(5)` |
 | 36 | `start_talk.sh` 报 “already running” 但它其实没跑 | `ps | grep "[t]alk_server.py"` 匹配到了**执行这条命令的 shell 自身**（命令行里含该字符串）→ 误判 | 用更严格的模式（两段式 `grep "[e]cho_mimic_v3" | grep "[t]alk_server"`）或直接 `pgrep -f 'envs/talk/bin/python .*talk_server.py'`；这就是 §4.1 #6 「`pkill -f` 自匹配」的同族坑 |
 | 26 | 前端显示"方案有改动"但其实没改 | `prompt_revisions.schema_json` 是 **jsonb**（PG 重排对象键），前端 `JSON.stringify` 把**纯键序差异**当改动 | 新增 `canonicalJson()` 统一 dirty/pristine 比对；删掉 `startVoice/startBgm/startLipsync` 里会另存未确认版本的兜底保存 |
 | 27 | 部署与生产任务互踩 | 同一张卡 | 纪律：**串行、不插队、不抢显存**；部署只在任务空隙；只做 ≤5 s 短查，禁止长轮询（单次等待 ≤60 s） |
@@ -524,7 +541,8 @@ setsid nohup /opt/weaveora/envs/talk/bin/python /opt/weaveora/first_image.py > /
 | **FLUX.1-schnell（T2，Phase 3）** | ⏳ 排队（22.7 G） | 走 `deploy/gpu2_dl_flux.sh`，同新盘 + 软链 |
 | **kind=talk 生产接线** | 🟡 代码已入库（`8e9dd80`），未部署 | 需：① `edge_proxy.py` 加 `/talk` → `:8094`（数秒网关重启，挑任务空隙）② VPS worker env `WEAVEORA_TALK_URL=http://180.127.11.166:10558/talk` ③ 重启 `weaveora-gpu-worker` ④ 部署 API jar ⑤ 建 talk 任务验证资产进「对口型」Tab |
 | **jaw_gain=1.25 增强档** | 🟡 参数已通 | 与 talk 接线一起验证 |
-| **文生图切本地（imageEngine=gpu）** | ⏳ 待你定 | 目前 cloud 为主；Qwen-Image 已实测 40 s/张 |
+| ~~A1 批量连跑~~ / ~~A2 预热~~ / ~~A3 同 kind 调度~~ | ✅ 已完成 | A3：API claim 同 kind 优先（已部署）；A2：`/opt/weaveora/warmup.sh` + 挂进 `services_up.sh`（后台、队列非空自动跳过、`WEAVEORA_WARMUP=off` 可关）；A1：多镜提交 + A3 亲和 + 模型常驻/页缓存，实测第二个同 kind 任务不再付加载成本 |
+| **文生图档位** | ✅ 默认 = B 高步数电影档 | 见 §3.1 档位表；切档只改「生成引擎配置 → 文生图」的 workflow/steps/cfg/denoise |
 | **旧模型迁到新盘** | ⏳ 可选 | 把 `diffusion_models/text_encoders/echo_mimic/checkpoints` 等旧大件"复制 → 校验 → 原子软链替换 → 删旧文件"迁到新盘，进一步松系统盘；**必须在任务空隙做** |
 | **A14B worker 部署** | ⏳ 待部署 | 并发会话已提交 `4e93235`（Wan2.2 I2V-A14B 双专家 + TTS 显存让位），尚未上 VPS worker |
 | **stable_syncnet.pt / ACE-Step split_files** | ⏳ 按需 | 推理不加载，磁盘紧张时再评估 |

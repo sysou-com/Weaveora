@@ -107,6 +107,11 @@ else
     "$VENV_PY" "$ROOT/edge_proxy.py" --port "$GWPORT"
 fi
 
+# ---------- 预热（后台、非阻塞；队列非空会自动跳过）----------
+# 目的：把出图那套大权重先读进显存/内存，用户的第一个任务不再付冷启动成本
+# （2026-09-15 实测：重启后首张图曾要 12 分钟）。可用 WEAVEORA_WARMUP=off 关闭。
+setsid nohup bash "$ROOT/warmup.sh" >> "$LOGD/warmup.log" 2>&1 < /dev/null &
+
 log "---------------- 监听汇总 ----------------"
 for p in "$GWPORT" 8001 8091 8093 8094; do
   if up $p; then log "  :$p  LISTEN"; else log "  :$p  --"; fi

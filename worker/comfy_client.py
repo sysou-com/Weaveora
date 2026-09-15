@@ -31,6 +31,9 @@ IMAGE_COMFY = os.environ.get("WEAVEORA_IMAGE_COMFY_URL", "").strip()        # �
 IMAGE_ENGINE = os.environ.get("WEAVEORA_IMAGE_ENGINE", "builtin").strip().lower()
 IMAGE_TXT2IMG_WF = os.environ.get("WEAVEORA_IMAGE_WORKFLOW", "").strip()
 IMAGE_IMG2IMG_WF = os.environ.get("WEAVEORA_IMAGE_IMG2IMG_WORKFLOW", "").strip()
+# ★ 参考图**锚定**档（Qwen-Image-Edit 这类：把参考图编码进 conditioning，而不是“以它为底重画”）。
+#   与 img2img 的区别：Edit 用 EmptySD3LatentImage + TextEncodeQwenImageEditPlus(image1/image2) → denoise 保持 1.0。
+IMAGE_EDIT_WF = os.environ.get("WEAVEORA_IMAGE_EDIT_WORKFLOW", "").strip()
 IMAGE_MODEL = os.environ.get("WEAVEORA_IMAGE_MODEL", "").strip()
 IMAGE_STEPS = int(os.environ.get("WEAVEORA_IMAGE_STEPS", "0") or 0)
 IMAGE_DENOISE = float(os.environ.get("WEAVEORA_IMAGE_DENOISE", "0.65") or 0.65)
@@ -72,7 +75,11 @@ def _wf_inject_size(graph, width, height):
 
 
 def _wf_inject_text(graph, positive, negative):
-    """正/负词：按 KSampler 的接线分辨那两 CLIPTextEncode，再用 _meta.title 兑底。"""
+    """正/负词：按 KSampler 的接线分辨那两条件节点，再用 _meta.title 兑底。
+
+    兼容两类节点（重要）：普通 `CLIPTextEncode`（入参名为 text）与 Qwen-Image-**Edit** 的
+    `TextEncodeQwenImageEditPlus`（入参名为 **prompt**）—— 写错入参名会静默不生效（图照出，但用的还是空提示词）。
+    """
     ks = _wf_of_class(graph, "KSampler") or _wf_of_class(graph, "KSamplerAdvanced")
     pos_id = neg_id = None
     if ks:
@@ -84,7 +91,9 @@ def _wf_inject_text(graph, positive, negative):
                     pos_id = ref[0]
                 else:
                     neg_id = ref[0]
-    texts = _wf_of_class(graph, "CLIPTextEncode")
+    texts = (_wf_of_class(graph, "CLIPTextEncode")
+             + _wf_of_class(graph, "TextEncodeQwenImageEditPlus")
+             + _wf_of_class(graph, "TextEncodeQwenImageEdit"))
     if not pos_id or not neg_id:
         for nid, n in texts:
             title = ((n.get("_meta") or {}).get("title") or "").lower()
@@ -99,10 +108,18 @@ def _wf_inject_text(graph, positive, negative):
             if nid != pos_id:
                 neg_id = nid
                 break
-    if pos_id and pos_id in graph:
-        graph[pos_id]["inputs"]["text"] = positive or ""
-    if neg_id and neg_id in graph:
-        graph[neg_id]["inputs"]["text"] = negative or ""
+    def _set(nid, val):
+        if not (nid and nid in graph):
+            return
+        ins = graph[nid].setdefault("inputs", {})
+        if "text" in ins:
+            ins["text"] = val or ""
+        elif "prompt" in ins:          # Qwen-Image-Edit 系
+            ins["prompt"] = val or ""
+        else:
+            ins["text"] = val or ""
+    _set(pos_id, positive)
+    _set(neg_id, negative)
     return pos_id, neg_id
 
 
@@ -135,11 +152,34 @@ def _wf_inject_model(graph, model):
     return hit
 
 
-def _wf_set_image(graph, filename):
-    nodes = _wf_of_class(graph, "LoadImage")
-    for _nid, n in nodes:
-        n.setdefault("inputs", {})["image"] = filename
-    return bool(nodes)
+def _wf_set_image(graph, filenames):
+    """把（多）参考图写进工作流里的 LoadImage 节点；多个 LoadImage 按节点 id 顺序依次分配。"""
+    if isinstance(filenames, str):
+        filenames = [filenames]
+    nodes = sorted(_wf_of_class(graph, "LoadImage"), key=lambda x: str(x[0]))
+    if not nodes:
+        return False
+    for i, (nid, n) in enumerate(nodes):
+        if i < len(filenames) and filenames[i]:
+            n.setdefault("inputs", {})["image"] = filenames[i]
+        elif filenames:
+            n.setdefault("inputs", {})["image"] = filenames[0]   # 节点比参考图多 → 复用第一张
+    return True
+
+
+def _wf_latent_is_img2img(graph):
+    """KSampler 的 latent 来自 VAEEncode ⇒ 真 img2img（要设 denoise）；来自 Empty*Latent ⇒ txt2img/Edit（denoise 必须 1.0）。
+
+    踩过的坑：Edit 工作流也有 LoadImage 节点（参考图），但它用的是 EmptySD3LatentImage，
+    若一律按“有参考图就设 denoise=0.5”，Edit 会只画一半步数 → 图糊。
+    """
+    ks = _wf_of_class(graph, "KSampler") or _wf_of_class(graph, "KSamplerAdvanced")
+    if not ks:
+        return False
+    ref = ks[0][1].get("inputs", {}).get("latent_image")
+    if not (isinstance(ref, list) and ref and isinstance(ref[0], str)):
+        return False
+    return graph.get(ref[0], {}).get("class_type") == "VAEEncode"
 
 
 def _wf_save_prefix(graph, prefix):
@@ -177,16 +217,23 @@ def generate_via_workflow(client_id, payload, progress_fn=None, on_tick=None):
     height = params.get("height") if isinstance(params.get("height"), int) else 768
     prefix = "weaveora_wf%s" % (("_shot" + str(payload.get("shot_no"))) if payload.get("shot_no") else "")
 
-    ref_name = None
+    ref_names = []
     ref_keys = payload.get("referenceKeys") or []
-    if ref_keys:
+    for i, key in enumerate(ref_keys[:3]):
         try:
-            data, ctype = fetch_reference_bytes(ref_keys[0])
-            ref_name = _upload_image(data, (ref_keys[0].split("/")[-1] or "ref.png"), ctype or "image/png")
+            data, ctype = fetch_reference_bytes(key)
+            nm = _upload_image(data, (key.split("/")[-1] or ("ref_%d.png" % i)), ctype or "image/png")
+            if nm:
+                ref_names.append(nm)
         except Exception as e:
-            print("[comfy] 文生图参考图上传失败（降为纯文生图）：%s" % e, flush=True)
-    path = IMAGE_IMG2IMG_WF if (ref_name and IMAGE_IMG2IMG_WF and os.path.exists(IMAGE_IMG2IMG_WF)) \
-        else IMAGE_TXT2IMG_WF
+            print("[comfy] 参考图#%d 上传失败（跳过）：%s" % (i, e), flush=True)
+    # 选工作流：参考图锚定（Edit）> img2img（以参考为底）> 纯文生图
+    if ref_names and IMAGE_EDIT_WF and os.path.exists(IMAGE_EDIT_WF):
+        path, mode = IMAGE_EDIT_WF, "edit"
+    elif ref_names and IMAGE_IMG2IMG_WF and os.path.exists(IMAGE_IMG2IMG_WF):
+        path, mode = IMAGE_IMG2IMG_WF, "img2img"
+    else:
+        path, mode = IMAGE_TXT2IMG_WF, "txt2img"
     graph = _wf_load(path)
     if progress_fn:
         progress_fn(40, "sampling")
@@ -195,15 +242,20 @@ def generate_via_workflow(client_id, payload, progress_fn=None, on_tick=None):
     _wf_inject_size(graph, width, height)
     steps = IMAGE_STEPS or (params.get("steps") if isinstance(params.get("steps"), (int, float)) else 0)
     cfg = params.get("cfg") if isinstance(params.get("cfg"), (int, float)) else None
-    denoise = (params.get("denoise") if isinstance(params.get("denoise"), (int, float)) else IMAGE_DENOISE) \
-        if ref_name else 1.0
+    is_i2i = _wf_latent_is_img2img(graph)
+    denoise = 1.0
+    if ref_names and is_i2i:
+        denoise = (params.get("denoise") if isinstance(params.get("denoise"), (int, float))
+                   else IMAGE_DENOISE)
     _wf_inject_sampler(graph, seed, steps, cfg, denoise)
-    if ref_name and not _wf_set_image(graph, ref_name):
-        raise ComfyError("图生图工作流里没有 LoadImage 节点，无法接入参考图：%s" % path)
+    if ref_names:
+        if not _wf_set_image(graph, ref_names):
+            print("[comfy] 工作流 %s 无 LoadImage 节点，%d 张参考图未使用" % (os.path.basename(path), len(ref_names)),
+                  flush=True)
     _wf_save_prefix(graph, prefix)
-    print("[comfy] 工作流出图：%s%s size=%dx%d steps=%s denoise=%s ref=%s"
-          % (os.path.basename(path), "(img2img)" if ref_name else "(txt2img)", width, height,
-             steps or "-", denoise, ref_name or "-"), flush=True)
+    print("[comfy] 工作流出图：%s(%s) size=%dx%d steps=%s cfg=%s denoise=%s refs=%s"
+          % (os.path.basename(path), mode, width, height, steps or "-", cfg if cfg is not None else "-",
+             denoise, ",".join(ref_names) or "-"), flush=True)
 
     saved, COMFY = COMFY, _image_comfy()
     try:
@@ -315,16 +367,41 @@ def _require_node_features():
     print("[comfy] 节点补丁版本 %s，能力齐全 ✅" % info.get("version"), flush=True)
 
 
-def _free_comfy_models():
-    """让 ComfyUI 卸掉自己缓存的模型（SDXL / Wan 等占着 6+ GB），把显存让给 LatentSync。
+def _free_comfy_models(wait_gb=None, timeout=90):
+    """让 ComfyUI 卸掉自己缓存的模型，把显存让给下一个「重量级且换模型」的任务（motion / lipsync）。
 
-    8 GiB 卡上很关键：否则 LatentSync 会在 ComfyUI 残留模型之上 OOM。失败不致命。
+    ★ 2026-09-15 两个坑（都踩过）：
+      ① 去掉 `--disable-smart-memory` 后模型会**常驻显存**（同 kind 连跑很快，这是我们要的），
+         但切到另一种能力时（still 的 Qwen-Image ~26G → clip 的 A14B 双专家 ~44.5G）就容易 OOM；
+      ② `/free` 的卸载是**异步**的：发完立刻量显存往往还没掉（实测 19.9G → 19.5G），
+         旧代码量一次就往下走 → motion 直接在 KSamplerAdvanced 上 `torch.OutOfMemoryError`。
+    所以：先 POST /free，再**轮询等到显存真的回来**（wait_gb 为目标，默认只等 1 次要求不苛刻）。
     """
     try:
         _comfy("POST", "/free", payload={"unload_models": True, "free_memory": True}, timeout=180)
-        print("[comfy] 已请求卸载缓存模型（为 lipsync 腾显存）", flush=True)
+        print("[comfy] 已请求卸载 ComfyUI 缓存模型（为下个重量级任务腾显存）", flush=True)
     except Exception as e:
         print("[comfy] /free 失败（忽略）: %s" % e, flush=True)
+        return None
+    if wait_gb is None:
+        return None
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        time.sleep(3)
+        try:
+            free, _total = vram_stats()
+        except Exception:
+            free = None
+        if free is not None and free >= wait_gb:
+            print("[comfy] 卸载完成：可用显存 %.1f GiB（目标 %.1f）" % (free, wait_gb), flush=True)
+            return free
+    try:
+        free, _total = vram_stats()
+    except Exception:
+        free = None
+    print("[comfy] 等待卸载超时，当前可用 %.1f GiB（目标 %.1f）"
+          % (free if free is not None else -1, wait_gb), flush=True)
+    return free
 
 
 def fetch_reference_bytes(storage_key):
@@ -748,7 +825,10 @@ MOTION_VRAM_AREA_REF = 832.0 * 480.0   # 标定分辨率（换成其它分辨率
 # 卡片预留（GiB）：预估值与总显存留这么多余地；只用来挡「根本放不下」的组合。
 # 注意：**不能拿 /system_stats 的 vram_free 当判据** —— ComfyUI 自己缓存的双专家（26.6GiB）
 # 是可以回收的，实测就吃过这个坑：1280x704/48 帧被误拦（当时 free 只有 20GiB）。
-MOTION_VRAM_SAFETY_GB = float(os.environ.get("WEAVEORA_MOTION_VRAM_SAFETY_GB", "0") or 0)
+MOTION_VRAM_SAFETY_GB = float(os.environ.get("WEAVEORA_MOTION_VRAM_SAFETY_GB", "4") or 4)
+# ★ 2026-09-15 从 0 改为 4：旧值 0 = 没有余量，于是 80 帧 @832×464（预估 44.5 GiB / 总 47.4 GiB）
+# “体检通过”但实际在 KSamplerAdvanced 上 `torch.OutOfMemoryError: Allocation on device`
+# （预估没有算显存碎片、CUDA 上下文、VAE 解码瞬时峰值）。
 
 # 总显存低于这个值就别浪费 GPU 时间了（A14B 硬门槛：24G 卡无论如何跑不了）
 MOTION_MIN_FREE_GB = float(os.environ.get("WEAVEORA_MOTION_MIN_FREE_GB", "30") or 30)
@@ -1269,12 +1349,12 @@ def generate_motion(client_id, payload, progress_fn=None):
                 "  修法二：显式降级单专家（params.mode=single + params.model=本地 5B 权重名）"
                 % (_total, MOTION_MIN_TOTAL_GB))
         if _free is not None and _free < _need:
-            # 先请 ComfyUI 释放自己的缓存（双专家 26.6GiB 是可回收的），再重新量一次
+            # 先请 ComfyUI 释放自己的缓存（双专家 26.6GiB 是可回收的），**并等卸载真的生效**（异步！）
             try:
-                _free_comfy_models()
-                _free2, _total2 = vram_stats()
-                if _free2 is not None:
-                    _free, _total = _free2, (_total2 or _total)
+                _free = _free_comfy_models(wait_gb=_need, timeout=120)
+                if _free is None:
+                    _free, _total2 = vram_stats()
+                    _total = _total2 or _total
                 print("[comfy] 已请 ComfyUI 释放缓存，可用显存 → %.1f GiB" % _free, flush=True)
             except Exception as _e:
                 print("[comfy] 释放 ComfyUI 缓存失败（忽略）: %s" % _e, flush=True)
@@ -1287,12 +1367,22 @@ def generate_motion(client_id, payload, progress_fn=None):
                                       / max(1e-6, MOTION_VRAM_PER_FRAME_GB * _area_scale)))
             _max_px = int(((_total - MOTION_VRAM_SAFETY_GB - MOTION_VRAM_BASE_GB) /
                            max(1e-6, MOTION_VRAM_PER_FRAME_GB * float(_frames))) * MOTION_VRAM_AREA_REF)
-            raise ComfyError(
-                "这次 motion 放不下：%dx%d / %d 帧 预估需 %.1f GiB，本机总显存 %.1f GiB。\n"
-                "  ① 本分辨率下最多约 %d 帧；或总像素降到约 %d\n"
-                "  ② 降分辨率（如 832x480）往往比降帧数划算\n"
-                "  ③ 跨镜并发时确认没有其它任务同时占卡（A14B 会独占）"
-                % (mw, mh, _frames, _need, _total, _max_frames, _max_px))
+            if _max_frames < 40:
+                raise ComfyError(
+                    "这次 motion 放不下：%dx%d / %d 帧 预估需 %.1f GiB，本机总显存 %.1f GiB。\n"
+                    "  ① 本分辨率下最多约 %d 帧；或总像素降到约 %d\n"
+                    "  ② 降分辨率（如 832x480）往往比降帧数划算\n"
+                    "  ③ 跨镜并发时确认没有其它任务同时占卡（A14B 会独占）"
+                    % (mw, mh, _frames, _need, _total, _max_frames, _max_px))
+            # ★ 能放下但余量不足 → **自动降帧**，不要硬跑 OOM。
+            #   输出仍会按目标时长由 _retime_to_fps() 补帧 → 时长不变，只损失一点运动稠密度。
+            _new_frames = max(32, (_max_frames - 4) // 4 * 4)   # 4n 对齐（latent = frames+1）且再留余量
+            print("[comfy] 显存不足 → 自动降帧：%d → %d 帧（预估需 %.1f GiB > 可用 %.1f GiB，总 %.1f GiB；"
+                  "输出仍按目标时长补帧）" % (_frames, _new_frames, _need,
+                                       _total - MOTION_VRAM_SAFETY_GB, _total), flush=True)
+            payload = dict(payload)
+            payload["frames"] = _new_frames
+            _mp["frames"] = _new_frames
         if _free is not None and _free < _need:
             print("[comfy] WARN 当前可用 %.1f GiB < 预估 %.1f GiB：ComfyUI 会自行换入换出，"
                   "若 OOM 请降分辨率或帧数" % (_free, _need), flush=True)
@@ -2311,7 +2401,7 @@ def apply_services(svc):
     # 只要换一个 JSON，不用改 worker、不用重启；参数注入靠 class_type/标题约定（见 generate_via_workflow）。
     img = g("image")
     if isinstance(img, dict):
-        global IMAGE_ENGINE, IMAGE_COMFY, IMAGE_TXT2IMG_WF, IMAGE_IMG2IMG_WF, IMAGE_MODEL, IMAGE_STEPS, IMAGE_DENOISE
+        global IMAGE_ENGINE, IMAGE_COMFY, IMAGE_TXT2IMG_WF, IMAGE_IMG2IMG_WF, IMAGE_EDIT_WF, IMAGE_MODEL, IMAGE_STEPS, IMAGE_DENOISE
         eng = img.get("engine")
         if isinstance(eng, str) and eng.strip():
             IMAGE_ENGINE = eng.strip().lower()
@@ -2324,6 +2414,9 @@ def apply_services(svc):
         w2 = img.get("img2imgWorkflow") or img.get("img2img_workflow")
         if isinstance(w2, str) and w2.strip():
             IMAGE_IMG2IMG_WF = w2.strip()
+        w3 = img.get("editWorkflow") or img.get("edit_workflow")
+        if isinstance(w3, str) and w3.strip():
+            IMAGE_EDIT_WF = w3.strip()
         m = img.get("model")
         if isinstance(m, str) and m.strip():
             IMAGE_MODEL = m.strip()

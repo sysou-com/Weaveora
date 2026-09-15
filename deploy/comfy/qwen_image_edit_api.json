@@ -1,0 +1,30 @@
+{
+  "_comment": "Weaveora · Qwen-Image-**Edit**（参考图锚定，最多 3 张参考图）。为什么需要：img2img 只是“以参考为底重画”（denoise 决定洗掉多少），而 Edit 是**真把参考图当条件**（TextEncodeQwenImageEditPlus 会把参考图的 VAE latent 一起编码进 conditioning）→ 人物/质感/风格更贴参考，这也是云端那种“看参考图出图”的观感。worker 注入 6.prompt / 7.prompt / 12.image / 14.image / 8 尺寸 / 9.seed；steps/cfg 走 services.image.steps 或 params。",
+  "1": { "class_type": "UNETLoader", "_meta": { "title": "unet" }, "inputs": { "unet_name": "qwen_image_edit_fp8_e4m3fn.safetensors", "weight_dtype": "default" } },
+  "2": { "class_type": "CLIPLoader", "_meta": { "title": "clip" }, "inputs": { "clip_name": "qwen_2.5_vl_7b_fp8_scaled.safetensors", "type": "qwen_image", "device": "default" } },
+  "3": { "class_type": "VAELoader", "_meta": { "title": "vae" }, "inputs": { "vae_name": "qwen_image_vae.safetensors" } },
+  "5": { "class_type": "ModelSamplingAuraFlow", "_meta": { "title": "shift" }, "inputs": { "model": ["1", 0], "shift": 3.0 } },
+  "12": { "class_type": "LoadImage", "_meta": { "title": "ref1" }, "inputs": { "image": "" } },
+  "14": { "class_type": "LoadImage", "_meta": { "title": "ref2" }, "inputs": { "image": "" } },
+  "6": {
+    "class_type": "TextEncodeQwenImageEditPlus",
+    "_meta": { "title": "positive" },
+    "inputs": { "clip": ["2", 0], "prompt": "", "vae": ["3", 0], "image1": ["12", 0], "image2": ["14", 0] }
+  },
+  "7": {
+    "class_type": "TextEncodeQwenImageEditPlus",
+    "_meta": { "title": "negative" },
+    "inputs": { "clip": ["2", 0], "prompt": "", "vae": ["3", 0], "image1": ["12", 0], "image2": ["14", 0] }
+  },
+  "8": { "class_type": "EmptySD3LatentImage", "_meta": { "title": "latent" }, "inputs": { "width": 1280, "height": 704, "batch_size": 1 } },
+  "9": {
+    "class_type": "KSampler",
+    "_meta": { "title": "sampler" },
+    "inputs": {
+      "model": ["5", 0], "positive": ["6", 0], "negative": ["7", 0], "latent_image": ["8", 0],
+      "seed": 0, "steps": 20, "cfg": 2.5, "sampler_name": "euler", "scheduler": "simple", "denoise": 1.0
+    }
+  },
+  "10": { "class_type": "VAEDecode", "_meta": { "title": "decode" }, "inputs": { "samples": ["9", 0], "vae": ["3", 0] } },
+  "11": { "class_type": "SaveImage", "_meta": { "title": "save" }, "inputs": { "images": ["10", 0], "filename_prefix": "weaveora_qwen_edit" } }
+}
