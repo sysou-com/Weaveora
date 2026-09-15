@@ -503,6 +503,15 @@ setsid nohup /opt/weaveora/envs/talk/bin/python /opt/weaveora/first_image.py > /
 
 ## 7. 待完成 / 后续
 
+> 🚧 **2026-09-15 16:20 发现 GPU 服务器进入维护/重建态**：ssh 主机密钥变了、原密钥被拒（`Permission denied (publickey)`），
+> 两个公网入口（10558/10588）均不可达（`000`）→ 依赖 GPU 的任务（出片/对口型/配音/配乐/本机出图）当前会失败。
+> 维护结束后的回归清单（都已就绪，只差环境）：
+> 1. 重新打通 ssh（新主机密钥已加入 `~/.ssh/known_hosts`；若新容器不认原公钥，需在平台侧重新注入）；
+> 2. `bash /opt/weaveora/services_up.sh`（或确认 `weaveora-stack.service` 已启动）→ 校验 5 个端口 + 持久卷 `/opt/weaveora` 完整；
+> 3. 部署网关新路由：推 `deploy/edge_proxy.py` 并**只重启网关进程**（不动 ComfyUI）→ `curl <网关>/talk/health` 应 200；
+> 4. 配置页把「图像引擎」切成 **GPU 服务器**（`imageEngine=gpu`）→ 出图走本机 Qwen-Image；
+> 5. 跑一遍第 5 镜三步链路（文生图 → motion → 对口型）+ 一个 `kind=talk` 任务（验证资产进「对口型」Tab）。
+
 | 项 | 状态 | 说明 |
 |---|---|---|
 | **Qwen-Image-Edit（Phase 2）** | ⏳ 下载中（20.4 G） | 下完 → 写 `qwen_image_edit_api.json` → 用**第 5 镜关键帧**当参考图出一张对照 |

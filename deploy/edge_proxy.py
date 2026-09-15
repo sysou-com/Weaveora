@@ -9,6 +9,9 @@
 #   /audio/*   -> 127.0.0.1:8091   (去前缀)  TTS 配音 /tts 、转写 /transcribe 、/health
 #   /bgm/*     -> 127.0.0.1:8092   (去前缀)  配乐 HTTP 兜底 /music 、/health
 #   /face/*    -> 127.0.0.1:8093   (保留)    人脸 /face/probe 、/face/embed 、/health
+#   /talk      -> 127.0.0.1:8094   (保留)    整脸口型（EchoMimicV3 / jaw-lip）单镜 /talk
+#   /talk_batch-> 127.0.0.1:8094   (保留)    整脸口型批量（一次加载处理 N 镜，摊薄 20GB 加载）
+#   /talk/health -> 127.0.0.1:8094 (去前缀)  整脸口型健康检查（转发到 /health）
 #   /*         -> 127.0.0.1:8001   (保留)    ComfyUI（含 /ws WebSocket）
 #
 # 对应 worker 环境变量：
@@ -36,6 +39,14 @@ ROUTES = [
     ("/audio", "http://127.0.0.1:8091", True),
     ("/bgm",   "http://127.0.0.1:8092", True),
     ("/face",  "http://127.0.0.1:8093", False),
+    # 整脸口型（EchoMimicV3 / jaw-lip，:8094）。
+    # ★ 顺序有讲究：匹配是「第一个命中的前缀」——
+    #   `/talk/health` 是**去前缀**转 /health（talk 服务只认 /health）；
+    #   `/talk` 与 `/talk_batch` **保留原路径**（worker 直接 POST 这两个路径）。
+    #   注意 `/talk_batch` 不匹配 `/talk`（匹配规则要求完全相等或前缀+/），所以必须单独列。
+    ("/talk/health", "http://127.0.0.1:8094", True),
+    ("/talk_batch",  "http://127.0.0.1:8094", False),
+    ("/talk",        "http://127.0.0.1:8094", False),
 ]
 DEFAULT_UPSTREAM = "http://127.0.0.1:8001"   # ComfyUI
 
