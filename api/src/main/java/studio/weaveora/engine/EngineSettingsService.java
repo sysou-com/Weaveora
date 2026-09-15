@@ -184,7 +184,13 @@ public class EngineSettingsService {
         return n;
     }
 
-    /** 取某项服务配置（用户值覆盖默认值，逐字段合并）。 */
+    /** 取某项服务配置（用户值覆盖默认值，逐字段合并）。
+     *
+     * <p>★ 关键：用户值为 **null / 缺失** 一律视为「未配置」→ **保留推导值/默认值**，不能用 null 覆盖。
+     * 踩过的坑（2026-09-15）：前端表单用 `value || null` 提交空输入框，若让 null 覆盖，
+     * 用户每次保存都会把从「GPU 服务器地址」推导出来的 comfyUrl/talk.url 洗掉 → worker 拿到 null，
+     * 只能回退到自己的环境变量（可能就是另一台/旧地址）。
+     */
     private static com.fasterxml.jackson.databind.JsonNode merge(
             com.fasterxml.jackson.databind.JsonNode cur, String key,
             com.fasterxml.jackson.databind.node.ObjectNode defaults) {
@@ -192,7 +198,12 @@ public class EngineSettingsService {
             return defaults;
         }
         com.fasterxml.jackson.databind.node.ObjectNode out = defaults.deepCopy();
-        cur.path(key).fields().forEachRemaining(e -> out.set(e.getKey(), e.getValue()));
+        cur.path(key).fields().forEachRemaining(e -> {
+            if (e.getValue() == null || e.getValue().isNull()) {
+                return;   // null = 未配置 → 不覆盖
+            }
+            out.set(e.getKey(), e.getValue());
+        });
         return out;
     }
 
