@@ -85,6 +85,16 @@ else
     "$VENV_PY" "$ROOT/face/face_server.py" --port 8093 --device "$WEAVEORA_FACE_DEVICE"
 fi
 
+# ---------- 整脸口型 talk :8094（EchoMimicV3 / jaw-lip）----------
+# 独立 venv（envs/talk）与 ComfyUI 隔离；喊叫/尖叫/吟唱这类「嘴大张」镜用它替代 LatentSync。
+# ⚠️ 踩过的坑（2026-09-15）：原来只有手工 start_talk.sh，机器一重启 8094 就没了（维护后实测未监听）。
+if up 8094; then
+  log "talk :8094 已在监听，跳过"
+else
+  cd "$ROOT" || exit 1
+  start_bg "talk(:8094)" "$LOGD/talk_server.log" "$ROOT/envs/talk/bin/python" "$ROOT/talk/talk_server.py"
+fi
+
 # ---------- 边缘网关（端口可配：WEAVEORA_GATEWAY_PORT，缺省 8000）----------
 # GPU#2：平台给的公网映射是 <公网端口>→容器 8800，故那边要设 8800（具体公网地址/端口见「生成引擎配置 → GPU 服务器地址」）。
 GWPORT=${WEAVEORA_GATEWAY_PORT:-8000}
@@ -98,7 +108,7 @@ else
 fi
 
 log "---------------- 监听汇总 ----------------"
-for p in "$GWPORT" 8001 8091 8093; do
+for p in "$GWPORT" 8001 8091 8093 8094; do
   if up $p; then log "  :$p  LISTEN"; else log "  :$p  --"; fi
 done
 log "================ services_up DONE ================"

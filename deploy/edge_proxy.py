@@ -11,7 +11,7 @@
 #   /face/*    -> 127.0.0.1:8093   (保留)    人脸 /face/probe 、/face/embed 、/health
 #   /talk      -> 127.0.0.1:8094   (保留)    整脸口型（EchoMimicV3 / jaw-lip）单镜 /talk
 #   /talk_batch-> 127.0.0.1:8094   (保留)    整脸口型批量（一次加载处理 N 镜，摊薄 20GB 加载）
-#   /talk/health -> 127.0.0.1:8094 (去前缀)  整脸口型健康检查（转发到 /health）
+#   /talk/health -> 127.0.0.1:8094 (保留)    整脸口型健康检查（服务端认 /talk/health）
 #   /*         -> 127.0.0.1:8001   (保留)    ComfyUI（含 /ws WebSocket）
 #
 # 对应 worker 环境变量：
@@ -41,10 +41,11 @@ ROUTES = [
     ("/face",  "http://127.0.0.1:8093", False),
     # 整脸口型（EchoMimicV3 / jaw-lip，:8094）。
     # ★ 顺序有讲究：匹配是「第一个命中的前缀」——
-    #   `/talk/health` 是**去前缀**转 /health（talk 服务只认 /health）；
-    #   `/talk` 与 `/talk_batch` **保留原路径**（worker 直接 POST 这两个路径）。
-    #   注意 `/talk_batch` 不匹配 `/talk`（匹配规则要求完全相等或前缀+/），所以必须单独列。
-    ("/talk/health", "http://127.0.0.1:8094", True),
+    #   `/talk/health`、`/talk_batch`、`/talk` 均**保留原路径**（talk 服务端自己认这三个路径）。
+    #   踩过的坑：早先把 `/talk/health` 配成「去前缀」，而去前缀的实现是 `path[len(prefix):] or "/"` ——
+    #   精确命中时剥成空 → 转发到 `/` → talk 服务端 404。这类「路径就是全路径」的路由必须 strip=False。
+    #   另：`/talk_batch` 不匹配前缀 `/talk`（规则要求完全相等或前缀+/），所以必须单独列。
+    ("/talk/health", "http://127.0.0.1:8094", False),
     ("/talk_batch",  "http://127.0.0.1:8094", False),
     ("/talk",        "http://127.0.0.1:8094", False),
 ]

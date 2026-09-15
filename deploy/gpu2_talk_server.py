@@ -292,7 +292,7 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
-        if self.path.startswith("/health"):
+        if self.path.startswith("/health") or self.path.startswith("/talk/health"):
             free = None
             try:
                 import torch
