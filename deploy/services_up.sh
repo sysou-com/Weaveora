@@ -59,7 +59,7 @@ else
   export WEAVEORA_COSYVOICE_MODEL="pretrained_models/CosyVoice2-0.5B"
   export WEAVEORA_COSYVOICE_SFT_MODEL="pretrained_models/CosyVoice-300M-SFT"
   export WEAVEORA_TTS_DEFAULT_VOICE="中文女"
-  export WEAVEORA_TTS_PRELOAD=1
+  export WEAVEORA_TTS_PRELOAD=0   # 48G 卡为了让 A14B motion 独占显存（实测峰值 47.3GiB），TTS 改为按需加载
   export WEAVEORA_TTS_ALIGN=0
   # 显存仲裁：TTS 常驻占 ~7GiB，与 Wan2.2 14B 双专家无法共存。
   #   worker 在出视频前会看 ComfyUI 的显存余量，不够时 POST /unload 让 TTS 卸载模型

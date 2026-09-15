@@ -488,14 +488,15 @@ def _post_prompt(prompt, client_id):
 #     Wan2.2 A14B 的**高噪声专家**负责整体布局与**大幅运动**，低噪声专家负责细节收尾。
 #     把 4-step 蒸馏 LoRA 同样压在高噪声专家上 → 运动幅度被压扁（现象：慢动作 / 动态丢失）。
 #     ⇒ 修法：高噪声专家**少蒸馏或完全不蒸馏**（强度 0 = 该专家不加 LoRA），低噪声专家可足量蒸馏。
-#     经验口径（Kijai issue #998）：高噪声 LoRA 越大 → 动态越小；越小 → 越丢 Wan2.2 质感，
-#     故默认 high 0.6 / low 1.0（换 LoRA 家族时强度约定会变，见下）。
+#     实测口径（GPU#2 48G / 2026-09-14）：给 fp8 高噪声专家挂 LoRA，ComfyUI 要额外
+#     dequantize 一份权重（13.3GiB fp8 → ~28GiB fp16）→ **48G 卡也 OOM**；且动态会被压扁。
+#     ⇒ 默认 high=0.0（只给低噪声专家蒸馏）、low=1.0（换 LoRA 家族时强度约定会变，见下）。
 #
 #   档位（payload["params"]["preset"]；每一项都能用显式键覆盖）：
 #     draft    4 步  switch 2   最快，动态最弱（只看构图）
 #     balanced 6 步  switch 3   默认生产档
 #     motion   8 步  switch 4   动态优先
-#     hero     6 步  switch 3   高噪声专家**完全不蒸馏** + CFG 3.5（关键镜）
+#     hero     6 步  switch 3   抬高 cfg_high=3.5（关键镜；高噪声 LoRA 在所有档位都是 0）
 #     full    24 步  switch 12  完全不蒸馏（画质上限，配合 sageattention）
 #   切分口径：高/低噪声按总步数折半（4→2、6→3、8→4），与官方/社区一致。
 #
