@@ -293,6 +293,25 @@ def execute_job(job):
                  {"code": "LIPSYNC_ERROR", "message": str(e)[:500]})
             return False
 
+    # jaw-lip（整脸音频驱动）：静帧 + 配音 → EchoMimic 整脸表演（GPU 机上的 talk 服务，独立 venv）
+    # 与 lipsync 的分工：lipsync 在**既有画面**上换嘴（保留运镜）；talk 从**静帧**重新表演（嘴+下颌+表情一起生成）。
+    if kind == "talk":
+        import talk_client
+        try:
+            outs = talk_client.generate_talk(
+                jid, payload,
+                progress_fn=lambda p, st: _req("POST", "/internal/jobs/%s/progress" % jid,
+                                                {"progress": p, "stage": st}))
+            media = [(o["bytes"], o.get("mime") or "video/mp4", o.get("width"), o.get("height"),
+                      o.get("duration_ms")) for o in outs]
+            return _complete(jid, payload, media)
+        except Exception as e:
+            import traceback as _tb
+            _tb.print_exc()
+            _req("POST", "/internal/jobs/%s/fail" % jid,
+                 {"code": "TALK_ERROR", "message": str(e)[:500]})
+            return False
+
     if MODE == "cloud":
         import cloud_client as cloud
         # 用户云凭据（图片=OpenAI-compatible；视频=Replicate），经 internal 通道拉取

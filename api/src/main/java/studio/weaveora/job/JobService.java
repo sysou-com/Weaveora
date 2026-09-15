@@ -258,8 +258,8 @@ public class JobService {
     public List<JobView> create(UUID userId, UUID workspaceId, UUID projectId, CreateJobRequest req) {
         guard.requireMember(userId, workspaceId);
         ProjectSnapshot project = projects.require(userId, workspaceId, projectId);
-        if (req.kind() == null || !List.of("still", "clip", "voice", "bgm", "portrait", "lipsync").contains(req.kind())) {
-            throw new BizException(ErrorCode.VALIDATION, "kind 必须为 still|clip|voice|bgm");
+        if (req.kind() == null || !List.of("still", "clip", "voice", "bgm", "portrait", "lipsync", "talk").contains(req.kind())) {
+            throw new BizException(ErrorCode.VALIDATION, "kind 必须为 still|clip|voice|bgm|portrait|lipsync|talk");
         }
         if (project.approvedRevisionId() == null || !project.approvedRevisionId().equals(req.revisionId())) {
             throw new BizException(ErrorCode.REVISION_NOT_APPROVED, "请先确认该方案（未确认不可生成）");
@@ -282,6 +282,12 @@ public class JobService {
         }
         if ("lipsync".equals(req.kind())) {
             return createLipsyncJobs(workspaceId, projectId, req, plan, revisionNo, userId)
+                    .stream().map(this::toView).toList();
+        }
+        // jaw-lip（整脸音频驱动 / EchoMimic）：从**静帧**重新生成整段表演（嘴+下颌+表情），
+        // 与 lipsync（在既有画面上换嘴、保留运镜）互补；产物按 lipsync 落库（前端「对口型」Tab 可见）。
+        if ("talk".equals(req.kind())) {
+            return createTalkJobs(workspaceId, projectId, req, plan, revisionNo, userId)
                     .stream().map(this::toView).toList();
         }
         // 配音/配乐是自托管音频服务；**对口型也固定走本机 GPU**（音频驱动的后处理跑在 ComfyUI 工作流里，
@@ -1013,7 +1019,12 @@ public class JobService {
         job.succeed();
         jobs.save(job);
         metrics.jobSucceeded();
-        String kind = List.of("clip", "still", "voice", "bgm", "portrait", "lipsync").contains(job.kind()) ? job.kind() : "still";
+        String kind = List.of("clip", "still", "voice", "bgm", "portrait", "lipsync", "talk").contains(job.kind()) ? job.kind() : "still";
+        // talk（整脸音频驱动）的产物按 lipsync 落库：前端「对口型」Tab 直接可见、可与 LatentSync 版逐版对比；
+        // 任务自身的 kind 仍是 talk，payload.source=talk / jawGain 仍在，便于审计。
+        if ("talk".equals(kind)) {
+            kind = "lipsync";
+        }
         // 试听产物单独 kind（voice_preview/bgm_preview），避免被正式渲染/导出选中
         boolean previewJob = job.payload() != null && job.payload().path("preview").asBoolean(false);
         if (previewJob && ("voice".equals(kind) || "bgm".equals(kind))) {
@@ -1449,7 +1460,7 @@ public class JobService {
      *
      * <p>所以这三种 kind 一律落 {@code gpu}，**不受用户 image/video_engine=cloud 的影响**。
      */
-    static final Set<String> SELF_HOSTED_KINDS = Set.of("voice", "bgm", "lipsync");
+    static final Set<String> SELF_HOSTED_KINDS = Set.of("voice", "bgm", "lipsync", "talk");
 
     /**
      * P13 纯函数（便于单测）：决定任务落到哪个执行面。
@@ -1783,6 +1794,87 @@ public class JobService {
     private static final java.util.regex.Pattern EXPRESSION_RISK_RE = java.util.regex.Pattern.compile(
             "喊叫|尖叫|惊叫|惊呼|失声|呼喊|大叫|吼叫|嚎叫|嘶喊|大喊|张口|张嘴|大张|口大张"
             + "|scream|shriek|shout|yell|cry out|wail|mouth wide|wide.open.mouth|open mouth|mouth open");
+
+    /**
+     * jaw-lip（整脸音频驱动）：把该镜的**静帧**与该镜配音交给 talk 服务（GPU 机上的 EchoMimicV3 + 下颌曲线层）
+     * → 得到「嘴/下颌/表情一起重新表演」的片段。
+     *
+     * <p>与 {@link #createLipsyncJobs} 的分工：
+     * <ul>
+     *   <li>lipsync（LatentSync）= 在**既有画面**上只换嘴 → 保留运镜/表演，但喊叫这类「下颌大开」做不了；</li>
+     *   <li>talk（EchoMimic）= 从**静帧**重新表演 → 擅长喊叫/极端表情，但会重演镜头（运镜不保留）。</li>
+     * </ul>
+     *
+     * <p>产物按 lipsync 落库（前端「对口型」Tab 可见），任务本身 kind=talk；payload 带 jawGain 等可审计参数：
+     * {@code jaw_gain=1.0} 表示原生不动，{@code 1.25} 为建议的「喊叫增强」档（曲线层按音频响度额外下拉下颌）。
+     */
+    private List<GenerationJob> createTalkJobs(UUID workspaceId, UUID projectId, CreateJobRequest req,
+                                              JsonNode plan, int revisionNo, UUID userId) {
+        List<UUID> shotIds = resolveVideoShots(userId, workspaceId, projectId, req.revisionId(), req.shotId(),
+                "clip", req.shotNos(), Boolean.TRUE.equals(req.includeLocked()));
+        if (shotIds.isEmpty()) {
+            throw new BizException(ErrorCode.SHOT_NOT_APPROVED, emptyShotReason(workspaceId, projectId, req));
+        }
+        // talk 服务在 GPU 机上（独立 venv），云节点不会认领 → 固定 gpu（与 lipsync 同理）
+        String engineRoute = routeForKind("talk", engineSettings.resolveEngine(userId, "clip"));
+        List<GenerationJob> created = new ArrayList<>();
+        List<String> skipped = new ArrayList<>();
+        for (UUID shotId : shotIds) {
+            JsonNode shot = shotOf(plan, shotId);
+            if (shot == null) {
+                continue;
+            }
+            int shotNo = shot.path("shot_no").asInt();
+            // 底图：必须是**静帧**（整脸生成从一张图起）——没有就跳过并说清原因
+            studio.weaveora.asset.domain.Asset still = pickNewestAsset(projectId, workspaceId, shotNo, "still");
+            if (still == null) {
+                skipped.add("第" + shotNo + "镜（缺静帧：整脸口型要一张静帧当底图，先出关键帧）");
+                continue;
+            }
+            List<studio.weaveora.asset.domain.Asset> voices = newestVoicePerLine(projectId, workspaceId, shotNo);
+            if (voices.isEmpty()) {
+                skipped.add("第" + shotNo + "镜（缺配音）");
+                continue;
+            }
+            ObjectNode payload = mapper().createObjectNode();
+            payload.put("kind", "talk");
+            payload.put("source", "talk");
+            payload.put("mode", "video");
+            payload.put("revisionId", req.revisionId().toString());
+            payload.put("shotId", shotId.toString());
+            payload.put("shot_no", shotNo);
+            payload.put("imageKey", still.storageKey());
+            payload.put("prompt", shot.path("positive_prompt").asText(""));
+            com.fasterxml.jackson.databind.node.ArrayNode vk = payload.putArray("voiceKeys");
+            for (studio.weaveora.asset.domain.Asset a : voices) {
+                vk.add(a.storageKey());
+            }
+            payload.put("voiceCount", voices.size());
+            payload.put("duration_sec", shot.path("duration_sec").asDouble(3));
+            // 下颌曲线层参数：1.0=原生不动；1.25=建议增强档（可按镜在方案里覆盖 shots[].talk_gain）
+            payload.put("jawGain", shot.path("talk_gain").asDouble(1.0));
+            payload.put("jawStrength", shot.path("talk_strength").asDouble(0.35));
+            payload.put("jawAttackMs", shot.path("talk_attack_ms").asDouble(50));
+            payload.put("jawDecayMs", shot.path("talk_decay_ms").asDouble(130));
+            // 显存/速度档：48G 卡实测 768²×113 帧会 OOM；默认 512²+81 帧+8 步（≈2–5 分钟/镜）
+            payload.put("talkSteps", shot.path("talk_steps").asInt(8));
+            payload.put("gpuExclusive", true);
+            payload.put("gpuHint", "整脸口型（EchoMimic）与出片互斥：单卡串行，勿与 A14B 出片并发");
+            created.add(createOne(workspaceId, projectId, req.revisionId(), shotId,
+                    PRESET_CLIP, "talk", payload, userId, engineRoute));
+        }
+        if (created.isEmpty()) {
+            String why = skipped.isEmpty() ? "" : "（" + String.join("、", skipped.subList(0, Math.min(4, skipped.size())))
+                    + (skipped.size() > 4 ? " 等" : "") + "）";
+            throw new BizException(ErrorCode.VALIDATION,
+                    "没有可做整脸口型的镜头：需要该镜已有**静帧**且已生成配音" + why);
+        }
+        if (!skipped.isEmpty()) {
+            log.warn("talk 跳过了 {} 个镜：{}", skipped.size(), skipped);
+        }
+        log.warn("talk jobs created project={} count={} —— 与出片共卡，需串行", projectId, created.size());
+        return created;
+    }
 
     /** 该项目/镜号下最新的一条某类产物。 */
     private studio.weaveora.asset.domain.Asset pickNewestAsset(UUID projectId, UUID workspaceId, int shotNo, String kind) {
