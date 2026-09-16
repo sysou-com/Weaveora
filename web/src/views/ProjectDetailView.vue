@@ -593,7 +593,7 @@ function subjectActions(sub: PlanSubject): Array<{ label: string; key: string; d
     { label: sub.portraitAssetId ? '换一版定妆照' : '生成定妆照', key: 'gen' },
     { label: sub.portraitAssetId ? '主体设定（性别/年龄/体态…）' : '主体设定（性别/年龄/体态…）', key: 'traits' },
     { label: '把最新定妆照设为锚定图', key: 'pick', disabled: !portraitsOf(sub.name).length },
-    { label: '把所选参考图设为定妆照', key: 'useRef', disabled: subjectRefCandidates(sub.name).length === 0 },
+    { label: '把所选参考图设为定妆照', key: 'useRef', disabled: portraitRefCandidates().length === 0 },
     { label: '管理别名…', key: 'alias' },
     { label: '删除该主体', key: 'del' },
   ]
@@ -704,7 +704,7 @@ async function openPortraitDialog(name: string): Promise<void> {
   const revId = genRevisionId()
   if (!revId) return
   if (dirty.value && !(await savePlanInPlace())) return
-  const picked = subjectRefCandidates(name)
+  const picked = portraitRefCandidates()
   portraitSubject.value = name
   portraitRefIds.value = picked
   portraitPositive.value = ''
@@ -901,24 +901,19 @@ function filteredSubjects(): PlanSubject[] {
 }
 
 /**
- * 可作为定妆照的参考图：① 该主体名下命名的图 → ② 方案里该主体的图 → ③ 界面点选但未命名的图。
+ * 定妆照的参考图候选 = **方案里所有勾选的参考图**。
  *
- * 注：**不限制“别的角色用过就不给用”** —— 双胞胎/同人等场景本来就可以共用同一张参考图。
+ * ★ 2026-09-16 用户裁定（重要，别再改回去）：
+ *   ① 定妆的参考图**只看勾选没勾选，与命名/主体标注无关** —— 勾了就算，没勾就不算；
+ *      所以这里**不再**按名字（本名/别称/未命名）筛，也不再关心“这张属于哪个主体”。
+ *   ② 关键帧（出图）的参考图**只认绑定的定妆照**（`subjects[].portraitAssetId`，§7.5.1），
+ *      参考图不参与出图锚定 —— 两条路职责分开。
+ *
+ * 历史教训：改之前既看“在不在列表里”又忽略勾选状态 → 用户勾了 A、结果照了未勾选的 B
+ * （人脸探针实测 A 已勾选=0.106 / B 未勾选=0.759）。
  */
-function subjectRefCandidates(name: string): string[] {
-  // ★ 2026-09-16 夜 bug 修复（用户实测：定妆照没照她勾选的参考图，反而照了那张「暗掉」的）：
-  //   以前这里只看「在不在参考图列表里」，**完全忽略勾选状态** → 未勾选（变暗）的图照样被送进
-  //   模型；而用户的心智模型是「勾选＝做参考」。实测证据：未勾选的 310c269d 与新定妆照人脸相似度
-  //   0.759（就是照它画的），已勾选的 b1c8042e 只有 0.106。现在**只认勾选的**。
-  const checked = (id: string) => !refUnchecked.value.includes(id)
-  const inPlan = (planSubjects().find((x) => x.name === name)?.refs ?? [])
-    .filter((r) => r.checked !== false)
-    .map((r) => r.assetId)
-  const named = Object.keys(refSubjects.value).filter(
-    (id) => (refSubjects.value[id] ?? '').trim() === name && refSelected.value.includes(id) && checked(id),
-  )
-  const unnamed = refSelected.value.filter((id) => (refSubjects.value[id] ?? '').trim() === '' && checked(id))
-  return Array.from(new Set([...named, ...inPlan, ...unnamed]))
+function portraitRefCandidates(): string[] {
+  return refSelected.value.filter((id) => !refUnchecked.value.includes(id))
 }
 /**
  * 把所选参考图设为该主体的定妆照。
@@ -929,11 +924,14 @@ function subjectRefCandidates(name: string): string[] {
  *
  * ⚠️ 语义提醒：这只是让数据的"身份"变正确，并**不会**把它变成标准角色设定图 ——
  * 多角色同框时参考集样式不统一照样串脸，所以界面同时保留了「生成定妆照」的推荐。
+ *
+ * ★ 2026-09-16 夜：候选口径改成“所有勾选的参考图”（与命名无关）→ 这里取第一张；
+ *   多张勾选时请只保留想要的那张再点本项。
  */
 async function useRefAsPortrait(name: string): Promise<void> {
-  const cand = subjectRefCandidates(name)
+  const cand = portraitRefCandidates()
   if (!cand.length) {
-    message.warning(`先为「${name}」点选一张参考图（在参考图格子上打勾），再设为定妆照`)
+    message.warning('先在参考图格子上勾选一张图，再设为定妆照')
     return
   }
   const srcId = cand[0]
@@ -3903,7 +3901,7 @@ const shotTotal = computed(() => {
                 :class="['ref-thumb', { sel: refSelected.includes(a.id) && !refUnchecked.includes(a.id), off: refUnchecked.includes(a.id) }]"
                 :title="refSelected.includes(a.id)
                   ? '点击移出（不再作为生成定妆照的参考）'
-                  : '点击加入（作为生成定妆照的参考图，不参与出图锚定）'"
+                  : '点击加入并勾选（作为生成定妆照的参考图；出图锚定只认绑定的定妆照）'"
                 @click="toggleRef(a.id, !refSelected.includes(a.id))"
               >
                 <img v-if="thumbUrls[a.id]" :src="thumbUrls[a.id]" alt="参考图" loading="lazy" />
@@ -4074,7 +4072,8 @@ const shotTotal = computed(() => {
               支持多图的模型，如 bytedance/seedream-4 / google/nano-banana：image_input）。
             </p>
             <p v-if="cameraIntentWithRefs" class="ref-conflict">
-              检测到「背影/过肩/机位」类构图诉求：参考图可能把构图拉回参考视角。建议先取消勾选参考图（仅需形象/画风锚定时再选），或把机位写进「视角/前景/主体朝向」字段。
+              检测到「背影/过肩/机位」类构图诉求：若参考图里带进来一张场景/构图基准图，可能把构图拉回参考视角。
+              建议把构图/机位写进「视角/前景/主体朝向」字段。（参考图不参与出图锚定 —— 关键帧只认绑定的定妆照）
             </p>
           </div>
           </div>
