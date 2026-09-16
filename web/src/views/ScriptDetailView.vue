@@ -49,6 +49,7 @@ import ConvertToProjectDialog, {
   type ConvertPayload,
 } from '@/components/script/ConvertToProjectDialog.vue'
 import NextEpisodeDialog from '@/components/script/NextEpisodeDialog.vue'
+import PagedTextarea from '@/components/script/PagedTextarea.vue'
 import ScriptChangeList from '@/components/script/ScriptChangeList.vue'
 import ScriptFieldCard from '@/components/script/ScriptFieldCard.vue'
 import SyncConfirmDialog from '@/components/script/SyncConfirmDialog.vue'
@@ -496,6 +497,7 @@ function fieldValue(key: ScriptFieldKey): string {
             :script-id="scriptId"
             :workspace-id="workspaceId"
             :elements="draftElements"
+            :page-rows="25"
           />
         </div>
         <template #footer>
@@ -523,14 +525,13 @@ function fieldValue(key: ScriptFieldKey): string {
             placeholder="一句话概括本集发生了什么"
           />
 
-          <label class="lbl">本集正文</label>
-          <NInput
-            v-model:value="epDrawer.content"
-            type="textarea"
-            :autosize="{ minRows: 12, maxRows: 16 }"
+          <label class="lbl">本集正文（每页 25 行，可左右滑动换页）</label>
+          <PagedTextarea
+            v-model="epDrawer.content"
+            :page-rows="25"
             :maxlength="40000"
-            show-count
             placeholder="对话、动作、舞台说明……建议 ≥4000 字"
+            test-id="episode-content"
           />
 
           <NAlert type="info" :bordered="false" class="hint">

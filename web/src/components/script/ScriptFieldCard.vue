@@ -1,18 +1,18 @@
 <script setup lang="ts">
-import { NButton, NIcon, NInput, useMessage } from 'naive-ui'
+import { NButton, NIcon, useMessage } from 'naive-ui'
 import { Sparkles, RefreshCw, Info } from 'lucide-vue-next'
 import { ref } from 'vue'
 
+import PagedTextarea from './PagedTextarea.vue'
 import ScriptAiDiffDialog, { type AiDiffItem } from './ScriptAiDiffDialog.vue'
 import { aiScriptField, aiScriptFieldPreview } from '@/api/scripts'
 import type { ScriptFieldKey } from '@/api/types'
 import { SCRIPT_FIELD_MAX } from '@/utils/script'
 
 /**
- * 单个剧本要素字段卡：字段说明 + 定高滚动输入 + AI 生成 / AI 更新（Q3：先弹 diff 再写入）。
+ * 单个剧本要素字段卡：字段说明 + **分页**输入 + AI 生成 / AI 更新（Q3：先弹 diff 再写入）。
  *
- * 有 scriptId → 走正式端点（AI 能看到全部要素与已写集数）；
- * 无 scriptId（新建页）→ 走无状态 preview 端点，用页面已填内容作为上下文。
+ * 分页：新建页 15 行/页（默认），详情抽屉传 25 行/页；手机可左右滑动换页。
  */
 const props = defineProps<{
   fieldKey: ScriptFieldKey
@@ -27,6 +27,8 @@ const props = defineProps<{
   /** 页面上已填的全部要素（AI 更新时的上下文） */
   elements?: Record<string, string>
   disabled?: boolean
+  /** 每页行数：新建页 15，详情抽屉 25 */
+  pageRows?: number
 }>()
 
 const emit = defineEmits<{ 'update:modelValue': [value: string] }>()
@@ -135,16 +137,14 @@ function onApply(): void {
       {{ help }}
     </p>
 
-    <NInput
-      type="textarea"
-      :value="modelValue"
-      :placeholder="placeholder"
-      :autosize="{ minRows: 10, maxRows: 12 }"
+    <PagedTextarea
+      :model-value="modelValue"
+      :page-rows="pageRows ?? 15"
       :maxlength="SCRIPT_FIELD_MAX"
-      show-count
+      :placeholder="placeholder"
       :disabled="disabled"
-      :data-testid="`field-${fieldKey}`"
-      @update:value="applyValue"
+      :test-id="`field-${fieldKey}`"
+      @update:model-value="applyValue"
     />
 
     <p class="ai-hint font-mono text-secondary">
