@@ -25,7 +25,7 @@ import {
 import { createBrief, listBriefs } from '@/api/briefs'
 import { createJobs, listJobs, cancelJob, rerunJob, retryJobs, deleteJobs, JOB_STATE_LABEL } from '@/api/jobs'
 import { shareProject } from '@/api/market'
-import { listAssets, uploadReference, fetchAssetBlob, deleteAssets, uploadVoiceLine, useSampleAsLineVoice, deleteVoicePreset, auditionVoicePreset } from '@/api/assets'
+import { listAssets, uploadReference, fetchAssetBlob, deleteAssets, uploadVoiceLine, useSampleAsLineVoice, deleteVoicePreset, auditionVoicePreset, assetAsPortrait } from '@/api/assets'
 import { createExport, fetchExportBlob, renderMaster, timecode } from '@/api/export'
 import { aiGenerateLines, aiGenerateMusic, extractSubjects, patchPlanInPlace, patchSubjectMeta } from '@/api/director'
 import { getEngineSettings } from '@/api/engineSettings'
@@ -657,24 +657,45 @@ function subjectRefCandidates(name: string): string[] {
   const unnamed = refSelected.value.filter((id) => (refSubjects.value[id] ?? '').trim() === '')
   return Array.from(new Set([...named, ...inPlan, ...unnamed]))
 }
-/** P13：把所选参考图**直接设为定妆照**（免生成；用完释放勾选，与「生成定妆照」一致） */
-function useRefAsPortrait(name: string): void {
+/**
+ * 把所选参考图设为该主体的定妆照。
+ *
+ * ★ 2026-09-16 改（用户提案）：先在**资产库里物化出一张真正的定妆照**（kind=portrait，
+ * 后端复制字节成独立资产），再让方案绑定**它** —— 而不是像以前那样把 portraitAssetId
+ * 直接指向 kind=reference 的素材图。好处：资产库分类/按 kind 扫描/删素材连坐都不用再"宽容判断"。
+ *
+ * ⚠️ 语义提醒：这只是让数据的"身份"变正确，并**不会**把它变成标准角色设定图 ——
+ * 多角色同框时参考集样式不统一照样串脸，所以界面同时保留了「生成定妆照」的推荐。
+ */
+async function useRefAsPortrait(name: string): Promise<void> {
   const cand = subjectRefCandidates(name)
   if (!cand.length) {
     message.warning(`先为「${name}」点选一张参考图（在参考图格子上打勾），再设为定妆照`)
     return
   }
-  const assetId = cand[0]
+  const srcId = cand[0]
   const ver = (planSubjects().find((x) => x.name === name)?.portraitVersion ?? 0) + 1
-  setPlanSubjects(planSubjects().map((x) => (x.name === name
-    ? { ...x, portraitAssetId: assetId, portraitVersion: ver }
-    : x)))
-  // 与「生成定妆照」一致：用完立即释放勾选（图仍在图库里；双胞胎等需共用时再勾选同一张即可）
-  refSelected.value = refSelected.value.filter((id) => id !== assetId)
-  delete refSubjects.value[assetId]
-  pruneUnchecked()
-  void saveSubjectMeta()
-  message.success(`已把所选参考图设为「${name}」的定妆照（v${ver} ·#${assetId.slice(-6)}，已就地保存）`)
+  portraitBusy.value = true
+  try {
+    const made = await assetAsPortrait(workspaceId.value, projectId.value, srcId, name, ver)
+    setPlanSubjects(planSubjects().map((x) => (x.name === name
+      ? { ...x, portraitAssetId: made.id, portraitVersion: ver }
+      : x)))
+    void queryClient.invalidateQueries({ queryKey: ['assets'] })
+    // 与「生成定妆照」一致：用完立即释放勾选（图仍在图库里；双胞胎等需共用时再勾选同一张即可）
+    refSelected.value = refSelected.value.filter((id) => id !== srcId)
+    delete refSubjects.value[srcId]
+    pruneUnchecked()
+    void saveSubjectMeta()
+    message.success(
+      `已把所选参考图复制为「${name}」的定妆照（v${ver} ·#${made.id.slice(-6)}，已就地保存）。`
+      + '注：这是复制件，不是重新生成的设定图 —— 多角色同框想更稳，建议点「生成定妆照」。',
+    )
+  } catch (e) {
+    message.error(e instanceof Error ? e.message : '设为定妆照失败')
+  } finally {
+    portraitBusy.value = false
+  }
 }
 
 /** 删除主体：连同它在参考图上的主体标记一起清掉（否则会残留成无主参考图） */

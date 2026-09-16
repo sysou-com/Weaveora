@@ -35,6 +35,8 @@ public class AssetService {
     private final WorkspaceGuard guard;
     private final ProjectContextPort projects;
     /** P8：构造配音快照（prompt_snapshot）用 */
+    private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(AssetService.class);
+
     private final com.fasterxml.jackson.databind.ObjectMapper mapper =
             new com.fasterxml.jackson.databind.ObjectMapper();
 
@@ -69,6 +71,77 @@ public class AssetService {
         }
         Asset a = Asset.reference(workspaceId, projectId, key, mime, null, null);
         return toResponse(assets.save(a));
+    }
+
+    /**
+     * ★ 2026-09-16（用户提案）：把一张**参考图物化成真正的「定妆照」资产**，再让方案去绑它。
+     *
+     * <p>为什么要复制成新资产，而不是直接让 {@code subjects[].portraitAssetId} 指向参考图：
+     * <ul>
+     *   <li>以前是"指针方案"，于是方案的「定妆照」其实 {@code kind=reference} ——
+     *       资产库的「定妆照」分类、{@code portraitsOf(subject)}、后端按 {@code kind=portrait} 扫描
+     *       这三处都得额外写"宽容判断"才能认它（一不留神就误判成「没定妆照」→ 中止出图或静默剔除角色）；</li>
+     *   <li>指针方案下**删掉那张素材图 = 定妆照悬空**（生成时立刻报"缺定妆照"或悄悄丢角色），
+     *       复制成独立资产后两者生命周期解耦；</li>
+     *   <li>一个主体可以有多版定妆照，{@code portraitVersion} 才有真实意义。</li>
+     * </ul>
+     *
+     * <p>落库形态：{@code kind=portrait}、{@code prompt_snapshot.kind=portrait} + {@code subject} +
+     * {@code portrait_version} + {@code source_asset_id}（可溯源到哪张素材转来的）。
+     * 幂等：同一素材 + 同一主体已物化过就直接返回那一张（避免重复点出垃圾资产）。
+     *
+     * <p>⚠️ 语义提醒：这只是把「素材图」**换了个正确的身份**，并不会把它变成"标准角色设定图" ——
+     * 多角色同框时参考集样式不统一仍会串脸，所以界面另外提示「推荐先生成定妆照」。
+     */
+    @Transactional
+    public AssetResponse portraitFromAsset(UUID userId, UUID workspaceId, UUID projectId,
+                                           UUID assetId, String subject, Integer version) {
+        guard.requireMember(userId, workspaceId);
+        projects.require(userId, workspaceId, projectId);
+        String name = subject == null ? "" : subject.trim();
+        if (name.isEmpty()) {
+            throw new BizException(ErrorCode.VALIDATION, "缺少主体名");
+        }
+        studio.weaveora.asset.domain.Asset src = assets.findByIdAndWorkspaceId(assetId, workspaceId)
+                .orElseThrow(() -> new BizException(ErrorCode.NOT_FOUND, "参考图不存在"));
+        if (!projectId.equals(src.projectId())) {
+            throw new BizException(ErrorCode.VALIDATION, "该资产不属于本项目");
+        }
+        // 幂等：同一素材已为同一主体物化过 → 直接复用
+        for (studio.weaveora.asset.domain.Asset a : assets
+                .findByProjectIdAndWorkspaceIdAndKindOrderByCreatedAtDesc(projectId, workspaceId, "portrait")) {
+            com.fasterxml.jackson.databind.JsonNode snap = a.promptSnapshot();
+            if (snap != null && assetId.toString().equals(snap.path("source_asset_id").asText(""))
+                    && name.equals(snap.path("subject").asText(""))) {
+                return toResponse(a);
+            }
+        }
+        String mime = src.mime() == null || src.mime().isBlank() ? "image/png" : src.mime();
+        String ext = ext(mime);
+        String key = workspaceId + "/" + projectId + "/portrait/" + UUID.randomUUID() + "." + ext;
+        long size = 0;
+        try (InputStream in = storage.get(src.storageKey()).stream()) {
+            byte[] bytes = in.readAllBytes();
+            size = bytes.length;
+            storage.put(key, new java.io.ByteArrayInputStream(bytes), size, mime);
+        } catch (Exception e) {
+            throw new IllegalStateException("定妆照物化失败（复制素材图字节）: " + e.getMessage(), e);
+        }
+        int ver = version != null && version > 0 ? version : 1;
+        com.fasterxml.jackson.databind.node.ObjectNode snap = mapper.createObjectNode();
+        snap.put("kind", "portrait");
+        snap.put("subject", name);
+        snap.put("portrait_version", ver);
+        snap.put("source", "from-reference");
+        snap.put("source_asset_id", assetId.toString());
+        snap.put("prompt", "（由所选参考图复制而来，未重新生成）");
+        snap.put("note", "由参考图复制而来，不是标准角色设定图：多角色同框时样式可能不统一，建议改用「生成定妆照」");
+        studio.weaveora.asset.domain.Asset made = studio.weaveora.asset.domain.Asset.output(
+                workspaceId, projectId, null, null, null, "portrait", key, mime,
+                src.width(), src.height(), null, null, snap);
+        studio.weaveora.asset.domain.Asset saved = assets.save(made);
+        log.info("asset: 参考图 {} → 定妆照 {}（主体 {}，{} bytes，v{}）", assetId, saved.id(), name, size, ver);
+        return toResponse(saved);
     }
 
     /**

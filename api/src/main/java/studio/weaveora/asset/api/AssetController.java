@@ -51,6 +51,27 @@ public class AssetController {
     }
 
     /**
+     * ★ 2026-09-16：把所选参考图**物化成真正的定妆照资产**（kind=portrait）并返回新资产。
+     *
+     * <p>取代旧的「只改方案指针」做法 —— 那样方案的"定妆照"其实是 kind=reference，
+     * 资产库分类/按 kind 扫描/删素材连坐都得靠宽容判断兜；见 AssetService.portraitFromAsset。
+     */
+    @PostMapping("/projects/{projectId}/assets/{assetId}/as-portrait")
+    public ResponseEntity<AssetResponse> asPortrait(
+            HttpServletRequest request,
+            @RequestHeader(value = ProjectController.WORKSPACE_HEADER, required = false) String workspaceId,
+            @PathVariable UUID projectId,
+            @PathVariable UUID assetId,
+            @RequestBody AsPortraitRequest body) {
+        return ResponseEntity.ok(assetService.portraitFromAsset(
+                uid(request), ws(workspaceId), projectId, assetId, body.subject(), body.version()));
+    }
+
+    /** 把参考图物化为定妆照：subject 必填；version 为空按 1 计。 */
+    public record AsPortraitRequest(String subject, Integer version) {
+    }
+
+    /**
      * P9：克隆音色 —— 上传样本 → 处理 → 返回原件/处理后两个资产（前端做 A/B 对比试听）。
      */
     @PostMapping(value = "/projects/{projectId}/voice-presets", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)

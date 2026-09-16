@@ -225,6 +225,27 @@ export async function fetchAssetBlob(workspaceId: string, assetId: string): Prom
   return resp.blob()
 }
 
+/**
+ * ★ 2026-09-16：把所选参考图**物化成真正的定妆照资产**（kind=portrait），返回新资产。
+ *
+ * 为什么不在前端只改方案指针（旧做法）：那样方案的「定妆照」其实是 kind=reference，
+ * 资产库分类 / 按 kind 扫描 / 删素材连坐都要靠宽容判断兜；物化后语义正确且生命周期解耦。
+ * 幂等：同一素材 + 同一主体重复调用会直接返回已物化那张。
+ */
+export async function assetAsPortrait(
+  workspaceId: string,
+  projectId: string,
+  assetId: string,
+  subject: string,
+  version?: number,
+): Promise<AssetRef> {
+  return request<AssetRef>(`/api/v1/projects/${projectId}/assets/${assetId}/as-portrait`, {
+    method: 'POST',
+    headers: { [WORKSPACE_HEADER]: workspaceId },
+    body: { subject, version: version ?? 1 },
+  })
+}
+
 /** 删除所选资产（删行 + 删存储文件） */
 export async function deleteAssets(
   workspaceId: string,
