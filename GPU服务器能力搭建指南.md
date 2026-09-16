@@ -401,7 +401,10 @@ positive_prompt += """
 - **槽位顺序**（`image1` = `referenceKeys[0]`）与 worker 的 `comfy_client._wf_set_image()` 一致：
   `LoadImage` 按**节点 id 字符串排序**依次取图 → 在 `qwen_image_edit_api.json` 里就是 `12`(→`image1`)、`14`(→`image2`)。
   **改工作流时不要打乱 LoadImage 的 id 顺序**，否则提示词里的 imageN 会指错人。
-- **槽位上限**：`qwen_image_edit_api.json` 只接了 **2 个 LoadImage 槽**（`image1`/`image2`）—— 第 3 个主体**不会报错，但图会被默默丢掉**（`_wf_set_image` 只在槽位数内分配）。要 3 主体同框得先给工作流加 `LoadImage` 节点并把 `TextEncodeQwenImageEditPlus.image3` 接上。上游若某张参考图上传失败，槽位会**前移**（提示词里的 `imageN` 会错位一格）——worker 日志 `[comfy] 参考图#N 上传失败（跳过）` 是唯一线索。
+- **槽位上限 = 3（2026-09-16 扩到 3）**：`qwen_image_edit_api.json` 现在有 3 个 `LoadImage`（节点 `12`/`14`/`16`，按 id 字符串序 = image1/2/3），两个 `TextEncodeQwenImageEditPlus`（正/负）都接了 `image1/image2/image3`。
+  - ⚠️ 原来只有 2 个槽 → **第 3 个主体不会报错、图被静默丢掉**；实测导致「三主体镜（宝玉/可卿/警幻）里警幻没有参考图 → 人物不一致」。
+  - worker 现在会：**多于槽位 → 告警**；**少于槽位 → 摘掉空槽**（`_wf_prune_unused_images`，不再复用第一张 —— 否则同一张脸会被注入两次）。
+  - 上游某张参考图上传失败时槽位会**前移一格**（提示词里的 `imageN` 会错位）——日志 `[comfy] 参考图#N 上传失败（跳过）` 是唯一线索。
 - 即使**一个位置都没设**，只要绑定了参考图也照样写映射（退化为「只点名、无坐标」）；
   参考图中**没有 subject 名的通用风格图不点名**（否则会凭空造出一个角色）。
 - 路线 A（提示词描述位置，默认生效） vs 路线 B（`ConditioningSetAreaPercentage` 区域条件，`WEAVEORA_IMAGE_AREA_COND=1`，

@@ -172,6 +172,36 @@ def _wf_inject_model(graph, model):
     return hit
 
 
+def _wf_prune_unused_images(graph, used):
+    """把**多余的第 N 个参考图槽**从图里摘掉（连同对它的引用）。
+
+    为什么不能像 _wf_set_image 那样「槽位比参考图多就复用第一张」：
+    TextEncodeQwenImageEditPlus 会把**每个槽**都编码成 reference latent —— 复用等于同一张脸
+    被注入两次（多花 token，还可能把某个角色的权重带偏）。
+
+    为什么现在必须会摘（2026-09-16）：Edit 工作流从 2 个槽扩到 **3 个槽** ——
+    用户第 4 镜有 3 个主体（宝玉/可卿/警幻），旧工作流只有 2 个 LoadImage，
+    第 3 张**不报错但被静默丢掉**，于是「警幻」这一镜完全没有参考图、人物对不上（用户报的一致性）。
+    扩槽之后「少于槽位」的镜头变多，所以必须能把空槽摘干净。
+    """
+    if used <= 0:
+        return 0
+    nodes = sorted(_wf_of_class(graph, "LoadImage"), key=lambda x: str(x[0]))
+    drop = [str(nid) for nid, _n in nodes[used:]]
+    if not drop:
+        return 0
+    for nid in drop:
+        graph.pop(nid, None)
+    for _nid, n in list(graph.items()):
+        ins = n.get("inputs")
+        if not isinstance(ins, dict):
+            continue
+        for k, v in list(ins.items()):
+            if isinstance(v, list) and v and str(v[0]) in drop:
+                del ins[k]
+    return len(drop)
+
+
 def _wf_set_image(graph, filenames):
     """把（多）参考图写进工作流里的 LoadImage 节点；多个 LoadImage 按节点 id 顺序依次分配。"""
     if isinstance(filenames, str):
@@ -346,6 +376,17 @@ def generate_via_workflow(client_id, payload, progress_fn=None, on_tick=None):
         if not _wf_set_image(graph, ref_names):
             print("[comfy] 工作流 %s 无 LoadImage 节点，%d 张参考图未使用" % (os.path.basename(path), len(ref_names)),
                   flush=True)
+        else:
+            slots = len(_wf_of_class(graph, "LoadImage"))
+            if len(ref_names) > slots:
+                # ★ 静默丢图是最坏的一种：模型少一张身份锚定，用户只会看到「这镜人脸不对」
+                print("[comfy] ⚠️ 参考图 %d 张 > 工作流槽位 %d 个 → 多出的**会被丢掉**（%s）；"
+                      "该镜可能丢身份锚定，请给工作流加 LoadImage 槽或用更少主体"
+                      % (len(ref_names), slots, ",".join(ref_names[:len(ref_names) - slots])), flush=True)
+            pruned = _wf_prune_unused_images(graph, len(ref_names))
+            if pruned:
+                print("[comfy] 参考图 %d 张 < 工作流槽位 %d 个 → 已摘掉多余空槽 %d 个（避免重复注入同一张脸）"
+                      % (len(ref_names), slots, pruned), flush=True)
     # ★ 位置优先：方案里每个主体在画面中的位置（x/y/w/h，归一化）→ 区域条件
     regions = payload.get("referenceRegions") or []
     subjects = payload.get("referenceSubjects") or []

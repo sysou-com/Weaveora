@@ -98,7 +98,125 @@ public final class PlanSubjects {
                         new Subject(name, KIND_PERSON, List.of(), true, false, refs, null, 0)));
             }
         }
-        return List.copyOf(out.values());
+        return mergeAliasDuplicates(List.copyOf(out.values()));
+    }
+
+    /**
+     * 别称归并：把「名字是另一个主体别称」的条目认定成**同一个主体**。
+     *
+     * <p>为什么必须做（2026-09-16 用户实测：第 4 镜一致性又崩）：参考图面板里如果某张图被标成
+     * **别称**（如「宝二爷」，而主体本名叫「宝玉」），前端 {@code syncReferenceAssets} 按标注名分组，
+     * 于是方案里多出一个叫「宝二爷」的**新主体** —— 它带着素材图但**没有定妆照**，
+     * 而真主体「宝玉」的 refs 反而被清空。生成时 `enforcePortraits` 给「宝二爷」找不到定妆照：
+     * 主主体直接报错，非主主体被默默剔除 → **那一镜就丢了身份锚定**（人物对不上参考图）。
+     *
+     * <p>规则：名称（本名或别称）出现在另一个主体的 name/aliases 中 → 归并为一组；
+     * 组内**优先留“有定妆照”的那个作为本名**（没有就看声明顺序），合并 refs（按 assetId 去重、
+     * checked 取或）与 aliases（取并集），注入提示词也只用本名。
+     */
+    static List<Subject> mergeAliasDuplicates(List<Subject> in) {
+        if (in == null || in.size() < 2) {
+            return in == null ? List.of() : in;
+        }
+        int n = in.size();
+        int[] parent = new int[n];
+        for (int i = 0; i < n; i++) {
+            parent[i] = i;
+        }
+        // token（本名或别称）→ 最早声明该 token 的主体下标
+        Map<String, Integer> owner = new LinkedHashMap<>();
+        for (int i = 0; i < n; i++) {
+            owner.putIfAbsent(in.get(i).name(), i);
+            for (String a : in.get(i).aliases()) {
+                owner.putIfAbsent(a, i);
+            }
+        }
+        for (int i = 0; i < n; i++) {
+            Subject s = in.get(i);
+            List<String> tokens = new ArrayList<>();
+            tokens.add(s.name());
+            tokens.addAll(s.aliases());
+            for (String tk : tokens) {
+                Integer j = owner.get(tk);
+                if (j != null) {
+                    union(parent, i, j);
+                }
+            }
+        }
+        // 分组（按首次出现顺序）
+        Map<Integer, List<Integer>> groups = new LinkedHashMap<>();
+        for (int i = 0; i < n; i++) {
+            groups.computeIfAbsent(find(parent, i), k -> new ArrayList<>()).add(i);
+        }
+        List<Subject> out = new ArrayList<>();
+        for (List<Integer> g : groups.values()) {
+            if (g.size() == 1) {
+                out.add(in.get(g.get(0)));
+                continue;
+            }
+            // 本名 = 组内第一个“有定妆照”的；都没有就取声明顺序第一个
+            int keep = g.get(0);
+            for (int idx : g) {
+                if (in.get(idx).hasPortrait()) {
+                    keep = idx;
+                    break;
+                }
+            }
+            Subject base = in.get(keep);
+            List<String> aliases = new ArrayList<>(base.aliases());
+            Map<String, Ref> refs = new LinkedHashMap<>();
+            for (Ref r : base.refs()) {
+                refs.putIfAbsent(r.assetId(), r);
+            }
+            String portrait = base.portraitAssetId();
+            int pv = base.portraitVersion();
+            List<String> dropped = new ArrayList<>();
+            for (int idx : g) {
+                if (idx == keep) {
+                    continue;
+                }
+                Subject d = in.get(idx);
+                dropped.add(d.name());
+                for (String a : d.aliases()) {
+                    if (!a.isBlank() && !a.equals(base.name()) && !aliases.contains(a)) {
+                        aliases.add(a);
+                    }
+                }
+                if (!d.name().isBlank() && !d.name().equals(base.name()) && !aliases.contains(d.name())) {
+                    aliases.add(d.name());     // 被并进来的本名 → 降级成别称，保留可匹配性
+                }
+                for (Ref r : d.refs()) {
+                    Ref old = refs.get(r.assetId());
+                    refs.put(r.assetId(), old == null ? r
+                            : new Ref(r.assetId(), old.checked() || r.checked(),
+                                      old.region() != null ? old.region() : r.region()));
+                }
+                if ((portrait == null || portrait.isBlank()) && d.hasPortrait()) {
+                    portrait = d.portraitAssetId();
+                    pv = d.portraitVersion();
+                }
+            }
+            out.add(new Subject(base.name(), base.kind(), List.copyOf(aliases), base.enabled(), base.locked(),
+                    List.copyOf(refs.values()), portrait == null ? "" : portrait, pv));
+            System.out.println("[PlanSubjects] 别称归并：「" + String.join("、", dropped)
+                    + "」→ 同一主体「" + base.name() + "」（别名 " + aliases + "，合并后 " + refs.size() + " 张参考图）");
+        }
+        return List.copyOf(out);
+    }
+
+    private static int find(int[] parent, int i) {
+        while (parent[i] != i) {
+            parent[i] = parent[parent[i]];
+            i = parent[i];
+        }
+        return i;
+    }
+
+    private static void union(int[] parent, int a, int b) {
+        int ra = find(parent, a), rb = find(parent, b);
+        if (ra != rb) {
+            parent[Math.max(ra, rb)] = Math.min(ra, rb);
+        }
     }
 
     private static Subject parseOne(JsonNode s) {
@@ -182,6 +300,27 @@ public final class PlanSubjects {
             }
         }
         return false;
+    }
+
+    /**
+     * 名字是否属于该主体（本名或别称，含中文 2 字片段容错）。
+     *
+     * <p>用途：按主体名反查主体/定妆照时也要认别称 —— 否则「方案里叫宝玉、图上标了宝二爷」
+     * 会被当成两个主体，其中一个没有定妆照 → 那一镜丢身份锚定（用户实测第 4 镜）。
+     */
+    public static boolean isSameSubject(Subject s, String name) {
+        if (name == null || name.isBlank()) {
+            return false;
+        }
+        String n = name.trim();
+        if (n.equals(s.name())) {
+            return true;
+        }
+        if (s.aliases().contains(n)) {
+            return true;
+        }
+        // 反向：传入的名字是主体本名的一部分/别称的写法（如 传「贾宝玉」、主体名「宝玉」）
+        return nameMatches(s.name(), n);
     }
 
     /** 名称匹配：精确包含 + 中文名退一步做 2 字片段（秦可卿 ↔「可卿」）。 */

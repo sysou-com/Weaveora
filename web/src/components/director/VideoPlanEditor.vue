@@ -54,6 +54,8 @@ const emit = defineEmits<{
   aiMusic: []
   /** P9：删除音色（父级调 API + 清理引用） */
   removePreset: [id: string]
+  /** P10：按配音实际时长反推镜头时长（原在「任务」区，2026-09-16 移回「镜头时长」） */
+  calibrateDurations: []
   /** 方案被就地修改（改名等），父级用于触发 dirty */
   'update:plan': []
   closePreview: []
@@ -370,7 +372,23 @@ const transitions = ['cut', 'dissolve', 'fade', 'wipe'].map((v) => ({ label: v, 
     </section>
 
     <section class="block">
-      <p class="block-label font-mono">镜头时长（成片总长 {{ totalDur.toFixed(2) }}s）</p>
+      <div class="dur-head">
+        <p class="block-label font-mono" style="margin: 0">镜头时长（成片总长 {{ totalDur.toFixed(2) }}s）</p>
+        <!--
+          2026-09-16（用户要求）：这个按钮改的是**镜头时长**，所以放在「镜头时长」标题旁，
+          不再和「生成关键帧/运动/配音」这些任务按钮混在「任务」区（那里按下片流程排序）。
+        -->
+        <NButton
+          size="tiny"
+          quaternary
+          :disabled="!!disabled"
+          data-testid="btn-calibrate-durations"
+          title="用每段配音的**实际时长**反推镜头时长（配音占用 + 余量）；超过视频模型单次输出上限的镜头自动切成多段"
+          @click="emit('calibrateDurations')"
+        >
+          按配音校准时长
+        </NButton>
+      </div>
       <p class="hint-line text-secondary">
         逐镜调节时长后「保存方案」即生效；云端按镜头计费，短镜更省。留空镜将跳过字幕，时长需 ≥1s。
       </p>
@@ -833,6 +851,14 @@ const transitions = ['cut', 'dissolve', 'fade', 'wipe'].map((v) => ({ label: v, 
     flex: 1 1 100%;
     min-width: 0;
   }
+}
+.dur-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 4px;
 }
 /* P12：镜头时长自适应网格（桌面多列，手机 1~2 列） */
 .dur-grid {

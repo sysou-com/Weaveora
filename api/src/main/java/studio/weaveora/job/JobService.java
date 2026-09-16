@@ -1291,12 +1291,17 @@ public class JobService {
     private studio.weaveora.asset.domain.Asset portraitOf(JsonNode plan, UUID projectId, UUID workspaceId,
                                                          String subject) {
         JsonNode p = plan == null ? com.fasterxml.jackson.databind.node.MissingNode.getInstance() : plan;
-        for (JsonNode s : p.path("subjects")) {
-            if (!subject.equals(s.path("name").asText(""))) {
+        // ★ 别称也认（2026-09-16 用户实测第 4 镜）：方案里主体叫「宝玉」、参考图上标的是「宝二爷」时，
+        //   按名字精确匹配会当成两个主体 → 别名那个找不到定妆照 → 那一镜丢身份锚定。
+        //   这里按「本名或别称」都算命中（与 PlanSubjects.parse 的归并同口径）。
+        List<studio.weaveora.director.plan.PlanSubjects.Subject> subs =
+                studio.weaveora.director.plan.PlanSubjects.parse(p);
+        for (studio.weaveora.director.plan.PlanSubjects.Subject sub : subs) {
+            if (!studio.weaveora.director.plan.PlanSubjects.isSameSubject(sub, subject)) {
                 continue;
             }
-            String pid = s.path("portraitAssetId").asText("");
-            if (pid.isBlank()) {
+            String pid = sub.portraitAssetId();
+            if (pid == null || pid.isBlank()) {
                 continue;
             }
             try {
@@ -1305,6 +1310,8 @@ public class JobService {
                     if (!"portrait".equals(a.kind())) {
                         log.info("refs: 主体「{}」的定妆照是本地上传/参考图（kind={}，用户指定）→ 照用不误",
                                 subject, a.kind());
+                    } else if (!sub.name().equals(subject)) {
+                        log.info("refs: 「{}」按别称命中主体「{}」的定妆照", subject, sub.name());
                     }
                     return a;
                 }
@@ -1312,12 +1319,24 @@ public class JobService {
                 // 脏数据 → 继续下面扫描
             }
         }
+        // 兜底扫描：资产 prompt_snapshot 里命中**主体名或任一别称**都算（原来只按传入名精确包含）
+        List<String> tokens = new ArrayList<>();
+        tokens.add(subject);
+        for (studio.weaveora.director.plan.PlanSubjects.Subject sub : subs) {
+            if (studio.weaveora.director.plan.PlanSubjects.isSameSubject(sub, subject)) {
+                tokens.add(sub.name());
+                tokens.addAll(sub.aliases());
+            }
+        }
         for (studio.weaveora.asset.domain.Asset a : assetRepo
                 .findByProjectIdAndWorkspaceIdAndKindOrderByCreatedAtDesc(projectId, workspaceId, "portrait")) {
             com.fasterxml.jackson.databind.JsonNode snap = a.promptSnapshot();
             String txt = snap == null ? "" : snap.toString();
-            if (txt.contains(subject)) {
-                return a;
+            for (String tk : tokens) {
+                if (tk != null && !tk.isBlank() && txt.contains(tk)) {
+                    log.info("refs: 「{}」兜底扫描命中定妆照（快照里出现「{}」）", subject, tk);
+                    return a;
+                }
             }
         }
         return null;

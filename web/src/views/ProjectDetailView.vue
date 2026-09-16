@@ -58,6 +58,7 @@ import {
   round2,
   shotCastInfo,
   shotHasText,
+  subjectMatches,
 } from '@/utils/plan'
 import type { ImagePlan, VideoPlan } from '@/api/types'
 
@@ -803,6 +804,29 @@ function buildRefAssets(): Array<{
   })
 }
 
+/**
+ * 标注名 → 方案里的**规范主体名**（本名优先；命中别称/简称都归到本名）。
+ *
+ * 为什么必须做（2026-09-16 用户实测第 4 镜一致性又崩）：参考图面板里把某张图标成**别称**
+ * （如主体本名「宝玉」、图上写「宝二爷」）时，旧逻辑按标注名分组，会**新建一个叫「宝二爷」的主体**：
+ * 它带素材图但**没有定妆照**，而真主体「宝玉」的 refs 被清空 → 生成时别名主体找不到定妆照
+ * （主主体直接报错、非主主体被静默剔除）→ 那一镜丢身份锚定、人物对不上参考图。
+ * 找不到对应主体时原样返回（允许新建主体）。
+ */
+function canonicalSubjectName(raw: string, subs: PlanSubject[]): string {
+  const key = (raw ?? '').trim()
+  if (!key) return ''
+  const exact = subs.find((s) => s.name === key)
+  if (exact) return exact.name
+  const hit = subs.find(
+    (s) =>
+      (s.aliases ?? []).includes(key)
+      || subjectMatches(key, s.name)
+      || (s.aliases ?? []).some((al) => subjectMatches(key, al)),
+  )
+  return hit ? hit.name : key
+}
+
 function syncReferenceAssets(): void {
   if (!draft.value) return
   const refs = buildRefAssets()
@@ -811,19 +835,26 @@ function syncReferenceAssets(): void {
   const prev = planSubjects()
   const byName = new Map(prev.map((s) => [s.name, s]))
   const grouped = new Map<string, PlanSubjectRef[]>()
+  /** 本次按别称标注出来的名字 → 追加到该主体的 aliases（下次镜文本写别称也能自动绑定） */
+  const aliasAdd = new Map<string, string[]>()
   for (const r of refs) {
     // 未标主体名的图**不创建“（未命名）”主体**（只留在 referenceAssets 里），
     // 否则随手选一张图就会多出一个空名主体（实测踩过）
-    const key = (r.subject ?? '').trim()
-    if (!key) {
+    const typed = (r.subject ?? '').trim()
+    if (!typed) {
       continue
+    }
+    const key = canonicalSubjectName(typed, prev)
+    if (key !== typed) {
+      aliasAdd.set(key, [...(aliasAdd.get(key) ?? []), typed])
     }
     grouped.set(key, [...(grouped.get(key) ?? []), { assetId: r.assetId, checked: !refUnchecked.value.includes(r.assetId), region: r.region ?? null }])
   }
   const out: PlanSubject[] = []
   for (const [name, refsOf] of grouped) {
     const old = byName.get(name)
-    out.push({ name, kind: old?.kind ?? 'person', aliases: old?.aliases ?? [], enabled: old?.enabled ?? true, locked: old?.locked ?? false, refs: refsOf, portraitAssetId: old?.portraitAssetId ?? '', portraitVersion: old?.portraitVersion ?? 0 })
+    const extra = (aliasAdd.get(name) ?? []).filter((x) => x !== name && !(old?.aliases ?? []).includes(x))
+    out.push({ name, kind: old?.kind ?? 'person', aliases: [...(old?.aliases ?? []), ...extra], enabled: old?.enabled ?? true, locked: old?.locked ?? false, refs: refsOf, portraitAssetId: old?.portraitAssetId ?? '', portraitVersion: old?.portraitVersion ?? 0 })
     byName.delete(name)
   }
   // 没有素材图但有定妆图/别名的主体也要保留（否则一键抽取的结果会丢）
@@ -3474,6 +3505,7 @@ const shotTotal = computed(() => {
                   @toggle-lock="toggleShotLock"
                   @approve-shot="handleApproveShot"
                   @ai-prompt="openAiRewrite"
+                  @calibrate-durations="calibrateAllDurations"
                   @preview-voice="previewVoice"
                   @preview-bgm="previewBgm"
                   @gen-line="genVoiceLine"
@@ -3530,20 +3562,27 @@ const shotTotal = computed(() => {
             注意：**不能用 v-if 按状态隐藏** —— 否则未确认方案/有进行中任务时按钮会“消失”，
             用户找不到入口；改为常显 + :disabled + title 说明前置条件。
           -->
+          <!--
+            2026-09-16（用户要求）：按**下片流程**从前到后排列，不再按“重要性”乱序：
+            关键帧(still) → 运动(motion) → 配音(voice) → 对口型(lipsync) → 配乐(bgm)。
+            「按配音校准时长」已移回方案编辑器「镜头时长」标题旁（它改的是镜头时长，不是任务）。
+            注意：**不能用 v-if 按状态隐藏** —— 否则未确认方案/有进行中任务时按钮会“消失”，
+            用户找不到入口；改为常显 + :disabled + title 说明前置条件。
+          -->
           <div class="jobs-actions" data-testid="job-gen-actions">
-            <NButton
-              v-if="isVideoNow"
-              size="small"
-              quaternary
-              data-testid="btn-calibrate-durations"
-              title="用每段配音的**实际时长**反推镜头时长（配音占用 + 余量）；超过视频模型单次输出上限的镜头自动切成多段"
-              @click="calibrateAllDurations"
-            >
-              按配音校准时长
-            </NButton>
             <span v-if="activeJobCount" class="state-hint font-mono gen-live" data-testid="job-live-hint">
               {{ freshActiveCount || activeJobCount }} 个进行中…
             </span>
+            <NButton
+              size="small"
+              type="primary"
+              :loading="genBusy"
+              data-testid="btn-gen-jobs"
+              :title="isVideoNow ? '第一步：按确认稿逐镜出关键帧(still)' : '开始生成'"
+              @click="withShotPicker(isVideoNow ? '生成关键帧(still)' : '开始生成', (nos) => startGeneration(nos), 'still')"
+            >
+              {{ isVideoNow ? '生成关键帧(still)' : '开始生成' }}
+            </NButton>
             <span v-if="!isVideoNow" class="count-inline">
               张数
               <select v-model="imgCount" class="mini-select">
@@ -3559,7 +3598,7 @@ const shotTotal = computed(() => {
               :loading="genBusy"
               data-testid="btn-motion-jobs"
               :disabled="!motionReady"
-              :title="motionReady ? '把已确认的关键帧做成运动片段(motion)' : '先出关键帧(still)并确认后可用（两段式 §11.3）'"
+              :title="motionReady ? '第二步：把已确认的关键帧做成运动片段(motion)' : '先出关键帧(still)并确认后可用（两段式 §11.3）'"
               @click="openMotionModal"
             >
               运动(motion)
@@ -3569,10 +3608,22 @@ const shotTotal = computed(() => {
               size="small"
               secondary
               :loading="genBusy"
+              data-testid="btn-voice-jobs"
+              :disabled="!detApproved"
+              :title="detApproved ? '第三步：自托管 CosyVoice，逐镜台词 → 配音' : '需先确认方案（右上角「确认」）后生成配音；未确认的镜头不能配音'"
+              @click="withShotPicker('生成配音(voice)', (nos) => startVoice(nos), 'voice')"
+            >
+              生成配音(voice)
+            </NButton>
+            <NButton
+              v-if="isVideoNow"
+              size="small"
+              secondary
+              :loading="genBusy"
               :disabled="!detApproved"
               data-testid="btn-lipsync-jobs"
               :title="detApproved
-                ? '对口型：用该镜配音驱动嘴型（需本机已装口型工作流，见 docs/lipsync-setup.md）。'
+                ? '第四步：对口型 —— 用该镜配音驱动嘴型（需本机已装口型工作流，见 docs/lipsync-setup.md）。'
                   + '会独占本机显存（~7.9/8GiB），跑的时候别同时排其它 GPU 任务；约 2.5 分钟/秒视频'
                 : '需先确认方案'"
               @click="openLipsyncPicker()"
@@ -3584,27 +3635,12 @@ const shotTotal = computed(() => {
               size="small"
               secondary
               :loading="genBusy"
-              data-testid="btn-voice-jobs"
-              :disabled="!detApproved"
-              :title="detApproved ? '自托管 CosyVoice：逐镜台词 → 配音' : '需先确认方案（右上角「确认」）后生成配音；未确认的镜头不能配音'"
-              @click="withShotPicker('生成配音(voice)', (nos) => startVoice(nos), 'voice')"
-            >
-              生成配音(voice)
-            </NButton>
-            <NButton
-              v-if="isVideoNow"
-              size="small"
-              secondary
-              :loading="genBusy"
               data-testid="btn-bgm-jobs"
               :disabled="!detApproved"
-              :title="detApproved ? '自托管音乐生成：按 music_mood 生成整片 BGM' : '需先确认方案（右上角「确认」）后生成配乐'"
+              :title="detApproved ? '第五步：自托管音乐生成，按 music_mood 生成整片 BGM' : '需先确认方案（右上角「确认」）后生成配乐'"
               @click="startBgm"
             >
               生成配乐(bgm)
-            </NButton>
-            <NButton size="small" type="primary" :loading="genBusy" data-testid="btn-gen-jobs" @click="withShotPicker(isVideoNow ? '生成关键帧(still)' : '开始生成', (nos) => startGeneration(nos), 'still')">
-              {{ isVideoNow ? '生成关键帧(still)' : '开始生成' }}
             </NButton>
           </div>
         </div>

@@ -77,16 +77,29 @@ def _req(method, path, payload=None, files=None, timeout=30):
         data = json.dumps(payload).encode()
         headers["Content-Type"] = "application/json"
     req = urllib.request.Request(API + path, data=data, headers=headers, method=method)
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            body = r.read()
-            return r.status, json.loads(body.decode()) if body else {}
-    except urllib.error.HTTPError as e:
-        body = e.read().decode() or "{}"
+    # ★ 瞬断重试（2026-09-16）：部署 api-deploy.sh 会 restart weaveora-api，
+    #   而 _req 以前只处理 HTTPError，**连接被拒/超时直接抛 URLError** →
+    #   register()/claim/心跳全都会把进程/线程弄挂（日志一串 Failed with result 'exit-code'）。
+    #   这里对网络层错误退避重试；HTTP 状态码错误照旧立刻返回给调用方判断。
+    last = None
+    for attempt in range(1, 6):
         try:
-            return e.code, json.loads(body)
-        except Exception:
-            return e.code, {"error": body[:300]}
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                body = r.read()
+                return r.status, json.loads(body.decode()) if body else {}
+        except urllib.error.HTTPError as e:
+            body = e.read().decode() or "{}"
+            try:
+                return e.code, json.loads(body)
+            except Exception:
+                return e.code, {"error": body[:300]}
+        except Exception as e:      # URLError / timeout / 连接被拒
+            last = e
+            if attempt < 5:
+                print("[stub] %s %s 网络异常（第 %d 次）：%s —— 2s 后重试"
+                      % (method, path, attempt, e), flush=True)
+                time.sleep(2)
+    raise last
 
 
 def make_png(width, height, seed):
@@ -590,14 +603,31 @@ def main():
     ap.add_argument("--once", action="store_true", help="完成一个任务即退出")
     args = ap.parse_args()
 
-    node_id = register()
+    # ★ 注册要能扛住 API 重启（2026-09-16）：部署 api-deploy.sh 会 restart weaveora-api，
+    #   而这里一抛异常整个进程就退出 → systemd 每 10s 重启一次（日志里一串
+    #   `Failed with result 'exit-code'`，看着像 worker 坏了）。改成有限重试 + 退避。
+    node_id = None
+    for attempt in range(1, 31):
+        try:
+            node_id = register()
+            break
+        except Exception as e:
+            print("[stub] 注册失败（第 %d 次）：%s —— 5s 后重试（API 可能在重启）" % (attempt, e), flush=True)
+            time.sleep(5)
+    if not node_id:
+        print("[stub] 注册连续失败 30 次，退出（等 systemd 重启）", flush=True)
+        return
     print("[stub] node %s registered (workspace=%s)" % (node_id[:8], WORKSPACE or "pool"), flush=True)
 
     stop = threading.Event()
 
     def heartbeat():
         while not stop.is_set():
-            _req("POST", "/internal/nodes/%s/heartbeat" % node_id, {})
+            try:
+                _req("POST", "/internal/nodes/%s/heartbeat" % node_id, {})
+            except Exception as e:
+                # 心跳线程不能因为 API 重启就死掉（死了节点会被判离线，任务再也领不到）
+                print("[stub] 心跳失败（忽略，继续）：%s" % e, flush=True)
             time.sleep(25)
 
     threading.Thread(target=heartbeat, daemon=True).start()
@@ -605,7 +635,13 @@ def main():
     worked = 0
     try:
         while not stop.is_set():
-            st, body = _req("POST", "/internal/nodes/%s/claim" % node_id, {}, timeout=35)
+            try:
+                st, body = _req("POST", "/internal/nodes/%s/claim" % node_id, {}, timeout=35)
+            except Exception as e:
+                # 重试后仍失败（API 还在重启/网络抖动）→ 继续轮询，别让进程退出
+                print("[stub] 领任务失败（忽略，3s 后重试）：%s" % e, flush=True)
+                time.sleep(3)
+                continue
             job = (body or {}).get("job")
             if job:
                 # 服务地址（配音/配乐、对口型、转写、人脸）随任务下发 —— 用户在
