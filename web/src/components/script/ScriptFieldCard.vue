@@ -5,9 +5,10 @@ import { ref } from 'vue'
 
 import PagedTextarea from './PagedTextarea.vue'
 import ScriptAiDiffDialog, { type AiDiffItem } from './ScriptAiDiffDialog.vue'
+import ScriptLengthDialog from './ScriptLengthDialog.vue'
 import { aiScriptField, aiScriptFieldPreview } from '@/api/scripts'
 import type { ScriptFieldKey } from '@/api/types'
-import { SCRIPT_FIELD_MAX } from '@/utils/script'
+import { SCRIPT_FIELD_MAX, rememberFieldTarget, rememberedFieldTarget } from '@/utils/script'
 
 /**
  * 单个剧本要素字段卡：字段说明 + **分页**输入 + AI 生成 / AI 更新（Q3：先弹 diff 再写入）。
@@ -37,12 +38,17 @@ const message = useMessage()
 const busy = ref(false)
 const diffShow = ref(false)
 const diffItems = ref<AiDiffItem[]>([])
+// 长度弹窗：点「AI 生成/更新」先问用户要多少字（用户 2026-09-17 要求，上限 8000）
+const lengthShow = ref(false)
+const target = ref(rememberedFieldTarget())
+const pendingMode = ref<'from_title' | 'from_content'>('from_title')
 
 function applyValue(value: string): void {
   emit('update:modelValue', value)
 }
 
-async function ask(mode: 'from_title' | 'from_content'): Promise<void> {
+/** 点 AI 生成 / AI 更新：先弹「设定字数」 */
+function ask(mode: 'from_title' | 'from_content'): void {
   if (props.disabled) return
   if (!props.title.trim()) {
     message.warning('先填写「剧本标题」，AI 依据标题与类型生成内容')
@@ -52,6 +58,17 @@ async function ask(mode: 'from_title' | 'from_content'): Promise<void> {
     message.warning('先选择「剧本类型」')
     return
   }
+  pendingMode.value = mode
+  target.value = rememberedFieldTarget()
+  lengthShow.value = true
+}
+
+/** 用户在弹窗里确认字数 → 真正发起生成 */
+async function run(targetChars: number): Promise<void> {
+  lengthShow.value = false
+  target.value = targetChars
+  rememberFieldTarget(targetChars)
+  const mode = pendingMode.value
   busy.value = true
   try {
     const res = props.scriptId
@@ -59,6 +76,7 @@ async function ask(mode: 'from_title' | 'from_content'): Promise<void> {
           field: props.fieldKey,
           mode,
           currentValue: props.modelValue,
+          targetChars,
         })
       : await aiScriptFieldPreview({
           title: props.title,
@@ -67,6 +85,7 @@ async function ask(mode: 'from_title' | 'from_content'): Promise<void> {
           mode,
           currentValue: props.modelValue,
           elements: props.elements,
+          targetChars,
         })
     if (!res.value) {
       message.warning('AI 没返回内容，请重试')
@@ -78,7 +97,8 @@ async function ask(mode: 'from_title' | 'from_content'): Promise<void> {
         label: props.label,
         before: props.modelValue,
         after: res.value,
-        note: res.note,
+        note: res.note || `目标 ${targetChars} 字 · 实际 ${res.value.length} 字`,
+        outline: res.outline ?? undefined,
       },
     ]
     diffShow.value = true
@@ -152,6 +172,12 @@ function onApply(): void {
     </p>
 
     <ScriptAiDiffDialog v-model:show="diffShow" :items="diffItems" @apply="onApply" />
+    <ScriptLengthDialog
+      v-model:show="lengthShow"
+      :value="target"
+      :subject="label"
+      @confirm="run"
+    />
   </section>
 </template>
 

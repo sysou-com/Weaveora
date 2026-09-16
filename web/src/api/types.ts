@@ -803,6 +803,8 @@ export interface AiFieldResult {
   note: string
   changed: boolean
   source: string
+  /** 【B】本次的分段写作提纲（每段一行）；空=未生成提纲 */
+  outline?: string[] | null
 }
 
 /** 下一集草稿（未落库） */
@@ -814,6 +816,8 @@ export interface AiNextEpisodeResult {
   source: string
   /** 需要告知用户的提示（如某段生成失败/未达目标长度）；无则 null */
   note?: string | null
+  /** 【B】本集的节拍提纲（每段一行）；无则 null */
+  outline?: string[] | null
 }
 
 /** 精简故事刷新 + 一致性检查结果 */

@@ -16,6 +16,28 @@ export interface ScriptFieldMeta {
 
 export const SCRIPT_FIELD_MAX = 8000
 
+/** AI 生成长文的**目标字数**区间（用户 2026-09-17：弹窗里设定，上限 8000） */
+export const SCRIPT_TARGET_MIN = 500
+export const SCRIPT_TARGET_DEFAULT = 4000
+const TARGET_STORAGE_KEY = 'weaveora:script:fieldTarget'
+
+/** 记住上次设定的目标字数（跨字段/跨会话），避免每次都调 */
+export function rememberedFieldTarget(): number {
+  const raw = window.localStorage.getItem(TARGET_STORAGE_KEY)
+  const n = raw ? Number(raw) : NaN
+  return clampTarget(Number.isFinite(n) ? n : SCRIPT_TARGET_DEFAULT)
+}
+
+export function rememberFieldTarget(n: number): void {
+  window.localStorage.setItem(TARGET_STORAGE_KEY, String(clampTarget(n)))
+}
+
+export function clampTarget(n: number): number {
+  const v = Math.round(Number(n))
+  if (!Number.isFinite(v)) return SCRIPT_TARGET_DEFAULT
+  return Math.min(SCRIPT_FIELD_MAX, Math.max(SCRIPT_TARGET_MIN, v))
+}
+
 export const SCRIPT_FIELDS: ScriptFieldMeta[] = [
   {
     key: 'characters',

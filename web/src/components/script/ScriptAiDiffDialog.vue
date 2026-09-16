@@ -12,6 +12,8 @@ export interface AiDiffItem {
   before: string
   after: string
   note?: string
+  /** 【B】本次生成的分段提纲（每段一行） */
+  outline?: string[]
 }
 
 const props = defineProps<{
@@ -89,6 +91,10 @@ function delCount(item: AiDiffItem): number {
           </button>
         </label>
         <p v-if="item.note" class="row-note text-secondary">{{ item.note }}</p>
+        <details v-if="item.outline?.length" class="outline" open>
+          <summary>本次写作提纲（{{ item.outline.length }} 段）</summary>
+          <p v-for="(seg, i) in item.outline" :key="i" class="seg">{{ seg }}</p>
+        </details>
         <div v-if="open.includes(item.key)" class="diff">
           <p v-for="(l, i) in lines(item)" :key="i" :class="['dl', l.type]">{{ l.text }}</p>
         </div>
@@ -124,6 +130,9 @@ function delCount(item: AiDiffItem): number {
 }
 .toggle:hover { color: var(--wv-text); }
 .row-note { margin: 0; padding: 0 12px 8px; font-size: 12px; }
+.outline { padding: 0 12px 10px; font-size: 12px; color: var(--wv-text-2); }
+.outline summary { cursor: pointer; color: var(--wv-accent-text); margin-bottom: 4px; }
+.outline .seg { margin: 0 0 2px; line-height: 1.7; }
 .diff {
   max-height: 260px; overflow: auto; padding: 8px 12px 12px;
   border-top: 1px solid var(--wv-divider);

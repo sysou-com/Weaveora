@@ -242,7 +242,14 @@ export async function applyScriptSync(
 export async function aiScriptField(
   workspaceId: string,
   scriptId: string,
-  input: { field: string; mode: 'from_title' | 'from_content'; hint?: string; currentValue?: string },
+  input: {
+    field: string
+    mode: 'from_title' | 'from_content'
+    hint?: string
+    currentValue?: string
+    /** 用户设定的目标字数（≤8000；不传=4000） */
+    targetChars?: number
+  },
 ): Promise<AiFieldResult> {
   return request<AiFieldResult>(`/api/v1/scripts/${scriptId}/ai/field`, {
     method: 'POST',
@@ -260,6 +267,8 @@ export async function aiScriptFieldPreview(input: {
   hint?: string
   currentValue?: string
   elements?: Record<string, string>
+  /** 用户设定的目标字数（≤8000；不传=4000） */
+  targetChars?: number
 }): Promise<AiFieldResult> {
   return request<AiFieldResult>('/api/v1/scripts/ai/preview-field', {
     method: 'POST',

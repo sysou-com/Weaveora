@@ -143,8 +143,12 @@ const epDrawer = reactive({
   content: '',
   summary: '',
   aiPolished: false,
+  /** 【B】本集 AI 提纲（仅用于抽屉展示） */
+  outline: [] as string[],
 })
 const savingEp = ref(false)
+/** 【B】本集 AI 生成时的节拍提纲（仅展示，帮助作者快速定位；手写编辑会清空） */
+const epOutline = ref<string[]>([])
 
 function openEpisodeDrawer(p: Partial<typeof epDrawer>): void {
   epDrawer.show = true
@@ -155,6 +159,7 @@ function openEpisodeDrawer(p: Partial<typeof epDrawer>): void {
   epDrawer.content = p.content ?? ''
   epDrawer.summary = p.summary ?? ''
   epDrawer.aiPolished = p.aiPolished ?? false
+  epOutline.value = p.outline ?? []
 }
 
 function editEpisode(e: { id: string; episodeNo: number; title: string; content: string; summary: string; aiPolished: boolean }): void {
@@ -260,6 +265,7 @@ async function chooseNext(payload: { polished: boolean; titleHint: string; instr
       content: r.content,
       summary: r.summary,
       aiPolished: payload.polished,
+      outline: r.outline ?? [],
     })
     if (payload.polished) message.success('AI 已按「精简的故事」草拟本集，请检查修改后保存')
     if (r.note) message.warning(r.note)
@@ -514,6 +520,10 @@ function fieldValue(key: ScriptFieldKey): string {
     <NDrawer v-model:show="epDrawer.show" :width="760" placement="right">
       <NDrawerContent :title="`${epDrawer.mode === 'create' ? '新增' : '编辑'}第 ${epDrawer.no} 集`" closable>
         <div class="ep-edit">
+          <div v-if="epOutline.length" class="ep-outline">
+            <p class="ep-outline-title font-mono">本次 AI 写作提纲 · {{ epOutline.length }} 段（只展示，不入稿）</p>
+            <p v-for="(seg, i) in epOutline" :key="i" class="ep-outline-seg">{{ seg }}</p>
+          </div>
           <label class="lbl">本集标题</label>
           <NInput v-model:value="epDrawer.title" :maxlength="200" placeholder="例如：雨夜重逢" />
 
@@ -667,6 +677,12 @@ function fieldValue(key: ScriptFieldKey): string {
 .drawer-lead { margin: 0 0 14px; font-size: 12.5px; line-height: 1.8; }
 .fields-edit { display: flex; flex-direction: column; gap: 16px; }
 .ep-edit { display: flex; flex-direction: column; gap: 6px; }
+.ep-outline {
+  margin-bottom: 10px; padding: 12px 14px; border-radius: var(--wv-radius-s);
+  background: var(--wv-accent-soft); border: 1px solid var(--wv-accent-strong);
+}
+.ep-outline-title { margin: 0 0 6px; font-size: 11px; color: var(--wv-accent-text); letter-spacing: 0.08em; }
+.ep-outline-seg { margin: 0; font-size: 12.5px; line-height: 1.7; color: var(--wv-text-2); }
 .lbl { margin-top: 8px; font-size: 12px; color: var(--wv-text-3); }
 .hint { margin-top: 14px; }
 

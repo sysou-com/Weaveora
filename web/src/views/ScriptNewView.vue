@@ -9,8 +9,9 @@ import { aiScriptFieldPreview, createScript } from '@/api/scripts'
 import type { ScriptFieldKey } from '@/api/types'
 import ScriptAiDiffDialog, { type AiDiffItem } from '@/components/script/ScriptAiDiffDialog.vue'
 import ScriptFieldCard from '@/components/script/ScriptFieldCard.vue'
+import ScriptLengthDialog from '@/components/script/ScriptLengthDialog.vue'
 import { useAuthStore } from '@/stores/auth'
-import { SCRIPT_FIELDS, SCRIPT_GENRES } from '@/utils/script'
+import { SCRIPT_FIELDS, SCRIPT_GENRES, rememberFieldTarget, rememberedFieldTarget } from '@/utils/script'
 
 /** 新建剧本（「我的项目 → 新建项目」的同构页面）：标题 + 类型 + 6 个可 AI 生成的要素。 */
 const auth = useAuthStore()
@@ -41,6 +42,8 @@ const batchShow = ref(false)
 const batchBusy = ref(false)
 const batchProgress = ref('')
 const batchItems = ref<AiDiffItem[]>([])
+const lengthShow = ref(false)
+const batchTarget = ref(rememberedFieldTarget())
 
 /**
  * 一键生成全部：**并发 3 路**。
@@ -51,6 +54,14 @@ async function generateAll(): Promise<void> {
     message.warning('请先填写「剧本标题」并选择「剧本类型」')
     return
   }
+  batchTarget.value = rememberedFieldTarget()
+  lengthShow.value = true
+}
+
+/** 用户设完字数 → 真正开始批量生成（并发 3 路 + 进度） */
+async function runBatch(targetChars: number): Promise<void> {
+  lengthShow.value = false
+  rememberFieldTarget(targetChars)
   batchBusy.value = true
   batchProgress.value = '准备中…'
   const queue = [...SCRIPT_FIELDS]
@@ -68,9 +79,17 @@ async function generateAll(): Promise<void> {
           mode: 'from_title',
           currentValue: fields[f.key],
           elements: elements.value,
+          targetChars,
         })
         if (r.value) {
-          items.push({ key: f.key, label: f.label, before: fields[f.key], after: r.value, note: r.note })
+          items.push({
+            key: f.key,
+            label: f.label,
+            before: fields[f.key],
+            after: r.value,
+            note: r.note || `目标 ${targetChars} 字 · 实际 ${r.value.length} 字`,
+            outline: r.outline ?? undefined,
+          })
         }
       } catch (e) {
         message.error(`${f.label}：${e instanceof Error ? e.message : '生成失败'}`)
@@ -242,6 +261,12 @@ function submit(): void {
       :items="batchItems"
       title="AI 一键生成 · 请确认要应用的字段"
       @apply="applyBatch"
+    />
+    <ScriptLengthDialog
+      v-model:show="lengthShow"
+      :value="batchTarget"
+      subject="全部 6 个要素"
+      @confirm="runBatch"
     />
   </div>
 </template>

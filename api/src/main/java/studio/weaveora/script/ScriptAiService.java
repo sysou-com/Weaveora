@@ -63,15 +63,27 @@ public class ScriptAiService {
         if (stub()) {
             String value = stubField(script, field);
             return new AiFieldResult(field.key(), value,
-                    "离线示例（未接 LLM）：请配置 WEAVEORA_LLM_* 后重新生成", !value.equals(current), "stub");
+                    "离线示例（未接 LLM）：请配置 WEAVEORA_LLM_* 后重新生成", !value.equals(current), "stub",
+                    List.of());
         }
-        // 分段续写：单次输出被 max_tokens 截断（实测 422），每段约 2200 字、拼到 ≥4000 字
+        // 分段续写：单次输出被 max_tokens 截断（实测 422），按用户设定的目标字数分段拼满
+        int target = ScriptPrompts.clampTarget(req.targetChars() == null ? 0 : req.targetChars());
+        ScriptPrompts.PassPlan plan = ScriptPrompts.planFor(target);
+        logTrim("字段「" + field.label() + "」", script, episodes, field.key(), false);
+        // 【B】结构先行：先要一份与段数 1:1 的提纲，每段照提纲写（不跑偏、不重复、可展示）
+        ScriptPrompts.Outline outline = outlineFor(
+                ScriptPrompts.outlineSystem(),
+                ScriptPrompts.outlineUserForField(script, episodes, field, req.hint(), target,
+                        req.fromContent(), current),
+                script.title(), "字段「" + field.label() + "」提纲");
         StringBuilder acc = new StringBuilder();
         String system = ScriptPrompts.fieldSystem();
         String note = "";
-        for (int pass = 1; pass <= ScriptPrompts.MAX_PASSES; pass++) {
+        // 允许比计划多写 1 段补齐（模型每段可能少写一点）
+        int maxPass = Math.min(ScriptPrompts.MAX_PASSES, plan.passes() + 1);
+        for (int pass = 1; pass <= maxPass; pass++) {
             String user = ScriptPrompts.fieldUser(script, episodes, field, req.hint(), current,
-                    req.fromContent(), pass, acc.toString());
+                    req.fromContent(), pass, acc.toString(), target, outline);
             JsonNode node;
             LlmJson res;
             try {
@@ -105,7 +117,7 @@ public class ScriptAiService {
             }
             if (acc.length() > 0) acc.append("\n\n");
             acc.append(part);
-            if (acc.length() >= ScriptPrompts.FIELD_MIN_CHARS) {
+            if (acc.length() >= target) {
                 break;
             }
         }
@@ -113,14 +125,15 @@ public class ScriptAiService {
         if (value.isBlank()) {
             throw new BizException(ErrorCode.DIRECTOR_PARSE_FAILED, "AI 未返回有效内容，请重试");
         }
-        if (value.length() < ScriptPrompts.FIELD_MIN_CHARS) {
+        if (value.length() < target) {
             // 不静默：长度不够就如实告诉用户（可重试或手写补写）
             note = (note == null || note.isBlank() ? "" : note + "；")
-                    + "AI 本次仅产出 " + value.length() + " 字（未达 " + ScriptPrompts.FIELD_MIN_CHARS
-                    + "），可重试或手写补全";
+                    + "AI 本次产出 " + value.length() + " 字（目标 " + target
+                    + " 字），可重试或手写补全";
         }
         boolean changed = !value.equals(current.trim());
-        return new AiFieldResult(field.key(), value, note, changed, llm.source());
+        return new AiFieldResult(field.key(), value, note, changed, llm.source(),
+                outline.isEmpty() ? List.of() : outline.segments());
     }
 
     // ------------------------------------------------------------ 下一集
@@ -132,7 +145,7 @@ public class ScriptAiService {
                 : episodes.stream().mapToInt(ScriptEpisode::episodeNo).max().orElse(0) + 1;
         if (!req.polishedOrDefault()) {
             // 「不需要 AI 润色」→ 返回空壳，前端给空编辑器（用户原话）
-            return new AiNextEpisodeResult(nextNo, "第 " + nextNo + " 集", "", "", "manual", null);
+            return new AiNextEpisodeResult(nextNo, "第 " + nextNo + " 集", "", "", "manual", null, null);
         }
         String hint = req.titleHint();
         if (stub()) {
@@ -141,17 +154,25 @@ public class ScriptAiService {
                     "离线示例：未接 LLM。配置 WEAVEORA_LLM_* 后将依据「精简的故事」自动生成第 " + nextNo + " 集。",
                     "（离线示例正文 · 未接 LLM）\n\n【场景】…\n\n【人物】…\n\n【本集冲突】…\n\n【正文】"
                             + "请在配置 LLM 后重新生成，或直接在此手写第 " + nextNo + " 集。",
-                    "stub", null);
+                    "stub", null, null);
         }
         String system = ScriptPrompts.episodeSystem();
-        // 分段续写：一集拆成 2–3 段（起 / 承转 / 合与钩子），每段约 2200 字，避开 max_tokens 截断
+        // 分段续写：一集拆成多段（起 / 承转 / 合与钩子），每段字数由预算决定，避开 max_tokens 截断
+        ScriptPrompts.PassPlan epPlan = ScriptPrompts.planFor(ScriptPrompts.EPISODE_MIN_CHARS);
+        int epMaxPass = Math.min(ScriptPrompts.MAX_PASSES, epPlan.passes() + 1);
+        logTrim("第 " + nextNo + " 集", script, episodes, null, true);
+        // 【B】先要本集的**节拍提纲**（起/承转/合），每段照一条写
+        ScriptPrompts.Outline outline = outlineFor(
+                ScriptPrompts.outlineSystem(),
+                ScriptPrompts.outlineUserForEpisode(script, episodes, nextNo, hint, req.instruction()),
+                script.title(), "第 " + nextNo + " 集提纲");
         String title = "";
         String summary = "";
         String note = "";
         StringBuilder acc = new StringBuilder();
-        for (int pass = 1; pass <= ScriptPrompts.MAX_PASSES; pass++) {
+        for (int pass = 1; pass <= epMaxPass; pass++) {
             String user = ScriptPrompts.episodeUser(script, episodes, nextNo, hint, req.instruction(),
-                    pass, acc.toString());
+                    pass, acc.toString(), outline);
             JsonNode node;
             LlmJson res;
             try {
@@ -209,7 +230,7 @@ public class ScriptAiService {
                     + "），可重试或手写补全";
             note = note.isBlank() ? warn : note + "；" + warn;
         }
-        return new AiNextEpisodeResult(nextNo, title, summary, content, llm.source(), note);
+        return new AiNextEpisodeResult(nextNo, title, summary, content, llm.source(), note, outline.isEmpty() ? null : outline.segments());
     }
 
     // ------------------------------------------------------------ 精简故事 + 一致性检查
@@ -385,6 +406,42 @@ public class ScriptAiService {
         } catch (RuntimeException e) {
             log.warn("{} 空正文重试仍失败：{}", what, e.getMessage());
             return null;
+        }
+    }
+
+    /**
+     * 【B】取分段写作提纲。
+     *
+     * <p>**失败不影响生成**：拿不到提纲就退化成「按段数自行推进」（不阻断主流程），只记一条日志。
+     */
+    private ScriptPrompts.Outline outlineFor(String system, String user, String title, String what) {
+        try {
+            LlmJson res = callJson(system, user, title, what);
+            ScriptPrompts.Outline outline = ScriptPrompts.parseOutline(res.node());
+            if (outline.isEmpty()) {
+                log.warn("{} 未解析出提纲，按段数自行推进。原文开头={}", what, head(res.raw(), 200));
+            }
+            return outline;
+        } catch (RuntimeException e) {
+            log.warn("{} 生成失败（不阻断正文生成）：{}", what, e.getMessage());
+            return ScriptPrompts.Outline.empty();
+        }
+    }
+
+    /** 【A】把上下文压缩/省略情况记入日志（不静默丢东西）。 */
+    private void logTrim(String what, Script script, List<ScriptEpisode> episodes,
+                         String targetKey, boolean withBodies) {
+        if (log.isDebugEnabled()) {
+            return;   // 生产（INFO）只在真的裁剪时记一条，避免每次刷两条日志
+        }
+        try {
+            ScriptPrompts.Block b = ScriptPrompts.context(script, episodes, targetKey, withBodies);
+            if (b.trimmed()) {
+                log.info("{} 上下文已按预算裁剪（{} 字上限）：{}",
+                        what, ScriptPrompts.CONTEXT_BUDGET_CHARS, String.join("；", b.notes()));
+            }
+        } catch (RuntimeException ignore) {
+            // 纯日志用途，绝不影响主流程
         }
     }
 
