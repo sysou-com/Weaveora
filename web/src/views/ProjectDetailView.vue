@@ -8,7 +8,8 @@ import {
   Save,
   WandSparkles,
 } from 'lucide-vue-next'
-import { NAlert, NButton, NDropdown, NIcon, NInput, NInputNumber, NModal, NRadioButton, NRadioGroup, NSkeleton, NTag, useDialog, useMessage } from 'naive-ui'
+import { NAlert, NButton, NDropdown, NIcon, NInput, NInputNumber, NModal, NRadioButton, NRadioGroup, NSelect, NSkeleton, NTag, useDialog, useMessage } from 'naive-ui'
+import type { SelectOption } from 'naive-ui'
 import { computed, h, nextTick, onErrorCaptured, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
@@ -1214,11 +1215,14 @@ const posScopeOptions = computed(() => {
   return out
 })
 /** 作用范围下拉的搜索：同时匹配 label 与 keywords（naive 默认只匹配 label）
- *  —— 用户输入「4」「帧 2」「定妆」「宝玉」「可卿」都能命中。 */
-function filterPosScope(pattern: string, option: { label?: string; keywords?: string }): boolean {
+ *  —— 用户输入「4」「帧 2」「定妆」「宝玉」「可卿」都能命中。
+ *  签名必须用 naive 的 SelectOption（NSelect 的 filter 是强类型的，用自定义窄类型 vue-tsc 会报错）。 */
+function filterPosScope(pattern: string, option: SelectOption): boolean {
   const q = (pattern || '').trim().toLowerCase()
   if (!q) return true
-  return `${option.label ?? ''} ${option.keywords ?? ''}`.toLowerCase().includes(q)
+  const label = typeof option.label === 'string' ? option.label : ''
+  const keywords = typeof option.keywords === 'string' ? option.keywords : ''
+  return `${label} ${keywords}`.toLowerCase().includes(q)
 }
 const posScopeValue = computed<string>(() => {
   const s = posScope.value

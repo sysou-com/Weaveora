@@ -9,9 +9,10 @@
   },
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
-    "build:prod": "vite build --base=/weaveora/",
+    "build": "npm run check:components && vite build",
+    "build:prod": "npm run check:components && vite build --base=/weaveora/",
     "preview": "vite preview",
+    "check:components": "node scripts/check_template_components.mjs",
     "type-check": "vue-tsc --noEmit"
   },
   "dependencies": {
