@@ -570,6 +570,18 @@ sequenceDiagram
 > （`Picture N (imageN) = 主体 (方位, x/y, 框 w×h)` + 「位置以本清单为准」）。因此 **LLM 不得在 `positive_prompt` 里自行发明画面方位**
 > （left/right/center、foreground/background）——两套方位并存会让模型左右/前后错位（2026-09-16 实测）。
 
+**运镜关键帧的帧级主体（2026-09-16 夜裁定，实现必须遵守）**
+
+运镜镜头的**每一帧**都必须能像首帧一样指定「剧情主体」与「区域位置」，因为第 2..N 帧经常换了视角/换了主体：
+
+| 语义 | 字段 | 优先级 |
+|---|---|---|
+| 该帧出镜主体 | `shots[].keyframes[fi].cast` | 帧级 > 镜级 `shots[].cast` > 按文本自动 |
+| 该帧画面位置 | `shots[].keyframes[fi].layout` | 帧级 > 镜级 `shots[].layout` > `subjects[].region` |
+
+> `cast` 语义：`undefined` = 继承镜级；`[]` = 该帧是空镜（不注入人物参考图）；非空 = 该帧就这几个主体。
+> 自动匹配的文本必须**包含该帧自己的 `composition/positive_prompt/label`**（否则“自动”看不见这一帧在讲谁）。
+
 **参考图的两条口径（2026-09-16 二次裁定，实现必须遵守）**
 
 | 用途 | 唯一判据 | 说明 |

@@ -45,8 +45,8 @@ const emit = defineEmits<{
   toggleLock: [shotNo: number, locked: boolean]
   /** P5：AI 更新本镜提示词（含运镜关键帧逐帧）——由父级弹框确认后写入 */
   aiPrompt: [shot: DirectorShot]
-  /** P5：跳转到顶部「位置总控」并选中本镜（方案 A：分镜卡只做快捷入口） */
-  editLayoutOnTop: [shotNo: number]
+  /** P5：跳转到顶部「位置总控」并选中本镜（方案 A：分镜卡只做快捷入口）；★ 2026-09-16 夜加帧号（-1=只看镜） */
+  editLayoutOnTop: [shotNo: number, frameIndex?: number]
 }>()
 
 const approved = computed(() => props.status === 'approved')
@@ -75,6 +75,37 @@ function castAuto(): void {
 /** 明确的空镜（环境/道具镜）：不注入任何人物参考图 */
 function castEmpty(): void {
   props.shot.cast = []
+}
+
+// ---------- ★ 2026-09-16 夜：**帧级主体**（运镜关键帧每一帧可以出镜不同的人）----------
+/** 关键帧元素类型 */
+type Kf = NonNullable<DirectorShot['keyframes']>[number]
+/** 帧级是否**显式**指定过 cast（undefined=继承镜级） */
+function kfCastExplicit(kf: Kf): boolean {
+  return Array.isArray((kf as { cast?: string[] | null }).cast)
+}
+/** 该帧当前生效的主体集合（显式则是显式值，否则继承本镜） */
+function kfCastSet(kf: Kf): string[] {
+  return kfCastExplicit(kf) ? [...((kf as { cast?: string[] }).cast ?? [])] : [...castInfo.value.subjects]
+}
+function kfCastChecked(kf: Kf): Record<string, boolean> {
+  const set = new Set(kfCastSet(kf))
+  const out: Record<string, boolean> = {}
+  for (const n of props.subjects ?? []) out[n] = set.has(n)
+  return out
+}
+function toggleKfCast(kf: Kf, name: string, on: boolean): void {
+  const next = new Set(kfCastSet(kf))
+  if (on) next.add(name)
+  else next.delete(name)
+  ;(kf as { cast?: string[] | null }).cast = (props.subjects ?? []).filter((n) => next.has(n))
+}
+/** 改回「继承本镜」：删掉帧级 cast 字段（空数组 = 该帧空镜，语义不同） */
+function kfCastAuto(kf: Kf): void {
+  delete (kf as unknown as Record<string, unknown>).cast
+}
+function kfCastEmpty(kf: Kf): void {
+  ;(kf as { cast?: string[] | null }).cast = []
 }
 
 /** 分镜折叠板：默认收起，只展示“画面动作”摘要，展开才显示全部字段 */
@@ -295,6 +326,36 @@ const sizeOptions = [
               :disabled="disabled"
             />
             <p v-if="kf.composition" class="kf-comp">{{ kf.composition }}</p>
+            <!-- ★ 2026-09-16 夜（用户报「运镜帧没有剧情主体，出图随意」）：每一帧都能指定主体 -->
+            <div v-if="(subjects ?? []).length" class="kf-cast">
+              <span class="kf-cast-label">
+                本帧主体
+                <span v-if="kfCastExplicit(kf)" class="cast-tag on font-mono">已指定</span>
+                <span v-else class="cast-tag font-mono">继承本镜</span>
+              </span>
+              <label v-for="n in subjects" :key="n" class="cast-item" :class="{ off: !kfCastChecked(kf)[n] }">
+                <input
+                  type="checkbox"
+                  :checked="kfCastChecked(kf)[n]"
+                  :disabled="disabled"
+                  :data-testid="`kf-cast-${shot.shot_no}-${i}-${n}`"
+                  @change="toggleKfCast(kf, n, ($event.target as HTMLInputElement).checked)"
+                />
+                <span>{{ n }}</span>
+              </label>
+              <span class="cast-actions">
+                <button v-if="kfCastExplicit(kf)" type="button" class="link-btn" :disabled="disabled" @click="kfCastAuto(kf)">
+                  改回继承
+                </button>
+                <button type="button" class="link-btn" :disabled="disabled" title="这一帧没有人物（纯环境/道具帧）" @click="kfCastEmpty(kf)">
+                  本帧空镜
+                </button>
+                <button type="button" class="link-btn" :disabled="disabled" data-testid="kf-edit-layout"
+                        title="到顶部「位置总控」按「第N镜·帧M」调这一帧的区域位置" @click="emit('editLayoutOnTop', shot.shot_no, i)">
+                  编辑本帧区域
+                </button>
+              </span>
+            </div>
           </div>
         </div>
       </div>
@@ -566,6 +627,8 @@ const sizeOptions = [
   flex: 0 0 130px;
   min-width: 0;
 }
+.kf-cast { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 6px; }
+.kf-cast-label { font-size: 11px; color: var(--wv-text-4); }
 .kf-comp {
   margin: 0;
   font-size: 11px;

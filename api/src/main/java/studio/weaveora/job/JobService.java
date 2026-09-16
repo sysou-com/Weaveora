@@ -327,13 +327,14 @@ public class JobService {
             for (UUID shotId : shotIds) {
                 JsonNode shot = shotOf(plan, shotId);
                 if (shot == null) continue;
-                RefCtx refs = resolveRefs(plan, shot, userId, workspaceId, projectId, req.revisionId());
                 long seed = shot.path("seed").asLong(0) == 0 ? randomSeed() : shot.path("seed").asLong(0);
                 List<JsonNode> frames = keyframesOf(shot);
                 if ("still".equals(req.kind()) && frames.size() > 1) {
                     // P2 运镜关键帧：每帧一个 still 任务（同 seed 保镜头内连贯）
                     for (int fi = 0; fi < frames.size(); fi++) {
                         JsonNode kf = frames.get(fi);
+                        // ★ 2026-09-16 夜：参考图/主体**逐帧**解析（帧级 cast > 镜级 cast > 帧文本自动）
+                        RefCtx refs = resolveRefs(plan, shot, userId, workspaceId, projectId, req.revisionId(), fi);
                         String raw = kf.path("positive_prompt").asText(shot.path("positive_prompt").asText(""));
                         // ★ 逐帧位置：把帧号传进去，applyLayoutRegions 才能取 keyframes[fi].layout
                         ObjectNode payload = videoShotPayload("still", plan, shot, req.revisionId(), shotId,
@@ -349,6 +350,9 @@ public class JobService {
                     }
                     continue;
                 }
+                // keyframes 存在（==1 帧）时按第 0 帧解析，让帧级 cast 同样生效
+                RefCtx refs = resolveRefs(plan, shot, userId, workspaceId, projectId, req.revisionId(),
+                        frames.isEmpty() ? -1 : 0);
                 ObjectNode payload = videoShotPayload(req.kind(), plan, shot, req.revisionId(), shotId,
                         revisionNo, shot.path("positive_prompt").asText(""), seed, project, style, refs, -1);
                 if ("clip".equals(req.kind())) {
@@ -1155,15 +1159,43 @@ public class JobService {
      */
     private RefCtx resolveRefs(JsonNode plan, JsonNode shot, UUID userId, UUID workspaceId,
                                UUID projectId, UUID revisionId) {
-        String text = (shot == null)
-                ? plan.path("positive_prompt").asText("") + " " + plan.path("prompt_zh").asText("")
-                : shot.path("action").asText("") + " " + shot.path("zh").asText("")
-                  + " " + shot.path("positive_prompt").asText("");
+        return resolveRefs(plan, shot, userId, workspaceId, projectId, revisionId, -1);
+    }
+
+    /**
+     * 按镜（或**镜内某一帧**）解析要注入的参考图。
+     *
+     * <p>★ 2026-09-16 夜（用户报「运镜关键帧里根本没有剧情主体，关键帧都是随意生成的」）：
+     * 以前这里只吃**镜级** `shots[].cast` 与镜级文本，运镜镜头的第 2..N 帧换了视角/换了主体也照样注入
+     * 第一帧那几个人 → 出图自然随意。现在：
+     * <ol>
+     *   <li>{@code keyframes[fi].cast}（帧级）优先，其次 {@code shots[].cast}（镜级），都没有才按文本自动；</li>
+     *   <li>该帧自己的 {@code composition / positive_prompt} 也加进匹配文本，让「自动」也看得见这一帧在讲谁。</li>
+     * </ol>
+     */
+    private RefCtx resolveRefs(JsonNode plan, JsonNode shot, UUID userId, UUID workspaceId,
+                               UUID projectId, UUID revisionId, int keyframeIndex) {
+        StringBuilder tb = new StringBuilder();
+        if (shot == null) {
+            tb.append(plan.path("positive_prompt").asText("")).append(' ')
+              .append(plan.path("prompt_zh").asText(""));
+        } else {
+            tb.append(shot.path("action").asText("")).append(' ')
+              .append(shot.path("zh").asText("")).append(' ')
+              .append(shot.path("positive_prompt").asText(""));
+            JsonNode kf = keyframeOf(shot, keyframeIndex);
+            if (kf != null) {
+                tb.append(' ').append(kf.path("composition").asText(""))
+                  .append(' ').append(kf.path("positive_prompt").asText("")).append(' ')
+                  .append(kf.path("label").asText(""));
+            }
+        }
+        String text = tb.toString();
         // ★ P5 显式主体（`shots[].cast`）：UI「本镜主体」勾选的结果，优先于文本匹配。
         //   null = 未指定（按文本自动）；[] = 明确的空镜（不注入任何人物参考图，只留风格图）；
         //   非空 = 本镜就这几个主体。用户实测反馈：不点名时后端会「回退为全部主体」→ 串脸，
         //   个别人物镜甚至看起来没拿到参考图 —— 所以让用户能明确指定。
-        java.util.List<String> cast = castOf(shot);
+        java.util.List<String> cast = castOf(shot, keyframeIndex);
         if (cast != null && cast.isEmpty()) {
             com.fasterxml.jackson.databind.node.ArrayNode styleOnly = mapper().createArrayNode();
             for (JsonNode b : plan.path("referenceAssets")) {
@@ -1542,6 +1574,32 @@ public class JobService {
      * @return null = 未指定（按镜文本自动匹配）；空 list = 明确的空镜（不注入人物参考图）；
      *         非空 = 本镜就这几个主体
      */
+    /** 取镜内第 fi 帧（越界/无 keyframes 返回 null）。 */
+    static JsonNode keyframeOf(JsonNode shot, int keyframeIndex) {
+        if (shot == null || keyframeIndex < 0) {
+            return null;
+        }
+        JsonNode frames = shot.path("keyframes");
+        if (frames.isArray() && keyframeIndex < frames.size()) {
+            return frames.get(keyframeIndex);
+        }
+        return null;
+    }
+
+    /**
+     * 本镜（或**本帧**）出镜主体：{@code keyframes[fi].cast} 优先，其次 {@code shots[].cast}。
+     *
+     * <p>返回值语义：null = 未指定（按文本自动）；[] = 明确的空镜；非空 = 就这几个主体。
+     * 帧级未写 cast 时**继承镜级**（保持旧行为，不破坏已有方案）。
+     */
+    static java.util.List<String> castOf(JsonNode shot, int keyframeIndex) {
+        JsonNode kf = keyframeOf(shot, keyframeIndex);
+        if (kf != null && kf.has("cast")) {
+            return castOf(kf);
+        }
+        return castOf(shot);
+    }
+
     static java.util.List<String> castOf(JsonNode shot) {
         if (shot == null) {
             return null;

@@ -291,6 +291,14 @@ export interface DirectorShot {
      * `layout` 写进该帧那次出图的正词与 `referenceRegions`。
      */
     layout?: Array<{ subject: string; x: number; y: number; w: number; h: number }> | null
+    /**
+     * ★ 2026-09-16 夜（用户要求）：**帧级剧情主体**（运镜关键帧的每一帧可以出镜不同的人）。
+     *
+     * 语义与 `shots[].cast` 一致：`undefined` = 继承镜级 cast（再退文本自动）；`[]` = 该帧是空镜；
+     * 非空 = 该帧就这几个主体。为什么必须有：运镜的第 2/第 3 帧常常换了视角/换了主体，
+     * 以前只有镜级 cast → 这些帧只能"继承 + 猜"，出图随意（用户实测反馈）。
+     */
+    cast?: string[] | null
   }> | null
 }
 

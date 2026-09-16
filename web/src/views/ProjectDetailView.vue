@@ -1452,14 +1452,21 @@ function clearPos(name: string): void {
 }
 
 /** 分镜卡【在顶部编辑】快捷入口（A 方案）：跳到顶部总控并选中该镜 */
-function editPosOnTop(shotNo: number): void {
-  setPosScope(`shot:${shotNo}`)
+function editPosOnTop(shotNo: number, frameIndex?: number): void {
+  // ★ 2026-09-16 夜：从「运镜关键帧」的某一帧点进来时，直接把作用范围切到那一帧
+  if (frameIndex != null && frameIndex >= 0) {
+    setPosScope(`frame:${shotNo}:${frameIndex}`)
+  } else {
+    setPosScope(`shot:${shotNo}`)
+  }
   posPanelRef.value?.scrollIntoView({ behavior: 'smooth', block: 'center' })
   const kfN = (shotOfNo(shotNo)?.keyframes ?? []).length
   message.info(
-    kfN > 1
-      ? `已在顶部选中第 ${shotNo} 镜（该镜有 ${kfN} 帧）：要改某一帧，把作用范围切到「帧 N」`
-      : `已在顶部「位置总控」选中第 ${shotNo} 镜`,
+    frameIndex != null && frameIndex >= 0
+      ? `已在顶部「位置总控」选中第 ${shotNo} 镜 · 帧 ${frameIndex + 1}（拖框或填区域%即可）`
+      : kfN > 1
+        ? `已在顶部选中第 ${shotNo} 镜（该镜有 ${kfN} 帧）：要改某一帧，把作用范围切到「帧 N」`
+        : `已在顶部「位置总控」选中第 ${shotNo} 镜`,
   )
 }
 
