@@ -1,20 +1,142 @@
 {
   "_comment": "Weaveora · Qwen-Image **高步数电影档**（纯文生图，去 Lightning 蒸馏 LoRA）。与 qwen_image_txt2img_api.json 的区别：去掉 Lightning、cfg 3.5、steps 24 —— 只有 cfg>1 时负向词与项目风格词才真正生效（Lightning 档必须 cfg=1.0，负词会被完全忽略，实测出来偏插画/古典）。worker 注入 6.text / 7.text / 8 尺寸 / 9.seed；steps/cfg 走 services.image 或 params。",
-  "1": { "class_type": "UNETLoader", "_meta": { "title": "unet" }, "inputs": { "unet_name": "qwen_image_fp8_e4m3fn.safetensors", "weight_dtype": "default" } },
-  "2": { "class_type": "CLIPLoader", "_meta": { "title": "clip" }, "inputs": { "clip_name": "qwen_2.5_vl_7b_fp8_scaled.safetensors", "type": "qwen_image", "device": "default" } },
-  "3": { "class_type": "VAELoader", "_meta": { "title": "vae" }, "inputs": { "vae_name": "qwen_image_vae.safetensors" } },
-  "5": { "class_type": "ModelSamplingAuraFlow", "_meta": { "title": "shift" }, "inputs": { "model": ["1", 0], "shift": 3.0 } },
-  "6": { "class_type": "CLIPTextEncode", "_meta": { "title": "positive" }, "inputs": { "clip": ["2", 0], "text": "" } },
-  "7": { "class_type": "CLIPTextEncode", "_meta": { "title": "negative" }, "inputs": { "clip": ["2", 0], "text": "" } },
-  "8": { "class_type": "EmptySD3LatentImage", "_meta": { "title": "latent" }, "inputs": { "width": 1280, "height": 704, "batch_size": 1 } },
-  "9": {
-    "class_type": "KSampler",
-    "_meta": { "title": "sampler" },
+  "1": {
+    "class_type": "UNETLoader",
+    "_meta": {
+      "title": "unet"
+    },
     "inputs": {
-      "model": ["5", 0], "positive": ["6", 0], "negative": ["7", 0], "latent_image": ["8", 0],
-      "seed": 0, "steps": 24, "cfg": 3.5, "sampler_name": "euler", "scheduler": "simple", "denoise": 1.0
+      "unet_name": "qwen_image_2512_fp8_e4m3fn.safetensors",
+      "weight_dtype": "default"
     }
   },
-  "10": { "class_type": "VAEDecode", "_meta": { "title": "decode" }, "inputs": { "samples": ["9", 0], "vae": ["3", 0] } },
-  "11": { "class_type": "SaveImage", "_meta": { "title": "save" }, "inputs": { "images": ["10", 0], "filename_prefix": "weaveora_qwen_film_t2i" } }
+  "2": {
+    "class_type": "CLIPLoader",
+    "_meta": {
+      "title": "clip"
+    },
+    "inputs": {
+      "clip_name": "qwen_2.5_vl_7b_fp8_scaled.safetensors",
+      "type": "qwen_image",
+      "device": "default"
+    }
+  },
+  "3": {
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "vae"
+    },
+    "inputs": {
+      "vae_name": "qwen_image_vae.safetensors"
+    }
+  },
+  "5": {
+    "class_type": "ModelSamplingAuraFlow",
+    "_meta": {
+      "title": "shift"
+    },
+    "inputs": {
+      "model": [
+        "1",
+        0
+      ],
+      "shift": 3.0
+    }
+  },
+  "6": {
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "positive"
+    },
+    "inputs": {
+      "clip": [
+        "2",
+        0
+      ],
+      "text": ""
+    }
+  },
+  "7": {
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "negative"
+    },
+    "inputs": {
+      "clip": [
+        "2",
+        0
+      ],
+      "text": ""
+    }
+  },
+  "8": {
+    "class_type": "EmptySD3LatentImage",
+    "_meta": {
+      "title": "latent"
+    },
+    "inputs": {
+      "width": 1280,
+      "height": 704,
+      "batch_size": 1
+    }
+  },
+  "9": {
+    "class_type": "KSampler",
+    "_meta": {
+      "title": "sampler"
+    },
+    "inputs": {
+      "model": [
+        "5",
+        0
+      ],
+      "positive": [
+        "6",
+        0
+      ],
+      "negative": [
+        "7",
+        0
+      ],
+      "latent_image": [
+        "8",
+        0
+      ],
+      "seed": 0,
+      "steps": 24,
+      "cfg": 3.5,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "denoise": 1.0
+    }
+  },
+  "10": {
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "decode"
+    },
+    "inputs": {
+      "samples": [
+        "9",
+        0
+      ],
+      "vae": [
+        "3",
+        0
+      ]
+    }
+  },
+  "11": {
+    "class_type": "SaveImage",
+    "_meta": {
+      "title": "save"
+    },
+    "inputs": {
+      "images": [
+        "10",
+        0
+      ],
+      "filename_prefix": "weaveora_qwen_film_t2i"
+    }
+  }
 }

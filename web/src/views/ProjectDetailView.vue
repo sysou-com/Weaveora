@@ -8,7 +8,7 @@ import {
   Save,
   WandSparkles,
 } from 'lucide-vue-next'
-import { NAlert, NButton, NDropdown, NInput, NIcon, NInputNumber, NModal, NSkeleton, NTag, useDialog, useMessage } from 'naive-ui'
+import { NAlert, NButton, NDropdown, NIcon, NInput, NInputNumber, NModal, NRadio, NRadioGroup, NSkeleton, NSpace, NTag, useDialog, useMessage } from 'naive-ui'
 import { computed, h, nextTick, onErrorCaptured, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
@@ -2612,7 +2612,7 @@ const aiBatchOpen = ref(false)
 const aiBatchBusy = ref(false)
 const aiBatch = ref<BatchItem[]>([])
 
-async function aiSyncAll(): Promise<void> {
+async function aiSyncAll(lang: 'zh' | 'en' = 'en'): Promise<void> {
   // 只同步“改动过但未 AI 同步”的镜头（en_synced===false；未改动/已同步的跳过）
   const shots = ((draft.value as unknown as { shots?: DirectorShot[] })?.shots ?? []).filter(
     (s) => s.en_synced === false && ((s.action ?? s.zh) ?? '').trim().length > 0,
@@ -2625,7 +2625,7 @@ async function aiSyncAll(): Promise<void> {
   aiBatch.value = []
   try {
     for (const shot of shots) {
-      const r = await rewritePromptFromZh(workspaceId.value, projectId.value, ((shot.action ?? shot.zh) ?? '').trim(), shot.positive_prompt, shot.negative_prompt)
+      const r = await rewritePromptFromZh(workspaceId.value, projectId.value, ((shot.action ?? shot.zh) ?? '').trim(), shot.positive_prompt, shot.negative_prompt, lang)
       aiBatch.value.push({
         shot,
         zh: ((shot.action ?? shot.zh) ?? '').trim(),
@@ -2639,6 +2639,18 @@ async function aiSyncAll(): Promise<void> {
   } finally {
     aiBatchBusy.value = false
   }
+}
+
+/** 同步前先让用户选中/英文（中文时 LLM 返回中文正/负向词并填充两框） */
+const aiLangOpen = ref(false)
+const aiLangPick = ref<'zh' | 'en'>('zh')
+function openAiLang(): void {
+  aiLangOpen.value = true
+}
+function confirmAiLang(): void {
+  const lang = aiLangPick.value
+  aiLangOpen.value = false
+  void aiSyncAll(lang)
 }
 
 function aiBatchApply(): void {
@@ -3408,7 +3420,7 @@ const shotTotal = computed(() => {
                   @toggle-lock="toggleShotLock"
                   @approve-shot="handleApproveShot"
                   @ai-prompt="openAiRewrite"
-                  @ai-sync-all="aiSyncAll"
+                  @ai-sync-all="openAiLang"
                   @preview-voice="previewVoice"
                   @preview-bgm="previewBgm"
                   @gen-line="genVoiceLine"
@@ -3755,6 +3767,23 @@ const shotTotal = computed(() => {
             <NButton size="small" @click="motionOpen = false">取消</NButton>
             <NButton size="small" type="primary" @click="confirmMotion">开始生成</NButton>
           </div>
+        </div>
+      </NModal>
+
+      <!-- AI 语言选择（同步提示词前必选：中文 → LLM 返回中文正/负向词并填充两框） -->
+      <NModal v-model:show="aiLangOpen" preset="card" title="提示词语言" style="max-width: 420px" data-testid="ai-lang-modal">
+        <p class="text-secondary" style="margin:0 0 10px;font-size:13px;">
+          选择 LLM 产出提示词的语言（中文：正/负向都是中文；英文：正/负向都是英文）
+        </p>
+        <NRadioGroup v-model:value="aiLangPick">
+          <NSpace>
+            <NRadio value="zh">中文</NRadio>
+            <NRadio value="en">英文</NRadio>
+          </NSpace>
+        </NRadioGroup>
+        <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px;">
+          <NButton size="small" @click="aiLangOpen = false">取消</NButton>
+          <NButton size="small" type="primary" data-testid="ai-lang-confirm" @click="confirmAiLang">开始同步</NButton>
         </div>
       </NModal>
 

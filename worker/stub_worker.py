@@ -176,8 +176,7 @@ def _bgm_media(jid, payload):
         import comfy_client as _c
         outs = _c.generate_music(
             "weaveora-stub-worker", payload,
-            progress_fn=lambda p, s: _req("POST", "/internal/jobs/%s/progress" % jid,
-                                          {"progress": p, "stage": s}))
+            progress_fn=_prog(jid))
         return [(o["bytes"], o.get("mime") or "audio/mpeg", None, None,
                  o.get("duration_ms")) for o in outs]
     import audio_client as audio
@@ -338,8 +337,46 @@ def _yield_resources(need_vram_gb=0.0, need_ram_gb=0.0, label=""):
     return vram1, ram1
 
 
+# ── 取消控制（2026-09-16）──────────────────────────────────────────────────
+# 背景：取消原先只改 API 的 state，worker 不知情 → 继续等 ComfyUI 跑完（24 步 720p 100+ 秒），
+# 而 ComfyUI 串行 → 僵尸 prompt 把队列堵死（表现为「新任务一直 queued」「一张关键帧等好几分钟」）。
+# 现在：API 的 /progress 会回 `cancelRequested`；worker 每轮轮询都问一次，取消即 /interrupt 并退出。
+_LAST_PROGRESS = {"p": 10}
+
+
+def _prog(jid):
+    """统一进度上报：记录最近进度（供取消检查复用，避免进度回退）。"""
+    def fn(p, stage):
+        try:
+            _LAST_PROGRESS["p"] = max(int(p or 0), _LAST_PROGRESS["p"])
+        except (TypeError, ValueError):
+            pass
+        return _req("POST", "/internal/jobs/%s/progress" % jid,
+                    {"progress": _LAST_PROGRESS["p"], "stage": stage})
+    return fn
+
+
+def _cancel_check(jid):
+    """给 comfy_client 的钩子：返回 True = 本任务已被取消。"""
+    def fn():
+        try:
+            _st, body = _req("POST", "/internal/jobs/%s/progress" % jid,
+                             {"progress": _LAST_PROGRESS["p"], "stage": "cancel_check"}, timeout=15)
+            return bool((body or {}).get("cancelRequested"))
+        except Exception:
+            return False
+    return fn
+
+
 def execute_job(job):
     jid = job["jobId"]
+    _LAST_PROGRESS["p"] = 10
+    try:
+        import comfy_client as _cc_cancel
+        _cc_cancel.CANCEL_CHECK = _cancel_check(jid)
+        _cc_cancel.reset_job_state()          # 每任务重置"已清残留"标记（否则重试会自中断）
+    except Exception:
+        pass
     payload = job.get("payload") or {}
     kind = payload.get("kind") or "still"
     seed = int(payload.get("seed") or random.randint(1, 2 ** 31))
@@ -374,8 +411,7 @@ def execute_job(job):
             _yield_resources(need_vram_gb=12.0, label="lipsync")
             outs = comfy.generate_lipsync(
                 "weaveora-stub-worker", payload,
-                progress_fn=lambda p, st: _req("POST", "/internal/jobs/%s/progress" % jid,
-                                               {"progress": p, "stage": st}))
+                progress_fn=_prog(jid))
             media = [(o["bytes"], o.get("mime") or "video/mp4", o.get("width"), o.get("height"),
                       o.get("duration_ms")) for o in outs]
             return _complete(jid, payload, media)
@@ -396,8 +432,7 @@ def execute_job(job):
             _yield_resources(need_vram_gb=1.0, need_ram_gb=34.0, label="talk")
             outs = talk_client.generate_talk(
                 jid, payload,
-                progress_fn=lambda p, st: _req("POST", "/internal/jobs/%s/progress" % jid,
-                                                {"progress": p, "stage": st}))
+                progress_fn=_prog(jid))
             media = [(o["bytes"], o.get("mime") or "video/mp4", o.get("width"), o.get("height"),
                       o.get("duration_ms")) for o in outs]
             return _complete(jid, payload, media)
@@ -428,9 +463,7 @@ def execute_job(job):
                 outs = cloud.generate_motion_via_replicate(
                     payload, vcfg.get("apiKey") or "", vcfg.get("model") or "",
                     cfg=vcfg,
-                    progress_fn=lambda p, st: _req(
-                        "POST", "/internal/jobs/%s/progress" % jid,
-                        {"progress": p, "stage": st}))
+                    progress_fn=_prog(jid))
                 media = [(o[0], o[1], o[2], o[3], o[4]) for o in outs]
             else:
                 import cloud_image
@@ -476,9 +509,7 @@ def execute_job(job):
                     outs = cloud.replicate_image(
                         payload, icfg.get("apiKey") or "", icfg.get("model") or "",
                         cfg=icfg,
-                        progress_fn=lambda p, st: _req(
-                            "POST", "/internal/jobs/%s/progress" % jid,
-                            {"progress": p, "stage": st}))
+                        progress_fn=_prog(jid))
                     # 尺寸用云端返回的**真实**尺寸（模型可能按画幅自己定尺，如 768x1360）
                     media = [(o[0], o[1], o[2], o[3], None) for o in outs]
             return _complete(jid, payload, media)
@@ -497,9 +528,7 @@ def execute_job(job):
                 _yield_resources(need_vram_gb=float(payload.get("motionNeedVramGb") or 44.0), label="clip")
                 _yield_vram_for_video()
                 outs = engine.generate_motion("weaveora-stub-worker", payload,
-                                              progress_fn=lambda p, s: _req(
-                                                  "POST", "/internal/jobs/%s/progress" % jid,
-                                                  {"progress": p, "stage": s}))
+                                              progress_fn=_prog(jid))
                 media = [(o["bytes"], o.get("mime") or "image/webp",
                           o.get("width") or width, o.get("height") or height,
                           int(float(payload.get("duration_sec", 3.0)) * 1000),
@@ -512,14 +541,10 @@ def execute_job(job):
                 if engine.image_workflow_ready():
                     print("[worker] 文生图走工作流：%s" % engine.IMAGE_TXT2IMG_WF, flush=True)
                     outs = engine.generate_via_workflow("weaveora-stub-worker", payload,
-                                                        progress_fn=lambda p, s: _req(
-                                                            "POST", "/internal/jobs/%s/progress" % jid,
-                                                            {"progress": p, "stage": s}))
+                                                        progress_fn=_prog(jid))
                 else:
                     outs = engine.generate("weaveora-stub-worker", payload,
-                                           progress_fn=lambda p, s: _req(
-                                               "POST", "/internal/jobs/%s/progress" % jid,
-                                               {"progress": p, "stage": s}))
+                                           progress_fn=_prog(jid))
                 media = [(o["bytes"], "image/png", width, height, None) for o in outs]
             return _complete(jid, payload, media)
         except Exception as e:

@@ -1031,14 +1031,26 @@ public class JobService {
     }
 
     @Transactional
-    public void progress(UUID jobId, int progress, String stage) {
+    /**
+     * 进度上报。
+     *
+     * <p>★ 返回值是**本任务是否已被取消**（cancelRequested）：worker 每几秒上报一次进度，
+     * 顺便拿到这个标志 → 立刻中断 ComfyUI 里的 prompt 并退出。
+     *
+     * <p>为什么必须这样（2026-09-16 结构性缺口）：取消原本只在 API 侧把 state 置 cancelled，
+     * worker 完全不知情，会继续等 ComfyUI 跑完（24 步 720p 要 100+ 秒），而 ComfyUI 是**串行**的
+     * —— 僵尸 prompt 会把后面真正要跑的任务堵死，表现为「新任务一直 queued / 单张关键帧要等好几分钟」。
+     */
+    public boolean progress(UUID jobId, int progress, String stage) {
         GenerationJob job = requireRunning(jobId);
         job.progress(progress, stage);
         Map<String, Object> evt = new LinkedHashMap<>();
         evt.put("type", "job.progress");
         evt.put("progress", progress);
         evt.put("stage", stage == null ? "" : stage);
-        emit(jobs.save(job), evt);
+        GenerationJob saved = jobs.save(job);
+        emit(saved, evt);
+        return saved.cancelRequested();
     }
 
     @Transactional
@@ -2338,7 +2350,107 @@ public class JobService {
         int[] dd = dimsFor(aspect);
         payload.set("params", mapper().createObjectNode().put("width", dd[0]).put("height", dd[1]));
         attachRefs(payload, refs);
+        // ★ 位置优先（2026-09-16）：把「每个主体在画面里的位置」写进 referenceRegions，
+        //   供 worker 做**区域条件**（ConditioningSetAreaPercentage）。来源优先级：
+        //     ① shots[].layout = [{subject,x,y,w,h}]（UI 位置编辑器，w/h 表达远近与大小）
+        //     ② shots[].lipsync_targets = {subject:{x,y}}（预览图点选，只有点 → 给默认框）
+        //   与参考图顺序（refs.subjects()）严格对齐，没位置的填 null。
+        applyLayoutRegions(payload, shot, refs);
         return payload;
+    }
+
+    private static double clamp01(double v) {
+        return v < 0 ? 0 : (v > 1 ? 1 : v);
+    }
+
+    /** 位置 → referenceRegions（见 videoShotPayload 调用处注释）。 */
+    private void applyLayoutRegions(ObjectNode payload, JsonNode shot, RefCtx refs) {
+        if (refs == null || refs.subjects() == null || refs.subjects().isEmpty()) {
+            return;
+        }
+        java.util.Map<String, double[]> pos = new java.util.LinkedHashMap<>();
+        JsonNode layout = shot.path("layout");
+        if (layout.isArray()) {
+            for (JsonNode it : layout) {
+                String s = it.path("subject").asText("").trim();
+                double x = it.path("x").asDouble(-1), y = it.path("y").asDouble(-1);
+                double w = it.path("w").asDouble(-1), h = it.path("h").asDouble(-1);
+                if (!s.isEmpty() && x >= 0 && y >= 0 && w > 0 && h > 0) {
+                    pos.put(s, new double[]{x, y, w, h});
+                }
+            }
+        }
+        JsonNode targets = shot.path("lipsync_targets");
+        if (targets.isObject()) {
+            java.util.Iterator<String> names = targets.fieldNames();
+            while (names.hasNext()) {
+                String s = names.next();
+                if (pos.containsKey(s)) {
+                    continue;
+                }
+                JsonNode t = targets.path(s);
+                double x = t.path("x").asDouble(-1), y = t.path("y").asDouble(-1);
+                if (x < 0 || y < 0) {
+                    continue;
+                }
+                // 点选只有坐标 → 以该点为中心给默认框（宽 0.30 / 高 0.45）；UI 提供 w/h 后走上面那条
+                pos.put(s, new double[]{Math.max(0, x - 0.15), Math.max(0, y - 0.20), 0.30, 0.45});
+            }
+        }
+        if (pos.isEmpty()) {
+            return;
+        }
+        com.fasterxml.jackson.databind.node.ArrayNode regions = payload.putArray("referenceRegions");
+        for (String subject : refs.subjects()) {
+            double[] p = (subject == null) ? null : pos.get(subject);
+            if (p == null) {
+                regions.addNull();
+                continue;
+            }
+            regions.addObject()
+                    .put("x", clamp01(p[0])).put("y", clamp01(p[1]))
+                    .put("w", clamp01(p[2])).put("h", clamp01(p[3]));
+        }
+        log.info("refs: 位置下发 {} 个主体：{}", pos.size(), pos.keySet());
+
+        // ★ 路线 A（2026-09-16）：位置先以**提示词**形式生效。
+        //   为什么不用区域条件（referenceRegions → ConditioningSetAreaPercentage + ConditioningCombine）：
+        //   Qwen-Image-Edit 的 conditioning（TextEncodeQwenImageEditPlus，带参考图 latent）被区域包裹/合并后，
+        //   KSampler 会抛 `IndexError: tuple index out of range`（实测两轮），所以先走提示词描述；
+        //   referenceRegions 仍然保留，供后续路线 B（离线调通后再切）。
+        StringBuilder sb = new StringBuilder();
+        for (java.util.Map.Entry<String, double[]> e : pos.entrySet()) {
+            double[] p = e.getValue();
+            if (p == null) {
+                continue;
+            }
+            if (sb.length() > 0) {
+                sb.append("; ");
+            }
+            sb.append(e.getKey()).append(" — x=").append(fmt2(p[0])).append(", y=").append(fmt2(p[1]))
+              .append(", box ").append(fmt2(p[2])).append("x").append(fmt2(p[3]))
+              .append(" (").append(posHint(p[0], p[1])).append(")");
+        }
+        if (sb.length() > 0) {
+            String add = "\nSubject placement (normalized frame coordinates, origin top-left; "
+                    + "smaller y = higher in frame, larger box = closer to camera): " + sb
+                    + ". Place each character exactly at that position and relative size; keep them apart.";
+            String cur = payload.path("positive_prompt").asText("");
+            payload.put("positive_prompt", cur + add);
+            log.info("refs: 位置已写入正词（路线A）：{}", sb);
+        }
+    }
+
+    /** 0–1 → 两位小数，便于提示词里对齐数字。 */
+    private static String fmt2(double v) {
+        return String.format(java.util.Locale.ROOT, "%.2f", v);
+    }
+
+    /** 归一化坐标 → 方位词（左/中/右 + 上/中/下），让模型更容易听懂。 */
+    private static String posHint(double x, double y) {
+        String h = x < 0.34 ? "left" : (x > 0.66 ? "right" : "center");
+        String v = y < 0.34 ? "upper" : (y > 0.66 ? "lower" : "middle");
+        return v + "-" + h;
     }
 
     /** P2：按关键帧序号选 still 产物（job payload.keyframe_index 标记帧号；无标记时首帧取最新、末帧取最早）。 */

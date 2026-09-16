@@ -122,12 +122,14 @@ public class DirectorController {
             @Valid @RequestBody RewritePromptRequest body) {
         return ResponseEntity.ok(directorService.rewritePrompt(
                 uid(request), ws(workspaceId), projectId, body.rawText(),
-                body.originalPositive(), body.originalNegative()));
+                body.originalPositive(), body.originalNegative(), body.lang()));
     }
 
+    /** lang：'zh' → 正/负向词都用中文；'en'（默认）→ 都用英文。 */
     public record RewritePromptRequest(@NotBlank String rawText,
                                        String originalPositive,
-                                       String originalNegative) {
+                                       String originalNegative,
+                                       String lang) {
     }
 
     @PostMapping("/director/generate")

@@ -634,10 +634,18 @@ public class DirectorService {
     @Transactional(readOnly = true)
     public java.util.Map<String, String> rewritePrompt(UUID userId, UUID workspaceId, UUID projectId,
                                                        String rawText, String originalPositive,
-                                                       String originalNegative) {
+                                                       String originalNegative, String lang) {
         context.require(userId, workspaceId, projectId);
         boolean amend = originalPositive != null && !originalPositive.isBlank();
-        String sysBase = "你是专业提示词工程师。positive_prompt 与 negative_prompt 均使用英文；"
+        // ★ 语言可选（2026-09-16）：lang='zh' → 正/负向词都用**中文**（Qwen 系模型对中文理解好；
+        //   用户明确要求“选中文就返回中文提示词并填充两个框”）；'en'（默认）保持原行为。
+        boolean zh = lang != null && "zh".equalsIgnoreCase(lang.trim());
+        String sysBase = zh
+                ? "你是专业提示词工程师。positive_prompt 与 negative_prompt 均使用**中文**；"
+                + "positive_prompt 含主体（要点名角色名）/镜头/光线/氛围/质感细节（<=60 个中文词）；"
+                + "negative_prompt 为中文常见负面项（模糊、低质量、畸形、多余肢体、重复、水印、文字、过曝 等）。"
+                + "只输出 JSON：{\"positive_prompt\":\"...\",\"negative_prompt\":\"...\"}"
+                : "你是专业提示词工程师。positive_prompt 与 negative_prompt 均使用英文；"
                 + "positive_prompt 含主体/镜头/光线/氛围/质感细节（<=60 英文词）；"
                 + "negative_prompt 为英文常见负面项（blurry, low quality, distorted, extra limbs, "
                 + "duplicated, watermark, text, oversaturated 等）。只输出 JSON：{\"positive_prompt\":\"...\",\"negative_prompt\":\"...\"}";

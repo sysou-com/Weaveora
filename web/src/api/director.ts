@@ -83,11 +83,13 @@ export async function rewritePromptFromZh(
   rawText: string,
   originalPositive?: string,
   originalNegative?: string,
+  lang: 'zh' | 'en' = 'en',
 ): Promise<RewriteResult> {
   return request<RewriteResult>(`/api/v1/projects/${projectId}/director/rewrite-prompt`, {
     method: 'POST',
     headers: { [WORKSPACE_HEADER]: workspaceId },
-    body: { rawText, originalPositive, originalNegative },
+    // lang：'zh' → LLM 返回**中文**正/负向词；'en' → 英文（默认，兼容旧行为）
+    body: { rawText, originalPositive, originalNegative, lang },
   })
 }
 

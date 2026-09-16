@@ -37,6 +37,12 @@ IMAGE_EDIT_WF = os.environ.get("WEAVEORA_IMAGE_EDIT_WORKFLOW", "").strip()
 IMAGE_MODEL = os.environ.get("WEAVEORA_IMAGE_MODEL", "").strip()
 IMAGE_STEPS = int(os.environ.get("WEAVEORA_IMAGE_STEPS", "0") or 0)
 IMAGE_DENOISE = float(os.environ.get("WEAVEORA_IMAGE_DENOISE", "0.65") or 0.65)
+# ★ 区域条件（位置优先）开关：默认关闭。
+#   原因（2026-09-16 实测两轮）：Qwen-Image-Edit 的 conditioning（TextEncodeQwenImageEditPlus 带参考图
+#   latent）被 ConditioningSetAreaPercentage 包裹再用 ConditioningCombine 合并后，KSampler 必报
+#   `IndexError: tuple index out of range`。故生产默认走「位置写进提示词」（路线A，后端拼句）；
+#   代码保留，等路线 B 找到在 2511 上成立的组合方式再置 1 打开。
+IMAGE_AREA_COND = os.environ.get("WEAVEORA_IMAGE_AREA_COND", "0") == "1"
 # 轮询超时：默认 30 分钟。踩过的坑（2026-09-15）：ComfyUI 重启后的**首张图**要从磁盘冷加载 ~28GB
 # （Qwen-Image 20.4G + Qwen2.5-VL 7.9G），而且 fp8 权重在 CPU 上手动 cast 成 bf16 很耗时，
 # 实测首张 prompt 花了 12 分 05 秒 —— 旧的 600s 超时会让 worker 先报 timeout，
@@ -66,10 +72,18 @@ def _wf_of_class(graph, class_type):
 
 
 def _wf_inject_size(graph, width, height):
+    """把目标尺寸写进工作流：Empty*LatentImage（txt2img）与 ImageScale/ImageResize（Edit 档：
+    官方结构是**把参考图缩放到目标尺寸 → VAEEncode → 当采样起点**）。"""
     for ct in ("EmptySD3LatentImage", "EmptyLatentImage"):
         for _nid, n in _wf_of_class(graph, ct):
             if "width" in n.get("inputs", {}):
                 n["inputs"]["width"], n["inputs"]["height"] = int(width), int(height)
+                return True
+    for ct in ("ImageScale", "ImageResize", "ImageScaleBy"):
+        for _nid, n in _wf_of_class(graph, ct):
+            ins = n.get("inputs", {})
+            if "width" in ins and "height" in ins:
+                ins["width"], ins["height"] = int(width), int(height)
                 return True
     return False
 
@@ -182,6 +196,62 @@ def _wf_latent_is_img2img(graph):
     return graph.get(ref[0], {}).get("class_type") == "VAEEncode"
 
 
+def _wf_apply_areas(graph, mode, pairs, log=print):
+    """把「每个主体在画面里的位置」变成**区域条件**（位置优先于整段提示词）。
+
+    pairs: [(ref_index, ref_filename, subject, x, y, w, h)]（归一化 0–1，w/h 表达远近与大小）
+    做法：每个主体一个自己的条件节点（Edit 档带上**那个主体自己的定妆照**）→
+         ConditioningSetAreaPercentage(conditioning,x,y,w,h) → 与全局正词 ConditioningCombine 合并 → 接给 KSampler.positive。
+    为什么不用 ControlNet：位置=“谁在哪、多大”，区域条件最直接且不需要新模型（community 常用做法）。
+    """
+    ks = _wf_of_class(graph, "KSampler") or _wf_of_class(graph, "KSamplerAdvanced")
+    if not ks:
+        return False
+    ks_id, ks_node = ks[0]
+    base_ref = (ks_node.get("inputs") or {}).get("positive")
+    if not (isinstance(base_ref, list) and base_ref):
+        return False
+    base = base_ref[0]
+    # 参考图文件名 → LoadImage 节点 id
+    by_name = {}
+    for nid, n in _wf_of_class(graph, "LoadImage"):
+        by_name[n.get("inputs", {}).get("image")] = nid
+    prev = base
+    n = 0
+    for (idx, fname, subj, x, y, w, h) in pairs:
+        n += 1
+        label = subj or ("subject%d" % (idx + 1))
+        txt_id = "area_txt_%d" % n
+        if mode == "edit" and base in graph and str(graph[base].get("class_type", "")).startswith("TextEncodeQwenImageEdit"):
+            tpl = graph[base]
+            inp = dict(tpl.get("inputs") or {})
+            # ★ 必须与基础正词节点**结构完全一致**（保留同样的 image1/image2/... 与 vae）：
+            #   区域的 conditioning 与它合并时，参考 latent 数量/字段必须对齐，否则 KSampler 会
+            #   `tuple index out of range`（2026-09-16 实测：只带 1 张参考图的区域节点合并后必崩）。
+            #   区域只负责“文字/身份在哪块生效”，参考图仍旧用同一批。
+            inp["prompt"] = ("%s — the character shown in reference image %d; keep exactly this character's face, "
+                             "hairstyle, age and costume" % (label, idx + 1))
+            graph[txt_id] = {"class_type": tpl.get("class_type"), "inputs": inp}
+        else:
+            # 非 Edit 档：普通 CLIPTextEncode（沿用正词节点的 clip）
+            clip_ref = (graph.get(base, {}).get("inputs") or {}).get("clip")
+            if not clip_ref:
+                continue
+            graph[txt_id] = {"class_type": "CLIPTextEncode",
+                             "inputs": {"clip": clip_ref, "text": "%s (the character in this area)" % label}}
+        set_id = "area_set_%d" % n
+        graph[set_id] = {"class_type": "ConditioningSetAreaPercentage",
+                         "inputs": {"conditioning": [txt_id, 0], "width": float(w), "height": float(h),
+                                    "x": float(x), "y": float(y), "strength": 1.0}}
+        comb_id = "area_comb_%d" % n
+        graph[comb_id] = {"class_type": "ConditioningCombine",
+                          "inputs": {"conditioning_1": [prev, 0], "conditioning_2": [set_id, 0]}}
+        prev = comb_id
+        log("[comfy] 区域条件 第%d个：%s x=%.3f y=%.3f w=%.3f h=%.3f" % (n, label, x, y, w, h))
+    ks_node.setdefault("inputs", {})["positive"] = [prev, 0]
+    return True
+
+
 def _wf_save_prefix(graph, prefix):
     for _nid, n in _wf_of_class(graph, "SaveImage"):
         n.setdefault("inputs", {})["filename_prefix"] = prefix
@@ -258,7 +328,10 @@ def generate_via_workflow(client_id, payload, progress_fn=None, on_tick=None):
     cfg = params.get("cfg") if isinstance(params.get("cfg"), (int, float)) else None
     is_i2i = _wf_latent_is_img2img(graph)
     denoise = 1.0
-    if ref_names and is_i2i:
+    if mode == "edit":
+        # Edit 档：采样起点**就是**参考图（官方结构）→ denoise 必须 1.0，否则等于把定妆照原图半保留（白底/证件照感）
+        denoise = 1.0
+    elif ref_names and is_i2i:
         denoise = (params.get("denoise") if isinstance(params.get("denoise"), (int, float))
                    else IMAGE_DENOISE)
     _wf_inject_sampler(graph, seed, steps, cfg, denoise)
@@ -266,6 +339,28 @@ def generate_via_workflow(client_id, payload, progress_fn=None, on_tick=None):
         if not _wf_set_image(graph, ref_names):
             print("[comfy] 工作流 %s 无 LoadImage 节点，%d 张参考图未使用" % (os.path.basename(path), len(ref_names)),
                   flush=True)
+    # ★ 位置优先：方案里每个主体在画面中的位置（x/y/w/h，归一化）→ 区域条件
+    regions = payload.get("referenceRegions") or []
+    subjects = payload.get("referenceSubjects") or []
+    pairs = []
+    for i, nm in enumerate(ref_names):
+        reg = regions[i] if i < len(regions) else None
+        if not isinstance(reg, dict):
+            continue
+        try:
+            x, y = float(reg.get("x")), float(reg.get("y"))
+            w, h = float(reg.get("w")), float(reg.get("h"))
+        except (TypeError, ValueError):
+            continue
+        if w <= 0 or h <= 0:
+            continue
+        pairs.append((i, nm, (subjects[i] if i < len(subjects) else ""), x, y, w, h))
+    if pairs:
+        if IMAGE_AREA_COND:
+            _wf_apply_areas(graph, mode, pairs)
+        else:
+            print("[comfy] 位置改由提示词描述（路线A）：%d 个主体（区域条件关闭，需开启设 WEAVEORA_IMAGE_AREA_COND=1）"
+                  % len(pairs), flush=True)
     _wf_save_prefix(graph, prefix)
     print("[comfy] 工作流出图：%s(%s) size=%dx%d steps=%s cfg=%s denoise=%s refs=%s"
           % (os.path.basename(path), mode, width, height, steps or "-", cfg if cfg is not None else "-",
@@ -286,6 +381,65 @@ def generate_via_workflow(client_id, payload, progress_fn=None, on_tick=None):
 
 class ComfyError(Exception):
     pass
+
+
+class JobCancelled(Exception):
+    """任务被用户在界面上取消（API 侧 cancelRequested=true）→ 立刻中断 ComfyUI 并退出。"""
+
+
+# 由 stub_worker 在每个任务开始时设置：无参可调用对象，返回 True = 该任务已被取消。
+# 放在模块级是为了让**所有**提交/轮询路径（still / clip / lipsync / 分段）共用同一个钩子，
+# 而不是每个分支各写一遍（2026-09-16：取消原来只改 API 状态，worker 不知情 → 僵尸 prompt 堵队列）。
+CANCEL_CHECK = None
+
+# ★ 本任务是否已经做过"提交前清残留 prompt"（2026-09-16 修的 bug）：
+#   旧写法每次都清，于是**重试提交时把我们自己刚提交、还在跑的 prompt 当成僵尸中断了**
+#   （实测：Edit 档 20 步跑到一半被自己 interrupt，任务永远拿不到图）。
+#   现在每个任务只清一次，由 stub_worker 在任务开始时 reset。
+_ORPHAN_CLEAR_DONE = {"v": False}
+
+
+def reset_job_state():
+    _ORPHAN_CLEAR_DONE["v"] = False
+
+
+def _maybe_cancelled():
+    if not CANCEL_CHECK:
+        return False
+    try:
+        return bool(CANCEL_CHECK())
+    except Exception:
+        return False
+
+
+def _interrupt_comfy(reason=""):
+    """中断 ComfyUI 当前执行（取消任务、清理残留 prompt 时用）。失败不致命。"""
+    try:
+        _comfy("POST", "/interrupt", timeout=30)
+        print("[comfy] 已请求中断 ComfyUI 当前执行%s" % (("（%s）" % reason) if reason else ""), flush=True)
+    except Exception as e:
+        print("[comfy] /interrupt 失败（忽略）：%s" % e, flush=True)
+
+
+def _clear_orphan_prompts():
+    """提交前确保 ComfyUI 队列干净。
+
+    我们**串行**提交，所以提交时队列里还有东西 = 上一个任务的僵尸 prompt（被取消/超时后残留）→
+    它会堵在仓库前端，新任务自跑不了。2026-09-16 实测：一张关键帧白等好几分钟就是这个。
+    """
+    try:
+        st, body = _comfy("GET", "/queue")
+        q = json.loads(body or b"{}")
+        running = len(q.get("queue_running") or [])
+        pending = len(q.get("queue_pending") or [])
+        if running or pending:
+            print("[comfy] 队里还有残留 prompt（running=%d pending=%d）→ 先中断清空" % (running, pending), flush=True)
+            _interrupt_comfy("清理残留")
+            time.sleep(2.0)
+        return running + pending
+    except Exception as e:
+        print("[comfy] 队列检查失败（忽略）：%s" % e, flush=True)
+        return 0
 
 
 def _api(path, payload=None, timeout=300):
@@ -652,10 +806,16 @@ def _poll_history(client_id, prompt_id, poll=2.0, timeout=600, on_tick=None):
 
     on_tick(elapsed_sec) 每轮回调一次（用于上报“已运行 N 分钟”，
     否则对口型 25–30 分钟期间 UI 会一直停在 40%，看着像卡死）。
+
+    ★ 每轮还检查一次「任务是否已被取消」（CANCEL_CHECK）：是则 **/interrupt 中断 ComfyUI** 并抛 JobCancelled，
+    不再白等到 timeout（那是僵尸 prompt 堵队列的根源）。
     """
     deadline = time.time() + timeout
     t0 = time.time()
     while time.time() < deadline:
+        if _maybe_cancelled():
+            _interrupt_comfy("任务已取消")
+            raise JobCancelled("任务已被取消（已中断 ComfyUI）")
         st, body = _comfy("GET", "/history/" + prompt_id)
         if st == 200:
             data = json.loads(body or b"{}")
@@ -752,6 +912,11 @@ def _post_prompt(prompt, client_id):
     """POST /prompt；对偶发的 prompt 校验失败重试 1 次（同图重投，服务端状态问题）。"""
     for attempt in (1, 2):
         try:
+            # 串行提交前提下，队里有东西就是上一个任务的僵尸 prompt → 清掉（否则本任务白等）。
+            # ★ 但每个任务**只清一次**：清了之后就认为队列里的东西是我们自己的（重试提交时绝不能自中断）。
+            if not _ORPHAN_CLEAR_DONE["v"]:
+                _clear_orphan_prompts()
+                _ORPHAN_CLEAR_DONE["v"] = True
             st, body = _comfy("POST", "/prompt", payload=prompt)
             pid = json.loads(body.decode()).get("prompt_id")
             if not pid:
