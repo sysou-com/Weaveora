@@ -1675,14 +1675,24 @@ def generate_motion(client_id, payload, progress_fn=None):
                 print("[comfy] 已请 ComfyUI 释放缓存，可用显存 → %.1f GiB" % _free, flush=True)
             except Exception as _e:
                 print("[comfy] 释放 ComfyUI 缓存失败（忽略）: %s" % _e, flush=True)
-        # 判据：**只挡「根本放不下」的组合**（预估 > 总显存 - 预留）。
-        # free < need 但仍能放下 → 给 WARN 继续跑，交给 ComfyUI 自己换入换出
-        # （旧写法拿 free 硬拦，会把本来能跑的任务误杀 —— 实测 121 帧 47.3GiB 是能跑的）。
-        if _total is not None and _need > (_total - MOTION_VRAM_SAFETY_GB):
+        # 判据：**只在真放不下时才降帧**。
+        #   free < need 但仍能放下 → 给 WARN 继续跑，交给 ComfyUI 自己换入换出
+        #   （旧写法拿 free 硬拦，会把本来能跑的任务误杀 —— 实测 121 帧 47.3GiB 是能跑的）。
+        #
+        # ★ 2026-09-16 夜线上事故（用户报「motion 前几秒快进、3s 后停住、最后又补齐」）：
+        #   旧写法把 `_need` 对比 `_total - SAFETY`（47.4-4 = **43.4**），而紧接着的日志自己就写着
+        #   「可用 **46.1**/47.4 GiB」—— 判据用的是“总显存减预留”，不是**刚卸载后实测的可用**，
+        #   于是 44.5GiB 的 80 帧任务被误判成放不下 → 降帧到 56 帧：
+        #     56 帧 @16fps = 3.56s（整段动作被压进这 3.56s，看起来快进 1.4x），
+        #     再由 _retime_to_fps 按“帧精确” **克隆尾帧补到 150 帧** → 尾部约 1.4s 静止。
+        #   现在：能拿到实测可用显存就以它为准（卸载后测得的最准）；
+        #   只有 `_free` 不可用时才回退到 `_total - SAFETY` 这个保守值。
+        _fit_budget = _free if _free is not None else (_total - MOTION_VRAM_SAFETY_GB if _total else None)
+        if _fit_budget is not None and _need > _fit_budget:
             _area_scale = (float(mw) * float(mh)) / MOTION_VRAM_AREA_REF
-            _max_frames = max(32, int((_total - MOTION_VRAM_SAFETY_GB - MOTION_VRAM_BASE_GB)
+            _max_frames = max(32, int((_fit_budget - MOTION_VRAM_BASE_GB)
                                       / max(1e-6, MOTION_VRAM_PER_FRAME_GB * _area_scale)))
-            _max_px = int(((_total - MOTION_VRAM_SAFETY_GB - MOTION_VRAM_BASE_GB) /
+            _max_px = int(((_fit_budget - MOTION_VRAM_BASE_GB) /
                            max(1e-6, MOTION_VRAM_PER_FRAME_GB * float(_frames))) * MOTION_VRAM_AREA_REF)
             if _max_frames < 40:
                 raise ComfyError(
@@ -1691,12 +1701,12 @@ def generate_motion(client_id, payload, progress_fn=None):
                     "  ② 降分辨率（如 832x480）往往比降帧数划算\n"
                     "  ③ 跨镜并发时确认没有其它任务同时占卡（A14B 会独占）"
                     % (mw, mh, _frames, _need, _total, _max_frames, _max_px))
-            # ★ 能放下但余量不足 → **自动降帧**，不要硬跑 OOM。
-            #   输出仍会按目标时长由 _retime_to_fps() 补帧 → 时长不变，只损失一点运动稠密度。
+            # ★ 万不得已才降帧（时长/速度会被牺牲），所以日志要把后果和替代方案说清楚。
             _new_frames = max(32, (_max_frames - 4) // 4 * 4)   # 4n 对齐（latent = frames+1）且再留余量
-            print("[comfy] 显存不足 → 自动降帧：%d → %d 帧（预估需 %.1f GiB > 可用 %.1f GiB，总 %.1f GiB；"
-                  "输出仍按目标时长补帧）" % (_frames, _new_frames, _need,
-                                       _total - MOTION_VRAM_SAFETY_GB, _total), flush=True)
+            print("[comfy] 显存不够 → 自动降帧：%d → %d 帧（预估需 %.1f GiB > 可用 %.1f GiB，总 %.1f GiB）。"
+                  "⚠️ 降帧会把整段动作压进更短的时长（看起来快进）且尾部静止（补帧补齐）；"
+                  "要保时长与速度，优先降分辨率（resolution=480p/更低）或把镜头拆短，别靠降帧"
+                  % (_frames, _new_frames, _need, _fit_budget, _total or 0), flush=True)
             payload = dict(payload)
             payload["frames"] = _new_frames
             _mp["frames"] = _new_frames

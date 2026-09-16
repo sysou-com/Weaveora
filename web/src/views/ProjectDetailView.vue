@@ -2355,6 +2355,14 @@ async function startGeneration(shotNos?: number[] | null): Promise<void> {
   if (!revId) return
   // P5：先过主体闸门（镜文本没点名主体 → 弹框让用户勾选，避免“全部注入/没参考图”）
   if (!preflightCast()) return
+  // ★ 2026-09-16 夜（用户要求“做 a”）：生成**前**拦“脸会过小”的组合。
+  //   为什么必须在生成前：事后告警等于白烧 GPU（用户原话：生成后再告警没意义，浪费了生图资源/时间）。
+  if (!preflightFaceSize(shotNos)) return
+  await doStartGeneration(shotNos, revId)
+}
+
+/** 真正发起关键帧生成（闸门过了、或用户在“脸过小”弹框里选了“仍然生成”） */
+async function doStartGeneration(shotNos: number[] | null | undefined, revId: string): Promise<void> {
   // P12：生成后自动切到对应 Tab（顺手解锁），否则用户看不到刚发起任务的进度
   focusJobTab('still')
   // P4：先把当前草稿（含参考图/主体标注/提示词改动）落库，再发起生成
@@ -2376,6 +2384,61 @@ async function startGeneration(shotNos?: number[] | null): Promise<void> {
     genBusy.value = false
   }
 }
+/**
+ * 生成前的“脸过小”闸门（用户要求 a）。
+ *
+ * 返回 false = 已弹框拦住（用户可选“先去调框”或“仍然生成”）。
+ * 判据：本镜该主体的**生效框**（帧级 > 镜级 > 方案默认）→ 估计脸宽 < 64px。
+ * 为什么值这个闸门：这类图生成出来基本必是“换脸/不像”（实测 47~59px 那一档），
+ * 而一张关键帧要占用 GPU 几分钟 —— 生成后再告警等于白烧（用户明确否定了事后告警）。
+ */
+function preflightFaceSize(shotNos?: number[] | null): boolean {
+  const d = draft.value
+  if (!d || !isVideoPlan(d)) return true
+  const names = planSubjectsNow.value
+  if (!names.length) return true
+  const want = shotNos && shotNos.length ? new Set(shotNos) : null
+  const rows: Array<{ shot: number; sub: string; px: number }> = []
+  for (const s of d.shots ?? []) {
+    if (want && !want.has(s.shot_no)) continue
+    for (const sub of shotCastInfo(s, names).subjects) {
+      const h = shotBoxH(s, sub)
+      if (!(h > 0)) continue
+      const px = estFacePx(h, stillFrameH.value)
+      if (px < FACE_PX_RED) rows.push({ shot: s.shot_no, sub, px })
+    }
+  }
+  if (!rows.length) return true
+  faceWarnRows.value = rows
+  faceWarnShotNos.value = shotNos && shotNos.length ? [...shotNos] : null
+  faceWarnOpen.value = true
+  return false
+}
+
+/** 该主体在**本镜**的生效框高（归一化 0~1）：帧级 > 镜级 > 方案默认（与后端 applyLayoutRegions 同优先级） */
+function shotBoxH(shot: DirectorShot, sub: string): number {
+  const norm = (h: unknown): number => {
+    const v = Number(h ?? 0)
+    if (!(v > 0)) return 0
+    return v > 1.5 ? v / 100 : v      // 兼容 0~1 与 0~100 两种写法
+  }
+  const kf = (shot.keyframes ?? [])[0] as unknown as { layout?: Array<{ subject?: string; h?: number }> } | undefined
+  const fromKf = kf?.layout?.find((x) => x.subject === sub)
+  if (fromKf) return norm(fromKf.h)
+  const fromShot = (shot.layout ?? []).find((x) => x.subject === sub)
+  if (fromShot) return norm(fromShot.h)
+  const fromPlan = planSubjects().find((x) => x.name === sub)?.region
+  return fromPlan ? norm(fromPlan.h) : 0
+}
+
+/** 用户选“仍然生成” */
+function confirmFaceWarn(): void {
+  faceWarnOpen.value = false
+  const revId = genRevisionId()
+  if (!revId) return
+  void doStartGeneration(faceWarnShotNos.value, revId)
+}
+
 async function cancelOne(jobId: string): Promise<void> {
   cancelBusy.value = jobId
   try {
@@ -2523,6 +2586,20 @@ function deleteJobOne(jobId: string): void {
  */
 const MOTION_MIN = ref(32)
 const MOTION_MAX = ref(96)
+/**
+ * motion 原生帧率（与 worker `WEAVEORA_MOTION_NATIVE_FPS` 同口径，缺省 16）：
+ * A14B 按 16fps 原生节奏生成，所以「需要多少帧」= 镜头时长 × 16（不是 30！）。
+ * 踩过的坑（2026-09-15）：UI 选 121 帧 + 按成片 30fps 理解 → 运动快 1.875×、5s 只剩 4.13s。
+ */
+const MOTION_NATIVE_FPS = 16
+/** 本镜时长（用于把帧数自动算出来 + 显本次帧数对应的视频长度） */
+const motionShotSec = computed<number>(() => {
+  const v = Number(project.data.value?.shotDurationSec ?? 0)
+  return v > 0 ? v : 5
+})
+const motionNeedFrames = computed<number>(() => Math.round(motionShotSec.value * MOTION_NATIVE_FPS))
+const motionFramesSec = computed<number>(() => (Number(motionFrames.value) || 0) / MOTION_NATIVE_FPS)
+const motionTooFew = computed<boolean>(() => Number(motionFrames.value) < motionNeedFrames.value)
 const motionLimitSource = ref('')
 const motionOpen = ref(false)
 const motionFrames = ref(48)
@@ -2556,7 +2633,9 @@ watch(
 )
 
 function openMotionModal(): void {
-  motionFrames.value = Math.min(48, MOTION_MAX.value)
+  // ★ 2026-09-16 夜（用户要求）：**不再让用户自己算帧数** —— 按「镜头时长 × 原生 16fps」自动填，
+  //   并夹到引擎下发区间内。帧数只当上限（worker 取 min(时长×16, 帧数)），所以自动填到位最安全。
+  motionFrames.value = Math.min(Math.max(motionNeedFrames.value, MOTION_MIN.value), MOTION_MAX.value)
   void motionLimits.refetch()
   motionOpen.value = true
 }
@@ -3191,6 +3270,11 @@ const planSubjectsNow = computed<string[]>(() => {
  *
  * @returns true = 可以继续生成；false = 需要用户先勾选（弹框已打开）
  */
+/** “脸过小”闸门的弹框状态（生成前拦，不阻断：用户可强推） */
+const faceWarnOpen = ref(false)
+const faceWarnRows = ref<Array<{ shot: number; sub: string; px: number }>>([])
+const faceWarnShotNos = ref<number[] | null>(null)
+
 function preflightCast(): boolean {
   const d = draft.value
   if (!d || !isVideoPlan(d)) return true
@@ -4552,14 +4636,49 @@ const shotTotal = computed(() => {
         </div>
       </div>
 
+      <!-- ★ 2026-09-16 夜（用户要求 a）：生成**前**的“脸会过小”确认闸门（不阻断，可强推） -->
+      <NModal v-model:show="faceWarnOpen" preset="card" title="⚠ 这些镜的脸会太小（身份锚定会失效）"
+              style="max-width: 560px" data-testid="face-warn-modal">
+        <p class="text-secondary" style="margin: 0 0 10px; font-size: 13px;">
+          按当前位置框估算，下面这些主体的脸在生成图里会小于 <b>{{ FACE_PX_RED }}px</b>
+          （实测这一档只能检出 1 张脸甚至 0 张，与定妆照的相似度掉到 0.19~0.30 → 容易“换脸/不像”）。
+          现在拦下来，是为了**不白烧这几分钟的 GPU**（而不是生成完再告警）。
+        </p>
+        <ul class="face-warn-list font-mono">
+          <li v-for="r in faceWarnRows" :key="r.shot + '-' + r.sub">
+            第 {{ r.shot }} 镜 · {{ r.sub }} —— 估计脸宽 <b>~{{ r.px }}px</b>
+          </li>
+        </ul>
+        <p class="text-secondary" style="font-size: 12px; margin: 8px 0 0">
+          怎么改：把该主体的框**改小（更近/半身）** —— 框高 h 越小脸越大（脸≈0.09×画幅高÷h）；或把 3 主体镜拆成 ≤2 主体。
+        </p>
+        <div class="ai-actions">
+          <NButton size="small" @click="faceWarnOpen = false">先去调框</NButton>
+          <NButton size="small" type="primary" :loading="genBusy" data-testid="face-warn-anyway"
+                   @click="confirmFaceWarn">
+            仍然生成
+          </NButton>
+        </div>
+      </NModal>
+
       <!-- 沉浸式预览（大图/大视频） -->
       <NModal v-model:show="motionOpen" preset="card" :title="'生成运动(motion)'" style="max-width: 420px">
         <div class="motion-form">
           <p class="text-secondary">
-            设置视频帧数（系统支持 {{ MOTION_MIN }}–{{ MOTION_MAX }}，帧数越高越流畅、耗时越长）
+            帧数不用自己算：按**镜头时长 × 原生 {{ MOTION_NATIVE_FPS }}fps** 自动填（本镜约 {{ motionShotSec }}s → {{ motionNeedFrames }} 帧）。
+            它只当**上限**用（worker 实际取 min(时长×{{ MOTION_NATIVE_FPS }}, 帧数)，填大了无害，填小了会把动作压短）。
             <span v-if="motionLimitSource" class="state-hint font-mono">· 上限来源：{{ motionLimitSource }}</span>
           </p>
           <NInputNumber v-model:value="motionFrames" :min="MOTION_MIN" :max="MOTION_MAX" :step="4" style="width: 180px" />
+          <p class="font-mono motion-sec" :class="{ warn: motionTooFew }">
+            当前 {{ motionFrames }} 帧 ÷ {{ MOTION_NATIVE_FPS }}fps ≈ {{ motionFramesSec.toFixed(2) }}s
+            <template v-if="motionTooFew">
+              ⚠ 比本镜 {{ motionShotSec }}s 短 {{ (motionShotSec - motionFramesSec).toFixed(2) }}s
+              → 整段动作会被压进这 {{ motionFramesSec.toFixed(2) }}s（看起来**快进**），尾部由补帧**静止**补齐。
+              建议降到 480p 分辨率（保时长）而不是降帧。
+            </template>
+            <template v-else>✓ 够覆盖本镜 {{ motionShotSec }}s</template>
+          </p>
           <div class="motion-ops">
             <NButton size="small" @click="motionOpen = false">取消</NButton>
             <NButton size="small" type="primary" @click="confirmMotion">开始生成</NButton>
@@ -5129,6 +5248,10 @@ const shotTotal = computed(() => {
 }
 .subj-hint { margin: 2px 0 0; font-size: 11px; line-height: 1.6; }
 .portrait-ref-warn { color: var(--wv-danger, #c45c4a); }
+/* “脸过小”生成前闸门 + motion 帧数↔时长提示（2026-09-16 夜） */
+.face-warn-list { margin: 0; padding-left: 18px; font-size: 12.5px; line-height: 1.9; color: var(--wv-danger, #c45c4a); }
+.motion-sec { font-size: 12px; margin: 8px 0 0; color: var(--wv-text-3, var(--wv-text-2)); }
+.motion-sec.warn { color: var(--wv-danger, #c45c4a); }
 /* 位置总控：估计脸宽告警（<64px 红 / 64~96px 黄 / ≥96px 绿） */
 .pos-face { font-size: 10.5px; white-space: nowrap; }
 .pos-face.ok { color: var(--wv-success, #7BC47F); }
