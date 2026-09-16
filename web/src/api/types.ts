@@ -173,6 +173,14 @@ export interface PlanSubject {
   enabled?: boolean
   locked?: boolean
   refs?: PlanSubjectRef[]
+  /**
+   * P5：**方案级默认位置**（「位置总控」→「方案默认（全片）」写这里）。
+   *
+   * 为什么单独按主体存、而不是挂在 `refs[].region` 上：主体可能只有定妆照、没有任何素材图
+   * （实测本项目的 4 个主体 refs 全空）——那时方案级位置就**无处可存**了。
+   * 优先级：帧级 `keyframes[].layout` &gt; 镜级 `shots[].layout` &gt; 本字段 &gt; `refs[].region` &gt; 点选坐标。
+   */
+  region?: { x: number; y: number; w: number; h: number } | null
   /** 定妆图（由素材图生成，优先用于分镜锚定） */
   portraitAssetId?: string
   portraitVersion?: number
@@ -264,6 +272,13 @@ export interface DirectorShot {
     camera_move?: string
     composition?: string
     positive_prompt: string
+    /**
+     * P5：**帧级**主体位置（运镜镜头的每一帧可各摆各的，一帧里可以有一个或多个主体框）。
+     *
+     * 优先级最高（高于 `shots[].layout` 与方案默认）；生成时后端按 `keyframe_index` 取对应帧的
+     * `layout` 写进该帧那次出图的正词与 `referenceRegions`。
+     */
+    layout?: Array<{ subject: string; x: number; y: number; w: number; h: number }> | null
   }> | null
 }
 

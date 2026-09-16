@@ -108,6 +108,21 @@
                 "shot_size": { "type": "string" },
                 "camera_move": { "type": "string" },
                 "composition": { "type": "string", "description": "机位/遮挡/前景关系（如 behind monk, over-the-shoulder）" },
+                "layout": {
+                  "type": ["array", "null"],
+                  "description": "P5 帧级主体位置（运镜镜头的每一帧可各摆各的，一帧里可一个或多个主体框）。优先级最高：帧级 > 镜级 shots[].layout > 方案默认 subjects[].region",
+                  "items": {
+                    "type": "object",
+                    "required": ["subject", "x", "y", "w", "h"],
+                    "properties": {
+                      "subject": { "type": "string" },
+                      "x": { "type": "number", "minimum": 0, "maximum": 1 },
+                      "y": { "type": "number", "minimum": 0, "maximum": 1 },
+                      "w": { "type": "number", "exclusiveMinimum": 0, "maximum": 1 },
+                      "h": { "type": "number", "exclusiveMinimum": 0, "maximum": 1 }
+                    }
+                  }
+                },
                 "positive_prompt": { "type": "string", "minLength": 20, "maxLength": 1200 }
               }
             }
@@ -139,7 +154,7 @@
           },
           "layout": {
             "type": ["array", "null"],
-            "description": "P5 逐镜画面位置（UI「画面位置」编辑器）：每个主体在画面中的位置与相对大小。优先级高于方案级 subjects[].refs[].region 与 lipsync_targets；后端会把它写成 referenceRegions（区域条件，路线B）并把「image1=谁 + 方位」拼进 positive_prompt（路线A）",
+            "description": "P5 逐镜画面位置（UI「位置总控」→作用范围=第 N 镜）：每个主体在画面中的位置与相对大小。优先级：帧级 keyframes[].layout > 本字段 > 方案默认 subjects[].region > lipsync_targets；后端把它写成 referenceRegions（区域条件，路线B）并把「image1=谁 + 方位」拼进 positive_prompt（路线A）",
             "items": {
               "type": "object",
               "required": ["subject", "x", "y", "w", "h"],

@@ -335,8 +335,9 @@ public class JobService {
                     for (int fi = 0; fi < frames.size(); fi++) {
                         JsonNode kf = frames.get(fi);
                         String raw = kf.path("positive_prompt").asText(shot.path("positive_prompt").asText(""));
+                        // ★ 逐帧位置：把帧号传进去，applyLayoutRegions 才能取 keyframes[fi].layout
                         ObjectNode payload = videoShotPayload("still", plan, shot, req.revisionId(), shotId,
-                                revisionNo, raw, seed, project, style, refs);
+                                revisionNo, raw, seed, project, style, refs, fi);
                         payload.put("keyframe_index", fi);
                         payload.put("keyframe_count", frames.size());
                         payload.put("frame_label", frameLabel(kf, fi, frames.size()));
@@ -349,7 +350,7 @@ public class JobService {
                     continue;
                 }
                 ObjectNode payload = videoShotPayload(req.kind(), plan, shot, req.revisionId(), shotId,
-                        revisionNo, shot.path("positive_prompt").asText(""), seed, project, style, refs);
+                        revisionNo, shot.path("positive_prompt").asText(""), seed, project, style, refs, -1);
                 if ("clip".equals(req.kind())) {
                     // motion 帧数：可显式指定（范围校验）
                     if (req.frames() != null) {
@@ -1522,11 +1523,8 @@ public class JobService {
         if (primary.isBlank()) {
             for (String s : subjects) { if (!s.isBlank()) { primary = s; break; } }
         }
-        boolean zh = isZhText(t);
-        String anchor = refAnchor(mapping.toString(), zh);
-        if (layout.length() > 0) {
-            anchor = anchor + (zh ? " 空间位置：" : " Spatial layout: ") + layout + "。";
-        }
+        // 位置句不再拼进 anchor（统一由 applyLayoutRegions 出，避免同一件事在正词里写两遍）
+        String anchor = refAnchor(mapping.toString(), isZhText(t));
         return new RefCtx(okIds, keys, subjects, regions, anchor, primary);
     }
 
@@ -1662,15 +1660,13 @@ public class JobService {
      * @param zh    是否用中文（跟随镜文本语言）
      */
     static String refAnchor(String slots, boolean zh) {
-        if (slots == null || slots.isBlank()) {
-            return zh ? " 人物/主体形象必须严格以给定参考图为准。"
-                      : " The subject appearance must strictly follow the provided reference image.";
-        }
+        // ★ 2026-09-16：这里**不再**列 imageN = 主体名 —— 那个清单连同位置一起由
+        //   applyLayoutRegions 一次写清（用户反馈：同一件事在正词里出现两遍、排序写法不一致，
+        //   模型会更难分清谁对应哪张图）。本方法只负责「身份约束」这一件事。
         return zh
-                ? " 参考图对应关系：" + slots + "。每个角色的身份、面容与服饰必须严格以其自己的参考图为依据；"
-                  + "角色之间必须互相区分，禁止共用、混合或互换面容。"
-                : " Reference image mapping: " + slots
-                  + ". Each character's identity, face and costume must strictly follow its own reference image;"
+                ? " 每个角色的身份、面容与服饰必须严格以其自己的参考图为依据；角色之间必须互相区分，"
+                  + "禁止共用、混合或互换面容。"
+                : " Each character's identity, face and costume must strictly follow its own reference image;"
                   + " keep the characters distinct and do not share, blend or swap their faces.";
     }
 
@@ -2427,7 +2423,7 @@ public class JobService {
     /** 视频镜头 payload 公共构造（含 P3 的 revision_no/prompt_md5；正词可传关键帧词）。 */
     private ObjectNode videoShotPayload(String kind, JsonNode plan, JsonNode shot, UUID revisionId, UUID shotId,
                                         int revisionNo, String positiveRaw, long seed, ProjectSnapshot project,
-                                        StyleTemplate style, RefCtx refs) {
+                                        StyleTemplate style, RefCtx refs, int keyframeIndex) {
         ObjectNode payload = mapper().createObjectNode();
         payload.put("kind", kind);
         payload.put("mode", "video");
@@ -2472,12 +2468,13 @@ public class JobService {
         attachRefs(payload, refs);
         // ★ 位置优先（2026-09-16）：把「每个主体在画面里的位置」写进 referenceRegions，
         //   供 worker 做**区域条件**（ConditioningSetAreaPercentage）。来源优先级：
-        //     ① shots[].layout = [{subject,x,y,w,h}]（UI 逐镜位置编辑器，w/h 表达远近与大小）
+        //     ⓪ shots[].keyframes[帧].layout = [{subject,x,y,w,h}]（帧级；运镜镜头的每一帧可各摆各的）
+        //     ① shots[].layout = [{subject,x,y,w,h}]（镜级；该镜所有帧的默认，UI 位置总控）
         //     ② 方案级 referenceAssets[].region / subjects[].refs[].region（「位置预览」卡的方案默认值）
         //     ③ shots[].lipsync_targets = {subject:{x,y}}（预览图点选，只有点 → 给默认框）
         //   与参考图顺序（refs.subjects()）严格对齐，没位置的填 null。
         //   同时把「image1=谁、image2=谁」写进正词（用户要求：positive_prompt 必须点名主体）。
-        applyLayoutRegions(payload, plan, shot, refs);
+        applyLayoutRegions(payload, plan, shot, keyframeIndex, refs);
         return payload;
     }
 
@@ -2502,13 +2499,14 @@ public class JobService {
      * 这里做**后端兜底**（不依赖 LLM 是否听话）：只要绑定了参考图，就把槽位映射写进正词。
      * 槽位与 worker 的 LoadImage 顺序一致（image1=referenceKeys[0] …，见 comfy_client._wf_set_image）。
      */
-    static void applyLayoutRegions(ObjectNode payload, JsonNode plan, JsonNode shot, RefCtx refs) {
+    static void applyLayoutRegions(ObjectNode payload, JsonNode plan, JsonNode shot, int keyframeIndex,
+                                   RefCtx refs) {
         if (refs == null || refs.subjects() == null || refs.subjects().isEmpty()) {
             return;
         }
         java.util.Map<String, double[]> pos = new java.util.LinkedHashMap<>();
         java.util.Map<String, String> src = new java.util.LinkedHashMap<>();
-        // ② 方案级区域（「位置预览」卡的默认值）
+        // ② 方案级区域（「位置总控」卡的「方案默认（全片）」）
         collectPlanRegions(pos, src, plan == null ? null : plan.path("referenceAssets"));
         JsonNode planSubjects = plan == null ? null : plan.path("subjects");
         if (planSubjects != null && planSubjects.isArray()) {
@@ -2517,11 +2515,19 @@ public class JobService {
                 if (name.isEmpty()) {
                     continue;
                 }
+                // ②-a 新增：subjects[].region（按**主体**存，不依赖有没有素材图）。
+                //     必须有它：4 个主体都只绑定定妆照、refs 为空时，方案级位置**无处可存**。
+                double[] own = jsonBox(sub.path("region"));
+                if (own != null && !pos.containsKey(name)) {
+                    pos.put(name, own);
+                    src.put(name, "plan");
+                }
+                // ②-b 兼容：subjects[].refs[].region（按素材图存的老口径）
                 for (JsonNode ref : sub.path("refs")) {
                     double[] p = jsonBox(ref.path("region"));
                     if (p != null && !pos.containsKey(name)) {
                         pos.put(name, p);
-                        src.put(name, "plan");
+                        src.put(name, "plan-ref");
                     }
                 }
             }
@@ -2570,6 +2576,24 @@ public class JobService {
                 }
             }
         }
+        // ⓪ 帧级位置（最高优先）：运镜镜头每一帧可以各摆各的（shots[].keyframes[fi].layout）
+        if (keyframeIndex >= 0) {
+            JsonNode frames = shot.path("keyframes");
+            if (frames.isArray() && keyframeIndex < frames.size()) {
+                JsonNode fl = frames.get(keyframeIndex).path("layout");
+                if (fl.isArray()) {
+                    for (JsonNode it : fl) {
+                        String sub = it.path("subject").asText("").trim();
+                        double x = it.path("x").asDouble(-1), y = it.path("y").asDouble(-1);
+                        double w = it.path("w").asDouble(-1), h = it.path("h").asDouble(-1);
+                        if (!sub.isEmpty() && x >= 0 && y >= 0 && w > 0 && h > 0) {
+                            pos.put(sub, new double[]{x, y, w, h});
+                            src.put(sub, "frame" + keyframeIndex);
+                        }
+                    }
+                }
+            }
+        }
         if (!pos.isEmpty()) {
             com.fasterxml.jackson.databind.node.ArrayNode regions = payload.putArray("referenceRegions");
             for (String subject : refs.subjects()) {
@@ -2591,42 +2615,44 @@ public class JobService {
         //   KSampler 会抛 `IndexError: tuple index out of range`（实测两轮），所以先走提示词描述；
         //   referenceRegions 仍然保留，供后续路线 B（离线调通后再切）。
         //
-        //   注：「imageN = 谁」的点名已由 refs.anchor() 统一负责（语言跟随镜文本），
-        //   这里只补**位置**，避免同一件事在正词里写两遍（冗余会抢词数预算）。
-        if (pos.isEmpty()) {
-            return;
-        }
+        //   注：「imageN = 谁」的点名与位置**由这里一次写清**（refAnchor 只保留身份约束）。
+        //   为什么要合并成一句（2026-09-16 用户反馈）：原来「参考图对应关系」和「主体位置」
+        //   两句都带 `imageN = 主体名`，写法/排序略有差别 → 模型更难分清谁对应哪张图。
         String cur = payload.path("positive_prompt").asText("");
         boolean zh = isZhText(cur);
+        // 即使一个位置都没设，也照写「imageN = 主体名」—— 这是「positive_prompt 必须点名主体」
+        // 的后端兜底（不依赖 LLM 听话）。无 subject 名的风格参考图不点名（否则凭空造角色）。
         StringBuilder sb = new StringBuilder();
         for (int i = 0; i < refs.subjects().size(); i++) {
             String name = refs.subjects().get(i);
             if (name == null || name.isBlank()) {
                 continue;
             }
-            double[] p = pos.get(name);
-            if (p == null) {
-                continue;
-            }
             if (sb.length() > 0) {
-                sb.append("; ");
+                sb.append(zh ? "；" : "; ");
             }
-            sb.append("image").append(i + 1).append(" = ").append(name).append(zh ? "（" : " (")
-              .append(zh ? posHintZh(p[0], p[1]) : posHint(p[0], p[1]))
-              .append(zh ? "，x=" : ", x=").append(fmt2(p[0]))
-              .append(zh ? "，y=" : ", y=").append(fmt2(p[1]))
-              .append(zh ? "，框 " : ", box ").append(fmt2(p[2])).append("x").append(fmt2(p[3]))
-              .append(zh ? "）" : ")");
+            double[] p = pos.get(name);
+            sb.append("image").append(i + 1).append(" = ").append(name);
+            if (p != null) {
+                sb.append(zh ? "（" : " (")
+                  .append(zh ? posHintZh(p[0], p[1]) : posHint(p[0], p[1]))
+                  .append(zh ? "，x=" : ", x=").append(fmt2(p[0]))
+                  .append(zh ? "，y=" : ", y=").append(fmt2(p[1]))
+                  .append(zh ? "，框 " : ", box ").append(fmt2(p[2])).append("x").append(fmt2(p[3]))
+                  .append(zh ? "）" : ")");
+            }
         }
         if (sb.length() > 0) {
             String add = zh
-                    ? "\n主体位置（归一化画面坐标，原点在左上；y 越小越靠上，框越大越靠近镜头）：" + sb
-                      + "。请把每个角色严格放在给定位置与相对大小上，角色之间保持明显分开。"
-                    : "\nSubject placement (normalized frame coordinates, origin top-left; smaller y = higher in"
-                      + " frame, larger box = closer to camera): " + sb
-                      + ". Place each character exactly at that position and relative size; keep them clearly apart.";
+                    ? "\n参考图与主体对应（按送入顺序）：" + sb
+                      + "。请严格按这个对应关系：每个角色只用自己的参考图，并放在括号里给的位置与相对大小上"
+                      + "（归一化画面坐标，原点在左上；y 越小越靠上，框越大越靠近镜头）；角色之间保持明显分开。"
+                    : "\nReference mapping (in input order): " + sb
+                      + ". Follow it strictly: each character uses only its own reference image and is placed at"
+                      + " the given position and relative size (normalized frame coordinates, origin top-left;"
+                      + " smaller y = higher in frame, larger box = closer to camera); keep them clearly apart.";
             payload.put("positive_prompt", cur + add);
-            log.info("refs: 位置已写入正词（路线A，zh={}）：{}", zh, sb);
+            log.info("refs: 参考图↔主体（含位置={}）已写入正词：{}", !pos.isEmpty(), sb);
         }
     }
 

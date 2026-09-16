@@ -45,6 +45,8 @@ const emit = defineEmits<{
   toggleLock: [shotNo: number, locked: boolean]
   /** P5：AI 更新本镜提示词（含运镜关键帧逐帧）——由父级弹框确认后写入 */
   aiPrompt: [shot: DirectorShot]
+  /** P5：跳转到顶部「位置总控」并选中本镜（方案 A：分镜卡只做快捷入口） */
+  editLayoutOnTop: [shotNo: number]
 }>()
 
 const approved = computed(() => props.status === 'approved')
@@ -244,8 +246,16 @@ const sizeOptions = [
           已标记为空镜：本镜不注入人物参考图（仅文生图 + 风格）。
         </p>
       </div>
-      <!-- P5 逐镜画面位置：写 shots[].layout（后端优先级高于方案级区域与点选坐标） -->
+      <!-- P5 逐镜画面位置（快捷入口）：正式编辑在顶部「位置总控」，这里也能直接拖，并可一键跳过去 -->
       <div class="field wide">
+        <div class="kf-hint-row">
+          <span class="fl" style="margin: 0">画面位置（本镜）</span>
+          <button type="button" class="link-btn" data-testid="shot-edit-layout-top"
+                  title="跳到顶部「位置总控」：那里能按作用范围改（方案默认 / 本镜 / 本镜的某一帧）"
+                  @click="emit('editLayoutOnTop', shot.shot_no)">
+            在顶部编辑位置 →
+          </button>
+        </div>
         <ShotLayoutEditor
           :model-value="shot.layout ?? null"
           :subjects="castInfo.subjects"
@@ -466,6 +476,21 @@ const sizeOptions = [
 .cast-actions .link-btn:disabled {
   color: var(--wv-text-4);
   cursor: not-allowed;
+}
+.kf-hint-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 4px;
+}
+.kf-hint-row .link-btn {
+  appearance: none;
+  border: 0;
+  background: none;
+  padding: 0;
+  font-size: 11px;
+  color: var(--wv-accent, #d0a24e);
+  cursor: pointer;
 }
 .cast-warn {
   margin: 0;

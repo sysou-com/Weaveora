@@ -854,7 +854,7 @@ function syncReferenceAssets(): void {
   for (const [name, refsOf] of grouped) {
     const old = byName.get(name)
     const extra = (aliasAdd.get(name) ?? []).filter((x) => x !== name && !(old?.aliases ?? []).includes(x))
-    out.push({ name, kind: old?.kind ?? 'person', aliases: [...(old?.aliases ?? []), ...extra], enabled: old?.enabled ?? true, locked: old?.locked ?? false, refs: refsOf, portraitAssetId: old?.portraitAssetId ?? '', portraitVersion: old?.portraitVersion ?? 0 })
+    out.push({ name, kind: old?.kind ?? 'person', aliases: [...(old?.aliases ?? []), ...extra], enabled: old?.enabled ?? true, locked: old?.locked ?? false, refs: refsOf, portraitAssetId: old?.portraitAssetId ?? '', portraitVersion: old?.portraitVersion ?? 0, region: old?.region ?? null })
     byName.delete(name)
   }
   // 没有素材图但有定妆图/别名的主体也要保留（否则一键抽取的结果会丢）
@@ -874,13 +874,6 @@ function toggleRefChecked(id: string, on: boolean): void {
   syncReferenceAssets()
 }
 
-function setRefRegion(id: string, k: 'x' | 'y' | 'w' | 'h', v: string): void {
-  const cur = refRegions.value[id] ?? { x: '', y: '', w: '', h: '' }
-  refRegions.value = { ...refRegions.value, [id]: { ...cur, [k]: v } }
-  syncReferenceAssets()
-}
-
-
 const POS_COLORS = ['#8FB9B4', '#C8A25E', '#C45C4A', '#7AA87A']
 function parseRegionPct(r?: { x: string; y: string; w: string; h: string } | null) {
   if (!r) return null
@@ -890,15 +883,40 @@ function parseRegionPct(r?: { x: string; y: string; w: string; h: string } | nul
   if (w <= 0 || h <= 0 || x < 0 || y < 0 || x + w > 100.001 || y + h > 100.001) return null
   return { x, y, w, h }
 }
-function setRefRegionPct(id: string, region: { x: number; y: number; w: number; h: number }): void {
-  const r = (v: number) => String(Math.round(Math.max(0, Math.min(100, v)) * 10) / 10)
-  refRegions.value = { ...refRegions.value, [id]: { x: r(region.x), y: r(region.y), w: r(region.w), h: r(region.h) } }
-  syncReferenceAssets()
+/**
+ * 主体名 → 它**实际用于锚定的那张图**是什么（位置总控的主体表上显示）。
+ *
+ * 为什么必须显示（2026-09-16 实测第 4 镜串脸）：方案里 `portraitAssetId` 可以指向一张
+ * **上传的素材图**（kind=reference）而不是生成出来的定妆照 —— 后端会尊重这个绑定（用户显式指定），
+ * 但多角色同框时这种「身份不明」的图极易串脸，而界面上完全看不出来。所以这里标明 kind 并高亮告警。
+ */
+function subjectAnchorInfo(name: string): { label: string; warn: boolean; title: string } {
+  const sub = planSubjects().find((x) => x.name === name)
+  const pid = (sub?.portraitAssetId ?? '').trim()
+  if (!pid) {
+    return { label: '未定妆', warn: true, title: '没有绑定定妆照：该主体出镜时会用不上身份锚定（或被后端剔除）' }
+  }
+  const asset = assetById.value[pid]
+  const suffix = `#${pid.slice(-6)}`
+  if (!asset) {
+    return { label: `锚定图 ${suffix}`, warn: true, title: `资产 ${pid} 不在当前资产列表里（可能已删除或在别的项目）` }
+  }
+  const isPortrait = asset.kind === 'portrait' || asset.snapshotKind === 'portrait'
+  return isPortrait
+    ? { label: `定妆照 ${suffix}`, warn: false, title: `用于身份锚定：定妆照资产 ${pid}` }
+    : {
+        label: `素材图（非定妆照）${suffix}`,
+        warn: true,
+        title: `这个主体实际用的是**上传素材图**（kind=${asset.kind}），不是生成的定妆照 —— `
+          + '多角色同框时容易串脸。建议到「主体」面板生成/重新绑定定妆照。',
+      }
 }
-/** P13：勾选参与的主体（用于「已选主体」显示：定妆照 + 区域） */
-const enabledSubjects = computed<PlanSubject[]>(() =>
-  planSubjects().filter((s) => s.enabled !== false && (s.name ?? '').trim() !== ''),
-)
+
+/** 主体名 → 定妆照缩略图（位置总控的主体表用；老代码传 PlanSubject，这里按名查更顺手） */
+function subjectThumbByName(name: string): string {
+  const sub = planSubjects().find((s) => s.name === name)
+  return sub ? subjectThumb(sub) : ''
+}
 /** 该主体显示的图：定妆照优先，其次第一张勾选素材图 */
 /** 已选主体里显示的图 = **只显示定妆照**；图片未加载时按需拉取（否则会误显示「未定妆」） */
 function subjectThumb(sub: PlanSubject): string {
@@ -919,35 +937,210 @@ function subjectThumb(sub: PlanSubject): string {
 
 /** 已按需加载过的资产 id（防止重复请求） */
 const loadTried = ref<string[]>([])
-/** 主体区域（优先取该主体当前的区��输入，其次取方案里存的 region） */
-function subjectRegion(sub: PlanSubject, k: 'x' | 'y' | 'w' | 'h'): string {
-  const id = sub.portraitAssetId || (sub.refs ?? []).find((x) => x.checked !== false)?.assetId || ''
-  const src = id ? refRegions.value[id] : undefined
-  if (src && src[k]) return src[k]
-  const r = (sub.refs ?? []).find((x) => x.checked !== false)?.region
-  return r ? pctOf(r, k) : ''
-}
 /** 归一化 region（0–1）→ 百分比字符串 */
 function pctOf(r: { x: number; y: number; w: number; h: number }, k: 'x' | 'y' | 'w' | 'h'): string {
   const v = r[k]
   return Number.isFinite(v) ? String(Math.round(v * 100)) : ''
 }
-/** 编辑主体区域：写回该主体第一张勾选素材图（或定妆图）对应的 refRegions，并同步进方案 */
-function setSubjectRegion(sub: PlanSubject, k: 'x' | 'y' | 'w' | 'h', v: string): void {
-  const id = sub.portraitAssetId || (sub.refs ?? []).find((r) => r.checked !== false)?.assetId || ''
-  if (!id) {
-    message.warning(`「${sub.name}」没有可挂区域的图（先上传/勾选素材图或生成定妆照）`)
+// ================= P5 位置总控（作用范围：方案默认 / 第 N 镜 / 第 N 镜·帧 M） =================
+/**
+ * 一个镜可能有多个（运镜）帧，每帧可以各摆各的位置，一帧里可有一个或多个主体框。
+ * 所以位置编辑必须能指定「改到哪一层」，三层优先级：
+ *   帧级 `shots[].keyframes[j].layout` &gt; 镜级 `shots[].layout` &gt; 方案默认 `subjects[].region`
+ *
+ * 顶部这张卡是**唯一总控**（分镜卡只留一个「在顶部编辑」快捷入口，A 方案）。
+ * 条目一律按**主体**分组（不是按参考图）—— 主体可能只有定妆照、没有任何素材图。
+ */
+type PosScope =
+  | { kind: 'plan' }
+  | { kind: 'shot'; shotNo: number }
+  | { kind: 'frame'; shotNo: number; index: number }
+const posScope = ref<PosScope>({ kind: 'plan' })
+const posPanelRef = ref<HTMLElement | null>(null)
+
+const posShotList = computed<DirectorShot[]>(() => {
+  const d = draft.value
+  return d && isVideoPlan(d) ? (d.shots ?? []) : []
+})
+function shotOfNo(no: number): DirectorShot | undefined {
+  return posShotList.value.find((s) => s.shot_no === no)
+}
+function posShotLabel(s: DirectorShot, i: number): string {
+  const kf = (s.keyframes ?? [])[i]
+  return `第 ${s.shot_no} 镜 · 帧 ${i + 1}${kf?.label ? ` ${kf.label}` : ''}`
+}
+/** 作用范围下拉（可搜索：输入「4」「帧 2」都能命中） */
+const posScopeOptions = computed(() => {
+  const out: Array<{ value: string; label: string; keywords: string }> = [
+    { value: 'plan', label: '方案默认（全片所有镜）', keywords: 'plan 方案 默认 全片 all' },
+  ]
+  for (const s of posShotList.value) {
+    out.push({ value: `shot:${s.shot_no}`, label: `第 ${s.shot_no} 镜（整镜默认）`, keywords: `shot ${s.shot_no} 镜 整镜` })
+    ;(s.keyframes ?? []).forEach((kf, i) => {
+      out.push({
+        value: `frame:${s.shot_no}:${i}`,
+        label: posShotLabel(s, i),
+        keywords: `frame ${s.shot_no} ${i + 1} 帧 ${kf.label ?? ''}`,
+      })
+    })
+  }
+  return out
+})
+const posScopeValue = computed<string>(() =>
+  posScope.value.kind === 'plan'
+    ? 'plan'
+    : posScope.value.kind === 'shot'
+      ? `shot:${posScope.value.shotNo}`
+      : `frame:${posScope.value.shotNo}:${posScope.value.index}`,
+)
+function setPosScope(v: string): void {
+  if (!v || v === 'plan') {
+    posScope.value = { kind: 'plan' }
     return
   }
-  setRefRegion(id, k, v)
+  const parts = v.split(':')
+  const no = Number(parts[1])
+  if (!Number.isFinite(no)) return
+  posScope.value =
+    parts[0] === 'frame' ? { kind: 'frame', shotNo: no, index: Number(parts[2]) || 0 } : { kind: 'shot', shotNo: no }
+}
+const posScopeLabel = computed(() => {
+  if (posScope.value.kind === 'plan') return '方案默认（全片）'
+  const s = shotOfNo(posScope.value.shotNo)
+  if (posScope.value.kind === 'shot') return `第 ${posScope.value.shotNo} 镜`
+  return s ? posShotLabel(s, posScope.value.index) : `第 ${posScope.value.shotNo} 镜 · 帧 ${posScope.value.index + 1}`
+})
+
+/** 当前范围要摆位置的主体（方案默认 = 全部启用主体；镜/帧 = 该镜出镜主体） */
+const posSubjects = computed<string[]>(() => {
+  const d = draft.value
+  if (!d || !isVideoPlan(d)) return []
+  const all = planSubjectNames(d)
+  if (posScope.value.kind === 'plan') return all
+  const s = shotOfNo(posScope.value.shotNo)
+  return s ? shotCastInfo(s, all).subjects : all
+})
+
+/** 当前范围里**显式设置**过的框（帧级/镜级/方案级各自的存储） */
+function posOwnBox(name: string): { x: number; y: number; w: number; h: number } | null {
+  const d = draft.value
+  if (!d || !isVideoPlan(d)) return null
+  if (posScope.value.kind === 'plan') {
+    return (d.subjects ?? []).find((x) => x.name === name)?.region ?? null
+  }
+  const s = shotOfNo(posScope.value.shotNo)
+  if (!s) return null
+  const list = posScope.value.kind === 'frame' ? (s.keyframes ?? [])[posScope.value.index]?.layout : s.layout
+  const b = (list ?? []).find((x) => x.subject === name)
+  return b ? { x: b.x, y: b.y, w: b.w, h: b.h } : null
+}
+/** 继承来源：镜继承方案默认；帧继承该镜的镜级 → 再不够就方案默认 */
+function posInheritedBox(name: string): { x: number; y: number; w: number; h: number } | null {
+  const d = draft.value
+  if (!d || !isVideoPlan(d) || posScope.value.kind === 'plan') return null
+  const s = shotOfNo(posScope.value.shotNo)
+  if (!s) return null
+  if (posScope.value.kind === 'frame') {
+    const own = (s.layout ?? []).find((b) => b.subject === name)
+    if (own) return { x: own.x, y: own.y, w: own.w, h: own.h }
+  }
+  return (d.subjects ?? []).find((x) => x.name === name)?.region ?? null
+}
+/** 显示用：本级有就用本级的，没有就显示继承来的（浅色虚线） */
+function posBox(name: string): { x: number; y: number; w: number; h: number } | null {
+  return posOwnBox(name) ?? posInheritedBox(name)
+}
+function posIsInherited(name: string): boolean {
+  return !posOwnBox(name) && !!posInheritedBox(name)
+}
+/** 百分比输入框的值（0–100） */
+function posPctStr(name: string): { x: string; y: string; w: string; h: string } {
+  const b = posBox(name)
+  return b
+    ? { x: pctOf(b, 'x'), y: pctOf(b, 'y'), w: pctOf(b, 'w'), h: pctOf(b, 'h') }
+    : { x: '', y: '', w: '', h: '' }
 }
 
-/** 位置预览数据：主体名 + 区域 + 配色 */
+/** 写一个主体的框到**当前范围**（其余已设主体保留，不动上层数据） */
+function posWrite(name: string, box: { x: number; y: number; w: number; h: number }): void {
+  const d = draft.value
+  if (!d || !isVideoPlan(d)) return
+  const cl = (v: number): number => Math.round(Math.max(0, Math.min(1, v)) * 1000) / 1000
+  const one = { subject: name, x: cl(box.x), y: cl(box.y), w: cl(box.w), h: cl(box.h) }
+  if (posScope.value.kind === 'plan') {
+    const subs = planSubjects()
+    setPlanSubjects(
+      subs.map((x) => (x.name === name ? { ...x, region: { x: one.x, y: one.y, w: one.w, h: one.h } } : x)),
+    )
+    return
+  }
+  const s = shotOfNo(posScope.value.shotNo)
+  if (!s) return
+  // 顺序按“当前范围的主体顺序”，保证后端 imageN 槽位与界面展示一致
+  const merge = (list: Array<{ subject: string; x: number; y: number; w: number; h: number }> | null | undefined) => {
+    const next = [...(list ?? []).filter((b) => b.subject !== name), one]
+    return posSubjects.value
+      .map((n) => next.find((b) => b.subject === n))
+      .filter((b): b is { subject: string; x: number; y: number; w: number; h: number } => !!b)
+  }
+  if (posScope.value.kind === 'frame') {
+    const kf = (s.keyframes ?? [])[posScope.value.index]
+    if (kf) kf.layout = merge(kf.layout)
+  } else {
+    s.layout = merge(s.layout)
+  }
+}
+/** 拖动/缩放用：入参是百分比（0–100） */
+function setPosPct(name: string, region: { x: number; y: number; w: number; h: number }): void {
+  posWrite(name, { x: region.x / 100, y: region.y / 100, w: region.w / 100, h: region.h / 100 })
+}
+/** 表里直接填值（0–100 百分比） */
+function setPosField(name: string, k: 'x' | 'y' | 'w' | 'h', raw: string): void {
+  const n = Number(String(raw ?? '').trim().replace('%', ''))
+  if (!Number.isFinite(n)) return
+  const base = posBox(name) ?? { x: 0.3, y: 0.2, w: 0.4, h: 0.6 }
+  const next = { ...base, [k]: Math.max(0, Math.min(100, n)) / 100 }
+  if (k === 'w') next.x = Math.min(next.x, 1 - next.w)
+  if (k === 'h') next.y = Math.min(next.y, 1 - next.h)
+  posWrite(name, next)
+}
+/** 清掉当前范围内该主体的位置（回到上一层继承） */
+function clearPos(name: string): void {
+  const d = draft.value
+  if (!d || !isVideoPlan(d)) return
+  if (posScope.value.kind === 'plan') {
+    setPlanSubjects(planSubjects().map((x) => (x.name === name ? { ...x, region: null } : x)))
+    return
+  }
+  const s = shotOfNo(posScope.value.shotNo)
+  if (!s) return
+  if (posScope.value.kind === 'frame') {
+    const kf = (s.keyframes ?? [])[posScope.value.index]
+    if (kf) kf.layout = (kf.layout ?? []).filter((b) => b.subject !== name)
+  } else {
+    s.layout = (s.layout ?? []).filter((b) => b.subject !== name)
+  }
+}
+
+/** 分镜卡【在顶部编辑】快捷入口（A 方案）：跳到顶部总控并选中该镜 */
+function editPosOnTop(shotNo: number): void {
+  setPosScope(`shot:${shotNo}`)
+  posPanelRef.value?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  const kfN = (shotOfNo(shotNo)?.keyframes ?? []).length
+  message.info(
+    kfN > 1
+      ? `已在顶部选中第 ${shotNo} 镜（该镜有 ${kfN} 帧）：要改某一帧，把作用范围切到「帧 N」`
+      : `已在顶部「位置总控」选中第 ${shotNo} 镜`,
+  )
+}
+
+/** 位置预览数据（**按主体**）：主体名 + 区域 + 配色 */
 const refPreviewItems = computed(() =>
-  selectedRefAssets.value.map((a, i) => ({
-    id: a.id,
-    label: (refSubjects.value[a.id] ?? '').trim() || `主体${i + 1}`,
-    region: parseRegionPct(refRegions.value[a.id]),
+  posSubjects.value.map((name, i) => ({
+    id: name,
+    label: name,
+    region: parseRegionPct(posPctStr(name)),
+    inherited: posIsInherited(name),
     color: POS_COLORS[i % POS_COLORS.length],
   })),
 )
@@ -956,11 +1149,14 @@ const posAspectCss = computed(() => {
   const [w, h] = ar.split(':').map((n) => Number(n) || 0)
   return w > 0 && h > 0 ? `${w} / ${h}` : '16 / 9'
 })
-/** 多主体自动均分（2 → 左右；3 → 三等分；4 → 2×2），帮助用户快速得到合理相对位置 */
+/** 「自动分配」：按当前范围的主体顺序摆位（2 → 左右；3 → 三等分；4 → 2×2） */
 function autoLayoutRegions(): void {
-  const items = selectedRefAssets.value
-  const n = items.length
-  if (n < 2) return
+  const names = posSubjects.value
+  const n = names.length
+  if (n < 2) {
+    message.info('当前范围只有 0~1 个主体，无需自动分配')
+    return
+  }
   const layouts: Array<{ x: number; y: number; w: number; h: number }> = []
   if (n === 2) {
     layouts.push({ x: 0, y: 0, w: 50, h: 100 }, { x: 50, y: 0, w: 50, h: 100 })
@@ -971,8 +1167,8 @@ function autoLayoutRegions(): void {
       layouts.push({ x: (i % 2) * 50, y: Math.floor(i / 2) * 50, w: 50, h: 50 })
     }
   }
-  items.forEach((a, i) => setRefRegionPct(a.id, layouts[i] ?? layouts[layouts.length - 1]))
-  message.success('已按主体顺序自动均分区域，可拖动或微调')
+  names.forEach((name, i) => setPosPct(name, layouts[i] ?? layouts[layouts.length - 1]))
+  message.success(`已按主体顺序自动分配（${posScopeLabel.value}），可拖动或微调`)
 }
 
 // 位置预览拖动（移动 / 右下角缩放）
@@ -994,14 +1190,14 @@ function onBoxPointerMove(e: PointerEvent): void {
   const dy = ((e.clientY - posDrag.sy) / posDragRect.h) * 100
   const o = posDrag.orig
   if (posDrag.mode === 'move') {
-    setRefRegionPct(posDrag.id, {
+    setPosPct(posDrag.id, {
       x: Math.min(Math.max(0, o.x + dx), 100 - o.w),
       y: Math.min(Math.max(0, o.y + dy), 100 - o.h),
       w: o.w,
       h: o.h,
     })
   } else {
-    setRefRegionPct(posDrag.id, {
+    setPosPct(posDrag.id, {
       x: o.x,
       y: o.y,
       w: Math.min(Math.max(5, o.w + dx), 100 - o.x),
@@ -3364,13 +3560,38 @@ const shotTotal = computed(() => {
             </p>
           </div>
 
-          <!-- 位置预览卡片（右卡）：预览框 → 拖动提示 → 已选主体区域表 → 红色告警 -->
-          <div class="pos-panel" data-testid="pos-panel">
+          <!--
+            位置总控（右卡）：作用范围（方案默认 / 第N镜 / 第N镜·帧M）→ 预览框 → 主体区域表。
+            2026-09-16 改造：以前这张卡按**参考图**分组（主体只有定妆照、没有素材图时就一个条目都没有，
+            完全不可用），且与分镜卡里的「画面位置（本镜）」职责重叠。现在统一成按**主体**、
+            并且能指定改到「帧」这一层（一个镜可能有多个运镜帧，一帧里可有一个或多个主体框）。
+          -->
+          <div ref="posPanelRef" class="pos-panel" data-testid="pos-panel">
             <div class="brief-head">
-              <span class="font-mono eyebrow">位置预览（相对位置 / 区域%）</span>
-              <button v-if="selectedRefAssets.length > 1" type="button" class="link-btn" @click="autoLayoutRegions">
-                自动均分
+              <span class="font-mono eyebrow">位置总控（主体 / 区域%）</span>
+              <button v-if="posSubjects.length > 1" type="button" class="link-btn" data-testid="btn-auto-layout"
+                      :title="`按当前范围（${posScopeLabel}）的主体顺序自动摆位`" @click="autoLayoutRegions">
+                自动分配
               </button>
+            </div>
+            <!-- 作用范围：可搜索下拉（输入 4 / 帧2 都能命中） -->
+            <div class="pos-scope-row">
+              <span class="pos-scope-label font-mono">作用范围</span>
+              <NSelect
+                :value="posScopeValue"
+                :options="posScopeOptions"
+                size="small"
+                filterable
+                class="pos-scope-select"
+                data-testid="pos-scope"
+                placeholder="方案默认（全片）"
+                @update:value="(v: string) => setPosScope(v)"
+              />
+              <span class="pos-scope-hint text-secondary">
+                {{ posScope.kind === 'plan'
+                  ? '全片默认位置；某一镜/某一帧没单独设时就用它'
+                  : `帧级 > 镜级 > 方案默认；当前编辑：${posScopeLabel}` }}
+              </span>
             </div>
 
             <div class="pos-frame" :style="{ aspectRatio: posAspectCss }">
@@ -3380,44 +3601,58 @@ const shotTotal = computed(() => {
                 v-for="it in refPreviewItems.filter((i) => i.region)"
                 :key="it.id"
                 class="pos-box"
+                :class="{ inherited: it.inherited }"
                 :style="{
                   left: (it.region?.x ?? 0) + '%',
                   top: (it.region?.y ?? 0) + '%',
                   width: (it.region?.w ?? 100) + '%',
                   height: (it.region?.h ?? 100) + '%',
                   borderColor: it.color,
-                  background: it.color + '22',
+                  background: it.inherited ? 'transparent' : it.color + '22',
                 }"
                 @pointerdown="onBoxPointerDown($event, it, 'move')"
                 @pointermove="onBoxPointerMove"
                 @pointerup="onBoxPointerUp"
                 @pointercancel="onBoxPointerUp"
               >
-                <span class="pos-label font-mono" :style="{ color: it.color }">{{ it.label }}</span>
+                <span class="pos-label font-mono" :style="{ color: it.color }">
+                  {{ it.label }}<template v-if="it.inherited"> · 继承</template>
+                </span>
                 <span class="pos-resize" @pointerdown.stop="onBoxPointerDown($event, it, 'resize')" />
               </div>
-              <p v-if="!refPreviewItems.some((i) => i.region)" class="pos-empty text-secondary">尚无区域：点右上「自动均分」，或拖预览框里的色块调整</p>
+              <p v-if="!refPreviewItems.some((i) => i.region)" class="pos-empty text-secondary">
+                尚无位置：点右上「自动分配」，或拖预览框里的色块调整
+              </p>
             </div>
 
             <p class="ref-hint text-secondary">
-              拖动色块移动、右下角拖动缩放；也可在上方「区域%」精确填写（x/y=左上角，w/h=宽高，0–100）。这里是**方案级默认位置**（全片生效）；
-              单个镜头要不一样的位置/远近，到分镜卡展开「画面位置（本镜）」拖动 —— 逐镜位置优先级更高（写进 <span class="font-mono">shots[].layout</span>）。
-              GPU(Comfy) 会把位置与「第几张参考图是哪个主体」写进提示词（多角色同框防串脸）。
+              拖动色块移动、右下角拖动缩放；也可在下方「区域%」直接填（x/y=左上角，w/h=宽高，0–100；w/h 越大=越近越大）。
+              这里是**唯一的位置总控**：作用范围选「方案默认」=全片；选「第 N 镜」/「第 N 镜 · 帧 M」=只改那一镜/那一帧
+              （生成时每帧用自己那份：<span class="font-mono">keyframes[j].layout</span> 优先于 <span class="font-mono">shots[].layout</span>）。
+              浅色虚线框 = 从上一层继承、尚未在本层设定。GPU(Comfy) 会把位置与「第几张参考图是哪个主体」写进提示词（多角色同框防串脸）。
             </p>
 
-            <!-- 区域表（提示下方） -->
-            <div v-if="enabledSubjects.length" class="ref-subjects pos-subjects" data-testid="subject-ref-block">
-              <p class="ref-subjects-title font-mono">已选主体<span class="text-secondary">（勾选参与的主体；只可编辑区域）</span></p>
-              <div v-for="sub in enabledSubjects" :key="sub.name" class="ref-subject-block">
+            <!-- 主体区域表：按**主体**列出（不依赖有没有素材图），可直接填值 -->
+            <div v-if="posSubjects.length" class="ref-subjects pos-subjects" data-testid="subject-ref-block">
+              <p class="ref-subjects-title font-mono">
+                主体位置<span class="text-secondary">（{{ posScopeLabel }}；共 {{ posSubjects.length }} 个主体）</span>
+              </p>
+              <div v-for="sub in posSubjects" :key="sub" class="ref-subject-block">
                 <div class="ref-subject-row">
-                  <img v-if="subjectThumb(sub)" :src="subjectThumb(sub)" class="ref-subject-thumb" alt="" />
+                  <img v-if="subjectThumbByName(sub)" :src="subjectThumbByName(sub)" class="ref-subject-thumb" alt="" />
                   <span v-else class="ref-subject-thumb empty font-mono">未定妆</span>
-                  <span class="ref-subject-name">{{ sub.name }}</span>
-                  <span v-if="sub.portraitAssetId" class="ref-subject-tag font-mono"
-                        :title="`定妆照资产 ${sub.portraitAssetId}`">
-                    定妆照 v{{ sub.portraitVersion ?? 1 }} ·#{{ sub.portraitAssetId.slice(-6) }}
+                  <span class="ref-subject-name">{{ sub }}</span>
+                  <span class="ref-subject-tag font-mono" :class="{ off: subjectAnchorInfo(sub).warn }"
+                        :title="subjectAnchorInfo(sub).title" :data-testid="'anchor-' + sub">
+                    {{ subjectAnchorInfo(sub).label }}
                   </span>
-                  <span v-else class="ref-subject-tag off font-mono">素材图</span>
+                  <span v-if="posIsInherited(sub)" class="ref-subject-tag font-mono" title="本层未设定，继承上一层的框">
+                    继承{{ posScope.kind === 'frame' ? '镜/方案' : '方案' }}默认
+                  </span>
+                  <button v-if="posOwnBox(sub)" type="button" class="link-btn pos-clear" title="清掉本层的位置，回到继承"
+                          @click="clearPos(sub)">
+                    清除本层
+                  </button>
                 </div>
                 <div class="ref-region-row">
                   <span class="ref-region-label font-mono">区域%</span>
@@ -3426,10 +3661,12 @@ const shotTotal = computed(() => {
                     :key="k"
                     class="text ref-region-input"
                     type="text"
-                    inputmode="numeric"
+                    inputmode="decimal"
                     :placeholder="k"
-                    :value="subjectRegion(sub, k)"
-                    @input="setSubjectRegion(sub, k, ($event.target as HTMLInputElement).value)"
+                    :data-testid="`pos-${k}-${sub}`"
+                    :value="posPctStr(sub)[k]"
+                    @change="setPosField(sub, k, ($event.target as HTMLInputElement).value)"
+                    @keyup.enter="setPosField(sub, k, ($event.target as HTMLInputElement).value)"
                   />
                 </div>
               </div>
@@ -3506,6 +3743,7 @@ const shotTotal = computed(() => {
                   @approve-shot="handleApproveShot"
                   @ai-prompt="openAiRewrite"
                   @calibrate-durations="calibrateAllDurations"
+                  @edit-layout-on-top="editPosOnTop"
                   @preview-voice="previewVoice"
                   @preview-bgm="previewBgm"
                   @gen-line="genVoiceLine"
@@ -4594,6 +4832,28 @@ const shotTotal = computed(() => {
   overflow: auto;
   padding: 14px; background: var(--wv-surface);
   border: 1px solid var(--wv-line); border-radius: var(--wv-radius-m);
+}
+.pos-scope-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 6px 0 8px;
+}
+.pos-scope-label {
+  font-size: 10.5px;
+  letter-spacing: 0.14em;
+  color: var(--wv-text-4);
+}
+.pos-scope-select {
+  width: 250px;
+  max-width: 60vw;
+}
+.pos-scope-hint {
+  font-size: 11px;
+}
+.pos-box.inherited {
+  border-style: dashed;
 }
 .pos-frame {
   position: relative; width: 100%; max-height: 340px; margin: 0 auto;

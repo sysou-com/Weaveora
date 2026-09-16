@@ -268,6 +268,8 @@ export function normalizePlan(raw: DirectorPlan): DirectorPlan {
               ...(k.camera_move === undefined ? {} : { camera_move: str(k.camera_move) }),
               composition: str(k.composition),
               positive_prompt: str(k.positive_prompt),
+              // ★ 帧级主体位置（P5）：白名单必须带上它，否则保存/回读一次就被剥掉
+              ...(Array.isArray(k.layout) ? { layout: k.layout } : {}),
             }))
         : []
       return {

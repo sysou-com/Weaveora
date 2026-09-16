@@ -56,6 +56,8 @@ const emit = defineEmits<{
   removePreset: [id: string]
   /** P10：按配音实际时长反推镜头时长（原在「任务」区，2026-09-16 移回「镜头时长」） */
   calibrateDurations: []
+  /** P5：分镜卡的「在顶部编辑位置」快捷入口 → 跳到顶部位置总控并选中该镜 */
+  editLayoutOnTop: [shotNo: number]
   /** 方案被就地修改（改名等），父级用于触发 dirty */
   'update:plan': []
   closePreview: []
@@ -276,6 +278,7 @@ const transitions = ['cut', 'dissolve', 'fade', 'wipe'].map((v) => ({ label: v, 
           @approve="emit('approveShot', $event)"
           @preview-voice="emit('previewVoice', $event)"
           @ai-prompt="emit('aiPrompt', $event)"
+          @edit-layout-on-top="emit('editLayoutOnTop', $event)"
         />
         <button
           v-if="allShots.length > shotShown"
