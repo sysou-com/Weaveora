@@ -136,6 +136,30 @@
           "allowNarrationOverflow": {
             "type": "boolean",
             "description": "P10：该镜允许配音时长超出镜头（不再提醒）。不设时音频与字幕仍会自然溢到下一镜，但界面会告警"
+          },
+          "layout": {
+            "type": ["array", "null"],
+            "description": "P5 逐镜画面位置（UI「画面位置」编辑器）：每个主体在画面中的位置与相对大小。优先级高于方案级 subjects[].refs[].region 与 lipsync_targets；后端会把它写成 referenceRegions（区域条件，路线B）并把「image1=谁 + 方位」拼进 positive_prompt（路线A）",
+            "items": {
+              "type": "object",
+              "required": ["subject", "x", "y", "w", "h"],
+              "properties": {
+                "subject": { "type": "string", "description": "主体名（与 subjects[].name / referenceAssets[].subject 同名即自动关联）" },
+                "x": { "type": "number", "minimum": 0, "maximum": 1, "description": "左上角 x（归一化）" },
+                "y": { "type": "number", "minimum": 0, "maximum": 1, "description": "左上角 y（归一化，越小越高）" },
+                "w": { "type": "number", "exclusiveMinimum": 0, "maximum": 1, "description": "宽（归一化）；越大 = 离镜头越近" },
+                "h": { "type": "number", "exclusiveMinimum": 0, "maximum": 1, "description": "高（归一化）；越大 = 离镜头越近" }
+              }
+            }
+          },
+          "lipsync_targets": {
+            "type": ["object", "null"],
+            "description": "P13 对口型「谁在哪张脸」：用户在预览图上点选的人脸位置 {主体名:{x,y}}（归一化 0–1）。仅作位置提示；有 layout 时以后者为准",
+            "additionalProperties": {
+              "type": "object",
+              "required": ["x", "y"],
+              "properties": { "x": { "type": "number" }, "y": { "type": "number" } }
+            }
           }
         }
       }

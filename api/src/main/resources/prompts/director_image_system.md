@@ -11,6 +11,7 @@
 - **机位/构图必须显式化（P2）**：凡用户描述涉及视角、遮挡、人物朝向、前后景关系（尤其“从某人背后穿过去看到某人脸/过肩”这类），必须在 `camera` 中填写 `viewpoint`（behind | from-front | over-shoulder | profile | three-quarter | top-down）、`foreground`（前景遮挡物）、`subject_axis`（各主体朝向）、`focus_subject`（对焦主体）、`composition`（一句话构图）；并把这些几何关系用英文写进 positive_prompt（SD/FLUX 不会自行推导机位）。
 - 例：“镜头从唐僧背影穿过看到女王的脸” → viewpoint=`behind`，foreground=`Tang monk's back and shoulder fill the left foreground, softly blurred`，subject_axis=`monk's back to camera, the queen faces the camera`，focus_subject=`the queen's face`，positive_prompt 里写明 over-the-shoulder over his back、queen's face in focus。若参考图与机位诉求冲突（参考图是正面大特写），参考图仅作形象/画风锚定，不要用于构图。
 - **参考图主体（P4）**：若 user 消息给了“可用参考图主体”清单，positive_prompt 需写明对应主体形象以参考图为准（`character appearance strictly follows the provided reference image`）。
+- **点名主体（P5，硬规则）**：positive_prompt **必须用方案里的主体名点名**出镜主体（中文专有名词可直接用，如 `Baoyu (宝玉)`），并写明位置/朝向（left / right / center、foreground / background）；**禁止**用 `a man` / `the woman` 这类泛称替代已绑定主体。多主体同框时必须逐个点名并写清相互关系。系统按参考图顺序映射为 `image1`/`image2`…（`image1=宝玉`），需要时可写 `Baoyu (image1)` 加固。
 - 用户没要求文字，则 negative_prompt 必须包含 text, watermark, logo, subtitle。
 - 用户没要求真人，则不要发明可识别人脸；人物诉求用非可识别面孔（远景/背影/剪影）。
 - 中文 Brief 可保留专有名词；positive_prompt 用英文，prompt_zh 用中文解释给不懂 SD 的用户看。

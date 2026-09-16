@@ -6,6 +6,7 @@ import { computed, ref, watch } from 'vue'
 import MusicTimeline from '@/components/director/MusicTimeline.vue'
 import NarrationTimeline from '@/components/director/NarrationTimeline.vue'
 import ShotCard from '@/components/director/ShotCard.vue'
+import type { LayoutBox } from '@/components/director/ShotLayoutEditor.vue'
 import VoiceBindingsTable from '@/components/director/VoiceBindingsTable.vue'
 import type { DirectorShot, ShotRecord, VideoPlan } from '@/api/types'
 import { MUSIC_MOOD_PRESETS, VOICE_PRESETS, moodOptions } from '@/utils/audio'
@@ -197,6 +198,79 @@ const statusOf = (no: number): string =>
 
 const approvedAll = computed(() => props.disabled)
 
+// ---------- P5：逐镜画面位置（shots[].layout）的默认值来源 ----------
+/** 参与锚定的主体名（方案顺序） */
+const planSubjectNames = computed<string[]>(() =>
+  (props.plan.subjects ?? [])
+    .filter((s) => s.enabled !== false && (s.name ?? '').trim() !== '')
+    .map((s) => s.name.trim()),
+)
+
+function boxOf(r: { x: number; y: number; w: number; h: number } | null | undefined): LayoutBox | null {
+  if (!r) return null
+  const { x, y, w, h } = r
+  const ok = [x, y, w, h].every((v) => Number.isFinite(v))
+  return ok && w > 0 && h > 0 && x >= 0 && y >= 0 ? { subject: '', x, y, w, h } : null
+}
+
+/** 方案级默认位置（「位置预览」卡）：referenceAssets[].region 优先，其次 subjects[].refs[].region */
+const planDefaultRegions = computed<Record<string, LayoutBox>>(() => {
+  const out: Record<string, LayoutBox> = {}
+  for (const ra of props.plan.referenceAssets ?? []) {
+    const name = (ra.subject ?? '').trim()
+    const b = boxOf(ra.region)
+    if (name && b && !out[name]) out[name] = { ...b, subject: name }
+  }
+  for (const s of props.plan.subjects ?? []) {
+    const name = (s.name ?? '').trim()
+    if (!name || out[name]) continue
+    for (const ref of s.refs ?? []) {
+      if (ref.checked === false) continue
+      const b = boxOf(ref.region)
+      if (b) {
+        out[name] = { ...b, subject: name }
+        break
+      }
+    }
+  }
+  return out
+})
+
+/** 画幅（CSS aspect-ratio 值），与项目画幅一致 */
+const planAspectCss = computed(() => {
+  const [w, h] = String(props.plan.aspect_ratio ?? '16:9').split(':').map((n) => Number(n) || 0)
+  return w > 0 && h > 0 ? `${w} / ${h}` : '16 / 9'
+})
+
+/** 与后端 JobService.subjectMatches 同步：精确包含，或中文名退一步做 2 字片段匹配 */
+function subjectMatches(text: string, subject: string): boolean {
+  const t = text ?? ''
+  const s = (subject ?? '').trim()
+  if (!s) return true
+  if (t.includes(s)) return true
+  if (s.length < 3) return false
+  for (let i = 0; i + 2 <= s.length; i++) {
+    if (t.includes(s.slice(i, i + 2))) return true
+  }
+  return false
+}
+
+/** 本镜可能出镜的主体：先看旁白/台词标注，再看镜文本匹配；一个都没命中则带回全部（与后端一致） */
+function shotSubjectsOf(shot: DirectorShot): string[] {
+  const names = planSubjectNames.value
+  if (!names.length) return []
+  const marked = new Set(
+    (shot.narrations ?? []).map((n) => (n.subject ?? '').trim()).filter((x) => x && names.includes(x)),
+  )
+  const text = [
+    shot.action ?? '',
+    (shot as unknown as { zh?: string }).zh ?? '',
+    shot.positive_prompt ?? '',
+  ].join(' ')
+  const hit = names.filter((n) => marked.has(n) || subjectMatches(text, n))
+  return hit.length ? hit : names
+}
+
 const transitions = ['cut', 'dissolve', 'fade', 'wipe'].map((v) => ({ label: v, value: v }))
 </script>
 
@@ -239,6 +313,9 @@ const transitions = ['cut', 'dissolve', 'fade', 'wipe'].map((v) => ({ label: v, 
           :busy="busyShot === shot.shot_no"
           :preview-busy="previewBusy"
           :locked="(props.lockedShots ?? []).includes(shot.shot_no)"
+          :subjects="shotSubjectsOf(shot)"
+          :default-layout="planDefaultRegions"
+          :aspect="planAspectCss"
           @toggle-lock="(no: number, l: boolean) => emit('toggleLock', no, l)"
           @approve="emit('approveShot', $event)"
           @preview-voice="emit('previewVoice', $event)"

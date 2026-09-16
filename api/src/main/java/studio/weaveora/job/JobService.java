@@ -2352,10 +2352,12 @@ public class JobService {
         attachRefs(payload, refs);
         // ★ 位置优先（2026-09-16）：把「每个主体在画面里的位置」写进 referenceRegions，
         //   供 worker 做**区域条件**（ConditioningSetAreaPercentage）。来源优先级：
-        //     ① shots[].layout = [{subject,x,y,w,h}]（UI 位置编辑器，w/h 表达远近与大小）
-        //     ② shots[].lipsync_targets = {subject:{x,y}}（预览图点选，只有点 → 给默认框）
+        //     ① shots[].layout = [{subject,x,y,w,h}]（UI 逐镜位置编辑器，w/h 表达远近与大小）
+        //     ② 方案级 referenceAssets[].region / subjects[].refs[].region（「位置预览」卡的方案默认值）
+        //     ③ shots[].lipsync_targets = {subject:{x,y}}（预览图点选，只有点 → 给默认框）
         //   与参考图顺序（refs.subjects()）严格对齐，没位置的填 null。
-        applyLayoutRegions(payload, shot, refs);
+        //   同时把「image1=谁、image2=谁」写进正词（用户要求：positive_prompt 必须点名主体）。
+        applyLayoutRegions(payload, plan, shot, refs);
         return payload;
     }
 
@@ -2363,23 +2365,61 @@ public class JobService {
         return v < 0 ? 0 : (v > 1 ? 1 : v);
     }
 
-    /** 位置 → referenceRegions（见 videoShotPayload 调用处注释）。 */
-    private void applyLayoutRegions(ObjectNode payload, JsonNode shot, RefCtx refs) {
+    /**
+     * 位置 → referenceRegions（路线 B 备用）+ 正词里的「参考图→主体」映射（路线 A 生效中）。
+     *
+     * <p>位置三档来源，优先级从高到低（见 videoShotPayload 调用处注释）：
+     * ① {@code shots[].layout} ②方案级 {@code referenceAssets[].region} / {@code subjects[].refs[].region}
+     * ③ {@code shots[].lipsync_targets}。
+     *
+     * <p><b>为什么②要直接读 plan 而不是 {@code refs.regions()}</b>：走「剧情主体」路径
+     * （{@code bindFromSubjects}，P13 起是默认路径）时 refs.regions() 恒为 null —— 它在按定妆照
+     * 重建参考图列表，区域信息就丢了。所以这里从 plan 里按主体名重新取（两处都收：
+     * {@code referenceAssets[{subject,region}]} 与 {@code subjects[{name,refs[{region}]}]}）。
+     *
+     * <p><b>为什么必须有「image1=谁」这段提示词</b>：多主体同框时，Edit 模型拿到 image1/image2
+     * 却不知道哪张脸对应哪个角色名，只能自己猜 → 串脸/换人。用户要求 positive_prompt 必须点名主体，
+     * 这里做**后端兜底**（不依赖 LLM 是否听话）：只要绑定了参考图，就把槽位映射写进正词。
+     * 槽位与 worker 的 LoadImage 顺序一致（image1=referenceKeys[0] …，见 comfy_client._wf_set_image）。
+     */
+    static void applyLayoutRegions(ObjectNode payload, JsonNode plan, JsonNode shot, RefCtx refs) {
         if (refs == null || refs.subjects() == null || refs.subjects().isEmpty()) {
             return;
         }
         java.util.Map<String, double[]> pos = new java.util.LinkedHashMap<>();
-        JsonNode layout = shot.path("layout");
-        if (layout.isArray()) {
-            for (JsonNode it : layout) {
-                String s = it.path("subject").asText("").trim();
-                double x = it.path("x").asDouble(-1), y = it.path("y").asDouble(-1);
-                double w = it.path("w").asDouble(-1), h = it.path("h").asDouble(-1);
-                if (!s.isEmpty() && x >= 0 && y >= 0 && w > 0 && h > 0) {
-                    pos.put(s, new double[]{x, y, w, h});
+        java.util.Map<String, String> src = new java.util.LinkedHashMap<>();
+        // ② 方案级区域（「位置预览」卡的默认值）
+        collectPlanRegions(pos, src, plan == null ? null : plan.path("referenceAssets"));
+        JsonNode planSubjects = plan == null ? null : plan.path("subjects");
+        if (planSubjects != null && planSubjects.isArray()) {
+            for (JsonNode sub : planSubjects) {
+                String name = sub.path("name").asText("").trim();
+                if (name.isEmpty()) {
+                    continue;
+                }
+                for (JsonNode ref : sub.path("refs")) {
+                    double[] p = jsonBox(ref.path("region"));
+                    if (p != null && !pos.containsKey(name)) {
+                        pos.put(name, p);
+                        src.put(name, "plan");
+                    }
                 }
             }
         }
+        // ②b 兼容旧路径：refs.regions() 里可能已带方案级区域（新「剧情主体」路径恒为 null）
+        java.util.List<String> csvs = refs.regions();
+        for (int i = 0; i < refs.subjects().size(); i++) {
+            String s = refs.subjects().get(i);
+            if (s == null || s.isBlank() || pos.containsKey(s)) {
+                continue;
+            }
+            double[] p = csvBox(i < csvs.size() ? csvs.get(i) : null);
+            if (p != null) {
+                pos.put(s, p);
+                src.put(s, "plan");
+            }
+        }
+        // ③ 预览图点选：只有坐标 → 以该点为中心给默认框（宽 0.30 / 高 0.45）
         JsonNode targets = shot.path("lipsync_targets");
         if (targets.isObject()) {
             java.util.Iterator<String> names = targets.fieldNames();
@@ -2393,51 +2433,119 @@ public class JobService {
                 if (x < 0 || y < 0) {
                     continue;
                 }
-                // 点选只有坐标 → 以该点为中心给默认框（宽 0.30 / 高 0.45）；UI 提供 w/h 后走上面那条
                 pos.put(s, new double[]{Math.max(0, x - 0.15), Math.max(0, y - 0.20), 0.30, 0.45});
+                src.put(s, "click");
             }
         }
-        if (pos.isEmpty()) {
-            return;
-        }
-        com.fasterxml.jackson.databind.node.ArrayNode regions = payload.putArray("referenceRegions");
-        for (String subject : refs.subjects()) {
-            double[] p = (subject == null) ? null : pos.get(subject);
-            if (p == null) {
-                regions.addNull();
-                continue;
+        // ① 逐镜位置编辑器（最高优先，覆盖上面两档）
+        JsonNode layout = shot.path("layout");
+        if (layout.isArray()) {
+            for (JsonNode it : layout) {
+                String s = it.path("subject").asText("").trim();
+                double x = it.path("x").asDouble(-1), y = it.path("y").asDouble(-1);
+                double w = it.path("w").asDouble(-1), h = it.path("h").asDouble(-1);
+                if (!s.isEmpty() && x >= 0 && y >= 0 && w > 0 && h > 0) {
+                    pos.put(s, new double[]{x, y, w, h});
+                    src.put(s, "layout");
+                }
             }
-            regions.addObject()
-                    .put("x", clamp01(p[0])).put("y", clamp01(p[1]))
-                    .put("w", clamp01(p[2])).put("h", clamp01(p[3]));
         }
-        log.info("refs: 位置下发 {} 个主体：{}", pos.size(), pos.keySet());
+        if (!pos.isEmpty()) {
+            com.fasterxml.jackson.databind.node.ArrayNode regions = payload.putArray("referenceRegions");
+            for (String subject : refs.subjects()) {
+                double[] p = (subject == null) ? null : pos.get(subject);
+                if (p == null) {
+                    regions.addNull();
+                    continue;
+                }
+                regions.addObject()
+                        .put("x", clamp01(p[0])).put("y", clamp01(p[1]))
+                        .put("w", clamp01(p[2])).put("h", clamp01(p[3]));
+            }
+            log.info("refs: 位置下发 {} 个主体（来源 {}）：{}", pos.size(), src, pos.keySet());
+        }
 
-        // ★ 路线 A（2026-09-16）：位置先以**提示词**形式生效。
+        // ★ 路线 A（2026-09-16）：位置 + 主体点名以**提示词**形式生效。
         //   为什么不用区域条件（referenceRegions → ConditioningSetAreaPercentage + ConditioningCombine）：
         //   Qwen-Image-Edit 的 conditioning（TextEncodeQwenImageEditPlus，带参考图 latent）被区域包裹/合并后，
         //   KSampler 会抛 `IndexError: tuple index out of range`（实测两轮），所以先走提示词描述；
         //   referenceRegions 仍然保留，供后续路线 B（离线调通后再切）。
         StringBuilder sb = new StringBuilder();
-        for (java.util.Map.Entry<String, double[]> e : pos.entrySet()) {
-            double[] p = e.getValue();
-            if (p == null) {
-                continue;
+        java.util.List<String> subj = refs.subjects();
+        for (int i = 0; i < subj.size(); i++) {
+            String name = subj.get(i);
+            if (name == null || name.isBlank()) {
+                continue;   // 无主体名的图是通用风格参考图，不点名
             }
             if (sb.length() > 0) {
                 sb.append("; ");
             }
-            sb.append(e.getKey()).append(" — x=").append(fmt2(p[0])).append(", y=").append(fmt2(p[1]))
-              .append(", box ").append(fmt2(p[2])).append("x").append(fmt2(p[3]))
-              .append(" (").append(posHint(p[0], p[1])).append(")");
+            sb.append("image").append(i + 1).append(" = ").append(name);
+            double[] p = pos.get(name);
+            if (p != null) {
+                sb.append(" (").append(posHint(p[0], p[1]))
+                  .append(", x=").append(fmt2(p[0])).append(", y=").append(fmt2(p[1]))
+                  .append(", box ").append(fmt2(p[2])).append("x").append(fmt2(p[3])).append(")");
+            }
         }
         if (sb.length() > 0) {
-            String add = "\nSubject placement (normalized frame coordinates, origin top-left; "
-                    + "smaller y = higher in frame, larger box = closer to camera): " + sb
-                    + ". Place each character exactly at that position and relative size; keep them apart.";
+            String add = "\nReference image mapping: " + sb
+                    + ". Each subject's face, hair and costume strictly follow its own reference image"
+                    + (pos.isEmpty()
+                        ? "."
+                        : ", and each character is placed exactly at the position and relative size given"
+                          + " (normalized frame coordinates, origin top-left; smaller y = higher in frame,"
+                          + " larger box = closer to camera); keep the characters clearly apart.");
             String cur = payload.path("positive_prompt").asText("");
             payload.put("positive_prompt", cur + add);
-            log.info("refs: 位置已写入正词（路线A）：{}", sb);
+            log.info("refs: 参考图→主体映射已写入正词（含位置={}）：{}", !pos.isEmpty(), sb);
+        }
+    }
+
+    /** 方案级 region 收集：{@code referenceAssets[{subject,region}]} → pos/src（先到先得）。 */
+    private static void collectPlanRegions(java.util.Map<String, double[]> pos,
+                                           java.util.Map<String, String> src, JsonNode arr) {
+        if (arr == null || !arr.isArray()) {
+            return;
+        }
+        for (JsonNode b : arr) {
+            String s = b.path("subject").asText("").trim();
+            if (s.isEmpty()) {
+                continue;
+            }
+            double[] p = jsonBox(b.path("region"));
+            if (p != null && !pos.containsKey(s)) {
+                pos.put(s, p);
+                src.put(s, "plan");
+            }
+        }
+    }
+
+    /** 归一化 region 节点（0–1）→ 框；不是合法框就回 null。 */
+    private static double[] jsonBox(JsonNode r) {
+        if (r == null || !r.isObject()) {
+            return null;
+        }
+        double x = r.path("x").asDouble(-1), y = r.path("y").asDouble(-1);
+        double w = r.path("w").asDouble(-1), h = r.path("h").asDouble(-1);
+        return (x < 0 || y < 0 || w <= 0 || h <= 0) ? null : new double[]{x, y, w, h};
+    }
+
+    /** 方案级 region 的 "x,y,w,h" csv → 归一化框；非法回 null。 */
+    private static double[] csvBox(String csv) {
+        if (csv == null || csv.isBlank()) {
+            return null;
+        }
+        String[] p = csv.split(",");
+        if (p.length < 4) {
+            return null;
+        }
+        try {
+            double x = Double.parseDouble(p[0].trim()), y = Double.parseDouble(p[1].trim());
+            double w = Double.parseDouble(p[2].trim()), h = Double.parseDouble(p[3].trim());
+            return (x < 0 || y < 0 || w <= 0 || h <= 0) ? null : new double[]{x, y, w, h};
+        } catch (NumberFormatException e) {
+            return null;
         }
     }
 

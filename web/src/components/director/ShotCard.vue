@@ -5,6 +5,7 @@ import { computed, ref } from 'vue'
 
 import type { DirectorShot } from '@/api/types'
 import { shotHasText } from '@/utils/plan'
+import ShotLayoutEditor, { type LayoutBox } from '@/components/director/ShotLayoutEditor.vue'
 
 const props = withDefaults(
   defineProps<{
@@ -18,8 +19,23 @@ const props = withDefaults(
     previewBusy?: boolean
     /** P12：该镜已封版（资源达标，批量生成会跳过） */
     locked?: boolean
+    /** P5：本镜可能出镜的主体名（方案主体顺序），供「画面位置」编辑器用 */
+    subjects?: string[]
+    /** P5：方案级默认区域（主体名 → 归一化框），作为本镜位置的继承默认 */
+    defaultLayout?: Record<string, LayoutBox>
+    /** 画幅（CSS aspect-ratio 值） */
+    aspect?: string
   }>(),
-  { status: 'draft', disabled: false, busy: false, previewBusy: false, locked: false },
+  {
+    status: 'draft',
+    disabled: false,
+    busy: false,
+    previewBusy: false,
+    locked: false,
+    subjects: () => [],
+    defaultLayout: () => ({}),
+    aspect: '16 / 9',
+  },
 )
 
 const emit = defineEmits<{
@@ -155,6 +171,17 @@ const sizeOptions = [
           :disabled="disabled"
         />
       </label>
+      <!-- P5 逐镜画面位置：写 shots[].layout（后端优先级高于方案级区域与点选坐标） -->
+      <div class="field wide">
+        <ShotLayoutEditor
+          :model-value="shot.layout ?? null"
+          :subjects="subjects"
+          :defaults="defaultLayout"
+          :aspect="aspect"
+          :disabled="disabled"
+          @update:model-value="(v) => { shot.layout = v }"
+        />
+      </div>
       <!-- P2 运镜关键帧：穿越型镜头逐帧生成（同 seed），motion 用首/尾帧 -->
       <div v-if="shot.keyframes && shot.keyframes.length" class="field wide kf-block">
         <span class="fl">运镜关键帧（{{ shot.keyframes.length }} 帧 · 生成时逐帧出图，motion 用首/尾帧）</span>

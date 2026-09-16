@@ -378,6 +378,36 @@ HTTP 兜底 `music_server.py`（:8092）默认不起，主线走 ComfyUI。
          → sidechaincompress（说话段自动压低音乐；失败退化为固定低音量）
 ```
 
+### 3.8 出图「位置 + 参考图→主体」映射（P5，2026-09-16）
+
+多主体同框时，Qwen-Image-Edit 拿到 `image1/image2` 却**不知道哪张脸是哪个角色**，只能自己猜 → 串脸/换人。
+所以后端在正词里**点名主体**，并把「谁在哪」一并写清（不依赖 LLM 是否听话）：
+
+```
+plan.referenceAssets[].region            # ② 方案级默认位置（「位置预览」卡）
+plan.subjects[].refs[].region            # ② 同上（前端 syncReferenceAssets 同时写两处）
+shots[].lipsync_targets{subject:{x,y}}   # ③ 预览图点选（只有点 → 默认框 0.30×0.45）
+shots[].layout=[{subject,x,y,w,h}]       # ① 逐镜位置（UI「画面位置」编辑器）—— 优先级最高
+         ↓ JobService.applyLayoutRegions(plan, shot, refs)
+referenceRegions[] = [{x,y,w,h} | null]   # 与 referenceKeys 严格同序（路线 B 的区域条件用）
+positive_prompt += """
+  Reference image mapping: image1 = 宝玉 (upper-left, x=0.19, y=0.09, box 0.30x0.45);
+  image2 = 可卿 (upper-right, ...). Each subject's face, hair and costume strictly follow its own
+  reference image, and each character is placed exactly at the position and relative size given
+  (normalized frame coordinates, origin top-left; smaller y = higher in frame, larger box = closer
+  to camera); keep the characters clearly apart."""
+```
+
+- **槽位顺序**（`image1` = `referenceKeys[0]`）与 worker 的 `comfy_client._wf_set_image()` 一致：
+  `LoadImage` 按**节点 id 字符串排序**依次取图 → 在 `qwen_image_edit_api.json` 里就是 `12`(→`image1`)、`14`(→`image2`)。
+  **改工作流时不要打乱 LoadImage 的 id 顺序**，否则提示词里的 imageN 会指错人。
+- **槽位上限**：`qwen_image_edit_api.json` 只接了 **2 个 LoadImage 槽**（`image1`/`image2`）—— 第 3 个主体**不会报错，但图会被默默丢掉**（`_wf_set_image` 只在槽位数内分配）。要 3 主体同框得先给工作流加 `LoadImage` 节点并把 `TextEncodeQwenImageEditPlus.image3` 接上。上游若某张参考图上传失败，槽位会**前移**（提示词里的 `imageN` 会错位一格）——worker 日志 `[comfy] 参考图#N 上传失败（跳过）` 是唯一线索。
+- 即使**一个位置都没设**，只要绑定了参考图也照样写映射（退化为「只点名、无坐标」）；
+  参考图中**没有 subject 名的通用风格图不点名**（否则会凭空造出一个角色）。
+- 路线 A（提示词描述位置，默认生效） vs 路线 B（`ConditioningSetAreaPercentage` 区域条件，`WEAVEORA_IMAGE_AREA_COND=1`，
+  在 Edit 档会抛 `IndexError: tuple index out of range`，待离线调通）。UI 与后端**两路都发**，切开关不用改代码。
+- 单测：`api/src/test/java/studio/weaveora/job/JobLayoutRegionsTest.java`（8 例，含三档优先级与非法框丢弃）。
+
 ---
 
 ## 4. 部署过程中遇到的坑（现象 → 根因 → 处置）

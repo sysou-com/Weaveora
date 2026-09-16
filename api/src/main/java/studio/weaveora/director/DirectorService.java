@@ -55,7 +55,7 @@ public class DirectorService {
     private static final List<String> CONCRETE_MODES = List.of("image", "video");
     private static final Map<String, String> SYSTEM_FALLBACK = Map.of(
             "image", "你是电影摄影指导+分镜师。输出且只输出 JSON（图片导演方案：mode/title/logline/prompt_zh/positive_prompt/negative_prompt/camera/lighting/palette/params/variations）。",
-            "video", "你是电影摄影指导+分镜师。输出且只输出 JSON（视频导演方案：mode/title/logline/duration_sec/aspect_ratio/script/shots/audio/edit_plan；镜头时长总和==目标时长，每镜 positive_prompt 20–1200）。关键规则：① 有台词的镜头尽量不用正脸大特写，改用过肩/侧脸/听者反应/手部或环境特写（图生视频模型无法对口型，正脸会让嘴型穿帮）；② 若镜头必须出现正脸说话，positive_prompt 里加 speaking、mouth moving，并置 shots[].lip_sync=true；③ 旁白镜头 lip_sync=false；④ 【动态】positive_prompt 必须写清可见的动态（主体动作/表情变化/眼神方向/次级运动/多主体互动 至少覆盖 3 类，用现在分词写进行中动作），禁写静态构图，negative 带 static, motionless, frozen —— 否则图生视频会输出几乎静止的慢动作。");
+            "video", "你是电影摄影指导+分镜师。输出且只输出 JSON（视频导演方案：mode/title/logline/duration_sec/aspect_ratio/script/shots/audio/edit_plan；镜头时长总和==目标时长，每镜 positive_prompt 20–1200）。关键规则：① 有台词的镜头尽量不用正脸大特写，改用过肩/侧脸/听者反应/手部或环境特写（图生视频模型无法对口型，正脸会让嘴型穿帮）；② 若镜头必须出现正脸说话，positive_prompt 里加 speaking、mouth moving，并置 shots[].lip_sync=true；③ 旁白镜头 lip_sync=false；④ 【动态】positive_prompt 必须写清可见的动态（主体动作/表情变化/眼神方向/次级运动/多主体互动 至少覆盖 3 类，用现在分词写进行中动作），禁写静态构图，negative 带 static, motionless, frozen —— 否则图生视频会输出几乎静止的慢动作；⑤ 【点名主体】已绑定参考图的主体必须用主体名点名（如 Baoyu (宝玉)），写明其位置（left/right/center、foreground/background），禁写 a man / the woman 这类泛称 —— 多主体同框不点名会串脸；参考图按顺序映射为 image1/image2。");
 
     private final ProjectContextPort context;
     private final PromptRevisionRepository revisions;
@@ -649,6 +649,9 @@ public class DirectorService {
                 + "positive_prompt 含主体/镜头/光线/氛围/质感细节（<=60 英文词）；"
                 + "negative_prompt 为英文常见负面项（blurry, low quality, distorted, extra limbs, "
                 + "duplicated, watermark, text, oversaturated 等）。只输出 JSON：{\"positive_prompt\":\"...\",\"negative_prompt\":\"...\"}";
+        // ★ 点名主体（2026-09-16 用户要求）：原正词里的角色名是身份锚定信号，不能被泛称冲掉
+        sysBase += " 硬规则：原正词里的角色名（专有名词）必须**保留并点名**，不得换成 a man / the woman / 一个男人这类泛称；"
+                + "多主体同框时写清各自位置与左右关系（left/right/center、foreground/background）。";
         String system;
         String user;
         if (amend) {
@@ -707,10 +710,22 @@ public class DirectorService {
         collectRefSubjects(refSubjects, prevPlan == null ? null : prevPlan.get("referenceAssets"));
         collectRefSubjects(refSubjects, brief.constraints() == null ? null : brief.constraints().get("referenceAssets"));
         if (!refSubjects.isEmpty()) {
+            StringBuilder map = new StringBuilder();
+            int slot = 1;
+            for (String s : refSubjects) {
+                if (map.length() > 0) map.append("、");
+                map.append("image").append(slot++).append("=").append(s);
+            }
             sb.append("\n\n可用参考图主体：”").append(String.join("、", refSubjects))
                     .append("”。这些主体的形象（面容/服饰）已有参考图锚定；请在各镜 positive_prompt 里明确写出该主体形象以参考图为准")
                     .append("（英文可写 character appearance strictly follows the provided reference image），")
-                    .append("并在 action 中保留主体名，便于系统为对应镜头绑定参考图。");
+                    .append("并在 action 中保留主体名，便于系统为对应镜头绑定参考图。")
+                    // ★ 点名主体（2026-09-16 用户要求）：映射顺序与系统下发参考图的顺序一致（image1=第一个主体）
+                    .append("\n【硬规则·点名主体】该主体出镜的镜头，positive_prompt 必须**用上面的主体名点名**（中文名可保留，如 Baoyu (宝玉)），")
+                    .append("并写清其位置与左右关系（left/right/center、foreground/background）；禁止用 a man / the woman 这类泛称替代。")
+                    .append("多主体同框时必须逐个点名并写清相互关系（例：Baoyu on the left, Keqing on the right, facing each other）。")
+                    .append("系统按参考图顺序把主体映射为 image1 / image2 …（").append(map)
+                    .append("）；需要时可在 positive_prompt 里显式写 Baoyu (image1) 加固对应关系。");
         }
         sb.append("\n\n请按 System Prompt 的 JSON 结构输出。");
         return sb.toString();

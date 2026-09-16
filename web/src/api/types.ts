@@ -203,6 +203,14 @@ export interface DirectorShot {
    */
   lipsync_targets?: Record<string, { x: number; y: number }> | null
   /**
+   * P5：**逐镜画面位置**（比方案级 region 优先）——UI「画面位置」编辑器写回。
+   *
+   * `[{subject, x, y, w, h}]`，归一化 0–1（相对画面宽高）；w/h 同时表达**远近与大小**
+   * （框越大 = 离镜头越近）。与 `referenceSubjects` 同名即可自动关联；缺省时后端依次回退到
+   * 方案级 `referenceAssets[].region` 与 `lipsync_targets`。
+   */
+  layout?: Array<{ subject: string; x: number; y: number; w: number; h: number }> | null
+  /**
    * P13：对口型的**底片**（用哪份画面驱动嘴型）——`'clip'` = 该镜最新 motion 片段，
    * `'still'` = 关键帧静帧；不设 = 自动（有 motion 用 motion，除非该镜是「惊恐/喊叫」
    * 这类底片里嘴本来就大张的镜头 → 自动改用静帧）。
@@ -253,7 +261,14 @@ export interface BasePlan {
   title: string
   logline: string
   /** P4 参考图与主体绑定（参考图面板标注后随方案保存；生成时按镜文案自动绑定） */
-  referenceAssets?: Array<{ assetId: string; subject?: string }>
+  referenceAssets?: Array<{
+    assetId: string
+    subject?: string
+    /** 方案级默认区域（归一化 0–1；「位置预览」卡拖动/填写所得） */
+    region?: { x: number; y: number; w: number; h: number } | null
+  }>
+  /** P13 剧情主体（定妆图/素材图 + 方案级默认区域） */
+  subjects?: PlanSubject[]
   [k: string]: unknown
 }
 
