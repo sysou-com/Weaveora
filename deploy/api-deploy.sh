@@ -2,7 +2,7 @@
 # Weaveora API 部署：本地 mvn package(含测试) → 上传 /opt/weaveora/api/weaveora-api.jar
 #                 → 备份旧包 → systemctl restart weaveora-api → 健康检查
 #
-# 前置：JDK21（默认 /d/jdk21/jdk-21.0.2，可用 JDK21= 覆盖）
+# 前置：JDK21（默认按已安装路径探测，可用 JDK21= 覆盖；2026-09-16：原默认 /d/jdk21/jdk-21.0.2 已不存在）
 # 安全闸：有 running 任务时拒绝重启（避免打断在跑的生成任务）；WEAVEORA_API_FORCE=1 可强推
 #
 # 用法：bash deploy/api-deploy.sh
@@ -10,7 +10,15 @@
 set -euo pipefail
 
 HOST="${WEAVEORA_API_HOST:-root@sysou.com}"
-KEY="${WEAVEORA_SSH_KEY:-$HOME/.ssh/comfy_tunnel_ed25519}"
+# SSH key：优先显式覆盖 $WEAVEORA_SSH_KEY；默认按「存在即用」顺序探测（2026-09-16：
+# 原来的 comfy_tunnel_ed25519 在本机已不存在，导致三个部署脚本一跑就 Permission denied）。
+KEY="${WEAVEORA_SSH_KEY:-}"
+if [ -z "$KEY" ]; then
+  for cand in "$HOME/.ssh/comfy_tunnel_ed25519" "$HOME/.ssh/id_ed25519" "$HOME/.ssh/id_rsa"; do
+    [ -f "$cand" ] && KEY="$cand" && break
+  done
+fi
+[ -f "${KEY:-}" ] || { echo "!! 找不到可用的 SSH 私钥（用 WEAVEORA_SSH_KEY=<路径> 指定）"; exit 1; }
 SVC="weaveora-api"
 REMOTE_DIR="/opt/weaveora/api"
 REMOTE_JAR="$REMOTE_DIR/weaveora-api.jar"
@@ -18,7 +26,15 @@ REMOTE_JAR="$REMOTE_DIR/weaveora-api.jar"
 cd "$(dirname "$0")/.."
 
 # ---- JDK21（本机环境里可能残留 JAVA_HOME=jdk-17，必须覆盖，否则 surefire 用 17 跑不了 21 的 class）----
+# JDK21：优先 $JDK21，其次按已安装路径探测（2026-09-16：/d/jdk21/jdk-21.0.2 在本机已不存在，
+# 实际装在 C:\Program Files\Eclipse Adoptium\jdk-21.0.12.101-hotspot）。
 JDK21="${JDK21:-/d/jdk21/jdk-21.0.2}"
+if [ ! -x "$JDK21/bin/javac" ]; then
+  for cand in "/c/Program Files/Eclipse Adoptium"/jdk-21* /c/Program\ Files/Eclipse\ Adoptium/jdk-21* \
+              /usr/lib/jvm/java-21-openjdk*; do
+    [ -x "$cand/bin/javac" ] && JDK21="$cand" && break
+  done
+fi
 if [ -x "$JDK21/bin/javac" ]; then
   [ -n "${JAVA_HOME:-}" ] && echo "   注意：环境里的 JAVA_HOME=$JAVA_HOME 会被覆盖为 JDK21"
   export JAVA_HOME="$(cd "$JDK21" && pwd -W 2>/dev/null || echo "$JDK21")"

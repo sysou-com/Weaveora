@@ -20,8 +20,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  *   <li>位置三层优先级：帧级 {@code shots[].keyframes[j].layout} &gt; 镜级 {@code shots[].layout}
  *       &gt; 方案默认（{@code subjects[].region} → {@code referenceAssets[].region} / {@code refs[].region}）
  *       &gt; 预览图点选 {@code lipsync_targets}；</li>
- *   <li>**正词里只出现一处** {@code imageN = 主体名（方位/框）}（由 applyLayoutRegions 统一写）；
- *       {@code refAnchor} 只负责身份约束那一句 —— 两处都写会让模型更难分清谁对应哪张图；</li>
+ *   <li>**正词里只出现一处** {@code Picture N (imageN) = 主体名（方位/框）}（由 applyLayoutRegions 统一写）；
+ *       {@code refAnchor} 只负责身份约束那一句 —— 两处都写会让模型更难分清谁对应哪张图；
+ *       槽位名**同时写** {@code Picture N}（Qwen-Image-Edit 节点内部就是 `Picture {}`）与旧口径 `imageN`；</li>
+ *   <li>位置清单必须带「以本清单为准」的覆盖句（镜文案里的方位词与用户设的框会矛盾 → 位置错位）；</li>
  *   <li>即使一个位置都没设，也照写点名（防「多角色串脸」）；无 subject 名的风格参考图不点名；</li>
  *   <li>系统追加的文字跟随镜文本语言（用户选中文时不得中英混杂）。</li>
  * </ul>
@@ -80,8 +82,8 @@ class JobLayoutRegionsTest {
         JobService.applyLayoutRegions(p, json("{}"), json("{}"), -1, refs("宝玉", "可卿"));
         String pos = p.path("positive_prompt").asText();
         // 没位置也要点名（后端兜底，不依赖 LLM）
-        assertTrue(pos.contains("image1 = 宝玉"), pos);
-        assertTrue(pos.contains("image2 = 可卿"), pos);
+        assertTrue(pos.contains("Picture 1 (image1) = 宝玉"), pos);
+        assertTrue(pos.contains("Picture 2 (image2) = 可卿"), pos);
         assertFalse(pos.contains("x="), "没有位置时不应编造坐标: " + pos);
         // 没位置 → 不下发 referenceRegions（= 不启用区域条件）
         assertNull(p.get("referenceRegions"));
@@ -104,8 +106,8 @@ class JobLayoutRegionsTest {
         JobService.applyLayoutRegions(p, plan, shot, -1, refs("宝玉", "可卿"));
 
         String pos = p.path("positive_prompt").asText();
-        assertTrue(pos.contains("image1 = 宝玉 (upper-center, x=0.62, y=0.10, box 0.30x0.60)"), pos);
-        assertTrue(pos.contains("image2 = 可卿 (upper-left, x=0.10, y=0.20, box 0.25x0.55)"), pos);
+        assertTrue(pos.contains("Picture 1 (image1) = 宝玉 (upper-center, x=0.62, y=0.10, box 0.30x0.60)"), pos);
+        assertTrue(pos.contains("Picture 2 (image2) = 可卿 (upper-left, x=0.10, y=0.20, box 0.25x0.55)"), pos);
 
         JsonNode regions = p.get("referenceRegions");
         assertEquals(2, regions.size());
@@ -126,14 +128,14 @@ class JobLayoutRegionsTest {
         // 第 2 帧（index=1）有自己的 layout → 帧级优先
         JobService.applyLayoutRegions(p, json("{}"), shot, 1, refs("宝玉"));
         assertTrue(p.path("positive_prompt").asText()
-                .contains("image1 = 宝玉 (upper-left, x=0.05, y=0.05, box 0.30x0.40)"),
+                .contains("Picture 1 (image1) = 宝玉 (upper-left, x=0.05, y=0.05, box 0.30x0.40)"),
                 p.path("positive_prompt").asText());
 
         // 第 1 帧（index=0）没设 → 退回镜级
         ObjectNode p0 = payload("cinematic still of two figures");
         JobService.applyLayoutRegions(p0, json("{}"), shot, 0, refs("宝玉"));
         assertTrue(p0.path("positive_prompt").asText()
-                .contains("image1 = 宝玉 (middle-center, x=0.50, y=0.50, box 0.20x0.20)"),
+                .contains("Picture 1 (image1) = 宝玉 (middle-center, x=0.50, y=0.50, box 0.20x0.20)"),
                 p0.path("positive_prompt").asText());
     }
 
@@ -146,7 +148,7 @@ class JobLayoutRegionsTest {
                 """);
         JobService.applyLayoutRegions(p, plan, json("{}"), -1, refs("宝玉"));
         String pos = p.path("positive_prompt").asText();
-        assertTrue(pos.contains("image1 = 宝玉 (upper-left, x=0.10, y=0.20, box 0.30x0.50)"), pos);
+        assertTrue(pos.contains("Picture 1 (image1) = 宝玉 (upper-left, x=0.10, y=0.20, box 0.30x0.50)"), pos);
         assertEquals(0.10, p.get("referenceRegions").get(0).path("x").asDouble(), 1e-6);
     }
 
@@ -161,8 +163,8 @@ class JobLayoutRegionsTest {
                 """);
         JobService.applyLayoutRegions(p, plan, json("{}"), -1, refs("宝玉", "可卿"));
         String pos = p.path("positive_prompt").asText();
-        assertTrue(pos.contains("image1 = 宝玉 (upper-left, x=0.05, y=0.05, box 0.40x0.90)"), pos);
-        assertTrue(pos.contains("image2 = 可卿 (upper-right, x=0.70, y=0.10, box 0.28x0.80)"), pos);
+        assertTrue(pos.contains("Picture 1 (image1) = 宝玉 (upper-left, x=0.05, y=0.05, box 0.40x0.90)"), pos);
+        assertTrue(pos.contains("Picture 2 (image2) = 可卿 (upper-right, x=0.70, y=0.10, box 0.28x0.80)"), pos);
     }
 
     @Test
@@ -172,7 +174,7 @@ class JobLayoutRegionsTest {
         JobService.applyLayoutRegions(p, json("{}"), shot, -1, refs("宝玉"));
         // 点选只有坐标 → 以点为中心默认框 0.30×0.45 = x 0.15 / y 0.20
         assertTrue(p.path("positive_prompt").asText()
-                .contains("image1 = 宝玉 (upper-left, x=0.15, y=0.20, box 0.30x0.45)"),
+                .contains("Picture 1 (image1) = 宝玉 (upper-left, x=0.15, y=0.20, box 0.30x0.45)"),
                 p.path("positive_prompt").asText());
     }
 
@@ -185,7 +187,7 @@ class JobLayoutRegionsTest {
         JobService.applyLayoutRegions(p, json("{}"), shot, -1, refs("宝玉"));
         String pos = p.path("positive_prompt").asText();
         assertTrue(pos.contains("参考图与主体对应（按送入顺序）"), pos);
-        assertTrue(pos.contains("image1 = 宝玉（左上，x=0.05，y=0.10，框 0.40x0.80）"), pos);
+        assertTrue(pos.contains("Picture 1 (image1) = 宝玉（左上，x=0.05，y=0.10，框 0.40x0.80）"), pos);
         assertFalse(pos.contains("Reference mapping"), pos);
     }
 
@@ -196,8 +198,32 @@ class JobLayoutRegionsTest {
         ObjectNode p = payload("cinematic still of two figures");
         JobService.applyLayoutRegions(p, json("{}"), json("{}"), -1, refs("", "宝玉"));
         String pos = p.path("positive_prompt").asText();
-        assertTrue(pos.contains("image2 = 宝玉"), pos);
-        assertFalse(pos.contains("image1 ="), pos);
+        assertTrue(pos.contains("Picture 2 (image2) = 宝玉"), pos);
+        assertFalse(pos.contains("Picture 1"), "无名风格参考图不应被点名: " + pos);
+    }
+
+    /**
+     * ★ 2026-09-16 新增：位置清单必须带「以本清单为准」的覆盖句。
+     *
+     * <p>为什么（用户实测第 4 镜反复“位置错位”）：镜文案由 LLM 写成「宝玉在前景中央…可卿在宝玉右侧…
+     * 警幻居后景」，而用户在「位置总控」里设的框是 x=0.24 / x=0.06 / x=0.65 —— 两套方位直接矛盾，
+     * 模型只能猜。现在明确告知：方位以区域清单为最终裁定。
+     */
+    @Test
+    void positionListCarriesAuthoritativeOverrideClause() {
+        ObjectNode zh = payload("电影感关键帧：宝玉与可卿并肩而立，烛光摇曳");
+        JsonNode shot = json("""
+                {"layout":[{"subject":"宝玉","x":0.24,"y":0.08,"w":0.19,"h":0.76},
+                           {"subject":"可卿","x":0.06,"y":0.06,"w":0.17,"h":0.78}]}
+                """);
+        JobService.applyLayoutRegions(zh, json("{}"), shot, -1, refs("宝玉", "可卿"));
+        assertTrue(zh.path("positive_prompt").asText().contains("位置以本清单为准"),
+                zh.path("positive_prompt").asText());
+
+        ObjectNode en = payload("cinematic still of two figures standing together");
+        JobService.applyLayoutRegions(en, json("{}"), shot, -1, refs("宝玉", "可卿"));
+        assertTrue(en.path("positive_prompt").asText().contains("[Authoritative placement]"),
+                en.path("positive_prompt").asText());
     }
 
     @Test
@@ -210,7 +236,7 @@ class JobLayoutRegionsTest {
         JobService.applyLayoutRegions(p, json("{}"), shot, -1, refs("宝玉", "可卿"));
         assertNull(p.get("referenceRegions"));
         String pos = p.path("positive_prompt").asText();
-        assertTrue(pos.contains("image1 = 宝玉") && pos.contains("image2 = 可卿"), pos);
+        assertTrue(pos.contains("Picture 1 (image1) = 宝玉") && pos.contains("Picture 2 (image2) = 可卿"), pos);
         assertFalse(pos.contains("x="), "非法框不应写进正词: " + pos);
     }
 

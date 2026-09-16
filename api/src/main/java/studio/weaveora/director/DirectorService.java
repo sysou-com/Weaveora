@@ -55,7 +55,7 @@ public class DirectorService {
     private static final List<String> CONCRETE_MODES = List.of("image", "video");
     private static final Map<String, String> SYSTEM_FALLBACK = Map.of(
             "image", "你是电影摄影指导+分镜师。输出且只输出 JSON（图片导演方案：mode/title/logline/prompt_zh/positive_prompt/negative_prompt/camera/lighting/palette/params/variations）。",
-            "video", "你是电影摄影指导+分镜师。输出且只输出 JSON（视频导演方案：mode/title/logline/duration_sec/aspect_ratio/script/shots/audio/edit_plan；镜头时长总和==目标时长，每镜 positive_prompt 20–1200）。关键规则：① 有台词的镜头尽量不用正脸大特写，改用过肩/侧脸/听者反应/手部或环境特写（图生视频模型无法对口型，正脸会让嘴型穿帮）；② 若镜头必须出现正脸说话，positive_prompt 里加 speaking、mouth moving，并置 shots[].lip_sync=true；③ 旁白镜头 lip_sync=false；④ 【动态】positive_prompt 必须写清可见的动态（主体动作/表情变化/眼神方向/次级运动/多主体互动 至少覆盖 3 类，用现在分词写进行中动作），禁写静态构图，negative 带 static, motionless, frozen —— 否则图生视频会输出几乎静止的慢动作；⑤ 【点名主体】已绑定参考图的主体必须用主体名点名（如 Baoyu (宝玉)），写明其位置（left/right/center、foreground/background），禁写 a man / the woman 这类泛称 —— 多主体同框不点名会串脸；参考图按顺序映射为 image1/image2。");
+            "video", "你是电影摄影指导+分镜师。输出且只输出 JSON（视频导演方案：mode/title/logline/duration_sec/aspect_ratio/script/shots/audio/edit_plan；镜头时长总和==目标时长，每镜 positive_prompt 20–1200）。关键规则：① 有台词的镜头尽量不用正脸大特写，改用过肩/侧脸/听者反应/手部或环境特写（图生视频模型无法对口型，正脸会让嘴型穿帮）；② 若镜头必须出现正脸说话，positive_prompt 里加 speaking、mouth moving，并置 shots[].lip_sync=true；③ 旁白镜头 lip_sync=false；④ 【动态】positive_prompt 必须写清可见的动态（主体动作/表情变化/眼神方向/次级运动/多主体互动 至少覆盖 3 类，用现在分词写进行中动作），禁写静态构图，negative 带 static, motionless, frozen —— 否则图生视频会输出几乎静止的慢动作；⑤ 【点名主体】已绑定参考图的主体必须用主体名点名（如 Baoyu (宝玉)），禁写 a man / the woman 这类泛称 —— 多主体同框不点名会串脸；⑥ 【不写画面方位】禁止 left/right/center、foreground/background 这类画面坐标 —— 位置由用户在「位置总控」设的区域框统一由系统下发，文案里猜的方位会与之冲突导致位置错位；参考图按顺序映射为 Picture 1/Picture 2。");
 
     private final ProjectContextPort context;
     private final PromptRevisionRepository revisions;
@@ -393,25 +393,56 @@ public class DirectorService {
             if (name.isEmpty()) {
                 continue;
             }
+            java.util.List<String> aliases = new java.util.ArrayList<>();
+            for (com.fasterxml.jackson.databind.JsonNode a : in.path("aliases")) {
+                String v = a.asText("").trim();
+                if (!v.isEmpty() && !v.equals(name)) {
+                    aliases.add(v);
+                }
+            }
+            // P13：除别名/勾选，也支持「把选定参考图直接设为定妆照」——就地写 portraitAssetId/Version
+            // 先按「本名或别称」找（别称命中也要认，否则前端拿着别称名提交会凭空多出一个主体）
+            int hit = -1;
             for (int i = 0; i < subs.size(); i++) {
-                studio.weaveora.director.plan.PlanSubjects.Subject cur = subs.get(i);
-                if (!cur.name().equals(name)) {
-                    continue;
+                if (subs.get(i).name().equals(name)) {
+                    hit = i;
+                    break;
                 }
-                java.util.List<String> aliases = new java.util.ArrayList<>();
-                for (com.fasterxml.jackson.databind.JsonNode a : in.path("aliases")) {
-                    String v = a.asText("").trim();
-                    if (!v.isEmpty() && !v.equals(name)) {
-                        aliases.add(v);
-                    }
+                if (hit < 0 && studio.weaveora.director.plan.PlanSubjects.isSameSubject(subs.get(i), name)) {
+                    hit = i;    // 别称命中（继续找精确同名，精确优先）
                 }
-                // P13：除别名/勾选，也支持「把选定参考图直接设为定妆照」——就地写 portraitAssetId/Version
+            }
+            if (hit < 0) {
+                // ★ 2026-09-16 新增主体（用户要求：「剧情主体」区要有「+ 新增主体」按钮）——
+                //   前端提交的整份主体列表里，方案里还不存在的名字即为新增。
+                String kind = in.path("kind").asText(studio.weaveora.director.plan.PlanSubjects.KIND_PERSON)
+                        .trim().toLowerCase();
+                if (!java.util.List.of(studio.weaveora.director.plan.PlanSubjects.KIND_PERSON,
+                        studio.weaveora.director.plan.PlanSubjects.KIND_VEHICLE,
+                        studio.weaveora.director.plan.PlanSubjects.KIND_OBJECT,
+                        studio.weaveora.director.plan.PlanSubjects.KIND_SCENE).contains(kind)) {
+                    kind = studio.weaveora.director.plan.PlanSubjects.KIND_PERSON;
+                }
+                subs.add(new studio.weaveora.director.plan.PlanSubjects.Subject(name, kind, aliases,
+                        !in.has("enabled") || in.path("enabled").asBoolean(true), false, java.util.List.of(),
+                        in.path("portraitAssetId").asText(""), in.path("portraitVersion").asInt(0)));
+                log.info("subject created in place: project={} rev={} name={} kind={}", projectId, revisionId, name, kind);
+                continue;
+            }
+            {
+                studio.weaveora.director.plan.PlanSubjects.Subject cur = subs.get(hit);
+                boolean exact = cur.name().equals(name);
                 String portraitId = in.has("portraitAssetId")
                         ? in.path("portraitAssetId").asText("") : cur.portraitAssetId();
                 int portraitVer = in.has("portraitVersion")
                         ? in.path("portraitVersion").asInt(cur.portraitVersion()) : cur.portraitVersion();
-                subs.set(i, new studio.weaveora.director.plan.PlanSubjects.Subject(
-                        cur.name(), cur.kind(), in.has("aliases") ? aliases : cur.aliases(),
+                // 别称命中时不覆盖已有别名（否则「宝二爷」那条空别名会把「宝玉」的别名洗掉），改成并集
+                java.util.List<String> nextAliases = !in.has("aliases") ? cur.aliases()
+                        : exact ? aliases
+                        : java.util.stream.Stream.concat(cur.aliases().stream(), aliases.stream())
+                            .distinct().toList();
+                subs.set(hit, new studio.weaveora.director.plan.PlanSubjects.Subject(
+                        cur.name(), cur.kind(), nextAliases,
                         in.has("enabled") ? in.path("enabled").asBoolean(true) : cur.enabled(),
                         cur.locked(), cur.refs(), portraitId, portraitVer));
             }
@@ -667,7 +698,11 @@ public class DirectorService {
                 + "duplicated, watermark, text, oversaturated 等）。只输出 JSON：{\"positive_prompt\":\"...\",\"negative_prompt\":\"...\"}";
         // ★ 点名主体（2026-09-16 用户要求）：原正词里的角色名是身份锚定信号，不能被泛称冲掉
         sysBase += " 硬规则：原正词里的角色名（专有名词）必须**保留并点名**，不得换成 a man / the woman / 一个男人这类泛称；"
-                + "多主体同框时写清各自位置与左右关系（left/right/center、foreground/background）。";
+                + "多主体同框时写清相互关系与动作互动。"
+                // ★ 2026-09-16 修正：禁止在文案里猜画面方位（与「位置总控」的区域框会直接矛盾 → 位置错位）
+                + "但**不要写画面方位**（left/right/center、foreground/background 以及“在画面左侧”这类词）："
+                + "主体在画面中的位置与大小由用户设置的区域框统一由系统下发给模型，文案里再写一套会互相冲突。"
+                + "若原正词里有方位词，改写时请**删掉**它们。";
         // ★ 语言纯度（2026-09-16 用户报「一半中文一半英文」）：语言必须**整条一致**，不得只换一半
         sysBase += zh
                 ? "【语言硬规则】输出必须**全部为中文**：禁止混入英文单词（负面词、质量词也一样），"
@@ -781,10 +816,17 @@ public class DirectorService {
                     .append("并在 action 中保留主体名，便于系统为对应镜头绑定参考图。")
                     // ★ 点名主体（2026-09-16 用户要求）：映射顺序与系统下发参考图的顺序一致（image1=第一个主体）
                     .append("\n【硬规则·点名主体】该主体出镜的镜头，positive_prompt 必须**用上面的主体名点名**（中文名可保留，如 Baoyu (宝玉)），")
-                    .append("并写清其位置与左右关系（left/right/center、foreground/background）；禁止用 a man / the woman 这类泛称替代。")
-                    .append("多主体同框时必须逐个点名并写清相互关系（例：Baoyu on the left, Keqing on the right, facing each other）。")
-                    .append("系统按参考图顺序把主体映射为 image1 / image2 …（").append(map)
-                    .append("）；需要时可在 positive_prompt 里显式写 Baoyu (image1) 加固对应关系。");
+                    .append("禁止用 a man / the woman 这类泛称替代。")
+                    .append("多主体同框时必须逐个点名并写清相互关系与动作互动（例：Baoyu and Keqing facing each other, Baoyu speaking while Keqing listens）。")
+                    // ★ 2026-09-16 修正（用户实测第 4 镜反复“位置错位”）：**禁止在文案里猜画面方位**。
+                    //   原因：用户在「位置总控」里设的区域框会由系统作为**最终位置**下发；
+                    //   文案里再写一套 left/right/foreground 极易与框矛盾（实测第 4 镜：文案“居后景追来/在宝玉右侧”
+                    //   而框是 x=0.65 / x=0.06，直接相反）→ 模型两头听，左右与前后乱。
+                    .append("【不要写画面方位】禁止写 on the left / on the right / in the center / foreground / background / left of him")
+                    .append("这类**画面坐标**描述 —— 主体在画面里的位置与大小由用户在「位置总控」里设的区域框统一由系统下发；")
+                    .append("你在文案里猜的方位若与之不一致，就会变成位置错位。前/后景只能写叙事必要的逻辑关系（如 she runs after them from behind），不要写画面左右。")
+                    .append("系统按参考图顺序把主体映射为 Picture 1 / Picture 2 …（等同旧口径 image1 / image2：“").append(map)
+                    .append("”）；需要时可在 positive_prompt 里显式写 Baoyu (Picture 1) 加固对应关系。");
         }
         sb.append("\n\n请按 System Prompt 的 JSON 结构输出。");
         return sb.toString();

@@ -11,6 +11,7 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import studio.weaveora.director.DirectorService;
 import studio.weaveora.identity.JwtAuthFilter;
@@ -85,6 +86,30 @@ public class DirectorController {
         var added = body.putArray("added");
         r.added().forEach(added::add);
         return ResponseEntity.ok(body);
+    }
+
+    /**
+     * P13b（2026-09-16 用户要求）：定妆图的**默认正/负向提示词**。
+     *
+     * <p>为什么要有这个只读端点：生成定妆图时要像分镜一样弹框让用户改提示词 —— 弹框预填的默认值
+     * 必须与后端真正落库的那份**完全一致**，否则「界面上看到 A、实际用 B」。单一真源在
+     * {@link studio.weaveora.director.SubjectPrompts}。
+     */
+    @GetMapping("/portrait-prompt")
+    public ResponseEntity<java.util.Map<String, Object>> portraitPrompt(
+            HttpServletRequest request,
+            @RequestHeader(value = ProjectController.WORKSPACE_HEADER, required = false) String workspaceId,
+            @PathVariable UUID projectId,
+            @RequestParam(name = "subject", required = false) String subject,
+            @RequestParam(name = "kind", required = false) String kind,
+            @RequestParam(name = "refCount", required = false, defaultValue = "0") int refCount) {
+        uid(request);
+        ws(workspaceId);
+        var out = new java.util.LinkedHashMap<String, Object>();
+        out.put("positivePrompt",
+                studio.weaveora.director.SubjectPrompts.portraitPrompt(subject, kind, Math.max(0, refCount)));
+        out.put("negativePrompt", studio.weaveora.director.SubjectPrompts.portraitNegativePrompt());
+        return ResponseEntity.ok(out);
     }
 
     /** P11：AI 一键配乐（依据剧情给出 2~5 段「时间段 + 情绪」）。 */

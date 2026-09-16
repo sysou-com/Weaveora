@@ -9,9 +9,11 @@
 - 用户没要求文字 → negative 含 text, watermark, logo, subtitle；没要求真人 → 不发明可识别人脸。
 - 跨镜一致性：同一主体复用描述性锚点；seed_lock=true；下一镜 ref_shot_no 指向上镜（尾帧衔接，§30 #25）。
 - **参考图主体（P4）**：若 user 消息给了“可用参考图主体”清单，凡该主体出镜的镜头，positive_prompt 必须写明其形象（面容/服饰）以参考图为准（例：`character appearance strictly follows the provided reference image`），并在 action 保留主体名（供系统绑定参考图）。
-- **点名主体（P5，硬规则）**：凡镜头里出现已绑定参考图的主体，positive_prompt **必须用方案里的主体名点名**（中文专有名词可直接用，如 `Baoyu (宝玉)`），**禁止**用 `a man` / `the woman` / `a young man` 这类泛称替代；并写明其**画面位置与左右关系**（`on the left` / `on the right` / `in the center`、`foreground` / `background`）。
-  - 同镜多主体：必须逐个点名并写清相互关系，例：`Baoyu on the left foreground and Keqing on the right background, facing each other over the table`。
-  - 系统会按参考图顺序把主体映射为 `image1` / `image2` …（`image1=宝玉`、`image2=可卿`）；需要时可显式写 `Baoyu (image1)` 加固对应关系。
+- **点名主体（P5，硬规则）**：凡镜头里出现已绑定参考图的主体，positive_prompt **必须用方案里的主体名点名**（中文专有名词可直接用，如 `Baoyu (宝玉)`），**禁止**用 `a man` / `the woman` / `a young man` 这类泛称替代。
+  - 同镜多主体：必须逐个点名，并写清**相互关系/朝句/动作互动**（例：`Baoyu and Keqing facing each other over the table, Baoyu speaking while Keqing listens`）。
+  - **不要写画面方位词（P5b，2026-09-16 修正）**：禁止写 `on the left` / `on the right` / `in the center` / `foreground` / `background` / `left of him` 这类**画面坐标**描述 —— 位置由用户在「位置总控」里设的区域框统一由系统下发给模型（`Picture 1 (image1) = 宝玉 (left-upper, x=0.24, y=0.08, box 0.19x0.76)`）。
+    你在文案里猜的方位若与用户设的框不一致，模型会“两头听” → 左右/前后错位（用户实测第 4 镜反复出现）。前/后景只写**叙事必要**的遮挡关系（`she runs after them from behind`），不写“在画面左边”。
+  - 系统会按参考图顺序把主体映射为 `Picture 1` / `Picture 2` …（等同旧口径 `image1` / `image2`，`Picture 1(image1)=宝玉`）；需要时可写 `Baoyu (Picture 1)` 加固对应关系。
   - 原因：多主体同框时若不点名，模型只能自己猜哪张参考图是谁 → 串脸/换人（实测踩过）。
 - **运镜关键帧（P2）**：凡用户要求「镜头穿过/从A到B看到C」「推过前景人物再看到脸」这类**一条相机路径**的镜头，禁止只写一句折中 prompt；必须给出 `keyframes` 2–4 帧（至少 起始帧 + 结束帧）：每帧写清 `composition`（机位/朝向/遮挡/前景关系，如 `camera behind the monk, his back in foreground`、`the queen's face front view past his shoulder`）与各自英文 `positive_prompt`；`positive_prompt` 仍填**结束帧**作为单帧兼容值。单帧能表达清楚的普通镜头不得滥用 keyframes。
 - **构图与出图口径（P6，2026-09-16）**：出图引擎是 **Qwen-Image-Edit（2511）**，参考图是定妆照（纯色背景头像）。

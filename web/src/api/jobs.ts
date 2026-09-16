@@ -20,6 +20,13 @@ export async function createJobs(
     shotNos?: number[] | null
     /** P12：true = 连已封版镜一起生成 */
     includeLocked?: boolean
+    /** P13：kind=portrait 时指定剧情主体名 */
+    subject?: string
+    /** P13：kind=portrait 时直接指定参考图资产（界面上当前点选的图，无需先保存/确认） */
+    refAssetIds?: string[]
+    /** P13b：kind=portrait 时用户在弹框里确认过的正/负向提示词（不传=用后端默认模板） */
+    positivePrompt?: string
+    negativePrompt?: string
   },
 ): Promise<JobRecord[]> {
   return request<JobRecord[]>(`/api/v1/projects/${projectId}/jobs`, {

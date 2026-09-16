@@ -8,14 +8,34 @@ package studio.weaveora.director;
  * 之后所有分镜都拿这张锚定，一致性才稳。
  *
  * <p>模板可按主体类型微调（人 / 载具装备 / 物件 / 场景），保持简洁、去掉干扰项。
+ *
+ * <p>★ 2026-09-16（用户要求）：定妆图生成前要像分镜一样**弹出正/负向提示词让用户改**，
+ * 所以这份模板同时是「默认值」的唯一真源（后端 {@code createPortraitJob} 与前端弹框都读它），
+ * 避免前后端各写一份漂移。
  */
 public final class SubjectPrompts {
+
+    /** 定妆图默认负向词（与分镜负词口径一致：文字/水印/多人物/畸形/低清）。 */
+    public static final String PORTRAIT_NEGATIVE =
+            "text, watermark, logo, subtitle, caption, signature, multiple people, two people, "
+                    + "deformed face, deformed hands, extra limbs, extra fingers, lowres, blurry, "
+                    + "jpeg artifacts, ugly, 3d render, cgi, 文字, 水印, 标志, 字幕, 多人, 畸形, 低分辨率";
 
     private SubjectPrompts() {
     }
 
-    /** 组装该主体的定妆图提示词。 */
+    /** 组装该主体的定妆图正向提示词（默认值）。 */
     public static String portraitPrompt(String name, String kind, int refCount) {
+        String core = portraitCore(name, kind);
+        if (refCount > 0) {
+            core += " Reference image(s): " + refCount
+                    + "; follow them for identity, hairstyle and costume (keep the same character, do not redesign).";
+        }
+        return core;
+    }
+
+    /** 主语模板（不含参考图计数句），供前端弹框展示/微调。 */
+    public static String portraitCore(String name, String kind) {
         String k = kind == null ? "" : kind.trim().toLowerCase();
         String base = switch (k) {
             case "vehicle" ->
@@ -32,10 +52,11 @@ public final class SubjectPrompts {
                             + "柔和均匀布光、写实电影质感；严格保持参考图的人物特征（五官/发型/服装/年龄感）。"
                             + "只画这一个角色，不要文字、不要边框、不要多人物。";
         };
-        String withName = String.format(base, name == null ? "" : name);
-        if (refCount > 0) {
-            withName += " Reference image(s): " + refCount + "; follow them for identity and costume.";
-        }
-        return withName;
+        return String.format(base, name == null ? "" : name);
+    }
+
+    /** 定妆图默认负向词（单一真源）。 */
+    public static String portraitNegativePrompt() {
+        return PORTRAIT_NEGATIVE;
     }
 }

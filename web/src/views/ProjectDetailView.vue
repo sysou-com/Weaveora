@@ -27,7 +27,7 @@ import { createJobs, listJobs, cancelJob, rerunJob, retryJobs, deleteJobs, JOB_S
 import { shareProject } from '@/api/market'
 import { listAssets, uploadReference, fetchAssetBlob, deleteAssets, uploadVoiceLine, useSampleAsLineVoice, deleteVoicePreset, auditionVoicePreset, assetAsPortrait } from '@/api/assets'
 import { createExport, fetchExportBlob, renderMaster, timecode } from '@/api/export'
-import { aiGenerateLines, aiGenerateMusic, extractSubjects, patchPlanInPlace, patchSubjectMeta } from '@/api/director'
+import { aiGenerateLines, aiGenerateMusic, extractSubjects, patchPlanInPlace, patchSubjectMeta, portraitPromptDefaults } from '@/api/director'
 import { getEngineSettings } from '@/api/engineSettings'
 import { getProject, updateProjectDuration } from '@/api/projects'
 import { getVideoLimits, listShotLocks, setShotLocks } from '@/api/shotLocks'
@@ -597,11 +597,148 @@ function subjectActions(sub: PlanSubject): Array<{ label: string; key: string; d
   ]
 }
 function onSubjectAction(key: string, name: string): void {
-  if (key === 'gen') void genPortrait(name)
+  if (key === 'gen') void openPortraitDialog(name)
   else if (key === 'pick') pickPortrait(name)
   else if (key === 'del') removeSubject(name)
   else if (key === 'alias') openAlias(name)
   else if (key === 'useRef') useRefAsPortrait(name)
+}
+
+/* ================= P13b 生成定妆图弹框（正/负向提示词可改） ================= */
+/**
+ * 为什么要弹框（2026-09-16 用户要求）：定妆图是**所有分镜的唯一身份锚定**，
+ * 之前只能用后端写死的模板生成（「标准角色设定图：xxx 正面半身、纯色背景…」），
+ * 用户想控（换背景色/换角度/换风格）只能改代码。现在与分镜的「AI 更新提示词」一致：
+ * 弹框预填默认模板 → 用户改 → 用改后的提示词 + 参考图出图。
+ */
+const portraitOpen = ref(false)
+const portraitSubject = ref('')
+const portraitRefIds = ref<string[]>([])
+const portraitPositive = ref('')
+const portraitNegative = ref('')
+const portraitPromptBusy = ref(false)
+const portraitGenBusy = ref(false)
+
+async function openPortraitDialog(name: string): Promise<void> {
+  const revId = genRevisionId()
+  if (!revId) return
+  if (dirty.value && !(await savePlanInPlace())) return
+  const picked = subjectRefCandidates(name)
+  portraitSubject.value = name
+  portraitRefIds.value = picked
+  portraitPositive.value = ''
+  portraitNegative.value = ''
+  portraitOpen.value = true
+  await loadPortraitPrompt()
+}
+
+/** 拉取默认正/负向词（真源在后端 SubjectPrompts；拉不到就用本地弟底） */
+async function loadPortraitPrompt(): Promise<void> {
+  const name = portraitSubject.value
+  const sub = planSubjects().find((x) => x.name === name)
+  portraitPromptBusy.value = true
+  try {
+    const d = await portraitPromptDefaults(workspaceId.value, projectId.value, name,
+      sub?.kind ?? 'person', portraitRefIds.value.length)
+    portraitPositive.value = d.positivePrompt
+    portraitNegative.value = d.negativePrompt
+  } catch {
+    portraitPositive.value = `标准角色设定图：${name} 正面半身、中性表情、纯色背景、全身服装与配饰清晰可辨、柔和均匀布光、写实电影质感；严格保持参考图的人物特征（五官/发型/服装/年龄感）。只画这一个角色，不要文字、不要边框、不要多人物。`
+    portraitNegative.value = 'text, watermark, logo, subtitle, multiple people, deformed face, extra limbs, lowres, blurry, 3d render, cgi'
+  } finally {
+    portraitPromptBusy.value = false
+  }
+}
+
+/** 弹框里确认 → 用「用户改过的提示词 + 当前参考图」出定妆图 */
+async function confirmPortrait(): Promise<void> {
+  const revId = genRevisionId()
+  const name = portraitSubject.value
+  if (!revId || !name) return
+  const pos = portraitPositive.value.trim()
+  if (!pos) {
+    message.warning('正向提示词不能为空')
+    return
+  }
+  portraitGenBusy.value = true
+  portraitBusy.value = true
+  try {
+    const pickedIds = [...portraitRefIds.value]
+    const created = await createJobs(workspaceId.value, projectId.value, {
+      revisionId: revId,
+      kind: 'portrait',
+      subject: name,
+      refAssetIds: pickedIds,
+      positivePrompt: pos,
+      negativePrompt: portraitNegative.value.trim(),
+    } as never)
+    const jobId = created[0]?.id
+    if (!jobId) throw new Error('未创建定妆图任务')
+    portraitOpen.value = false
+    message.info(`「${name}」定妆图合成中…（参考图 ${pickedIds.length} 张：${pickedIds.map((i) => '#' + i.slice(-4)).join(' ') || '无'}）`)
+    const job = await waitJobDone(jobId, 600000)
+    if (job.state !== 'succeeded') throw new Error(job.errorMessage || `任务${job.state}`)
+    await queryClient.invalidateQueries({ queryKey: ['assets'] })
+    await queryClient.invalidateQueries({ queryKey: ['jobs'] })
+    await refreshGallery()
+    // 参考图只是“生成定妆的素材”：用完**立即释放选中**（不再当锚定图）
+    const used = new Set<string>(pickedIds)
+    const sub = planSubjects().find((x) => x.name === name)
+    for (const r of sub?.refs ?? []) used.add(r.assetId)
+    for (const id of used) markUnchecked(id)
+    refSelected.value = refSelected.value.filter((id) => !used.has(id))
+    for (const id of used) delete refSubjects.value[id]
+    syncReferenceAssets()
+    message.success(`「${name}」定妆图已生成（参考图已复位为未选中）—— 用「操作 ▾ → 把最新定妆照设为锚定图」`)
+  } catch (e) {
+    message.error(e instanceof Error ? e.message : '生成定妆图失败')
+  } finally {
+    portraitGenBusy.value = false
+    portraitBusy.value = false
+  }
+}
+
+/* ================= 新增剧情主体（用户要求：剧情主体要有「+ 新增主体」） ================= */
+const addSubjOpen = ref(false)
+const addSubjName = ref('')
+const addSubjKind = ref<'person' | 'vehicle' | 'object' | 'scene'>('person')
+const addSubjAliases = ref('')
+const addSubjBusy = ref(false)
+
+function openAddSubject(): void {
+  addSubjName.value = ''
+  addSubjKind.value = 'person'
+  addSubjAliases.value = ''
+  addSubjOpen.value = true
+}
+
+async function confirmAddSubject(): Promise<void> {
+  const name = addSubjName.value.trim()
+  if (!name) {
+    message.warning('请填写主体名（如：宝玉 / 赤兔马 / 通灵宝玉）')
+    return
+  }
+  if (planSubjects().some((s) => s.name === name)) {
+    message.warning(`已有同名主体「${name}」`)
+    return
+  }
+  const aliases = addSubjAliases.value
+    .split(/[,，、;；\s]+/).map((x) => x.trim()).filter((x) => x && x !== name)
+  addSubjBusy.value = true
+  try {
+    setPlanSubjects([
+      ...planSubjects(),
+      { name, kind: addSubjKind.value, aliases, enabled: true, locked: false, refs: [],
+        portraitAssetId: '', portraitVersion: 0, region: null },
+    ])
+    await saveSubjectMeta()
+    addSubjOpen.value = false
+    message.success(`已新增剧情主体「${name}」（已就地保存）。下一步：用「操作 ▾ → 生成定妆照」给它出定妆图`)
+  } catch (e) {
+    message.error(e instanceof Error ? e.message : '新增主体失败')
+  } finally {
+    addSubjBusy.value = false
+  }
 }
 
 /** 别名管理：LLM 抽的别名可能张冠李戴（如把「浅蔷薇色纱衣女子」当成秦可卿），要能删 */
@@ -743,48 +880,11 @@ function toggleSubject(name: string, on: boolean): void {
   setPlanSubjects(planSubjects().map((s) => (s.name === name ? { ...s, enabled: on } : s)))
   void saveSubjectMeta()
 }
-/** 生成该主体的定妆图（kind=portrait） */
-async function genPortrait(name: string): Promise<void> {
-  const revId = genRevisionId()
-  if (!revId) return
-  if (dirty.value && !(await savePlanInPlace())) return
-  portraitBusy.value = true
-  try {
-    // 用「本主体名下/方案里/界面未命名点选」的参考图（subjectRefCandidates）——
-    // 不再用「subj==='' 就算本主体」的松散过滤：导入的定妆照 snapshot 里本来就没 subject，
-    // 那个规则会把别的角色的图也当成本主体的（实测把袭人的图带进了警幻的定妆生成）。
-    const pickedIds = subjectRefCandidates(name)
-    const created = await createJobs(workspaceId.value, projectId.value, {
-      revisionId: revId,
-      kind: 'portrait',
-      subject: name,
-      refAssetIds: pickedIds,
-    } as never)
-    const jobId = created[0]?.id
-    if (!jobId) throw new Error('未创建定妆图任务')
-    // 把“这次到底用了哪几张参考图”说清楚 —— 用户报过「换一版定妆照没使用我选的参考图」，
-    // 看不到实际入参就只能猜（实测根因是后端把旧定妆照也追加进去了）
-    message.info(`「${name}」定妆图合成中…（参考图 ${pickedIds.length} 张：${pickedIds.map((i) => '#' + i.slice(-4)).join(' ') || '无'}）`)
-    const job = await waitJobDone(jobId, 600000)
-    if (job.state !== 'succeeded') throw new Error(job.errorMessage || `任务${job.state}`)
-    await queryClient.invalidateQueries({ queryKey: ['assets'] })
-    await queryClient.invalidateQueries({ queryKey: ['jobs'] })
-    await refreshGallery()
-    // 参考图只是“生成定妆的素材”：用完**立即释放选中**（不再当锚定图）
-    const used = new Set<string>(pickedIds)
-    const sub = planSubjects().find((x) => x.name === name)
-    for (const r of sub?.refs ?? []) used.add(r.assetId)
-    for (const id of used) markUnchecked(id)
-    refSelected.value = refSelected.value.filter((id) => !used.has(id))
-    for (const id of used) delete refSubjects.value[id]
-    syncReferenceAssets()
-    message.success(`「${name}」定妆图已生成（参考图已复位为未选中）—— 用「操作 ▾ → 把最新定妆照设为锚定图」`)
-  } catch (e) {
-    message.error(e instanceof Error ? e.message : '生成定妆图失败')
-  } finally {
-    portraitBusy.value = false
-  }
-}
+
+/**
+ * 【已废弃】生成该主体的定妆图旧入口（2026-09-16 改为弹框 {@link openPortraitDialog}）：
+ * 定妆图也要像分镜一样弹出正/负向提示词让用户改，再用「参考图 + 用户改过的提示词」出图。
+ */
 /** 选图：把最新一版定妆图写回该主体（供分镜锚定） */
 function pickPortrait(name: string): void {
   const list = portraitsOf(name)
@@ -976,6 +1076,9 @@ type PosScope =
   | { kind: 'plan' }
   | { kind: 'shot'; shotNo: number }
   | { kind: 'frame'; shotNo: number; index: number }
+  /** ★ 2026-09-16（用户要求）：作用范围还能直接选「定妆照 · 某主体」——只看/只改这个主体的
+   *  全片默认位置（写 `subjects[].region`），预览框里直接展示它的定妆照。 */
+  | { kind: 'portrait'; subject: string }
 const posScope = ref<PosScope>({ kind: 'plan' })
 const posPanelRef = ref<HTMLElement | null>(null)
 
@@ -990,7 +1093,7 @@ function posShotLabel(s: DirectorShot, i: number): string {
   const kf = (s.keyframes ?? [])[i]
   return `第 ${s.shot_no} 镜 · 帧 ${i + 1}${kf?.label ? ` ${kf.label}` : ''}`
 }
-/** 作用范围下拉（可搜索：输入「4」「帧 2」都能命中） */
+/** 作用范围下拉（可搜索：输入「4」「帧 2」「定妆」「宝玉」都能命中） */
 const posScopeOptions = computed(() => {
   const out: Array<{ value: string; label: string; keywords: string }> = [
     { value: 'plan', label: '方案默认（全片所有镜）', keywords: 'plan 方案 默认 全片 all' },
@@ -1005,40 +1108,92 @@ const posScopeOptions = computed(() => {
       })
     })
   }
+  // 定妆照（放最后，但可搜索：输入「定妆」或主体名就直接定位）
+  for (const sub of planSubjects()) {
+    out.push({
+      value: `portrait:${sub.name}`,
+      label: `定妆照 · ${sub.name}${sub.portraitAssetId ? '' : '（未定妆）'}`,
+      keywords: `定妆照 portrait subject ${sub.name} ${(sub.aliases ?? []).join(' ')}`,
+    })
+  }
   return out
 })
-const posScopeValue = computed<string>(() =>
-  posScope.value.kind === 'plan'
+/** 作用范围下拉的搜索：同时匹配 label 与 keywords（naive 默认只匹配 label）
+ *  —— 用户输入「4」「帧 2」「定妆」「宝玉」「可卿」都能命中。 */
+function filterPosScope(pattern: string, option: { label?: string; keywords?: string }): boolean {
+  const q = (pattern || '').trim().toLowerCase()
+  if (!q) return true
+  return `${option.label ?? ''} ${option.keywords ?? ''}`.toLowerCase().includes(q)
+}
+const posScopeValue = computed<string>(() => {
+  const s = posScope.value
+  return s.kind === 'plan'
     ? 'plan'
-    : posScope.value.kind === 'shot'
-      ? `shot:${posScope.value.shotNo}`
-      : `frame:${posScope.value.shotNo}:${posScope.value.index}`,
-)
+    : s.kind === 'shot'
+      ? `shot:${s.shotNo}`
+      : s.kind === 'frame'
+        ? `frame:${s.shotNo}:${s.index}`
+        : `portrait:${s.subject}`
+})
 function setPosScope(v: string): void {
   if (!v || v === 'plan') {
     posScope.value = { kind: 'plan' }
     return
   }
   const parts = v.split(':')
+  if (parts[0] === 'portrait') {
+    const subject = v.slice('portrait:'.length)
+    if (!subject) return
+    posScope.value = { kind: 'portrait', subject }
+    // 定妆照作用域：没有方案级位置时先给一个居中默认框，否则预览框里什么都看不到、也无从拖
+    // （用户要的是“选定妆照的时候直接展示定妆照”）
+    ensurePortraitScopeBox(subject)
+    return
+  }
   const no = Number(parts[1])
   if (!Number.isFinite(no)) return
   posScope.value =
     parts[0] === 'frame' ? { kind: 'frame', shotNo: no, index: Number(parts[2]) || 0 } : { kind: 'shot', shotNo: no }
+  maybeAutoLayoutForScope()
+}
+/**
+ * ★ 2026-09-16（用户要求）：切到某一镜/某一帧时，如果**该镜还没设过位置**，就把涉及主体的
+ * 定妆照按主体顺序**自动均分**到框里；已经改过则不自动分配，直接展示之前的结果。
+ */
+function maybeAutoLayoutForScope(): void {
+  const k = posScope.value.kind
+  if (k !== 'shot' && k !== 'frame') return
+  const names = posSubjects.value
+  if (names.length < 2) return          // 0~1 个主体没有均分可言
+  if (names.some((n) => posOwnBox(n))) return   // 本层已有位置 → 保留用户改过的结果
+  autoLayoutRegions(true)
+}
+/** 定妆照作用域：无方案级位置则给一个居中默认框（宽 0.32 / 高 0.7，符合半身像比例） */
+function ensurePortraitScopeBox(subject: string): void {
+  if (posOwnBox(subject)) return
+  posWrite(subject, { x: 0.34, y: 0.15, w: 0.32, h: 0.7 })
+  message.info(`已给「${subject}」一个居中默认位置（可拖动/微调；也可在下方「区域%」直接填）`)
 }
 const posScopeLabel = computed(() => {
-  if (posScope.value.kind === 'plan') return '方案默认（全片）'
-  const s = shotOfNo(posScope.value.shotNo)
-  if (posScope.value.kind === 'shot') return `第 ${posScope.value.shotNo} 镜`
-  return s ? posShotLabel(s, posScope.value.index) : `第 ${posScope.value.shotNo} 镜 · 帧 ${posScope.value.index + 1}`
+  const s = posScope.value
+  if (s.kind === 'plan') return '方案默认（全片）'
+  if (s.kind === 'portrait') return `定妆照 · ${s.subject}`
+  const shot = shotOfNo(s.shotNo)
+  if (s.kind === 'shot') return `第 ${s.shotNo} 镜`
+  return shot ? posShotLabel(shot, s.index) : `第 ${s.shotNo} 镜 · 帧 ${s.index + 1}`
 })
 
-/** 当前范围要摆位置的主体（方案默认 = 全部启用主体；镜/帧 = 该镜出镜主体） */
+/** 当前范围要摆位置的主体（方案默认 = 全部启用主体；定妆照 = 该主体；镜/帧 = 该镜出镜主体） */
 const posSubjects = computed<string[]>(() => {
   const d = draft.value
   if (!d || !isVideoPlan(d)) return []
   const all = planSubjectNames(d)
-  if (posScope.value.kind === 'plan') return all
-  const s = shotOfNo(posScope.value.shotNo)
+  const sc = posScope.value
+  if (sc.kind === 'plan') return all
+  if (sc.kind === 'portrait') {
+    return all.includes(sc.subject) ? [sc.subject] : []
+  }
+  const s = shotOfNo(sc.shotNo)
   return s ? shotCastInfo(s, all).subjects : all
 })
 
@@ -1046,22 +1201,26 @@ const posSubjects = computed<string[]>(() => {
 function posOwnBox(name: string): { x: number; y: number; w: number; h: number } | null {
   const d = draft.value
   if (!d || !isVideoPlan(d)) return null
-  if (posScope.value.kind === 'plan') {
+  const sc = posScope.value
+  // 「方案默认」与「定妆照 · 某主体」都写在同一处：subjects[].region（按主体存的全片默认位置）
+  if (sc.kind === 'plan' || sc.kind === 'portrait') {
     return (d.subjects ?? []).find((x) => x.name === name)?.region ?? null
   }
-  const s = shotOfNo(posScope.value.shotNo)
+  const s = shotOfNo(sc.shotNo)
   if (!s) return null
-  const list = posScope.value.kind === 'frame' ? (s.keyframes ?? [])[posScope.value.index]?.layout : s.layout
+  const list = sc.kind === 'frame' ? (s.keyframes ?? [])[sc.index]?.layout : s.layout
   const b = (list ?? []).find((x) => x.subject === name)
   return b ? { x: b.x, y: b.y, w: b.w, h: b.h } : null
 }
 /** 继承来源：镜继承方案默认；帧继承该镜的镜级 → 再不够就方案默认 */
 function posInheritedBox(name: string): { x: number; y: number; w: number; h: number } | null {
   const d = draft.value
-  if (!d || !isVideoPlan(d) || posScope.value.kind === 'plan') return null
-  const s = shotOfNo(posScope.value.shotNo)
+  if (!d || !isVideoPlan(d)) return null
+  const sc = posScope.value
+  if (sc.kind === 'plan' || sc.kind === 'portrait') return null
+  const s = shotOfNo(sc.shotNo)
   if (!s) return null
-  if (posScope.value.kind === 'frame') {
+  if (sc.kind === 'frame') {
     const own = (s.layout ?? []).find((b) => b.subject === name)
     if (own) return { x: own.x, y: own.y, w: own.w, h: own.h }
   }
@@ -1088,14 +1247,15 @@ function posWrite(name: string, box: { x: number; y: number; w: number; h: numbe
   if (!d || !isVideoPlan(d)) return
   const cl = (v: number): number => Math.round(Math.max(0, Math.min(1, v)) * 1000) / 1000
   const one = { subject: name, x: cl(box.x), y: cl(box.y), w: cl(box.w), h: cl(box.h) }
-  if (posScope.value.kind === 'plan') {
+  const sc = posScope.value
+  if (sc.kind === 'plan' || sc.kind === 'portrait') {
     const subs = planSubjects()
     setPlanSubjects(
       subs.map((x) => (x.name === name ? { ...x, region: { x: one.x, y: one.y, w: one.w, h: one.h } } : x)),
     )
     return
   }
-  const s = shotOfNo(posScope.value.shotNo)
+  const s = shotOfNo(sc.shotNo)
   if (!s) return
   // 顺序按“当前范围的主体顺序”，保证后端 imageN 槽位与界面展示一致
   const merge = (list: Array<{ subject: string; x: number; y: number; w: number; h: number }> | null | undefined) => {
@@ -1104,8 +1264,8 @@ function posWrite(name: string, box: { x: number; y: number; w: number; h: numbe
       .map((n) => next.find((b) => b.subject === n))
       .filter((b): b is { subject: string; x: number; y: number; w: number; h: number } => !!b)
   }
-  if (posScope.value.kind === 'frame') {
-    const kf = (s.keyframes ?? [])[posScope.value.index]
+  if (sc.kind === 'frame') {
+    const kf = (s.keyframes ?? [])[sc.index]
     if (kf) kf.layout = merge(kf.layout)
   } else {
     s.layout = merge(s.layout)
@@ -1129,14 +1289,15 @@ function setPosField(name: string, k: 'x' | 'y' | 'w' | 'h', raw: string): void 
 function clearPos(name: string): void {
   const d = draft.value
   if (!d || !isVideoPlan(d)) return
-  if (posScope.value.kind === 'plan') {
+  const sc = posScope.value
+  if (sc.kind === 'plan' || sc.kind === 'portrait') {
     setPlanSubjects(planSubjects().map((x) => (x.name === name ? { ...x, region: null } : x)))
     return
   }
-  const s = shotOfNo(posScope.value.shotNo)
+  const s = shotOfNo(sc.shotNo)
   if (!s) return
-  if (posScope.value.kind === 'frame') {
-    const kf = (s.keyframes ?? [])[posScope.value.index]
+  if (sc.kind === 'frame') {
+    const kf = (s.keyframes ?? [])[sc.index]
     if (kf) kf.layout = (kf.layout ?? []).filter((b) => b.subject !== name)
   } else {
     s.layout = (s.layout ?? []).filter((b) => b.subject !== name)
@@ -1155,7 +1316,7 @@ function editPosOnTop(shotNo: number): void {
   )
 }
 
-/** 位置预览数据（**按主体**）：主体名 + 区域 + 配色 */
+/** 位置预览数据（**按主体**）：主体名 + 区域 + 配色 + 定妆照缩略图 */
 const refPreviewItems = computed(() =>
   posSubjects.value.map((name, i) => ({
     id: name,
@@ -1163,6 +1324,8 @@ const refPreviewItems = computed(() =>
     region: parseRegionPct(posPctStr(name)),
     inherited: posIsInherited(name),
     color: POS_COLORS[i % POS_COLORS.length],
+    // ★ 2026-09-16（用户要求）：预览框里直接显示定妆照图片（而不是只有线框）
+    thumb: subjectThumbByName(name),
   })),
 )
 const posAspectCss = computed(() => {
@@ -1170,12 +1333,15 @@ const posAspectCss = computed(() => {
   const [w, h] = ar.split(':').map((n) => Number(n) || 0)
   return w > 0 && h > 0 ? `${w} / ${h}` : '16 / 9'
 })
-/** 「自动分配」：按当前范围的主体顺序摆位（2 → 左右；3 → 三等分；4 → 2×2） */
-function autoLayoutRegions(): void {
+/** 「自动分配」：按当前范围的主体顺序摆位（2 → 左右；3 → 三等分；4 → 2×2）
+ *
+ * @param silent true = 由「切到某一镜时自动均分」触发（提示语不同，不当成用户主动操作）
+ */
+function autoLayoutRegions(silent = false): void {
   const names = posSubjects.value
   const n = names.length
   if (n < 2) {
-    message.info('当前范围只有 0~1 个主体，无需自动分配')
+    if (!silent) message.info('当前范围只有 0~1 个主体，无需自动分配')
     return
   }
   const layouts: Array<{ x: number; y: number; w: number; h: number }> = []
@@ -1189,7 +1355,9 @@ function autoLayoutRegions(): void {
     }
   }
   names.forEach((name, i) => setPosPct(name, layouts[i] ?? layouts[layouts.length - 1]))
-  message.success(`已按主体顺序自动分配（${posScopeLabel.value}），可拖动或微调`)
+  message.success(silent
+    ? `已按主体顺序把 ${n} 个定妆照自动均分到「${posScopeLabel.value}」（可拖动微调；不想自动分配可先手动设一个框）`
+    : `已按主体顺序自动分配（${posScopeLabel.value}），可拖动或微调`)
 }
 
 // 位置预览拖动（移动 / 右下角缩放）
@@ -1623,7 +1791,7 @@ function setRefFromAsset(id: string): void {
   refSelected.value.push(id)
   markUnchecked(id)
   syncReferenceAssets()
-  message.success('已加入参考图（默认不勾选=不参与锚定；勾选后才参与，它也可作为定妆的参照）')
+  message.success('已加入参考图（它只作为**生成定妆照**的依据，不参与出图锚定；出图锚定一律用定妆图）')
 }
 
 function onPickFile(e: Event): void {
@@ -3488,6 +3656,11 @@ const shotTotal = computed(() => {
                         data-testid="btn-extract-subjects" @click="onExtractSubjects">
                   {{ subjectBusy === 'extract' ? '抽取中…' : '一键生成主体' }}
                 </button>
+                <button type="button" class="op" :disabled="!canEdit"
+                        data-testid="btn-add-subject" title="手动新增一个剧情主体（如 GLM 漏抽的人物/物件/场景）"
+                        @click="openAddSubject">
+                  + 新增主体
+                </button>
                 <label class="upload-link" :class="{ busy: uploadingRef }">
                   <input type="file" accept="image/png,image/jpeg,image/webp" :disabled="uploadingRef" @change="onPickFile" />
                   <span v-if="uploadingRef">上传中…</span>
@@ -3497,7 +3670,12 @@ const shotTotal = computed(() => {
             </div>
 
             <!-- P13：剧情主体列表（勾选=参与锚定；定妆图=一致性锚定图） -->
-            <p class="ref-group-title font-mono">剧情主体：</p>
+            <p class="ref-group-title font-mono">
+              剧情主体：
+              <span class="text-secondary" style="letter-spacing: 0">
+                （勾选=参与出图；锚定一律用<b>定妆图</b>；没有主体就点右上「+ 新增主体」）
+              </span>
+            </p>
             <div v-if="planSubjects().length" class="subj-wrap" data-testid="subject-list">
               <input
                 v-model="subjectQuery"
@@ -3535,23 +3713,31 @@ const shotTotal = computed(() => {
               </div>
               </div>
               <p class="subj-hint text-secondary">
-                勾选 = 参与锚定；锚定优先用「定妆图」，没有定妆图才用素材图。改动后请<b>保存并重新确认</b>，否则生成仍读旧稿。
+                勾选 = 该主体参与出图（出图时身份锚定<b>一律用定妆图</b>，没有定妆图的主体不会注入）。
+                改动后请<b>保存并重新确认</b>，否则生成仍读旧稿。
               </p>
             </div>
             <!-- 参考图：标题（在剧情主体展示框下方、参考图格子之上） -->
-            <p class="ref-group-title font-mono">参考图：</p>
+            <p class="ref-group-title font-mono">
+              参考图：
+              <span class="text-secondary" style="letter-spacing: 0">
+                （<b>只作生成/指定定妆照的依据，不参与出图锚定</b>）
+              </span>
+            </p>
             <div v-if="refLibrary.length" class="refs-grid">
               <div
                 v-for="a in refLibrary.slice(0, 8)"
                 :key="a.id"
                 :class="['ref-thumb', { sel: refSelected.includes(a.id) && !refUnchecked.includes(a.id), off: refUnchecked.includes(a.id) }]"
-                :title="refSelected.includes(a.id) ? '点击取消加入' : '点击用作参考'"
+                :title="refSelected.includes(a.id)
+                  ? '点击移出（不再作为生成定妆照的参考）'
+                  : '点击加入（作为生成定妆照的参考图，不参与出图锚定）'"
                 @click="toggleRef(a.id, !refSelected.includes(a.id))"
               >
                 <img v-if="thumbUrls[a.id]" :src="thumbUrls[a.id]" alt="参考图" loading="lazy" />
                 <span v-else class="ref-empty">…</span>
-                <!-- P13：勾选=参与参考（未勾选视为不作为参考） -->
-                <label v-if="refSelected.includes(a.id)" class="ref-check" title="勾选=参与参考；取消勾选=不参与（不必删除）"
+                <!-- P13：勾选=作为生成定妆照的参考图（**不**参与出图锚定） -->
+                <label v-if="refSelected.includes(a.id)" class="ref-check" title="勾选=作为生成定妆照的参考图（不参与出图锚定）"
                        @click.stop>
                   <input type="checkbox" :checked="!refUnchecked.includes(a.id)"
                          :data-testid="`ref-check-${a.id.slice(0, 8)}`"
@@ -3591,11 +3777,11 @@ const shotTotal = computed(() => {
             <div class="brief-head">
               <span class="font-mono eyebrow">位置总控（主体 / 区域%）</span>
               <button v-if="posSubjects.length > 1" type="button" class="link-btn" data-testid="btn-auto-layout"
-                      :title="`按当前范围（${posScopeLabel}）的主体顺序自动摆位`" @click="autoLayoutRegions">
+                      :title="`按当前范围（${posScopeLabel}）的主体顺序自动摆位`" @click="autoLayoutRegions(false)">
                 自动分配
               </button>
             </div>
-            <!-- 作用范围：可搜索下拉（输入 4 / 帧2 都能命中） -->
+            <!-- 作用范围：可搜索下拉（输入 4 / 帧2 / 定妆都能命中） -->
             <div class="pos-scope-row">
               <span class="pos-scope-label font-mono">作用范围</span>
               <NSelect
@@ -3603,21 +3789,29 @@ const shotTotal = computed(() => {
                 :options="posScopeOptions"
                 size="small"
                 filterable
+                clearable
+                :filter="filterPosScope"
                 class="pos-scope-select"
                 data-testid="pos-scope"
-                placeholder="方案默认（全片）"
-                @update:value="(v: string) => setPosScope(v)"
+                placeholder="搜索/选择：分镜（第 N 镜）或定妆照"
+                @update:value="(v: string) => setPosScope(v ?? 'plan')"
               />
               <span class="pos-scope-hint text-secondary">
                 {{ posScope.kind === 'plan'
                   ? '全片默认位置；某一镜/某一帧没单独设时就用它'
-                  : `帧级 > 镜级 > 方案默认；当前编辑：${posScopeLabel}` }}
+                  : posScope.kind === 'portrait'
+                    ? `只看/只改「${posScope.subject}」的定妆照在全片默认画面里的位置`
+                    : `帧级 > 镜级 > 方案默认；当前编辑：${posScopeLabel}` }}
               </span>
             </div>
 
             <div class="pos-frame" :style="{ aspectRatio: posAspectCss }">
               <div class="pos-third pos-third-v1" /><div class="pos-third pos-third-v2" />
               <div class="pos-third pos-third-h1" /><div class="pos-third pos-third-h2" />
+              <!--
+                ★ 2026-09-16（用户要求）：预览框里直接显示**主体定妆照**（而不是只有线框），
+                并用图片来拖动 —— 看得到人脸/半身占多大、在哪儿，比空盒子直观得多。
+              -->
               <div
                 v-for="it in refPreviewItems.filter((i) => i.region)"
                 :key="it.id"
@@ -3636,21 +3830,26 @@ const shotTotal = computed(() => {
                 @pointerup="onBoxPointerUp"
                 @pointercancel="onBoxPointerUp"
               >
+                <img v-if="it.thumb" class="pos-img" :src="it.thumb" alt="" draggable="false" />
                 <span class="pos-label font-mono" :style="{ color: it.color }">
                   {{ it.label }}<template v-if="it.inherited"> · 继承</template>
                 </span>
                 <span class="pos-resize" @pointerdown.stop="onBoxPointerDown($event, it, 'resize')" />
               </div>
               <p v-if="!refPreviewItems.some((i) => i.region)" class="pos-empty text-secondary">
-                尚无位置：点右上「自动分配」，或拖预览框里的色块调整
+                {{ posScope.kind === 'portrait'
+                  ? '该主体还没有定妆照（或未设位置）：先到上面「操作 ▾ → 生成定妆照」'
+                  : '尚无位置：点右上「自动分配」，或拖预览框里的图调整' }}
               </p>
             </div>
 
             <p class="ref-hint text-secondary">
-              拖动色块移动、右下角拖动缩放；也可在下方「区域%」直接填（x/y=左上角，w/h=宽高，0–100；w/h 越大=越近越大）。
-              这里是**唯一的位置总控**：作用范围选「方案默认」=全片；选「第 N 镜」/「第 N 镜 · 帧 M」=只改那一镜/那一帧
-              （生成时每帧用自己那份：<span class="font-mono">keyframes[j].layout</span> 优先于 <span class="font-mono">shots[].layout</span>）。
-              浅色虚线框 = 从上一层继承、尚未在本层设定。GPU(Comfy) 会把位置与「第几张参考图是哪个主体」写进提示词（多角色同框防串脸）。
+              直接<b>拖动定妆照图片</b>移动、右下角拖动缩放；也可在下方「区域%」直接填（x/y=左上角，w/h=宽高，0–100；w/h 越大=越近越大）。
+              这里是唯一的位置总控：作用范围选「方案默认」=全片；选「第 N 镜」/「第 N 镜 · 帧 M」=只改那一镜/那一帧；
+              选「定妆照 · 某主体」=只看/只改那个主体的全片默认位置。
+              切到某一镜时，若该镜还没设过位置，会按该镜主体**自动均分**一次（改过就保留你的结果，不再自动抹平）。
+              注入时每帧用自己那份：<span class="font-mono">keyframes[j].layout</span> 优先于 <span class="font-mono">shots[].layout</span>。
+              GPU(Comfy) 会把位置与「第几张参考图（Picture N）是哪个主体」写进提示词（多角色同框防串脸、防错位）。
             </p>
 
             <!-- 主体区域表：按**主体**列出（不依赖有没有素材图），可直接填值 -->
@@ -4115,6 +4314,75 @@ const shotTotal = computed(() => {
             <NButton size="small" @click="motionOpen = false">取消</NButton>
             <NButton size="small" type="primary" @click="confirmMotion">开始生成</NButton>
           </div>
+        </div>
+      </NModal>
+
+      <!--
+        P13b 生成定妆图（用户要求：定妆图也要像分镜一样**弹正/负向提示词**，用参考图 + 提示词出新图）。
+        为什么必须弹：定妆图是所有分镜的唯一身份锚定，以前只能用后端写死的模板，想控（背景色/角度/风格）只能改代码。
+      -->
+      <NModal v-model:show="portraitOpen" preset="card" title="生成定妆照（可改正/负向提示词）"
+              style="max-width: 720px" data-testid="portrait-modal">
+        <p class="text-secondary" style="margin: 0 0 10px; font-size: 13px;">
+          主体：<b>{{ portraitSubject }}</b> ·
+          参考图 {{ portraitRefIds.length }} 张
+          <span class="font-mono">{{ portraitRefIds.map((i) => '#' + i.slice(-4)).join(' ') || '（无：将按纯文本生成）' }}</span>
+        </p>
+        <template v-if="portraitPromptBusy">
+          <div class="g-loading" style="padding: 20px 0">读取默认提示词…</div>
+        </template>
+        <template v-else>
+          <div class="ai-fields">
+            <label class="ai-label">正向提示词（定妆规范 + 你的要求；可改）</label>
+            <NInput v-model:value="portraitPositive" type="textarea" :autosize="{ minRows: 4, maxRows: 10 }"
+                    data-testid="portrait-positive" />
+            <label class="ai-label">负向提示词（可改）</label>
+            <NInput v-model:value="portraitNegative" type="textarea" :autosize="{ minRows: 2, maxRows: 6 }"
+                    data-testid="portrait-negative" />
+          </div>
+          <p class="text-secondary" style="font-size: 11.5px; margin: 10px 0 0">
+            提示：定妆照建议**纯色背景、正面半身、中性表情**（后续它会被当作锚定图喂进每一镜；
+            带白底/影棚背景的原图容易把构图带偏，worker 会自动在负词里追加“白色背景/证件照”类词）。
+            只改上面这两栏；确认后会**用这些参考图 + 这份提示词**生成新的一版定妆照。
+          </p>
+          <div class="ai-actions">
+            <NButton size="small" :disabled="portraitGenBusy" @click="portraitOpen = false">取消</NButton>
+            <NButton size="small" :disabled="portraitGenBusy" @click="loadPortraitPrompt">恢复默认词</NButton>
+            <NButton size="small" type="primary" :loading="portraitGenBusy" data-testid="portrait-generate"
+                     @click="confirmPortrait">
+              生成定妆照
+            </NButton>
+          </div>
+        </template>
+      </NModal>
+
+      <!-- 新增剧情主体（用户要求：剧情主体要能手动新增，不能只靠「一键生成主体」抽取） -->
+      <NModal v-model:show="addSubjOpen" preset="card" title="新增剧情主体"
+              style="max-width: 560px" data-testid="add-subject-modal">
+        <div class="ai-fields">
+          <label class="ai-label">主体名（必填；后续在分镜/提示词里就用这个名字）</label>
+          <NInput v-model:value="addSubjName" placeholder="如：宝玉 / 赤兔马 / 通灵宝玉 / 太虚幻境"
+                  data-testid="add-subject-name" @keyup.enter="confirmAddSubject" />
+          <label class="ai-label">类型（决定定妆图模板：人物 / 载具装备 / 物件 / 场景）</label>
+          <NRadioGroup v-model:value="addSubjKind" size="small" data-testid="add-subject-kind">
+            <NRadioButton value="person">人物</NRadioButton>
+            <NRadioButton value="vehicle">载具/装备</NRadioButton>
+            <NRadioButton value="object">物件</NRadioButton>
+            <NRadioButton value="scene">场景</NRadioButton>
+          </NRadioGroup>
+          <label class="ai-label">别名（选填，用逗号/顿号/空格分隔；镜文里写别名也能自动绑定）</label>
+          <NInput v-model:value="addSubjAliases" placeholder="如：贾宝玉、宝二爷" data-testid="add-subject-aliases" />
+        </div>
+        <p class="text-secondary" style="font-size: 11.5px; margin: 10px 0 0">
+          新增后会**就地保存**（不需重新确认）。接着在列表里用「操作 ▾ → 生成定妆照」给它出定妆图，
+          并「把最新定妆照设为锚定图」，这样分镜出图才会用它做身份锚定。
+        </p>
+        <div class="ai-actions">
+          <NButton size="small" :disabled="addSubjBusy" @click="addSubjOpen = false">取消</NButton>
+          <NButton size="small" type="primary" :loading="addSubjBusy" data-testid="add-subject-confirm"
+                   @click="confirmAddSubject">
+            新增主体
+          </NButton>
         </div>
       </NModal>
 
@@ -4889,8 +5157,22 @@ const shotTotal = computed(() => {
 .pos-box {
   position: absolute; border: 1.5px dashed currentColor; border-radius: 6px;
   display: flex; align-items: flex-start; cursor: move; touch-action: none;
+  overflow: hidden;
 }
-.pos-label { font-size: 10px; padding: 2px 5px; letter-spacing: .06em; white-space: nowrap; }
+/* ★ 2026-09-16（用户要求）：预览框里显示**定妆照图片**，拖动图片就是拖位置（不再是空线框）。
+   pointer-events:none 让图片不抢指针事件（否则浏览器原生图片拖拽/选中会干扰 pointerdown）。*/
+.pos-img {
+  position: absolute; inset: 0; width: 100%; height: 100%;
+  object-fit: cover; object-position: top center;
+  pointer-events: none; user-select: none; -webkit-user-drag: none;
+  opacity: .92;
+}
+.pos-label {
+  font-size: 10px; padding: 2px 5px; letter-spacing: .06em; white-space: nowrap;
+  position: relative; z-index: 1;
+  background: color-mix(in srgb, var(--wv-surface) 72%, transparent);
+  border-radius: 4px;
+}
 .pos-resize {
   position: absolute; right: -5px; bottom: -5px; width: 12px; height: 12px;
   border-radius: 3px; background: currentColor; cursor: nwse-resize; opacity: .85;

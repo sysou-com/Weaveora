@@ -180,12 +180,27 @@ export async function extractSubjects(
   })
 }
 
-/** P13：只更新主体元数据（别名 / 参与勾选）—— 就地生效，不另存版本、不需重新确认 */
+/** P13b：定妆图的**默认**正/负向提示词（弹框预填；单一真源在后端 SubjectPrompts） */
+export async function portraitPromptDefaults(
+  workspaceId: string,
+  projectId: string,
+  subject: string,
+  kind: string,
+  refCount: number,
+): Promise<{ positivePrompt: string; negativePrompt: string }> {
+  const qs = new URLSearchParams({ subject, kind, refCount: String(refCount) })
+  return request<{ positivePrompt: string; negativePrompt: string }>(
+    `/api/v1/projects/${projectId}/portrait-prompt?${qs.toString()}`,
+    { headers: { [WORKSPACE_HEADER]: workspaceId } },
+  )
+}
+
+/** P13：只更新主体元数据（别名 / 参与勾选 / 定妆照）—— 就地生效，不另存版本、不需重新确认 */
 export async function patchSubjectMeta(
   workspaceId: string,
   projectId: string,
   revisionId: string,
-  subjects: Array<{ name: string; aliases?: string[]; enabled?: boolean; portraitAssetId?: string; portraitVersion?: number }>,
+  subjects: Array<{ name: string; kind?: string; aliases?: string[]; enabled?: boolean; portraitAssetId?: string; portraitVersion?: number }>,
 ): Promise<RevisionDetail> {
   return request<RevisionDetail>(`/api/v1/projects/${projectId}/revisions/${revisionId}/subjects/meta`, {
     method: 'POST',

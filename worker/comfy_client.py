@@ -60,6 +60,27 @@ def _image_comfy():
     return (IMAGE_COMFY or COMFY).rstrip("/")
 
 
+def _looks_zh(text):
+    """提示词是否以中文为主（与后端 JobService.isZhText 同口径）。
+
+    用途：worker 会在正/负词前**追加**一段英文指令（Edit 档的“怎么用参考图”、负词的
+    “不要白底”等）；用户把提示词改成中文后，这段英文就成了“英文头 + 中文身 + 中文尾”，
+    实测会让模型两头听（用户报过中英混杂）。所以追加语必须跟随提示词语言。
+    判据：汉字 ≥ 6 且占「汉字+拉丁字母」≥ 20%（“英文里带中文角色名”不会误判）。
+    """
+    if not text:
+        return False
+    cjk = 0
+    latin = 0
+    for ch in text:
+        o = ord(ch)
+        if 0x4E00 <= o <= 0x9FFF:
+            cjk += 1
+        elif ('a' <= ch <= 'z') or ('A' <= ch <= 'Z'):
+            latin += 1
+    return cjk >= 6 and cjk * 100 >= (cjk + latin) * 20
+
+
 def image_workflow_ready():
     """文生图是否走「本机 ComfyUI 工作流」（engine=comfy + 工作流 JSON 存在）。"""
     return (IMAGE_ENGINE == "comfy" and bool(IMAGE_TXT2IMG_WF) and os.path.exists(IMAGE_TXT2IMG_WF))
@@ -325,14 +346,32 @@ def generate_via_workflow(client_id, payload, progress_fn=None, on_tick=None):
 
     ref_names = []
     ref_keys = payload.get("referenceKeys") or []
+    # ★ 2026-09-16（用户实测第 4 镜“张冠李戴”的一个真因）：参考图**上传失败不能静默跳过**。
+    #   旧写法失败就 continue → 后面的图**前移一格**，而提示词里的 `Picture 2 = 可卿` 不会变，
+    #   于是 Picture 2 实际装的是第三个主体的脸 → 两个角色的脸被互换（张冠李戴）。
+    #   现在：任一图拿不到就**直接报错**，宁可让任务失败并给出可行动的信息，也不输出一张错脸的图。
+    failed = []
     for i, key in enumerate(ref_keys[:3]):
         try:
             data, ctype = fetch_reference_bytes(key)
             nm = _upload_image(data, (key.split("/")[-1] or ("ref_%d.png" % i)), ctype or "image/png")
-            if nm:
+            if not nm:
+                failed.append("#%d(%s): 上传未返回文件名" % (i + 1, key.split("/")[-1][:12]))
+            else:
                 ref_names.append(nm)
         except Exception as e:
-            print("[comfy] 参考图#%d 上传失败（跳过）：%s" % (i, e), flush=True)
+            failed.append("#%d(%s): %s" % (i + 1, key.split("/")[-1][:12], e))
+    if failed:
+        raise ComfyError(
+            "参考图上传失败 %d 张 → 已中止（继续跑会导致角色与参考图错位/张冠李戴）：%s。"
+            "请重试；若持续失败，检查 /opt/weaveora 存储与 API 连通性。"
+            % (len(failed), "; ".join(failed)))
+    if len(ref_names) != len(ref_keys[:3]):
+        raise ComfyError("参考图数量不一致（上传 %d / 期望 %d）→ 已中止，避免角色错位"
+                         % (len(ref_names), len(ref_keys[:3])))
+    if ref_names:
+        print("[comfy] 参考图槽位映射：%s"
+              % ", ".join("Picture %d = %s" % (i + 1, n) for i, n in enumerate(ref_names)), flush=True)
     # 选工作流：参考图锚定（Edit）> img2img（以参考为底）> 纯文生图
     if ref_names and IMAGE_EDIT_WF and os.path.exists(IMAGE_EDIT_WF):
         path, mode = IMAGE_EDIT_WF, "edit"
@@ -348,15 +387,26 @@ def generate_via_workflow(client_id, payload, progress_fn=None, on_tick=None):
     #   （那样耗时翻倍、还可能中途跑偏）。这里只做两件小事：
     #   ① 正词前加一句“怎么用这些参考图”的指令（人不变、场景按下面描述、别把参考图的纯色背景搬过来）；
     #   ② 负词补上“白色背景/证件照/角色设定图”这类词（定妆照就是纯色背景，不补它很容易被沿习）。
+    #   ★ 2026-09-16：① 的语言**跟随提示词语言** —— 用户把正词改成中文后，这里再插一句英文
+    #     就变成“英文头 + 中文身 + 中文尾”，实测会让模型两头听（用户报过中英混杂）。
+    #     槽位名用模型自己的 `Picture N` 口径（TextEncodeQwenImageEditPlus 内部就是这么拼的）。
     if mode == "edit" and ref_names:
-        positive = ("The reference image(s) show this shot's character(s) in order; keep each character's face, "
-                    "hairstyle, age and costume strictly consistent with their own reference, and place them into "
-                    "the scene described below (background / lighting / camera framing / action follow the "
-                    "description; do NOT keep the plain or white studio backdrop of the reference image(s)). "
-                    "Scene: " + (positive or ""))
-        negative = ((negative + ", ") if negative else "") + \
-                   "white background, plain backdrop, solid color background, studio portrait, character sheet, " \
-                   "front facing ID photo, 3d render, cgi"
+        slot_hint = " ".join("Picture %d" % (i + 1) for i in range(len(ref_names)))
+        if _looks_zh(positive):
+            positive = ("参考图按送入顺序对应片中角色（%s）。每个角色的面容、发型、年龄与服装必须严格跟随"
+                        "其自己的参考图；把角色放进下面描述的剧情场景里（背景/光线/机位/动作以文字描述为准，"
+                        "**不要**保留参考图的纯色/白底写真背景）。场景：" % slot_hint) + (positive or "")
+            negative = ((negative + ", ") if negative else "") + \
+                       "白色背景, 纯色背景, 影棚背景, 角色设定图, 证件照, 正面证件照, 3d渲染, cgi"
+        else:
+            positive = ("The reference image(s) are %s and show this shot's character(s) in that order; keep each "
+                        "character's face, hairstyle, age and costume strictly consistent with their own reference, "
+                        "and place them into the scene described below (background / lighting / camera framing / "
+                        "action follow the description; do NOT keep the plain or white studio backdrop of the "
+                        "reference image(s)). Scene: " % slot_hint) + (positive or "")
+            negative = ((negative + ", ") if negative else "") + \
+                       "white background, plain backdrop, solid color background, studio portrait, character sheet, " \
+                       "front facing ID photo, 3d render, cgi"
     _wf_inject_text(graph, positive, negative)
     _wf_inject_model(graph, IMAGE_MODEL)
     _wf_inject_size(graph, width, height)

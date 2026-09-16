@@ -9,7 +9,15 @@
 set -euo pipefail
 
 HOST="${WEAVEORA_WEB_HOST:-root@sysou.com}"
-KEY="${WEAVEORA_SSH_KEY:-$HOME/.ssh/comfy_tunnel_ed25519}"
+# SSH key：优先显式覆盖 $WEAVEORA_SSH_KEY；默认按「存在即用」顺序探测（2026-09-16：
+# 原来的 comfy_tunnel_ed25519 在本机已不存在，导致三个部署脚本一跑就 Permission denied）。
+KEY="${WEAVEORA_SSH_KEY:-}"
+if [ -z "$KEY" ]; then
+  for cand in "$HOME/.ssh/comfy_tunnel_ed25519" "$HOME/.ssh/id_ed25519" "$HOME/.ssh/id_rsa"; do
+    [ -f "$cand" ] && KEY="$cand" && break
+  done
+fi
+[ -f "${KEY:-}" ] || { echo "!! 找不到可用的 SSH 私钥（用 WEAVEORA_SSH_KEY=<路径> 指定）"; exit 1; }
 REMOTE="${WEAVEORA_WEB_DIR:-/opt/weaveora/web}"
 KEEP_DAYS="${WEAVEORA_WEB_KEEP_DAYS:-14}"
 

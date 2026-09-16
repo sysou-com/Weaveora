@@ -2293,8 +2293,21 @@ public class JobService {
         payload.put("revision_no", revisionNo);
         payload.put("subject", subject);
         payload.put("portrait_version", (sub == null ? 1 : sub.portraitVersion() + 1));
-        payload.put("positive_prompt", studio.weaveora.director.SubjectPrompts.portraitPrompt(subject, sub == null ? null : sub.kind(), keys.size()));
-        payload.put("negative_prompt", "text, watermark, logo, multiple people, deformed face, extra limbs, lowres");
+        // ★ P13b（2026-09-16 用户要求）：定妆图也要像分镜一样**先弹正/负向提示词让用户改**。
+        //   用户确认过的就照用（不再被默认模板覆盖）；没给（旧链路 / 直接调 API）才用默认模板。
+        String positivePrompt = req.positivePrompt() == null ? "" : req.positivePrompt().trim();
+        String negativePrompt = req.negativePrompt() == null ? "" : req.negativePrompt().trim();
+        if (positivePrompt.isEmpty()) {
+            positivePrompt = studio.weaveora.director.SubjectPrompts.portraitPrompt(
+                    subject, sub == null ? null : sub.kind(), keys.size());
+        } else {
+            log.info("portrait 用户自定义正词 project={} subject={} len={}", projectId, subject, positivePrompt.length());
+        }
+        if (negativePrompt.isEmpty()) {
+            negativePrompt = studio.weaveora.director.SubjectPrompts.portraitNegativePrompt();
+        }
+        payload.put("positive_prompt", positivePrompt);
+        payload.put("negative_prompt", negativePrompt);
         payload.put("aspect_ratio", project.aspectRatio());
         int[] dd = dimsFor(project.aspectRatio());
         payload.set("params", mapper().createObjectNode().put("width", dd[0]).put("height", dd[1]));
@@ -2632,7 +2645,11 @@ public class JobService {
                 sb.append(zh ? "；" : "; ");
             }
             double[] p = pos.get(name);
-            sb.append("image").append(i + 1).append(" = ").append(name);
+            // ★ 2026-09-16：槽位口径用**模型自己的命名**。TextEncodeQwenImageEditPlus 内部把参考图
+            //   拼成 `Picture 1: <|vision_start|>…`（见节点源码 _get_qwen_prompt_embeds），
+            //   官方 2511 模板/社区写法也都是 `Picture 1` / `Picture 2`；我们之前只写 `image1`，
+            //   模型未必能把两者对上 → 多主体时张冠李戴。现在两种名字并列写，怎么读都不歧义。
+            sb.append("Picture ").append(i + 1).append(" (image").append(i + 1).append(") = ").append(name);
             if (p != null) {
                 sb.append(zh ? "（" : " (")
                   .append(zh ? posHintZh(p[0], p[1]) : posHint(p[0], p[1]))
@@ -2643,14 +2660,24 @@ public class JobService {
             }
         }
         if (sb.length() > 0) {
+            // ★ 2026-09-16 加「位置以本清单为准」的覆盖句。
+            //   用户实测第 4 镜反复「位置错位」的真因就在这里：镜文案由 LLM 写成
+            //   「宝玉在前景中央…可卿在宝玉右侧…警幻居后景」，而用户在「位置总控」里设的框是
+            //   x=0.24 / x=0.06 / x=0.65 —— 两套方位**直接矛盾**，模型只能猜，于是左右/前后乱。
+            //   现在明确：描述给出动作与氛围，位置/大小以本清单为最终裁定。
             String add = zh
                     ? "\n参考图与主体对应（按送入顺序）：" + sb
                       + "。请严格按这个对应关系：每个角色只用自己的参考图，并放在括号里给的位置与相对大小上"
                       + "（归一化画面坐标，原点在左上；y 越小越靠上，框越大越靠近镜头）；角色之间保持明显分开。"
+                      + "【位置以本清单为准】上面的动作/氛围描述仅供理解剧情，其中任何方位词（前后景、左右、远近）"
+                      + "若与本清单不一致，一律以本清单给出的位置与框大小为准。"
                     : "\nReference mapping (in input order): " + sb
                       + ". Follow it strictly: each character uses only its own reference image and is placed at"
                       + " the given position and relative size (normalized frame coordinates, origin top-left;"
-                      + " smaller y = higher in frame, larger box = closer to camera); keep them clearly apart.";
+                      + " smaller y = higher in frame, larger box = closer to camera); keep them clearly apart."
+                      + " [Authoritative placement] The action/mood description above is for story context only;"
+                      + " if any spatial wording in it (foreground/background, left/right, near/far) conflicts with"
+                      + " this list, the positions and box sizes given here always win.";
             payload.put("positive_prompt", cur + add);
             log.info("refs: 参考图↔主体（含位置={}）已写入正词：{}", !pos.isEmpty(), sb);
         }
