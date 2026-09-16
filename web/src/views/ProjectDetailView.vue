@@ -2631,6 +2631,11 @@ async function openAiImageRewrite(): Promise<void> {
  * 不一起重写就会出现「主正词更新了、关键帧还是旧稿」的不一致（用户实测第 3 镜）。
  */
 async function openAiRewrite(shot: DirectorShot): Promise<void> {
+  const raw = ((shot.action ?? shot.zh) ?? '').trim()
+  if (!raw) {
+    message.info('本镜还没有「画面动作」中文描述 —— AI 是照它重写的，请先在镜卡里填写')
+    return
+  }
   aiImageMode.value = false
   aiShot.value = shot
   aiOpen.value = true
@@ -2644,7 +2649,7 @@ async function openAiRewrite(shot: DirectorShot): Promise<void> {
     aiPreview.value = await rewritePromptFromZh(
       workspaceId.value,
       projectId.value,
-      ((shot.action ?? shot.zh) ?? '').trim(),
+      raw,
       shot.positive_prompt,
       shot.negative_prompt,
       aiLang.value,

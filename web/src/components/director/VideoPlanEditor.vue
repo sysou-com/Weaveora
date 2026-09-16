@@ -273,6 +273,7 @@ const transitions = ['cut', 'dissolve', 'fade', 'wipe'].map((v) => ({ label: v, 
           @toggle-lock="(no: number, l: boolean) => emit('toggleLock', no, l)"
           @approve="emit('approveShot', $event)"
           @preview-voice="emit('previewVoice', $event)"
+          @ai-prompt="emit('aiPrompt', $event)"
         />
         <button
           v-if="allShots.length > shotShown"
