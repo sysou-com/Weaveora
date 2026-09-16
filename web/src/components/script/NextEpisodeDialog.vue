@@ -42,6 +42,7 @@ watch(
   >
     <p class="lead text-secondary">
       要不要让 AI 润色这一集？AI 会先读**不断更新的「精简的故事」**，再结合剧本要素生成符合下一集剧情的内容。
+      <br />长文分段生成（拼到 4000+ 字）约需 1–2 分钟，请勿关闭页面。
     </p>
 
     <div class="options">
@@ -71,7 +72,7 @@ watch(
     <template #footer>
       <div class="foot">
         <NButton quaternary :disabled="busy" @click="emit('update:show', false)">取消</NButton>
-        <span v-if="busy" class="text-secondary busy">生成中，请稍候（长文可能需要 30–60 秒）…</span>
+        <span v-if="busy" class="text-secondary busy">生成中，请稍候（1–2 分钟）…</span>
       </div>
     </template>
   </NModal>

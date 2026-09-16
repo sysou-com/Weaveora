@@ -148,7 +148,7 @@ function onApply(): void {
     />
 
     <p class="ai-hint font-mono text-secondary">
-      「AI 生成」仅凭标题与类型 ·「AI 更新」读取全部要素与已写集数后重写
+      「AI 生成」仅凭标题与类型 ·「AI 更新」读取全部要素与已写集数后重写 · 长文分段落笔需 1–2 分钟
     </p>
 
     <ScriptAiDiffDialog v-model:show="diffShow" :items="diffItems" @apply="onApply" />

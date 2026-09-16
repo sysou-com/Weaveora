@@ -65,16 +65,62 @@ public class ScriptAiService {
             return new AiFieldResult(field.key(), value,
                     "离线示例（未接 LLM）：请配置 WEAVEORA_LLM_* 后重新生成", !value.equals(current), "stub");
         }
+        // 分段续写：单次输出被 max_tokens 截断（实测 422），每段约 2200 字、拼到 ≥4000 字
+        StringBuilder acc = new StringBuilder();
         String system = ScriptPrompts.fieldSystem();
-        String user = ScriptPrompts.fieldUser(script, episodes, field, req.hint(), current, req.fromContent());
-        JsonNode node = callJson(system, user, script.title(), "字段「" + field.label() + "」");
-        String value = node.path("value").asText("");
+        String note = "";
+        for (int pass = 1; pass <= ScriptPrompts.MAX_PASSES; pass++) {
+            String user = ScriptPrompts.fieldUser(script, episodes, field, req.hint(), current,
+                    req.fromContent(), pass, acc.toString());
+            JsonNode node;
+            LlmJson res;
+            try {
+                res = callJson(system, user, script.title(),
+                        "字段「" + field.label() + "」第 " + pass + " 段");
+            } catch (RuntimeException e) {
+                // 韧性：已有内容就保留，不要让第 2/3 段失败把前文一起丢掉
+                if (acc.length() > 0) {
+                    log.warn("字段「{}」第 {} 段失败，保留已生成 {} 字：{}",
+                            field.label(), pass, acc.length(), e.getMessage());
+                    break;
+                }
+                throw e;
+            }
+            node = res.node();
+            String part = pickText(res, "value", "字段「" + field.label() + "」第 " + pass + " 段");
+            if (part.isEmpty()) {
+                LlmJson again = retryBlank(system, user, script.title(),
+                        "字段「" + field.label() + "」第 " + pass + " 段");
+                if (again == null) {
+                    break;
+                }
+                node = again.node();
+                part = pickText(again, "value", "字段「" + field.label() + "」第 " + pass + " 段（重试）");
+                if (part.isEmpty()) {
+                    break;
+                }
+            }
+            if (pass == 1) {
+                note = node.path("note").asText("");
+            }
+            if (acc.length() > 0) acc.append("\n\n");
+            acc.append(part);
+            if (acc.length() >= ScriptPrompts.FIELD_MIN_CHARS) {
+                break;
+            }
+        }
+        String value = acc.toString().trim();
         if (value.isBlank()) {
             throw new BizException(ErrorCode.DIRECTOR_PARSE_FAILED, "AI 未返回有效内容，请重试");
         }
-        String note = node.path("note").asText("");
-        boolean changed = !value.trim().equals(current.trim());
-        return new AiFieldResult(field.key(), value.trim(), note, changed, llm.source());
+        if (value.length() < ScriptPrompts.FIELD_MIN_CHARS) {
+            // 不静默：长度不够就如实告诉用户（可重试或手写补写）
+            note = (note == null || note.isBlank() ? "" : note + "；")
+                    + "AI 本次仅产出 " + value.length() + " 字（未达 " + ScriptPrompts.FIELD_MIN_CHARS
+                    + "），可重试或手写补全";
+        }
+        boolean changed = !value.equals(current.trim());
+        return new AiFieldResult(field.key(), value, note, changed, llm.source());
     }
 
     // ------------------------------------------------------------ 下一集
@@ -86,7 +132,7 @@ public class ScriptAiService {
                 : episodes.stream().mapToInt(ScriptEpisode::episodeNo).max().orElse(0) + 1;
         if (!req.polishedOrDefault()) {
             // 「不需要 AI 润色」→ 返回空壳，前端给空编辑器（用户原话）
-            return new AiNextEpisodeResult(nextNo, "第 " + nextNo + " 集", "", "", "manual");
+            return new AiNextEpisodeResult(nextNo, "第 " + nextNo + " 集", "", "", "manual", null);
         }
         String hint = req.titleHint();
         if (stub()) {
@@ -95,21 +141,75 @@ public class ScriptAiService {
                     "离线示例：未接 LLM。配置 WEAVEORA_LLM_* 后将依据「精简的故事」自动生成第 " + nextNo + " 集。",
                     "（离线示例正文 · 未接 LLM）\n\n【场景】…\n\n【人物】…\n\n【本集冲突】…\n\n【正文】"
                             + "请在配置 LLM 后重新生成，或直接在此手写第 " + nextNo + " 集。",
-                    "stub");
+                    "stub", null);
         }
         String system = ScriptPrompts.episodeSystem();
-        String user = ScriptPrompts.episodeUser(script, episodes, nextNo, hint, req.instruction());
-        JsonNode node = callJson(system, user, script.title(), "第 " + nextNo + " 集");
-        String content = node.path("content").asText("");
+        // 分段续写：一集拆成 2–3 段（起 / 承转 / 合与钩子），每段约 2200 字，避开 max_tokens 截断
+        String title = "";
+        String summary = "";
+        String note = "";
+        StringBuilder acc = new StringBuilder();
+        for (int pass = 1; pass <= ScriptPrompts.MAX_PASSES; pass++) {
+            String user = ScriptPrompts.episodeUser(script, episodes, nextNo, hint, req.instruction(),
+                    pass, acc.toString());
+            JsonNode node;
+            LlmJson res;
+            try {
+                res = callJson(system, user, script.title(), "第 " + nextNo + " 集第 " + pass + " 段");
+            } catch (RuntimeException e) {
+                // 韧性：第 1 段必须成功（否则没有本集）；后续段失败则保留已写部分
+                if (acc.length() > 0) {
+                    note = "第 " + pass + " 段生成失败，已保留前 " + acc.length() + " 字（可重试补全）";
+                    log.warn("第 {} 集第 {} 段失败，保留 {} 字：{}", nextNo, pass, acc.length(), e.getMessage());
+                    break;
+                }
+                throw e;
+            }
+            node = res.node();
+            String part = pickText(res, "content", "第 " + nextNo + " 集第 " + pass + " 段");
+            if (part.isEmpty()) {
+                // 实测：模型偶尔会把某一段留空（或只给大纲）—— 不静默丢弃，明确要求「必须给正文」再试一次
+                LlmJson again = retryBlank(system, user, script.title(),
+                        "第 " + nextNo + " 集第 " + pass + " 段");
+                if (again == null) {
+                    break;
+                }
+                node = again.node();
+                part = pickText(again, "content", "第 " + nextNo + " 集第 " + pass + " 段（重试）");
+                if (part.isEmpty()) {
+                    break;
+                }
+            }
+            if (pass == 1) {
+                title = node.path("title").asText("").trim();
+            }
+            if (summary.isBlank()) {
+                // 模型有时只在某一段给了摘要（或写在子对象里）→ 任一段有就用，不限定第 1 段
+                summary = node.path("summary").asText("").trim();
+            }
+            if (acc.length() > 0) acc.append("\n\n");
+            acc.append(part);
+            if (acc.length() >= ScriptPrompts.EPISODE_MIN_CHARS) {
+                break;
+            }
+        }
+        String content = acc.toString().trim();
         if (content.isBlank()) {
             throw new BizException(ErrorCode.DIRECTOR_PARSE_FAILED, "AI 未返回有效正文，请重试");
         }
-        String title = node.path("title").asText("");
         if (title.isBlank()) {
             title = (hint == null || hint.isBlank()) ? "第 " + nextNo + " 集" : hint.trim();
         }
-        return new AiNextEpisodeResult(nextNo, title.trim(),
-                node.path("summary").asText("").trim(), content.trim(), llm.source());
+        if (summary.isBlank()) {
+            // 兜底：没有摘要就用正文开头（「精简的故事」需要每集有据可依）
+            summary = ScriptPrompts.clip(content, 120);
+        }
+        if (content.length() < ScriptPrompts.EPISODE_MIN_CHARS) {
+            String warn = "AI 本次产出 " + content.length() + " 字（未达 " + ScriptPrompts.EPISODE_MIN_CHARS
+                    + "），可重试或手写补全";
+            note = note.isBlank() ? warn : note + "；" + warn;
+        }
+        return new AiNextEpisodeResult(nextNo, title, summary, content, llm.source(), note);
     }
 
     // ------------------------------------------------------------ 精简故事 + 一致性检查
@@ -128,7 +228,7 @@ public class ScriptAiService {
         }
         try {
             String user = ScriptPrompts.condenseUser(script, episodes);
-            JsonNode node = callJson(ScriptPrompts.condenseSystem(), user, script.title(), "精简故事");
+            JsonNode node = callJson(ScriptPrompts.condenseSystem(), user, script.title(), "精简故事").node();
             String story = node.path("condensedStory").asText("");
             List<String> beats = new ArrayList<>();
             for (JsonNode b : node.path("completedBeats")) {
@@ -155,7 +255,7 @@ public class ScriptAiService {
                     4, "stub");
         }
         JsonNode node = callJson(ScriptPrompts.guideSystem(),
-                ScriptPrompts.guideUser(script, episodes), script.title(), "AI 引导");
+                ScriptPrompts.guideUser(script, episodes), script.title(), "AI 引导").node();
         List<String> missing = new ArrayList<>();
         for (JsonNode n : node.path("missingBeats")) {
             String v = n.asText("").trim();
@@ -183,7 +283,7 @@ public class ScriptAiService {
             return out;
         }
         JsonNode node = callJson(null, ScriptPrompts.rewriteEpisodesUser(script, items, episodes),
-                script.title(), "一致性改写");
+                script.title(), "一致性改写").node();
         for (JsonNode n : node.path("episodes")) {
             int no = n.path("episodeNo").asInt(0);
             if (no <= 0) continue;
@@ -202,7 +302,7 @@ public class ScriptAiService {
         }
         try {
             JsonNode node = callJson(null, ScriptPrompts.briefUser(script, episode),
-                    script.title(), "brief 精简");
+                    script.title(), "brief 精简").node();
             String brief = node.path("brief").asText("").trim();
             return brief.isBlank() ? ScriptPrompts.clip(episode.content(), ScriptPrompts.BRIEF_MAX_CHARS) : brief;
         } catch (RuntimeException e) {
@@ -218,11 +318,15 @@ public class ScriptAiService {
      *
      * @param system null = 用 {@link ScriptPrompts#episodeSystem()} 之外的默认（这里传 null 时用通用收尾指令）
      */
-    private JsonNode callJson(String system, String user, String title, String what) {
+    /** 一次 LLM 调用的结果：原文 + 解析后的对象（原文用于字段名异常时打日志）。 */
+    private record LlmJson(String raw, JsonNode node) {
+    }
+
+    private LlmJson callJson(String system, String user, String title, String what) {
         String sys = system != null ? system : GENERIC_SYSTEM;
         try {
             String raw = llm.generateJson(new LlmRequest(sys, user, title, "", "video", "16:9", null, null));
-            return parse(raw);
+            return new LlmJson(raw, parse(raw, what));
         } catch (BizException e) {
             throw e;
         } catch (RuntimeException e) {
@@ -232,25 +336,119 @@ public class ScriptAiService {
         }
     }
 
+    /**
+     * 取正文字段：主键名不同就回退到常见别名；都找不到就**打日志带原文开头**（不静默丢内容）。
+     *
+     * <p>2026-09-17 实测：模型有时会把正文放在 {@code text}/{@code body}/{@code value} 下，
+     * 或把标题/摘要/正文包成子对象；早期实现直接取 {@code content} 得到空串 → 抛 BizException 且**无任何日志**，
+     * 排障时只能靠猜（违反「不要静默丢东西」纪律）。
+     */
+    private String pickText(LlmJson res, String primary, String what) {
+        JsonNode node = res.node();
+        String v = node.path(primary).asText("");
+        if (!v.isBlank()) {
+            return v.trim();
+        }
+        for (String alt : List.of("content", "value", "text", "body", "paragraph", "正文", "内容")) {
+            if (alt.equals(primary)) continue;
+            String a = node.path(alt).asText("");
+            if (!a.isBlank()) {
+                log.warn("剧本 AI（{}）未给出字段 {}，回退使用 {}", what, primary, alt);
+                return a.trim();
+            }
+        }
+        // 可能是嵌套（如 data.content）或数组包装
+        for (JsonNode child : node) {
+            if (child.isObject()) {
+                String a = pickText(new LlmJson(res.raw(), child), primary, what + "/嵌套");
+                if (!a.isBlank()) {
+                    return a;
+                }
+            }
+        }
+        log.warn("剧本 AI（{}）里找不到正文字段（期望 {}）。顶层字段={} 原文开头={}",
+                what, primary, keysOf(node), head(res.raw(), 320));
+        return "";
+    }
+
+    /**
+     * 段落为空时的补救：在指令尾部把「必须给正文」写成硬要求再试一次。
+     *
+     * <p>实测（2026-09-17）：分集生成时模型偶尔会把某一段留空或只给大纲，
+     * 早期实现直接 {@code break} 放弃 → 最终只有 1574 字（远低于 4000 的最低要求）。
+     */
+    private LlmJson retryBlank(String system, String user, String title, String what) {
+        try {
+            String forced = user + "\n【必须】本段必须给出正文，不得留空、不得只给说明或大纲；"
+                    + "请按上面的字数要求接着写下去。";
+            return callJson(system, forced, title, what + "（空正文重试）");
+        } catch (RuntimeException e) {
+            log.warn("{} 空正文重试仍失败：{}", what, e.getMessage());
+            return null;
+        }
+    }
+
+    private static String keysOf(JsonNode node) {
+        List<String> keys = new java.util.ArrayList<>();
+        node.fieldNames().forEachRemaining(keys::add);
+        return keys.toString();
+    }
+
     private static final String GENERIC_SYSTEM = """
             你是资深影视编剧与剧本医生。请严格按用户要求，只输出纯 JSON（不要解释、不要 Markdown 围栏）。
             """;
 
     private JsonNode parse(String raw) {
+        return parse(raw, "");
+    }
+
+    /**
+     * 容错解析：剥围栏、提首尾花括号、容忍数组包装（模型偶发返回 {@code [{...}]}）。
+     *
+     * <p>失败时**必须打日志带原文开头** —— 2026-09-17 实测：解析失败静默抛 BizException 时，
+     * 日志里什么都看不到，只能靠猜（与「不要静默丢东西」纪律相悖）。
+     */
+    private JsonNode parse(String raw, String what) {
         if (raw == null || raw.isBlank()) {
             throw new BizException(ErrorCode.DIRECTOR_PARSE_FAILED, "AI 返回为空");
         }
         String s = raw.trim();
-        int b = s.indexOf('{');
-        int e = s.lastIndexOf('}');
-        if (b < 0 || e <= b) {
-            throw new BizException(ErrorCode.DIRECTOR_PARSE_FAILED, "AI 返回不是 JSON 对象");
+        JsonNode node = tryRead(s);
+        if (node == null) {
+            int b = s.indexOf('{');
+            int e = s.lastIndexOf('}');
+            if (b >= 0 && e > b) {
+                node = tryRead(s.substring(b, e + 1));
+            }
         }
+        if (node != null && node.isArray()) {
+            for (JsonNode n : node) {
+                if (n.isObject()) {
+                    node = n;
+                    break;
+                }
+            }
+        }
+        if (node == null || !node.isObject()) {
+            log.warn("剧本 AI（{}）返回不是 JSON 对象，原文开头: {}", what, head(raw, 240));
+            throw new BizException(ErrorCode.DIRECTOR_PARSE_FAILED,
+                    "AI 返回格式异常" + (what.isBlank() ? "" : "（" + what + "）") + "，请重试");
+        }
+        return node;
+    }
+
+    private JsonNode tryRead(String s) {
         try {
-            return mapper.readTree(s.substring(b, e + 1));
-        } catch (Exception ex) {
-            throw new BizException(ErrorCode.DIRECTOR_PARSE_FAILED, "AI 返回 JSON 解析失败");
+            JsonNode n = mapper.readTree(s);
+            return n == null || n.isNull() ? null : n;
+        } catch (Exception e) {
+            return null;
         }
+    }
+
+    private static String head(String raw, int max) {
+        String s = raw == null ? "" : raw.replaceAll("\\s+", " ").trim();
+        return s.length() <= max ? s : s.substring(0, max) + "…";
     }
 
     private static List<ScriptConflict> parseConflicts(JsonNode arr) {

@@ -43,7 +43,8 @@ public class OpenAiDirectorLlm implements DirectorLlm {
         for (int attempt = 1; attempt <= 2; attempt++) {
             try {
                 String content = callOnce(request);
-                String cleaned = stripFences(content);
+                // 两步归一：剥代码围栏 → 修复字符串内的裸控制字符（长中文段落高频；见 JsonGuard 注释）
+                String cleaned = JsonGuard.repairStrings(stripFences(content));
                 // 校验确实是 JSON（早失败早重试）
                 mapper.readTree(cleaned);
                 return cleaned;

@@ -262,6 +262,7 @@ async function chooseNext(payload: { polished: boolean; titleHint: string; instr
       aiPolished: payload.polished,
     })
     if (payload.polished) message.success('AI 已按「精简的故事」草拟本集，请检查修改后保存')
+    if (r.note) message.warning(r.note)
     if (r.source === 'stub') message.info('当前未接 LLM（离线示例）；配置 WEAVEORA_LLM_* 后为正式内容')
   } catch (e) {
     message.error(e instanceof Error ? e.message : 'AI 生成失败')

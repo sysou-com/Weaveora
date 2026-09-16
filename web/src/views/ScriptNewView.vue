@@ -39,37 +39,56 @@ const elements = computed<Record<string, string>>(() => ({ ...fields }))
 // ---------- 一键生成全部（批量 diff 确认，Q3） ----------
 const batchShow = ref(false)
 const batchBusy = ref(false)
+const batchProgress = ref('')
 const batchItems = ref<AiDiffItem[]>([])
 
+/**
+ * 一键生成全部：**并发 3 路**。
+ * 每个字段要分段续写到 ≥4000 字（实测 1–2 分钟），6 个字段串行就是十几分钟 → 不可接受。
+ */
 async function generateAll(): Promise<void> {
   if (!title.value.trim() || !genre.value.trim()) {
     message.warning('请先填写「剧本标题」并选择「剧本类型」')
     return
   }
   batchBusy.value = true
+  batchProgress.value = '准备中…'
+  const queue = [...SCRIPT_FIELDS]
   const items: AiDiffItem[] = []
-  for (const f of SCRIPT_FIELDS) {
-    try {
-      const r = await aiScriptFieldPreview({
-        title: title.value,
-        genre: genre.value,
-        field: f.key,
-        mode: 'from_title',
-        currentValue: fields[f.key],
-        elements: elements.value,
-      })
-      if (r.value) {
-        items.push({ key: f.key, label: f.label, before: fields[f.key], after: r.value, note: r.note })
+  let done = 0
+  const worker = async (): Promise<void> => {
+    for (;;) {
+      const f = queue.shift()
+      if (!f) return
+      try {
+        const r = await aiScriptFieldPreview({
+          title: title.value,
+          genre: genre.value,
+          field: f.key,
+          mode: 'from_title',
+          currentValue: fields[f.key],
+          elements: elements.value,
+        })
+        if (r.value) {
+          items.push({ key: f.key, label: f.label, before: fields[f.key], after: r.value, note: r.note })
+        }
+      } catch (e) {
+        message.error(`${f.label}：${e instanceof Error ? e.message : '生成失败'}`)
       }
-    } catch (e) {
-      message.error(`${f.label}：${e instanceof Error ? e.message : '生成失败'}`)
+      done++
+      batchProgress.value = `已生成 ${done} / ${SCRIPT_FIELDS.length}`
     }
   }
+  await Promise.all([worker(), worker(), worker()])
   batchBusy.value = false
+  batchProgress.value = ''
   if (!items.length) {
     message.warning('AI 没有返回内容，请逐个字段重试')
     return
   }
+  // 保持字段原本顺序（并发完成顺序是乱的）
+  const order = new Map(SCRIPT_FIELDS.map((f, i) => [f.key as string, i]))
+  items.sort((a, b) => (order.get(a.key) ?? 0) - (order.get(b.key) ?? 0))
   batchItems.value = items
   batchShow.value = true
 }
@@ -173,7 +192,7 @@ function submit(): void {
           <div class="actions">
             <NButton size="large" :loading="batchBusy" data-testid="ai-gen-all" @click="generateAll">
               <template #icon><NIcon><Wand2 :size="16" /></NIcon></template>
-              AI 一键生成全部要素
+              {{ batchBusy ? batchProgress || '生成中…' : 'AI 一键生成全部要素' }}
             </NButton>
             <NButton
               type="primary"
@@ -210,6 +229,10 @@ function submit(): void {
             <li>AI 持续维护「精简的故事」，越写越连贯</li>
             <li>每集可一键「转成项目」出分镜与提示词</li>
           </ul>
+          <p class="warn text-secondary">
+            AI 写长文（每段约 2200 字，拼到 4000+ 字）需要 1–2 分钟；
+            点「AI 生成」后请勿关闭页面。
+          </p>
         </div>
       </aside>
     </div>
@@ -256,6 +279,7 @@ function submit(): void {
 .steps li { font-size: 12.5px; color: var(--wv-text-3); line-height: 1.6; padding-left: 14px; position: relative; }
 .steps li::before { content: '·'; position: absolute; left: 4px; color: var(--wv-accent); }
 .steps li { counter-increment: s; }
+.warn { margin: 12px 0 0; font-size: 12px; line-height: 1.7; border-top: 1px solid var(--wv-divider); padding-top: 10px; }
 @media (max-width: 900px) {
   .new-layout { grid-template-columns: 1fr; }
   .side { display: none; }

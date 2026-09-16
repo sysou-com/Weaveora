@@ -6,6 +6,8 @@ public record AiNextEpisodeResult(
         String title,
         String summary,
         String content,
-        String source
+        String source,
+        /** 需要告知用户的提示（如某段生成失败/未达目标长度）；无则 null */
+        String note
 ) {
 }
