@@ -42,7 +42,7 @@ public class InternalController {
     }
 
     public record CompleteAssetDto(String key, String mime, Integer width, Integer height, Long seed, Integer durationMs,
-                                   Boolean faceDetected, String faceFrames) {
+                                   Boolean faceDetected, String faceFrames, String notes) {
     }
 
     public record CompleteRequest(List<CompleteAssetDto> assets) {
@@ -88,7 +88,7 @@ public class InternalController {
         List<JobService.CompleteAsset> items = req.assets() == null ? List.of()
                 : req.assets().stream()
                 .map(a -> new JobService.CompleteAsset(a.key(), a.mime(), a.width(), a.height(),
-                        a.seed(), a.durationMs(), a.faceDetected(), a.faceFrames()))
+                        a.seed(), a.durationMs(), a.faceDetected(), a.faceFrames(), a.notes()))
                 .toList();
         return ResponseEntity.ok(jobService.complete(jobId, items));
     }

@@ -1102,6 +1102,8 @@ MOTION_VRAM_AREA_REF = 832.0 * 480.0   # 标定分辨率（换成其它分辨率
 # 注意：**不能拿 /system_stats 的 vram_free 当判据** —— ComfyUI 自己缓存的双专家（26.6GiB）
 # 是可以回收的，实测就吃过这个坑：1280x704/48 帧被误拦（当时 free 只有 20GiB）。
 MOTION_VRAM_SAFETY_GB = float(os.environ.get("WEAVEORA_MOTION_VRAM_SAFETY_GB", "4") or 4)
+# 自动降分辨率的**下限**（长边），避免“为了塞下无限降”：512 长边在 16:9 下约 512x288
+MOTION_MIN_SIDE = int(os.environ.get("WEAVEORA_MOTION_MIN_SIDE", "512") or 512)
 # ★ 2026-09-15 从 0 改为 4：旧值 0 = 没有余量，于是 80 帧 @832×464（预估 44.5 GiB / 总 47.4 GiB）
 # “体检通过”但实际在 KSamplerAdvanced 上 `torch.OutOfMemoryError: Allocation on device`
 # （预估没有算显存碎片、CUDA 上下文、VAE 解码瞬时峰值）。
@@ -1160,6 +1162,40 @@ def _motion_vram_need_gb(frames, width, height):
     area = max(1.0, float(width) * float(height))
     scale = area / MOTION_VRAM_AREA_REF
     return MOTION_VRAM_BASE_GB + MOTION_VRAM_PER_FRAME_GB * float(frames) * scale
+
+
+def _motion_fit_resolution(mw, mh, frames, budget_gb):
+    """给定帧数与可用显存预算，算一个**能放下的最大分辨率**（保画幅、/16 对齐）。
+
+    为什么要有这个（2026-09-16 夜用户裁定）：显存不够时**首选降分辨率，而不是降帧** ——
+    降帧会静默牺牲**时长与速度**（动作被压进更短时长 → 看起来快进，尾部还要补帧静止），
+    而降分辨率只牺牲一点清晰度，时长与速度完全不变。
+
+    从 `_motion_vram_need_gb()` 反解面积：need = BASE + PER_FRAME × frames × area/REF
+      ⇒ area_need = (budget - BASE) × REF / (PER_FRAME × frames)
+    返回 (w, h)；连最低档都放不下（budget ≤ BASE 或算出的尺寸小于下限）返回 None。
+    """
+    try:
+        budget_gb = float(budget_gb)
+    except (TypeError, ValueError):
+        return None
+    room = budget_gb - MOTION_VRAM_BASE_GB
+    if room <= 0 or frames <= 0:
+        return None
+    area_need = room * MOTION_VRAM_AREA_REF / max(1e-6, MOTION_VRAM_PER_FRAME_GB * float(frames))
+    cur = float(mw) * float(mh)
+    if cur <= 0 or area_need >= cur:
+        return (int(mw), int(mh))
+    import math
+    k = math.sqrt(area_need / cur) * 0.97            # 留 3% 余量，避免刚卡在阀值上
+    w = max(MOTION_MIN_SIDE, int(mw * k) // 16 * 16)
+    h = max(MOTION_MIN_SIDE, int(mh * k) // 16 * 16)
+    if w * h >= cur:                                  # 舍入后没变小 → 强制降一档
+        w = max(MOTION_MIN_SIDE, (int(mw) - 16) // 16 * 16)
+        h = max(MOTION_MIN_SIDE, (int(mh) - 16) // 16 * 16)
+    if w < 16 or h < 16 or w * h >= cur:
+        return None
+    return (int(w), int(h))
 
 
 def _snake_key(k):
@@ -1650,11 +1686,16 @@ def generate_motion(client_id, payload, progress_fn=None):
     if (mw, mh) != (_w0, _h0):
         print("[comfy] motion 分辨率 %dx%d → %dx%d（默认 480p 桶；要原分辨率请设 resolution=720p）"
               % (_w0, _h0, mw, mh), flush=True)
+    # 因显存做的取舍会汇成 notes 随资产上报（不只藏在日志里）
+    _notes = []
+    _res_shrunk = False
+    _want_frames = None
     # P2：A14B 双专家实测峰值 ~42 GiB → 总显存不够就**快速失败并点名换机**
     # （旧行为：硬跑 → OOM，报一堆看不懂的错；24G 卡无论如何跑不了 A14B）
     if str(_mp.get("mode") or "").strip().lower() != "single":
         _free, _total = vram_stats()
         _frames = _motion_graph_frames(payload, _mp)[0]
+        _want_frames = _frames
         # ★ 必须用**压后**尺寸（mw/mh）估算：线上踩过 —— 已把 1280×704 压成 832×464，
         #   体检却仍按 1280×704 算 → 误报「放不下」（124 帧报 57.2 GiB，实际只需 ~47 GiB）
         _need = _motion_vram_need_gb(_frames, mw, mh)
@@ -1688,6 +1729,19 @@ def generate_motion(client_id, payload, progress_fn=None):
         #   现在：能拿到实测可用显存就以它为准（卸载后测得的最准）；
         #   只有 `_free` 不可用时才回退到 `_total - SAFETY` 这个保守值。
         _fit_budget = _free if _free is not None else (_total - MOTION_VRAM_SAFETY_GB if _total else None)
+        # ★ 2026-09-16 夜（用户裁定）：显存不够时**首选降分辨率保时长/速度**，降帧是最后手段。
+        _res_shrunk = False
+        if _fit_budget is not None and _need > _fit_budget:
+            _shrink = _motion_fit_resolution(mw, mh, _frames, _fit_budget)
+            if _shrink and _shrink != (mw, mh):
+                _w1, _h1 = _shrink
+                print("[comfy] 显存不够 → **先降分辨率保时长**：%dx%d → %dx%d（帧数 %d 不变 = 时长 %.2fs与速度不变；"
+                      "只牺牲一点清晰度）｜预估需 %.1f GiB ≤ 可用 %.1f GiB"
+                      % (mw, mh, _w1, _h1, _frames, _frames / max(1.0, MOTION_NATIVE_FPS), _need, _fit_budget),
+                      flush=True)
+                _res_shrunk = True
+                mw, mh = _w1, _h1
+                _need = _motion_vram_need_gb(_frames, mw, mh)
         if _fit_budget is not None and _need > _fit_budget:
             _area_scale = (float(mw) * float(mh)) / MOTION_VRAM_AREA_REF
             _max_frames = max(32, int((_fit_budget - MOTION_VRAM_BASE_GB)
@@ -1710,6 +1764,14 @@ def generate_motion(client_id, payload, progress_fn=None):
             payload = dict(payload)
             payload["frames"] = _new_frames
             _mp["frames"] = _new_frames
+            _frames = _new_frames
+        # 把“因显存做的取舍”汇成一句 notes（前端在资产卡上看得见，不只藏在日志里）
+        if _res_shrunk:
+            _notes.append("显存不够 → 分辨率自动降到 %dx%d（时长与速度不变，只略糊）" % (mw, mh))
+        if _want_frames is not None and _frames != _want_frames:
+            _notes.append("显存仍不够 → 帧数 %d→%d（实际约 %.2fs，动作会被压缩且尾部静止补齐；建议拆短镜头）"
+                          % (_want_frames, _frames, _frames / max(1.0, MOTION_NATIVE_FPS)))
+        _notes = "；".join(_notes)
         if _free is not None and _free < _need:
             print("[comfy] WARN 当前可用 %.1f GiB < 预估 %.1f GiB：ComfyUI 会自行换入换出，"
                   "若 OOM 请降分辨率或帧数" % (_free, _need), flush=True)
@@ -1814,7 +1876,7 @@ def generate_motion(client_id, payload, progress_fn=None):
     if progress_fn:
         progress_fn(100, "done")
     return [{"bytes": mp4, "mime": "video/mp4", "width": int(w), "height": int(h),
-             "duration_ms": pdur, "face_detected": face, "face_frames": frames}]
+             "duration_ms": pdur, "face_detected": face, "face_frames": frames, "notes": _notes}]
 
 
 # ---- P7 配乐：ACE-Step 1.5（ComfyUI 原生节点，非 wrapper） ----

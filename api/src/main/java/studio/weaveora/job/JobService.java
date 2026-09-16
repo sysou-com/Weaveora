@@ -1086,7 +1086,8 @@ public class JobService {
             // 供选镜弹窗提前标出「无人脸」的镜——否则要等对口型跑到一半才报 Face not detected。
             // 注意：job.payload() 是共享节点，必须 deepCopy 后再改，否则会污染任务行。
             com.fasterxml.jackson.databind.JsonNode snap = job.payload();
-            if (a.faceDetected() != null || a.faceFrames() != null) {
+            if (a.faceDetected() != null || a.faceFrames() != null
+                    || (a.notes() != null && !a.notes().isBlank())) {
                 com.fasterxml.jackson.databind.node.ObjectNode o = (snap != null && snap.isObject())
                         ? ((com.fasterxml.jackson.databind.node.ObjectNode) snap).deepCopy()
                         : mapper().createObjectNode();
@@ -1095,6 +1096,11 @@ public class JobService {
                 }
                 if (a.faceFrames() != null) {
                     o.put("faceFrames", a.faceFrames());
+                }
+                // ★ 2026-09-16 夜：把 worker 的“因显存做的取舍”一并落进快照（如 motion 自动降分辨率），
+                //   前端在资产卡上能看到，而不是只藏在 VPS 日志里。
+                if (a.notes() != null && !a.notes().isBlank()) {
+                    o.put("notes", a.notes());
                 }
                 snap = o;
             }
@@ -2907,7 +2913,8 @@ public class JobService {
                 studio.weaveora.asset.AssetService.subjectOf(a), null,
                 studio.weaveora.asset.AssetService.snapshotKindOf(a),
                 studio.weaveora.asset.AssetService.faceDetectedOf(a),
-                studio.weaveora.asset.AssetService.faceFramesOf(a), a.createdAt());
+                studio.weaveora.asset.AssetService.faceFramesOf(a),
+                studio.weaveora.asset.AssetService.notesOf(a), a.createdAt());
     }
 
     private static long randomSeed() {
@@ -2920,6 +2927,6 @@ public class JobService {
 
     /** complete 请求中的资产元数据。 */
     public record CompleteAsset(String key, String mime, Integer width, Integer height, Long seed, Integer durationMs,
-                                Boolean faceDetected, String faceFrames) {
+                                Boolean faceDetected, String faceFrames, String notes) {
     }
 }

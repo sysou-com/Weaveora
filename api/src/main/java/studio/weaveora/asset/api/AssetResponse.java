@@ -45,6 +45,13 @@ public record AssetResponse(
          * 「部分帧无人脸」同样跑不了，UI 靠它把原因说清楚（而不是只标一句「无人脸」）。
          */
         String faceFrames,
+        /**
+         * ★ 2026-09-16 夜：worker 的“因显存做的取舍”说明（来自 prompt_snapshot.notes）。
+         *
+         * <p>为什么要暴露：motion 显存不够时 worker 会**自动降分辨率保时长**（或万不得已降帧），
+         * 这个决定必须让用户看得见（资产卡上一行提示），而不是藏在 VPS 的 journalctl 里。
+         */
+        String notes,
         OffsetDateTime createdAt
 ) {
 }

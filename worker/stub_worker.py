@@ -222,7 +222,8 @@ def _complete(jid, payload, media):
         return False
     st, done = _req("POST", "/internal/jobs/%s/complete" % jid, {
         "assets": [{"key": up["key"], "mime": mime, "width": w, "height": h, "seed": seed,
-                    "durationMs": dur, "faceDetected": extra.get("faceDetected")}]})
+                    "durationMs": dur, "faceDetected": extra.get("faceDetected"),
+                    "faceFrames": extra.get("faceFrames"), "notes": extra.get("notes")}]})
     if st != 200:
         _req("POST", "/internal/jobs/%s/fail" % jid, {"code": "COMPLETE_FAIL", "message": str(done)[:200]})
         return False
@@ -542,10 +543,11 @@ def execute_job(job):
                 _yield_vram_for_video()
                 outs = engine.generate_motion("weaveora-stub-worker", payload,
                                               progress_fn=_prog(jid))
-                media = [(o["bytes"], o.get("mime") or "image/webp",
+                media = [(o["bytes"], o.get("mime") or "video/mp4",
                           o.get("width") or width, o.get("height") or height,
-                          int(float(payload.get("duration_sec", 3.0)) * 1000),
-                          {"faceDetected": o.get("face_detected")}) for o in outs]
+                          int(o.get("duration_ms") or 0) or int(float(payload.get("duration_sec", 3.0)) * 1000),
+                          {"faceDetected": o.get("face_detected"), "faceFrames": o.get("face_frames"),
+                           "notes": o.get("notes")}) for o in outs]
             else:
                 # 文生图：配了「本机 ComfyUI 工作流」（engine=comfy + 工作流 JSON）就走工作流出图，
                 # 否则用 worker 自带的 SDXL/IP-Adapter 代码路径（builtin）。

@@ -950,7 +950,8 @@ public class ConcatService {
                 studio.weaveora.asset.AssetService.subjectOf(a), null,
                 studio.weaveora.asset.AssetService.snapshotKindOf(a),
                 studio.weaveora.asset.AssetService.faceDetectedOf(a),
-                studio.weaveora.asset.AssetService.faceFramesOf(a), a.createdAt());
+                studio.weaveora.asset.AssetService.faceFramesOf(a),
+                studio.weaveora.asset.AssetService.notesOf(a), a.createdAt());
     }
 
     /** 一个字幕段（镜内相对秒）。 */

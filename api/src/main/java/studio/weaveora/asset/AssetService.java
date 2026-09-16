@@ -325,6 +325,7 @@ public class AssetService {
                 snapText(a, "kind"),
                 faceDetectedOf(a),
                 faceFramesOf(a),
+                notesOf(a),
                 a.createdAt());
     }
 
@@ -369,6 +370,11 @@ public class AssetService {
     /** P13：抽样帧里能检出人脸的帧数（如 "4/6"）；未检测为 null。 */
     public static String faceFramesOf(Asset a) {
         return snapText(a, "faceFrames");
+    }
+
+    /** ★ 2026-09-16 夜：worker 写在快照里的取舍说明（如“显存不够 → 分辨率自动降到 704x384”）；无则 null。 */
+    public static String notesOf(Asset a) {
+        return snapText(a, "notes");
     }
 
     /** P10：配音产物在镜内的段号（写产生它的 job payload 快照里）；非配音为空。 */

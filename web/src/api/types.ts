@@ -443,6 +443,13 @@ export interface AssetRef {
   faceDetected?: boolean | null
   /** P13：检出人脸的抽样帧数，如 "6/6" "4/6" "0/6" */
   faceFrames?: string | null
+  /**
+   * ★ 2026-09-16 夜：worker 写在产物快照里的「因显存做的取舍」说明，如
+   * 「显存不够 → 分辨率自动降到 704x384（时长与速度不变，只略糊）」。
+   * 为什么要暴露到前端：motion 显存不够时 worker 会自动降分辨率（或万不得已降帧），
+   * 这个决定必须让用户看得见，而不是藏在 VPS 日志里。
+   */
+  notes?: string | null
   /** P10：产物真实时长（毫秒）—— 配音靠它对齐字幕、判定超长 */
   durationMs?: number | null
   /** P10：配音在镜内的段号（null = 非配音产物） */

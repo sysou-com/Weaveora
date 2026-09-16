@@ -4615,6 +4615,8 @@ const shotTotal = computed(() => {
             <div v-else class="g-loading">…</div>
             <div class="g-meta">
               <span class="g-kind font-mono">{{ a.kind }}<template v-if="galShotNo(a)"> · 第{{ galShotNo(a) }}镜</template><template v-if="a.width"> · {{ a.width }}×{{ a.height }}</template><template v-if="galRevNo(a.jobId)"> · v{{ galRevNo(a.jobId) }}</template></span>
+              <!-- ★ 2026-09-16 夜：worker 的显存取舍说明（如“显存不够 → 分辨率自动降到 704x384”）要看得见 -->
+              <span v-if="a.notes" class="g-note" :title="a.notes" data-testid="asset-note">⚠</span>
               <span class="g-actions">
                 <button v-if="galUrls[a.id]" type="button" class="g-max" title="沉浸预览/播放"
                         @click.stop="openImmersive(a.id, a.mime ?? '')">
@@ -5252,6 +5254,8 @@ const shotTotal = computed(() => {
 .face-warn-list { margin: 0; padding-left: 18px; font-size: 12.5px; line-height: 1.9; color: var(--wv-danger, #c45c4a); }
 .motion-sec { font-size: 12px; margin: 8px 0 0; color: var(--wv-text-3, var(--wv-text-2)); }
 .motion-sec.warn { color: var(--wv-danger, #c45c4a); }
+/* 资产卡上的 ⚠（worker 因显存做的取舍说明，如自动降分辨率）：悬停看全文 */
+.g-note { margin-left: 4px; color: var(--wv-warn, #C8A25E); cursor: help; }
 /* 位置总控：估计脸宽告警（<64px 红 / 64~96px 黄 / ≥96px 绿） */
 .pos-face { font-size: 10.5px; white-space: nowrap; }
 .pos-face.ok { color: var(--wv-success, #7BC47F); }
