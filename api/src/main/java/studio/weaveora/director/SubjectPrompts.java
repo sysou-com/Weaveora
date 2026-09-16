@@ -26,7 +26,28 @@ public final class SubjectPrompts {
 
     /** 组装该主体的定妆图正向提示词（默认值）。 */
     public static String portraitPrompt(String name, String kind, int refCount) {
+        return portraitPrompt(name, kind, refCount, null);
+    }
+
+    /**
+     * 组装该主体的定妆图正向提示词（默认值）。
+     *
+     * ★ P14（2026-09-16 用户要求）：把「主体设定」（性别/年龄/身高/体态/性格/外貌）拼进定妆提示词 ——
+     * 定妆照是所有分镜的**唯一错定图**，如果它本身就把性别/年龄段画错，后面每一镜都会错。
+     */
+    public static String portraitPrompt(String name, String kind, int refCount,
+                                       studio.weaveora.director.plan.PlanSubjects.Traits traits) {
         String core = portraitCore(name, kind);
+        if (traits != null && !traits.isEmpty()) {
+            core += "\n角色设定（必须体现在画面里）：" + traits.describe(true) + "。";
+            String gz = traits.genderZh();
+            if (!gz.isEmpty()) {
+                core += "这个角色是「" + gz + "」，"
+                        + ("男".equals(gz) ? "严重禁止画成女性、不要女性化的五官与发型服装。"
+                                           : "女".equals(gz) ? "严重禁止画成男性、不要男性化的五官与体型。"
+                                                             : "请按参考图与上面的描述如实表现性别特征。");
+            }
+        }
         if (refCount > 0) {
             core += " Reference image(s): " + refCount
                     + "; follow them for identity, hairstyle and costume (keep the same character, do not redesign).";

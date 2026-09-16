@@ -10,6 +10,13 @@ const sizeOptions = ['extreme-wide', 'wide', 'medium', 'close-up', 'extreme-clos
   label: v,
   value: v,
 }))
+
+/** ★ P14：设定年代（plan.setting 可能不存在，先建对象再赋值） */
+function setEra(v: string): void {
+  const p = props.plan as unknown as { setting?: { era?: string; notes?: string } }
+  if (!p.setting || typeof p.setting !== 'object') p.setting = {}
+  p.setting.era = v
+}
 </script>
 
 <template>
@@ -31,6 +38,18 @@ const sizeOptions = ['extreme-wide', 'wide', 'medium', 'close-up', 'extreme-clos
           type="textarea"
           :autosize="{ minRows: 2, maxRows: 5 }"
           :disabled="disabled"
+        />
+      </label>
+      <!-- ★ P14：设定年代（会追加进正词；不填就会出现与年代不符的人/物） -->
+      <label class="row">
+        <span class="key" title="剧情发生的时代/年代；会追加进出图正词">设定年代 era</span>
+        <NInput
+          :value="props.plan.setting?.era ?? ''"
+          size="small"
+          :disabled="disabled"
+          placeholder="如：清代 · 康熙年间 / 北宋汴京 / 近未来 2077 年"
+          data-testid="img-plan-era"
+          @update:value="(v: string) => setEra(v)"
         />
       </label>
       <div class="zh-head">

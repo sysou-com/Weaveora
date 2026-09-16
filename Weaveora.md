@@ -570,6 +570,26 @@ sequenceDiagram
 > （`Picture N (imageN) = 主体 (方位, x/y, 框 w×h)` + 「位置以本清单为准」）。因此 **LLM 不得在 `positive_prompt` 里自行发明画面方位**
 > （left/right/center、foreground/background）——两套方位并存会让模型左右/前后错位（2026-09-16 实测）。
 
+#### 7.5.2 设定年代与主体档案（P14，2026-09-16 裁定，实现必须遵守）
+
+**为什么要单独成一节**：用户实测「关键帧把宝玉画成了女性」，并反馈提示词与人物/年代不符。
+根因是方案里只有「名字」，**没有年代、也没有人物属性** —— LLM 与视觉模型只能靠名字猜。据此定三条：
+
+1. **方案必须交代设定年代**：顶层 `setting.era`（必填语义，如 `清代 · 康熙年间`），
+   可选 `setting.notes`（服化道/世界观补充）。导演 LLM 首次生成时必须输出；用户可在方案页手改。
+2. **主体必须有人物档案**：`subjects[]` 里 kind=person 的主体应给出
+   `gender`（male|female|other，**拿不准写 other，绝不允许猜反**）、`age`、`height`、`build`（体态）、
+   `personality`（性格）、`appearance`（外貌与服饰要点）。来源：①「一键生成主体」由场记 LLM 推断；②用户在「主体设定」里手填（以用户为准）。
+3. **两处信息必须进模型**（三处同口径，不得只做一处）：
+   | 去向 | 实现位置 |
+   |---|---|
+   | 导演生成 / 单镜重写 LLM 上下文 | `DirectorService.settingAndSubjectBlock()`（`buildUserPrompt` 与 `rewritePrompt` 共用） |
+   | 出图正词（每镜） | `JobService.applySetting()`（年代，追加 `【设定年代/世界观】`）+ `applyLayoutRegions()`（`Picture N = 主体[档案]`） |
+   | 定妆照提示词 | `SubjectPrompts.portraitPrompt(name, kind, refCount, traits)` |
+
+> **`subjects[]` 与 `setting` 都归用户所有**：导演新一版时由 `DirectorService.mergePrevSubjectsAndSetting()`
+> 强制继承上一版（丢弃 LLM 自己编的 `subjects`），否则一带而过就会把定妆照与档案洗掉（等价于“一致性突然全崩”）。
+
 ### 7.6 资产
 
 - 原图、缩略图、视频 mp4、预览 webp、prompt 快照、seed、模型哈希一并保存。

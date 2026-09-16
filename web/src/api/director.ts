@@ -180,19 +180,28 @@ export async function extractSubjects(
   })
 }
 
-/** P13b：定妆图的**默认**正/负向提示词（弹框预填；单一真源在后端 SubjectPrompts） */
+/**
+ * P13b/P14：定妆图的**默认**正/负向提示词（弹框预填）。
+ *
+ * 后端从**方案 subjects[]** 读 kind 与人物档案（性别/年龄/…），所以必须传 revisionId ——
+ * 保证「弹框里看到的就是 createPortraitJob 真正会用的那份」。
+ */
 export async function portraitPromptDefaults(
   workspaceId: string,
   projectId: string,
+  revisionId: string,
   subject: string,
-  kind: string,
   refCount: number,
-): Promise<{ positivePrompt: string; negativePrompt: string }> {
-  const qs = new URLSearchParams({ subject, kind, refCount: String(refCount) })
-  return request<{ positivePrompt: string; negativePrompt: string }>(
-    `/api/v1/projects/${projectId}/portrait-prompt?${qs.toString()}`,
-    { headers: { [WORKSPACE_HEADER]: workspaceId } },
-  )
+): Promise<{
+  positivePrompt: string
+  negativePrompt: string
+  kind?: string
+  traits?: Record<string, string>
+}> {
+  const qs = new URLSearchParams({ subject, refCount: String(refCount) })
+  return request(`/api/v1/projects/${projectId}/revisions/${revisionId}/portrait-prompt?${qs.toString()}`, {
+    headers: { [WORKSPACE_HEADER]: workspaceId },
+  })
 }
 
 /** P13：只更新主体元数据（别名 / 参与勾选 / 定妆照）—— 就地生效，不另存版本、不需重新确认 */
@@ -200,7 +209,22 @@ export async function patchSubjectMeta(
   workspaceId: string,
   projectId: string,
   revisionId: string,
-  subjects: Array<{ name: string; kind?: string; aliases?: string[]; enabled?: boolean; portraitAssetId?: string; portraitVersion?: number }>,
+  subjects: Array<{
+    name: string
+    kind?: string
+    aliases?: string[]
+    enabled?: boolean
+    portraitAssetId?: string
+    portraitVersion?: number
+    /** ★ P14：主体设定（人物档案）。带 hasTraits=true 时后端整份替换（允许清空） */
+    hasTraits?: boolean
+    gender?: string
+    age?: string
+    height?: string
+    build?: string
+    personality?: string
+    appearance?: string
+  }>,
 ): Promise<RevisionDetail> {
   return request<RevisionDetail>(`/api/v1/projects/${projectId}/revisions/${revisionId}/subjects/meta`, {
     method: 'POST',

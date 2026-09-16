@@ -55,7 +55,7 @@ public class DirectorService {
     private static final List<String> CONCRETE_MODES = List.of("image", "video");
     private static final Map<String, String> SYSTEM_FALLBACK = Map.of(
             "image", "你是电影摄影指导+分镜师。输出且只输出 JSON（图片导演方案：mode/title/logline/prompt_zh/positive_prompt/negative_prompt/camera/lighting/palette/params/variations）。",
-            "video", "你是电影摄影指导+分镜师。输出且只输出 JSON（视频导演方案：mode/title/logline/duration_sec/aspect_ratio/script/shots/audio/edit_plan；镜头时长总和==目标时长，每镜 positive_prompt 20–1200）。关键规则：① 有台词的镜头尽量不用正脸大特写，改用过肩/侧脸/听者反应/手部或环境特写（图生视频模型无法对口型，正脸会让嘴型穿帮）；② 若镜头必须出现正脸说话，positive_prompt 里加 speaking、mouth moving，并置 shots[].lip_sync=true；③ 旁白镜头 lip_sync=false；④ 【动态】positive_prompt 必须写清可见的动态（主体动作/表情变化/眼神方向/次级运动/多主体互动 至少覆盖 3 类，用现在分词写进行中动作），禁写静态构图，negative 带 static, motionless, frozen —— 否则图生视频会输出几乎静止的慢动作；⑤ 【点名主体】已绑定参考图的主体必须用主体名点名（如 Baoyu (宝玉)），禁写 a man / the woman 这类泛称 —— 多主体同框不点名会串脸；⑥ 【不写画面方位】禁止 left/right/center、foreground/background 这类画面坐标 —— 位置由用户在「位置总控」设的区域框统一由系统下发，文案里猜的方位会与之冲突导致位置错位；参考图按顺序映射为 Picture 1/Picture 2。");
+            "video", "你是电影摄影指导+分镜师。输出且只输出 JSON（视频导演方案：mode/title/logline/setting{era,notes}/duration_sec/aspect_ratio/script/shots/audio/edit_plan；镜头时长总和==目标时长，每镜 positive_prompt 20–1200）。关键规则：① **必须给出 setting.era（剧情年代，如“清代 · 康熙年间”），且全片不得混用年代元素**；主体档案由用户在面板维护，你只遵守不强编；② 有台词的镜头尽量不用正脸大特写，改用过肩/侧脸/听者反应/手部或环境特写（图生视频模型无法对口型，正脸会让嘴型穿帮）；③ 若镜头必须出现正脸说话，positive_prompt 里加 speaking、mouth moving，并置 shots[].lip_sync=true；④ 旁白镜头 lip_sync=false；⑤ 【动态】positive_prompt 必须写清可见的动态（主体动作/表情变化/眼神方向/次级运动/多主体互动 至少覆盖 3 类，用现在分词写进行中动作），禁写静态构图，negative 带 static, motionless, frozen —— 否则图生视频会输出几乎静止的慢动作；⑥ 【点名主体】已绑定参考图的主体必须用主体名点名（如 Baoyu (宝玉)），禁写 a man / the woman 这类泛称；且描写必须与其**性别/年龄段/体态**一致（**不得把男性写成女性**）；⑦ 【不写画面方位】禁止 left/right/center、foreground/background 这类画面坐标 —— 位置由用户在「位置总控」设的区域框统一由系统下发，文案里猜的方位会与之冲突导致位置错位；参考图按顺序映射为 Picture 1/Picture 2。不要输出 subjects 字段。");
 
     private final ProjectContextPort context;
     private final PromptRevisionRepository revisions;
@@ -119,6 +119,8 @@ public class DirectorService {
         }
         // 新一版保留上一版同镜的中文描述与旁白（zh/narration 是用户编辑字段，LLM 不自带）
         mergePrevMeta(plan, prev);
+        // ★ P14：主体（定妆照/素材图/人物档案）与「设定年代」都是**用户拥有**的数据，LLM 不得覆盖
+        mergePrevSubjectsAndSetting(plan, prev);
         // P8/P9：音频设置（音色/克隆音色/角色绑定/配乐段）LLM 永远不会产出，必须继承
         mergePrevAudio(plan, prev);
         ensureShotSyncedDefault(plan);
@@ -425,7 +427,8 @@ public class DirectorService {
                 }
                 subs.add(new studio.weaveora.director.plan.PlanSubjects.Subject(name, kind, aliases,
                         !in.has("enabled") || in.path("enabled").asBoolean(true), false, java.util.List.of(),
-                        in.path("portraitAssetId").asText(""), in.path("portraitVersion").asInt(0)));
+                        in.path("portraitAssetId").asText(""), in.path("portraitVersion").asInt(0),
+                        studio.weaveora.director.plan.PlanSubjects.Traits.parse(in)));
                 log.info("subject created in place: project={} rev={} name={} kind={}", projectId, revisionId, name, kind);
                 continue;
             }
@@ -441,10 +444,15 @@ public class DirectorService {
                         : exact ? aliases
                         : java.util.stream.Stream.concat(cur.aliases().stream(), aliases.stream())
                             .distinct().toList();
+                // ★ P14：主体设定（性别/年龄/身高/体态/性格/外貌）就地可改。
+                //   只要提交里带了 traits（以 "hasTraits" 标记），就用提交的那份（允许清空）。
+                studio.weaveora.director.plan.PlanSubjects.Traits nextTraits = in.path("hasTraits").asBoolean(false)
+                        ? studio.weaveora.director.plan.PlanSubjects.Traits.parse(in)
+                        : cur.traitsOrEmpty();
                 subs.set(hit, new studio.weaveora.director.plan.PlanSubjects.Subject(
                         cur.name(), cur.kind(), nextAliases,
                         in.has("enabled") ? in.path("enabled").asBoolean(true) : cur.enabled(),
-                        cur.locked(), cur.refs(), portraitId, portraitVer));
+                        cur.locked(), cur.refs(), portraitId, portraitVer, nextTraits));
             }
         }
         studio.weaveora.director.plan.PlanSubjects.write(obj, subs);
@@ -633,6 +641,47 @@ public class DirectorService {
                 .map(r -> r.revisionNo() + 1).orElse(1);
     }
 
+    /**
+     * P13b/P14：定妆图默认正/负向提示词（前端弹框预填）。
+     *
+     * <p>kind 与人物档案（性别/年龄/身高/体态/性格/外貌）从**方案 subjects[]** 读，
+     * 保证「弹框里看到的就是 createPortraitJob 真正会用的那份」。
+     */
+    @Transactional(readOnly = true)
+    public java.util.Map<String, Object> portraitPromptDefaults(UUID userId, UUID workspaceId, UUID projectId,
+                                                                 UUID revisionId, String subject, int refCount) {
+        context.require(userId, workspaceId, projectId);
+        PromptRevision r = findRevision(workspaceId, projectId, revisionId);
+        JsonNode plan = r.schemaJson() == null ? mapper.createObjectNode() : r.schemaJson();
+        String kind = null;
+        studio.weaveora.director.plan.PlanSubjects.Traits traits =
+                studio.weaveora.director.plan.PlanSubjects.Traits.EMPTY;
+        for (studio.weaveora.director.plan.PlanSubjects.Subject s
+                : studio.weaveora.director.plan.PlanSubjects.parse(plan)) {
+            if (studio.weaveora.director.plan.PlanSubjects.isSameSubject(s, subject)) {
+                kind = s.kind();
+                traits = s.traitsOrEmpty();
+                break;
+            }
+        }
+        if (kind == null && (subject == null || subject.isBlank())) {
+            throw new BizException(ErrorCode.VALIDATION, "缺少 subject（要生成哪个主体的定妆图）");
+        }
+        var out = new java.util.LinkedHashMap<String, Object>();
+        out.put("positivePrompt", studio.weaveora.director.SubjectPrompts.portraitPrompt(
+                subject, kind, Math.max(0, refCount), traits));
+        out.put("negativePrompt", studio.weaveora.director.SubjectPrompts.portraitNegativePrompt());
+        out.put("kind", kind == null ? "" : kind);
+        out.put("traits", traits.isEmpty() ? java.util.Map.of() : java.util.Map.of(
+                "gender", traits.gender() == null ? "" : traits.gender(),
+                "age", traits.age() == null ? "" : traits.age(),
+                "height", traits.height() == null ? "" : traits.height(),
+                "build", traits.build() == null ? "" : traits.build(),
+                "personality", traits.personality() == null ? "" : traits.personality(),
+                "appearance", traits.appearance() == null ? "" : traits.appearance()));
+        return out;
+    }
+
     private PromptRevision findRevision(UUID workspaceId, UUID projectId, UUID revisionId) {
         return revisions.findByIdAndProjectIdAndWorkspaceId(revisionId, projectId, workspaceId)
                 .orElseThrow(() -> new BizException(ErrorCode.NOT_FOUND, "方案不存在或不属于该项目"));
@@ -683,7 +732,7 @@ public class DirectorService {
                                                        String rawText, String originalPositive,
                                                        String originalNegative, String lang,
                                                        java.util.List<RewriteFrame> frames) {
-        context.require(userId, workspaceId, projectId);
+        ProjectContextPort.ProjectSnapshot project = context.require(userId, workspaceId, projectId);
         boolean amend = originalPositive != null && !originalPositive.isBlank();
         boolean zh = lang != null && "zh".equalsIgnoreCase(lang.trim());
         boolean multi = frames != null && frames.size() > 1;
@@ -708,6 +757,21 @@ public class DirectorService {
                 ? "【语言硬规则】输出必须**全部为中文**：禁止混入英文单词（负面词、质量词也一样），"
                 + "角色专有名词/模型名可保留原文。negative_prompt 必须是中文负面词清单，不得含 blurry/watermark 这类英文词。"
                 : "【语言硬规则】输出必须**全部为英文**，不得混入中文（角色专有名词可保留原文）。";
+        // ★ P14（2026-09-16）：把方案的「设定年代」与「人物档案」也告诉重写模型。
+        //   不告诉它，它就会照自己想象写（“宝玉”常被写成女性/写出现代元素），重写一次的代价就是重出一遍图。
+        JsonNode rwPlan = null;
+        if (project.approvedRevisionId() != null) {
+            rwPlan = revisions.findByIdAndProjectIdAndWorkspaceId(project.approvedRevisionId(), projectId, workspaceId)
+                    .map(PromptRevision::schemaJson).orElse(null);
+        }
+        String settingBlock = settingAndSubjectBlock(rwPlan);
+        StringBuilder sysPlus = new StringBuilder(sysBase);
+        if (!settingBlock.isEmpty()) {
+            sysPlus.append("\n\n").append(settingBlock)
+                    .append("\n【硬规则·一致性】你写的 positive_prompt 必须与上面的**年代/性别/年龄/体态**一致：")
+                    .append("尤其不得把男性写成女性（或反之），不得写与年龄不符的称谓，不得出现与年代不符的物件。");
+        }
+        sysBase = sysPlus.toString();
         String system;
         String user;
         String outSpec = zh ? "中文" : "英文";
@@ -803,6 +867,25 @@ public class DirectorService {
         java.util.LinkedHashSet<String> refSubjects = new java.util.LinkedHashSet<>();
         collectRefSubjects(refSubjects, prevPlan == null ? null : prevPlan.get("referenceAssets"));
         collectRefSubjects(refSubjects, brief.constraints() == null ? null : brief.constraints().get("referenceAssets"));
+        // ★ P14（2026-09-16）：主体可能**只有定妆图没有素材图**（本项目就是），
+        //   只扫 referenceAssets 会漏掉它们 → 导演既不知道有哪些主体，也拿不到人物档案。
+        java.util.List<studio.weaveora.director.plan.PlanSubjects.Subject> planSubs =
+                studio.weaveora.director.plan.PlanSubjects.parse(prevPlan);
+        for (studio.weaveora.director.plan.PlanSubjects.Subject s : planSubs) {
+            if (!s.name().isBlank()) {
+                refSubjects.add(s.name());
+            }
+        }
+        // ★ P14：设定年代 + 人物档案（用户要求：项目要交代剧情时间/年代，主体要有年龄/性别/身高/体态/性格）
+        String settingBlock = settingAndSubjectBlock(prevPlan);
+        if (!settingBlock.isEmpty()) {
+            sb.append("\n\n").append(settingBlock)
+                    .append("\n【硬规则·主体属性】凡镜中出现上述主体，positive_prompt 里对该主体的描写")
+                    .append("**必须与其性别/年龄段/体态/外貌一致**：")
+                    .append("尤其**不得把男性写成女性（或反之）**（man/woman、he/she、少年/少女 这类用词必须对得上）；")
+                    .append("不得写与年龄不符的称谓（少年不得写成老者/孩童）；服饰发式必须与年代和身份相符。")
+                    .append("未列出属性的主体按剧情自行判断，但同一主体在全片必须保持一致。");
+        }
         if (!refSubjects.isEmpty()) {
             StringBuilder map = new StringBuilder();
             int slot = 1;
@@ -841,6 +924,51 @@ public class DirectorService {
         }
     }
 
+    /**
+     * ★ P14（2026-09-16 用户要求）：「设定年代 + 剧情主体人物档案」提示词块。
+     *
+     * <p>为什么要单独抽出来：**导演生成**（buildUserPrompt）与**单镜重写**（rewritePrompt）
+     * 必须拿到**同一份**口径，否则会出现「导演写的是少年男性、重写一次变成女子」——
+     * 用户实测的「宝玉被当女性」就是这么来的（模型只能从名字自己猜性别）。
+     *
+     * @return 空串 = 方案里既没年代也没主体
+     */
+    static String settingAndSubjectBlock(JsonNode plan) {
+        if (plan == null || plan.isMissingNode() || !plan.isObject()) {
+            return "";
+        }
+        StringBuilder sb = new StringBuilder();
+        String era = plan.path("setting").path("era").asText("").trim();
+        String notes = plan.path("setting").path("notes").asText("").trim();
+        if (!era.isEmpty() || !notes.isEmpty()) {
+            sb.append("【设定年代/世界观（硬约束）】");
+            if (!era.isEmpty()) {
+                sb.append(era);
+            }
+            if (!notes.isEmpty()) {
+                sb.append(era.isEmpty() ? "" : "；").append(notes);
+            }
+            sb.append("。全片所有镜头的人物造型/服饰/发式/道具/建筑/环境都必须符合该年代，")
+                    .append("禁写该年代不存在的元素（如现代服装、手机、电线、现代建筑、现代交通工具）；称谓与身份也要符合年代。");
+        }
+        java.util.List<studio.weaveora.director.plan.PlanSubjects.Subject> subs =
+                studio.weaveora.director.plan.PlanSubjects.parse(plan);
+        if (!subs.isEmpty()) {
+            if (sb.length() > 0) {
+                sb.append('\n');
+            }
+            sb.append("【剧情主体设定（必须遵守）】");
+            int i = 1;
+            for (studio.weaveora.director.plan.PlanSubjects.Subject s : subs) {
+                String d = s.traitsOrEmpty().describe(false);
+                sb.append("\n  ").append(i++).append(". ").append(s.name())
+                        .append("（kind=").append(s.kind()).append("）")
+                        .append(d.isEmpty() ? "——未填属性（请按剧情自行判断，全片保持一致）" : "：" + d);
+            }
+        }
+        return sb.toString();
+    }
+
     /** 最近一版同模式方案（供“再导演基于上一版”注入）。 */
     /** 再导演参考：优先最新已确认版本方案；无确认稿则用最新 revision。 */
     private JsonNode latestPlan(UUID projectId, UUID approvedId, String mode) {
@@ -863,6 +991,11 @@ public class DirectorService {
     /** 上一版方案摘要（控制 token，逐镜给画面与正词要点）。 */
     private static String planSummary(JsonNode plan) {
         StringBuilder s = new StringBuilder();
+        // ★ P14：把设定年代与人物档案也带进摘要 —— 不然「再导演一版」会把这些设定丢掉
+        String block = settingAndSubjectBlock(plan);
+        if (!block.isEmpty()) {
+            s.append(block).append('\n');
+        }
         s.append("标题：").append(plan.path("title").asText("")).append("；logline：")
                 .append(plan.path("logline").asText("").length() > 100
                         ? plan.path("logline").asText("").substring(0, 100) + "…"
@@ -939,6 +1072,39 @@ public class DirectorService {
             if (p.has("en_synced") && !o.has("en_synced")) {
                 o.put("en_synced", p.path("en_synced").asBoolean(true));
             }
+        }
+    }
+
+    /**
+     * ★ P14（2026-09-16）：新一版继承「剧情主体」与「设定年代」。
+     *
+     * <p>为什么必须单独做一步（而不是靠 LLM 自觉）：
+     * <ul>
+     *   <li>{@code subjects[]} 里装的是**用户拥有的资产**（定妆照 id、素材图 refs、别名、勾选、人物档案），
+     *       LLM 根本产不出这些；而它在 user 消息里看到过主体清单，很可能“顺手”输出一份只有名字的 subjects
+     *       → 一旦落库，用户配好的定妆照/属性就被清空（等价于“一致性突然全崩”）。</li>
+     *   <li>{@code setting}（年代/世界观）虽由 LLM 产出，但用户可能手改过；LLM 漏给时不能把用户的设定丢了。</li>
+     * </ul>
+     * 规则：上一版有 subjects 就以上一版为准（丢弃 LLM 的）；setting 只在 LLM 没给时继承。
+     */
+    static void mergePrevSubjectsAndSetting(JsonNode plan, JsonNode prev) {
+        if (!(plan instanceof ObjectNode po) || prev == null || !prev.isObject()) {
+            return;
+        }
+        JsonNode prevSubs = prev.get("subjects");
+        if (prevSubs != null && prevSubs.isArray() && !prevSubs.isEmpty()) {
+            if (po.has("subjects")) {
+                System.out.println("[DirectorService] 丢弃 LLM 产出的 subjects（主体是用户数据，以上一版为准）");
+            }
+            po.set("subjects", prevSubs.deepCopy());
+            JsonNode prevRefs = prev.get("referenceAssets");
+            if (prevRefs != null && prevRefs.isArray()) {
+                po.set("referenceAssets", prevRefs.deepCopy());
+            }
+        }
+        JsonNode prevSetting = prev.get("setting");
+        if (prevSetting != null && prevSetting.isObject() && !po.has("setting")) {
+            po.set("setting", prevSetting.deepCopy());
         }
     }
 

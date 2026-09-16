@@ -482,6 +482,8 @@ public class JobService {
                 if (!refs.anchor().isBlank()) pos = pos + refs.anchor();
                 payload.put("positive_prompt", pos);
                 payload.put("negative_prompt", negWithRefGuard(styledNegative(style, plan.path("negative_prompt").asText("")), refs));
+                // ★ P14：图片方案也要带「设定年代」（否则会画出与年代不符的人/物）
+                applySetting(payload, plan);
                 stampRevisionMeta(payload, revisionNo, pos);
                 JsonNode params = plan.path("params");
                 com.fasterxml.jackson.databind.node.ObjectNode pnode =
@@ -1562,6 +1564,67 @@ public class JobService {
         return String.format(java.util.Locale.ROOT, "%.3f,%.3f,%.3f,%.3f", x, y, w, h);
     }
 
+    /**
+     * ★ P14（2026-09-16 用户要求）：把方案的「设定年代/世界观」写进出图正/负词。
+     *
+     * <p>为什么必须在**出图**这一层再写一遍：用户在方案里填的年代只有经过这里才会到达视觉模型；
+     * 只靠 LLM 在 positive_prompt 里自觉写是不够的（重写、手改、旧稿都有漏）。
+     * 幂等：已写过就不重复追加（同一次 payload 可能被多个分支调用）。
+     */
+    static void applySetting(ObjectNode payload, JsonNode plan) {
+        if (payload == null || plan == null || plan.isMissingNode()) {
+            return;
+        }
+        JsonNode st = plan.get("setting");
+        String era = st == null ? "" : st.path("era").asText("").trim();
+        String notes = st == null ? "" : st.path("notes").asText("").trim();
+        if (era.isEmpty() && notes.isEmpty()) {
+            return;
+        }
+        String cur = payload.path("positive_prompt").asText("");
+        if (cur.contains(SETTING_MARK)) {
+            return;
+        }
+        boolean zh = isZhText(cur);
+        StringBuilder sb = new StringBuilder();
+        if (zh) {
+            sb.append("\n").append(SETTING_MARK);
+            if (!era.isEmpty()) {
+                sb.append(era);
+            }
+            if (!notes.isEmpty()) {
+                sb.append(era.isEmpty() ? "" : "；").append(notes);
+            }
+            sb.append("。全片所有镜头的服装、发式、道具、建筑与环境都必须符合该年代设定，")
+              .append("禁止出现该年代不存在的元素（现代服装、手机、电线、现代建筑与现代交通工具）。");
+        } else {
+            sb.append("\n[Setting / era] ");
+            if (!era.isEmpty()) {
+                sb.append(era).append(". ");
+            }
+            if (!notes.isEmpty()) {
+                sb.append(notes).append(". ");
+            }
+            sb.append("All costumes, hairstyles, props, architecture and environment must strictly match this era; ")
+              .append("do not include anything that did not exist then (modern clothing, phones, power lines, ")
+              .append("modern buildings or vehicles).");
+        }
+        payload.put("positive_prompt", cur + sb);
+        // 负词也补一份（Qwen-Image-Edit 对负词不敏感，但代价极低，且用户能在界面上看到）
+        String neg = payload.path("negative_prompt").asText("");
+        if (!neg.contains(SETTING_NEG_MARK)) {
+            String add = zh
+                    ? "现代服装, 现代建筑, 手机, 电线, 现代交通工具"
+                    : "modern clothing, modern buildings, mobile phone, power lines, modern vehicles";
+            payload.put("negative_prompt", neg.isBlank() ? add : neg + ", " + add);
+        }
+        log.info("setting: 已下发年代/世界观（era={}）", era.isEmpty() ? "（仅 notes）" : era);
+    }
+
+    /** 幂等标记：正词里出现过就不再追加。 */
+    private static final String SETTING_MARK = "【设定年代/世界观】";
+    private static final String SETTING_NEG_MARK = "现代交通工具";
+
     /** 区域 → 方位描述（供云模型提示词）。 */
     private static String regionHint(String csv) {
         try {
@@ -2234,7 +2297,8 @@ public class JobService {
         ProjectContextPort.ProjectSnapshot project = projects.require(userId, workspaceId, projectId);
         studio.weaveora.director.plan.PlanSubjects.Subject sub =
                 studio.weaveora.director.plan.PlanSubjects.parse(plan).stream()
-                        .filter(s -> subject.equals(s.name()))
+                        // ★ P14：别称也要认（前端拿“宝二爷”提交时不能当成找不到主体，否则属性/模板全丢）
+                        .filter(s -> studio.weaveora.director.plan.PlanSubjects.isSameSubject(s, subject))
                         .findFirst()
                         .orElse(null);
         java.util.List<UUID> ids = new ArrayList<>();
@@ -2299,7 +2363,9 @@ public class JobService {
         String negativePrompt = req.negativePrompt() == null ? "" : req.negativePrompt().trim();
         if (positivePrompt.isEmpty()) {
             positivePrompt = studio.weaveora.director.SubjectPrompts.portraitPrompt(
-                    subject, sub == null ? null : sub.kind(), keys.size());
+                    subject, sub == null ? null : sub.kind(), keys.size(),
+                    // ★ P14：定妆照必须体现主体设定（性别/年龄/体态/外貌）—— 它是所有分镜的唯一错定图
+                    sub == null ? studio.weaveora.director.plan.PlanSubjects.Traits.EMPTY : sub.traitsOrEmpty());
         } else {
             log.info("portrait 用户自定义正词 project={} subject={} len={}", projectId, subject, positivePrompt.length());
         }
@@ -2308,6 +2374,8 @@ public class JobService {
         }
         payload.put("positive_prompt", positivePrompt);
         payload.put("negative_prompt", negativePrompt);
+        // ★ P14：定妆照也要符合设定年代（清代的人物不能穿着现代元素）
+        applySetting(payload, plan);
         payload.put("aspect_ratio", project.aspectRatio());
         int[] dd = dimsFor(project.aspectRatio());
         payload.set("params", mapper().createObjectNode().put("width", dd[0]).put("height", dd[1]));
@@ -2456,6 +2524,8 @@ public class JobService {
         }
         if (refs != null && !refs.anchor().isBlank()) pos = pos + refs.anchor();
         payload.put("positive_prompt", pos);
+        // ★ P14：设定年代（放 applyLayoutRegions 之前，让位置清单保持最后）
+        applySetting(payload, plan);
         // P-motion：运动（clip）额外追加静态抑制负面词，只作用于 clip（关键帧 still 不受影响）
         String neg = negWithRefGuard(styledNegative(style, shot.path("negative_prompt").asText("")), refs);
         if ("clip".equals(kind)) {
@@ -2486,7 +2556,7 @@ public class JobService {
         //     ② 方案级 referenceAssets[].region / subjects[].refs[].region（「位置预览」卡的方案默认值）
         //     ③ shots[].lipsync_targets = {subject:{x,y}}（预览图点选，只有点 → 给默认框）
         //   与参考图顺序（refs.subjects()）严格对齐，没位置的填 null。
-        //   同时把「image1=谁、image2=谁」写进正词（用户要求：positive_prompt 必须点名主体）。
+        //   同时把「Picture N = 谁・属性・位置」写进正词（用户要求：positive_prompt 必须点名主体，且要带人物档案）。
         applyLayoutRegions(payload, plan, shot, keyframeIndex, refs);
         return payload;
     }
@@ -2650,6 +2720,13 @@ public class JobService {
             //   官方 2511 模板/社区写法也都是 `Picture 1` / `Picture 2`；我们之前只写 `image1`，
             //   模型未必能把两者对上 → 多主体时张冠李戴。现在两种名字并列写，怎么读都不歧义。
             sb.append("Picture ").append(i + 1).append(" (image").append(i + 1).append(") = ").append(name);
+            // ★ P14（2026-09-16 用户实测「宝玉被当女性」）：把该主体的人物档案直接写进正词。
+            //   定妆照只约束长相，性别/年龄/体态必须用文字说清 —— 否则视觉模型只能猜。
+            studio.weaveora.director.plan.PlanSubjects.Traits tr =
+                    studio.weaveora.director.plan.PlanSubjects.traitsOf(plan, name);
+            if (tr != null && !tr.isEmpty()) {
+                sb.append('[').append(tr.describe(zh)).append(']');
+            }
             if (p != null) {
                 sb.append(zh ? "（" : " (")
                   .append(zh ? posHintZh(p[0], p[1]) : posHint(p[0], p[1]))
@@ -2669,12 +2746,16 @@ public class JobService {
                     ? "\n参考图与主体对应（按送入顺序）：" + sb
                       + "。请严格按这个对应关系：每个角色只用自己的参考图，并放在括号里给的位置与相对大小上"
                       + "（归一化画面坐标，原点在左上；y 越小越靠上，框越大越靠近镜头）；角色之间保持明显分开。"
+                      + "方括号里是该主体的人物设定（性别/年龄/体态/外貌），**必须严格遵守**：不得把男性画成女性（或反之），"
+                      + "不得画成与年龄不符的样貌；方括号里没写性别的主体，请严格以其参考图（Picture N）的面貌为准。"
                       + "【位置以本清单为准】上面的动作/氛围描述仅供理解剧情，其中任何方位词（前后景、左右、远近）"
                       + "若与本清单不一致，一律以本清单给出的位置与框大小为准。"
                     : "\nReference mapping (in input order): " + sb
                       + ". Follow it strictly: each character uses only its own reference image and is placed at"
                       + " the given position and relative size (normalized frame coordinates, origin top-left;"
                       + " smaller y = higher in frame, larger box = closer to camera); keep them clearly apart."
+                      + " The bracketed facts are each subject's fixed profile (gender/age/build/look) — obey them"
+                      + " strictly: never render a male character as female or vice versa, and never change their age."
                       + " [Authoritative placement] The action/mood description above is for story context only;"
                       + " if any spatial wording in it (foreground/background, left/right, near/far) conflicts with"
                       + " this list, the positions and box sizes given here always win.";

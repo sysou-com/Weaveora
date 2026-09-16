@@ -248,6 +248,66 @@ class JobLayoutRegionsTest {
         assertNull(p.get("referenceRegions"));
     }
 
+    // ---------- P14 主体档案 / 设定年代 ----------
+
+    /** 出图正词里的「Picture N = 主体」必须带上人物档案（性别/年龄/体态）——「宝玉被当女性」的解药。 */
+    @Test
+    void subjectTraitsAreWrittenIntoTheMapping() {
+        ObjectNode p = payload("cinematic still of two figures standing together");
+        JsonNode plan = json("""
+                {"subjects":[{"name":"宝玉","kind":"person","gender":"male","age":"17",
+                   "build":"清瘦","appearance":"大红箭袖"},
+                 {"name":"可卿","kind":"person","gender":"female"}]}
+                """);
+        JsonNode shot = json("""
+                {"layout":[{"subject":"宝玉","x":0.05,"y":0.1,"w":0.3,"h":0.6},
+                           {"subject":"可卿","x":0.6,"y":0.1,"w":0.3,"h":0.6}]}
+                """);
+        JobService.applyLayoutRegions(p, plan, shot, -1, refs("宝玉", "可卿"));
+        String pos = p.path("positive_prompt").asText();
+        assertTrue(pos.contains("Picture 1 (image1) = 宝玉[gender male (男)"), pos);
+        assertTrue(pos.contains("age 17"), pos);
+        assertTrue(pos.contains("build 清瘦"), pos);
+        assertTrue(pos.contains("Picture 2 (image2) = 可卿[gender female (女)]"), pos);
+        // 档案句要求严格服从，且禁止把男性画成女性
+        assertTrue(pos.contains("never render a male character as female"), pos);
+    }
+
+    /** 没填属性的主体不能凭空造出方括号（否则模型会以为有约束）。 */
+    @Test
+    void subjectsWithoutTraitsGetNoBrackets() {
+        ObjectNode p = payload("cinematic still of a figure");
+        JobService.applyLayoutRegions(p, json("{\"subjects\":[{\"name\":\"宝玉\"}]}"), json("{}"), -1, refs("宝玉"));
+        assertFalse(p.path("positive_prompt").asText().contains("[]"), p.path("positive_prompt").asText());
+    }
+
+    @Test
+    void settingEraIsAppendedInPromptLanguageAndIsIdempotent() {
+        ObjectNode zh = payload("电影感关键帧：宝玉与可卿并肩而立，烛光摇曳");
+        JobService.applySetting(zh, json("{\"setting\":{\"era\":\"清代 · 康熙年间\"}}"));
+        String z = zh.path("positive_prompt").asText();
+        assertTrue(z.contains("【设定年代/世界观】清代 · 康熙年间"), z);
+        assertTrue(zh.path("negative_prompt").asText().contains("现代服装"), zh.path("negative_prompt").asText());
+        // 幂等：重复调用不再追加
+        JobService.applySetting(zh, json("{\"setting\":{\"era\":\"清代 · 康熙年间\"}}"));
+        assertEquals(z, zh.path("positive_prompt").asText());
+
+        ObjectNode en = payload("cinematic still of a young man walking through a courtyard");
+        JobService.applySetting(en, json("{\"setting\":{\"era\":\"Qing dynasty, Kangxi era\"}}"));
+        assertTrue(en.path("positive_prompt").asText().contains("[Setting / era] Qing dynasty, Kangxi era"),
+                en.path("positive_prompt").asText());
+        assertTrue(en.path("negative_prompt").asText().contains("modern clothing"),
+                en.path("negative_prompt").asText());
+    }
+
+    @Test
+    void noSettingMeansPromptUntouched() {
+        ObjectNode p = payload("cinematic still of a figure");
+        JobService.applySetting(p, json("{}"));
+        assertEquals("cinematic still of a figure", p.path("positive_prompt").asText());
+        assertEquals("", p.path("negative_prompt").asText());
+    }
+
     // ---------- 本镜主体（shots[].cast） ----------
 
     @Test

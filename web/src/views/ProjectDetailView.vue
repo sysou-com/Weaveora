@@ -586,10 +586,11 @@ async function onExtractSubjects(): Promise<void> {
     subjectBusy.value = ''
   }
 }
-/** 主体操作菜单：生成/换一版 · 选图 · 删除 */
+/** 主体操作菜单：生成/换一版 · 选图 · 设定 · 删除 */
 function subjectActions(sub: PlanSubject): Array<{ label: string; key: string; disabled?: boolean }> {
   return [
     { label: sub.portraitAssetId ? '换一版定妆照' : '生成定妆照', key: 'gen' },
+    { label: sub.portraitAssetId ? '主体设定（性别/年龄/体态…）' : '主体设定（性别/年龄/体态…）', key: 'traits' },
     { label: '把最新定妆照设为锚定图', key: 'pick', disabled: !portraitsOf(sub.name).length },
     { label: '把所选参考图设为定妆照', key: 'useRef', disabled: subjectRefCandidates(sub.name).length === 0 },
     { label: '管理别名…', key: 'alias' },
@@ -598,10 +599,87 @@ function subjectActions(sub: PlanSubject): Array<{ label: string; key: string; d
 }
 function onSubjectAction(key: string, name: string): void {
   if (key === 'gen') void openPortraitDialog(name)
+  else if (key === 'traits') openTraits(name)
   else if (key === 'pick') pickPortrait(name)
   else if (key === 'del') removeSubject(name)
   else if (key === 'alias') openAlias(name)
   else if (key === 'useRef') useRefAsPortrait(name)
+}
+
+/* ================= P14 主体设定（人物档案）================= */
+/**
+ * 为什么要让用户填（2026-09-16 用户实测）：
+ * 「宝玉」被关键帧画成了**女性** —— 根因是主体只有名字没有属性，LLM 与视觉模型只能靠名字猜性别。
+ * 这份档案会同时进三处：①导演/重写提示词的 user 消息；②出图正词里的「Picture N = 主体[档案]」；③定妆照提示词。
+ * 性别是最关键的一项：定妆照画错性别，后面每一镜都跟着错。
+ */
+const traitsOpen = ref(false)
+const traitsSubject = ref('')
+const traitsKind = ref('person')
+const traitsDraft = ref<{
+  gender: 'male' | 'female' | 'other' | ''
+  age: string
+  height: string
+  build: string
+  personality: string
+  appearance: string
+}>({ gender: '', age: '', height: '', build: '', personality: '', appearance: '' })
+const traitsBusy = ref(false)
+
+function openTraits(name: string): void {
+  const sub = planSubjects().find((x) => x.name === name)
+  if (!sub) return
+  traitsSubject.value = name
+  traitsKind.value = sub.kind ?? 'person'
+  traitsDraft.value = {
+    gender: (sub.gender as 'male' | 'female' | 'other' | '') ?? '',
+    age: sub.age ?? '',
+    height: sub.height ?? '',
+    build: sub.build ?? '',
+    personality: sub.personality ?? '',
+    appearance: sub.appearance ?? '',
+  }
+  traitsOpen.value = true
+}
+
+async function confirmTraits(): Promise<void> {
+  const name = traitsSubject.value
+  const d = traitsDraft.value
+  if (traitsKind.value === 'person' && !d.gender) {
+    const ok = window.confirm(
+      `「${name}」还没填性别。\n\n`
+      + '不填的话，模型只能靠名字猜 —— 实测出现过把男性角色画成女性的问题。\n'
+      + '确定要留空吗？（可稍后再补）',
+    )
+    if (!ok) return
+  }
+  traitsBusy.value = true
+  try {
+    setPlanSubjects(planSubjects().map((x) => (x.name === name
+      ? { ...x, gender: d.gender, age: d.age.trim(), height: d.height.trim(), build: d.build.trim(),
+          personality: d.personality.trim(), appearance: d.appearance.trim() }
+      : x)))
+    await saveSubjectMeta()
+    traitsOpen.value = false
+    const filled = d.gender || d.age || d.build || d.appearance
+    message.success(filled
+      ? `已保存「${name}」的主体设定（已就地保存，无需重新确认）`
+      : `已清空「${name}」的主体设定`)
+  } catch (e) {
+    message.error(e instanceof Error ? e.message : '保存主体设定失败')
+  } finally {
+    traitsBusy.value = false
+  }
+}
+
+/** 主体档案一行摘要（列表用）；空则返回空串 */
+function traitsSummary(sub: PlanSubject): string {
+  const g = sub.gender === 'male' ? '男' : sub.gender === 'female' ? '女' : sub.gender === 'other' ? '性别未定' : ''
+  return [g, sub.age, sub.build || sub.height].filter((x) => x && String(x).trim()).join(' · ')
+}
+/** 人物主体缺性别 → 列表上给个红色提醒（就是「宝玉被当女性」的根因） */
+function traitsWarn(sub: PlanSubject): boolean {
+  return (sub.kind ?? 'person') === 'person' && !sub.gender
 }
 
 /* ================= P13b 生成定妆图弹框（正/负向提示词可改） ================= */
@@ -635,15 +713,21 @@ async function openPortraitDialog(name: string): Promise<void> {
 /** 拉取默认正/负向词（真源在后端 SubjectPrompts；拉不到就用本地弟底） */
 async function loadPortraitPrompt(): Promise<void> {
   const name = portraitSubject.value
-  const sub = planSubjects().find((x) => x.name === name)
+  const revId = genRevisionId()
   portraitPromptBusy.value = true
   try {
-    const d = await portraitPromptDefaults(workspaceId.value, projectId.value, name,
-      sub?.kind ?? 'person', portraitRefIds.value.length)
+    if (!revId) throw new Error('no revision')
+    const d = await portraitPromptDefaults(workspaceId.value, projectId.value, revId, name,
+      portraitRefIds.value.length)
     portraitPositive.value = d.positivePrompt
     portraitNegative.value = d.negativePrompt
   } catch {
-    portraitPositive.value = `标准角色设定图：${name} 正面半身、中性表情、纯色背景、全身服装与配饰清晰可辨、柔和均匀布光、写实电影质感；严格保持参考图的人物特征（五官/发型/服装/年龄感）。只画这一个角色，不要文字、不要边框、不要多人物。`
+    const sub = planSubjects().find((x) => x.name === name)
+    const kind = sub?.kind ?? 'person'
+    const tail = kind === 'person'
+      ? `${name} 正面半身、中性表情、纯色背景、全身服装与配饰清晰可辨、柔和均匀布光、写实电影质感；严格保持参考图的人物特征（五官/发型/服装/年龄感）。只画这一个角色，不要文字、不要边框、不要多人物。`
+      : `${name} 标准设定图：主体居中、纯色背景、均匀布光、细节清晰；严格保持参考图的外形/材质/颜色。不要文字、不要边框。`
+    portraitPositive.value = `标准角色设定图：${tail}`
     portraitNegative.value = 'text, watermark, logo, subtitle, multiple people, deformed face, extra limbs, lowres, blurry, 3d render, cgi'
   } finally {
     portraitPromptBusy.value = false
@@ -866,6 +950,14 @@ async function saveSubjectMeta(): Promise<void> {
         enabled: x.enabled !== false,
         portraitAssetId: x.portraitAssetId ?? '',
         portraitVersion: x.portraitVersion ?? 0,
+        // ★ P14：人物档案随元数据一起就地保存（hasTraits=true → 后端整份替换，允许清空）
+        hasTraits: true,
+        gender: x.gender ?? '',
+        age: x.age ?? '',
+        height: x.height ?? '',
+        build: x.build ?? '',
+        personality: x.personality ?? '',
+        appearance: x.appearance ?? '',
       })))
     // 元数据已落库 → 不置脏（避免又要求“保存 + 确认”）
     metaSyncedAt.value = Date.now()
@@ -975,7 +1067,10 @@ function syncReferenceAssets(): void {
   for (const [name, refsOf] of grouped) {
     const old = byName.get(name)
     const extra = (aliasAdd.get(name) ?? []).filter((x) => x !== name && !(old?.aliases ?? []).includes(x))
-    out.push({ name, kind: old?.kind ?? 'person', aliases: [...(old?.aliases ?? []), ...extra], enabled: old?.enabled ?? true, locked: old?.locked ?? false, refs: refsOf, portraitAssetId: old?.portraitAssetId ?? '', portraitVersion: old?.portraitVersion ?? 0, region: old?.region ?? null })
+    out.push({ name, kind: old?.kind ?? 'person', aliases: [...(old?.aliases ?? []), ...extra], enabled: old?.enabled ?? true, locked: old?.locked ?? false, refs: refsOf, portraitAssetId: old?.portraitAssetId ?? '', portraitVersion: old?.portraitVersion ?? 0, region: old?.region ?? null,
+      // ★ P14：人物档案不能在这里被抹掉（syncReferenceAssets 每次改参考图都会重建 subjects）
+      gender: old?.gender ?? '', age: old?.age ?? '', height: old?.height ?? '', build: old?.build ?? '',
+      personality: old?.personality ?? '', appearance: old?.appearance ?? '' })
     byName.delete(name)
   }
   // 没有素材图但有定妆图/别名的主体也要保留（否则一键抽取的结果会丢）
@@ -3550,6 +3645,11 @@ const changeSummary = computed<string[]>(() => {
   const rA = canonicalJson(ac.referenceAssets ?? [])
   const rC = canonicalJson(cc.referenceAssets ?? [])
   if (rA !== rC) out.push('参考图/区域')
+  // ★ P14：设定年代与主体档案（都会影响出图，必须出现在差异里）
+  if (canonicalJson((ac as { setting?: unknown }).setting ?? null)
+      !== canonicalJson((cc as { setting?: unknown }).setting ?? null)) out.push('设定年代')
+  if (canonicalJson((ac as { subjects?: unknown }).subjects ?? null)
+      !== canonicalJson((cc as { subjects?: unknown }).subjects ?? null)) out.push('剧情主体设定')
   return out.length ? out : ['（仅有不影响生成的元数据变化）']
 })
 
@@ -3691,6 +3791,17 @@ const shotTotal = computed(() => {
                          @change="toggleSubject(sub.name, ($event.target as HTMLInputElement).checked)" />
                 </label>
                 <span class="subj-name">{{ sub.name }}</span>
+                <!-- ★ P14 主体设定（性别/年龄/体态）：点一下就能改；缺性别给红色提醒（「宝玉被当女性」的根因） -->
+                <span
+                  :class="['subj-traits', 'font-mono', { on: !!traitsSummary(sub), warn: traitsWarn(sub) }]"
+                  :data-testid="`subj-traits-${sub.name}`"
+                  :title="traitsWarn(sub)
+                    ? '未填性别：模型只能靠名字猜性别（实测出现过把男性角色画成女性）。点这里补上'
+                    : '主体设定：' + (traitsSummary(sub) || '未填') + '（点这里修改）'"
+                  @click="openTraits(sub.name)"
+                >
+                  {{ traitsSummary(sub) || (traitsWarn(sub) ? '⚠ 未填性别' : '设定 ✗') }}
+                </span>
                 <span v-if="sub.aliases?.length" class="subj-alias font-mono" :title="sub.aliases?.join('、')">
                   {{ sub.aliases?.slice(0, 2).join('/') }}<template v-if="(sub.aliases?.length ?? 0) > 2">…</template>
                 </span>
@@ -3714,7 +3825,9 @@ const shotTotal = computed(() => {
               </div>
               <p class="subj-hint text-secondary">
                 勾选 = 该主体参与出图（出图时身份锚定<b>一律用定妆图</b>，没有定妆图的主体不会注入）。
-                改动后请<b>保存并重新确认</b>，否则生成仍读旧稿。
+                <b>主体设定</b>（性别/年龄/身高/体态/性格/外貌）会同时喂给导演 LLM 与出图模型 ——
+                不填性别时模型只能靠名字猜（实测把「宝玉」画成了女性）。
+                改动后请<b>保存并重新确认</b>（主体设定是就地保存，不必重新确认），否则生成仍读旧稿。
               </p>
             </div>
             <!-- 参考图：标题（在剧情主体展示框下方、参考图格子之上） -->
@@ -4318,6 +4431,49 @@ const shotTotal = computed(() => {
       </NModal>
 
       <!--
+        P14 主体设定（人物档案）：性别/年龄/身高/体态/性格/外貌。
+        为什么必须让用户能填：定妆照只约束长相；LLM 与视觉模型还需要知道性别与年龄段——
+        实测「宝玉」被画成女性，根因就是主体只有名字没属性，模型只能猜。
+      -->
+      <NModal v-model:show="traitsOpen" preset="card"
+              :title="`主体设定 · ${traitsSubject}`" style="max-width: 620px" data-testid="traits-modal">
+        <p class="text-secondary" style="margin: 0 0 12px; font-size: 12.5px">
+          这份档案会写进：导演与你 AI 重写提示词的上下文、每一镜的正词（<span class="font-mono">Picture N = 主体[档案]</span>）、
+          以及该主体的定妆照提示词 —— 三处口径一致，模型才不会自相矛盾。
+        </p>
+        <div class="ai-fields">
+          <label class="ai-label">性别（最关键；决定 he/she、man/woman、五官与体型）</label>
+          <NRadioGroup v-model:value="traitsDraft.gender" size="small" data-testid="traits-gender">
+            <NRadioButton value="male">男 male</NRadioButton>
+            <NRadioButton value="female">女 female</NRadioButton>
+            <NRadioButton value="other">未定／不适合</NRadioButton>
+          </NRadioGroup>
+          <label class="ai-label">年龄（数字或年龄段，如 17 / 十六七岁 / 中年）</label>
+          <NInput v-model:value="traitsDraft.age" :disabled="traitsKind !== 'person'"
+                  placeholder="如：17" data-testid="traits-age" />
+          <label class="ai-label">身高（如 178cm / 高挑；也可只写体态）</label>
+          <NInput v-model:value="traitsDraft.height" placeholder="如：178cm" data-testid="traits-height" />
+          <label class="ai-label">体态特征（清瘦 / 丰膾 / 嫗小 / 魁梧 / 肩宽背厚…）</label>
+          <NInput v-model:value="traitsDraft.build" placeholder="如：清瘦、身形额长" data-testid="traits-build" />
+          <label class="ai-label">性格（影响表情/眼神/动作的写法）</label>
+          <NInput v-model:value="traitsDraft.personality" placeholder="如：多情敏感、外表温柔内心刚强"
+                  data-testid="traits-personality" />
+          <label class="ai-label">外貌 / 服饰要点（发式、服色、配饰 —— 跨镜一致性的关键）</label>
+          <NInput v-model:value="traitsDraft.appearance" type="textarea"
+                  :autosize="{ minRows: 2, maxRows: 5 }"
+                  placeholder="如：面若中秋之月，大红箭袖，项上金螭璎珞，束发嵌宝紫金冠"
+                  data-testid="traits-appearance" />
+        </div>
+        <div class="ai-actions">
+          <NButton size="small" :disabled="traitsBusy" @click="traitsOpen = false">取消</NButton>
+          <NButton size="small" type="primary" :loading="traitsBusy" data-testid="traits-save"
+                   @click="confirmTraits">
+            保存（就地生效）
+          </NButton>
+        </div>
+      </NModal>
+
+      <!--
         P13b 生成定妆图（用户要求：定妆图也要像分镜一样**弹正/负向提示词**，用参考图 + 提示词出新图）。
         为什么必须弹：定妆图是所有分镜的唯一身份锚定，以前只能用后端写死的模板，想控（背景色/角度/风格）只能改代码。
       -->
@@ -4327,6 +4483,12 @@ const shotTotal = computed(() => {
           主体：<b>{{ portraitSubject }}</b> ·
           参考图 {{ portraitRefIds.length }} 张
           <span class="font-mono">{{ portraitRefIds.map((i) => '#' + i.slice(-4)).join(' ') || '（无：将按纯文本生成）' }}</span>
+          <template v-if="traitsSummary(planSubjects().find((x) => x.name === portraitSubject) ?? ({ name: '', } as PlanSubject))">
+            · 主体设定：{{ traitsSummary(planSubjects().find((x) => x.name === portraitSubject) ?? ({ name: '' } as PlanSubject)) }}
+          </template>
+          <template v-else>
+            · <button type="button" class="link-btn" @click="openTraits(portraitSubject)">补主体设定（性别/年龄…）</button>
+          </template>
         </p>
         <template v-if="portraitPromptBusy">
           <div class="g-loading" style="padding: 20px 0">读取默认提示词…</div>
@@ -4797,6 +4959,24 @@ const shotTotal = computed(() => {
 .subj-portrait { font-size: 10.5px; color: var(--wv-text-4); }
 .subj-portrait.on { color: var(--wv-success, #7BC47F); }
 .subj-refs { font-size: 10.5px; color: var(--wv-text-4); margin-right: auto; }
+/* ★ P14 主体设定（性别/年龄/体态）：点一下就能改；缺性别时用警示色 ——
+   因为「没填性别」就是实测「宝玉被画成女性」的根因，必须在列表上看得见。 */
+.subj-traits {
+  font-size: 10.5px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px dashed var(--wv-line);
+  color: var(--wv-text-4);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.subj-traits:hover { border-color: var(--wv-accent); color: var(--wv-accent-text); }
+.subj-traits.on { border-style: solid; color: var(--wv-text-2); }
+.subj-traits.warn {
+  border-style: solid;
+  border-color: color-mix(in srgb, var(--wv-danger, #c45c4a) 60%, var(--wv-line));
+  color: var(--wv-danger, #c45c4a);
+}
 .subj-hint { margin: 2px 0 0; font-size: 11px; line-height: 1.6; }
 .ref-thumb.off img { opacity: 0.35; filter: grayscale(0.7); }
 .ref-check { position: absolute; top: 4px; left: 4px; z-index: 2; }

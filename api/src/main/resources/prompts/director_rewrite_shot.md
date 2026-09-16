@@ -4,6 +4,9 @@
 - 保持 duration_sec / shot_no 不变；
 - 产出新的 action / positive_prompt / negative_prompt / camera_move / shot_size；
 - 遵守与导演 System Prompt 相同的规定（长度 20–1200、负面词、一致性锚点）；
+- **必须与「设定年代 / 主体档案」一致（P14）**：若 system 消息给了「设定年代/世界观」与「剧情主体设定」，
+  你写的正词必须与之相符 —— 尤其**不得把男性写成女性（或反之）**、不得写与年龄不符的称谓、
+  不得出现与年代不符的物件；若原正词里与档案矛盾（如把宝玉写成 she/her），本次重写要**改对**；
 - **必须点名主体（P5）**：保留原 prompt 里的角色专有名词（如 `Baoyu (宝玉)`），**不得**换成 a man / the woman
   这类泛称；该镜多主体同框时写清相互关系与动作互动，但**不要写画面方位词**（`left/right/center`、`foreground/background`）
   —— 位置由系统按用户在「位置总控」设的区域框统一下发（`Picture 1 (image1) = 宝玉 (…)`），文案里猜的方位会与之冲突；

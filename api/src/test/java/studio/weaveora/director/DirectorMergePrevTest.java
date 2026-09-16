@@ -146,6 +146,53 @@ class DirectorMergePrevTest {
         ObjectNode now = plan(1);
         DirectorService.mergePrevMeta(now, null);
         DirectorService.mergePrevAudio(now, null);
+        DirectorService.mergePrevSubjectsAndSetting(now, null);
         assertEquals(1, now.path("shots").size());
+    }
+
+    // ---------- ★ P14：主体（含定妆照/档案）与设定年代都归用户 ----------
+
+    @Test
+    void llmProducedSubjectsAreDiscardedInFavourOfPreviousOnes() {
+        ObjectNode prev = plan(1, 2);
+        ArrayNode ps = prev.putArray("subjects");
+        ps.addObject().put("name", "宝玉").put("kind", "person").put("gender", "male")
+                .put("portraitAssetId", "p1");
+        prev.putArray("referenceAssets").addObject().put("assetId", "a1").put("subject", "宝玉");
+
+        ObjectNode now = plan(1, 2);
+        // LLM 照着摘要自己编了一份只有名字的 subjects（会把定妆照/属性洗掉）
+        now.putArray("subjects").addObject().put("name", "宝玉");
+
+        DirectorService.mergePrevSubjectsAndSetting(now, prev);
+
+        assertEquals(1, now.path("subjects").size());
+        assertEquals("p1", now.path("subjects").get(0).path("portraitAssetId").asText());
+        assertEquals("male", now.path("subjects").get(0).path("gender").asText());
+        assertEquals("a1", now.path("referenceAssets").get(0).path("assetId").asText());
+    }
+
+    @Test
+    void settingIsInheritedOnlyWhenTheModelOmittedIt() {
+        ObjectNode prev = plan(1);
+        prev.putObject("setting").put("era", "清代 · 康熙年间");
+
+        ObjectNode missing = plan(1);
+        DirectorService.mergePrevSubjectsAndSetting(missing, prev);
+        assertEquals("清代 · 康熙年间", missing.path("setting").path("era").asText());
+
+        ObjectNode own = plan(1);
+        own.putObject("setting").put("era", "北宋汴京");
+        DirectorService.mergePrevSubjectsAndSetting(own, prev);
+        assertEquals("北宋汴京", own.path("setting").path("era").asText(), "LLM 给了就用 LLM 的");
+    }
+
+    @Test
+    void emptyPreviousSubjectsDoNotWipeNewPlan() {
+        ObjectNode prev = plan(1);
+        prev.putArray("subjects");
+        ObjectNode now = plan(1);
+        DirectorService.mergePrevSubjectsAndSetting(now, prev);
+        assertFalse(now.has("subjects"), "上一版没有主体时不应写入空数组");
     }
 }

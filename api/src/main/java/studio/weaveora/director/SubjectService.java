@@ -88,7 +88,9 @@ public class SubjectService {
                     }
                 }
                 byName.put(mergeInto, new PlanSubjects.Subject(old.name(), old.kind(), merged,
-                        old.enabled(), old.locked(), old.refs(), old.portraitAssetId(), old.portraitVersion()));
+                        old.enabled(), old.locked(), old.refs(), old.portraitAssetId(), old.portraitVersion(),
+                        // ★ P14：合并时把 LLM 新抽到的属性并进来（旧值优先，缺失才用新的）
+                        old.traitsOrEmpty().merge(p.traitsOrEmpty())));
                 continue;
             }
             if (byName.containsKey(p.name())) {
@@ -103,7 +105,9 @@ public class SubjectService {
                 byName.put(p.name(), new PlanSubjects.Subject(old.name(),
                         old.kind().equals(PlanSubjects.KIND_PERSON) ? p.kind() : old.kind(),
                         merged, old.enabled(), old.locked(), old.refs(),
-                        old.portraitAssetId(), old.portraitVersion()));
+                        old.portraitAssetId(), old.portraitVersion(),
+                        // ★ P14：用户已经填过的属性不覆盖，只补空的
+                        old.traitsOrEmpty().merge(p.traitsOrEmpty())));
             } else {
                 byName.put(p.name(), p);
                 added.add(p.name());
@@ -115,18 +119,30 @@ public class SubjectService {
 
     private List<PlanSubjects.Subject> ask(ProjectContextPort.ProjectSnapshot project, JsonNode plan) {
         String system = """
-                你是短剧/影视的场记。从给定剧情里抽取**需要在画面上保持一致的主体元素**。
+                你是短剧/影视的场记。从给定剧情里抽取**需要在画面上保持一致的主体元素**，并尽量给出它们的**人物档案**。
                 要求：
                 1. 只抽真正会反复出现、需要形象一致的主体：人物、载具/装备、重要物件、关键场景；
                 2. 同一主体的不同称呼合并成一条，把其他叫法写进 aliases（如 宝玉/贾宝玉/宝二爷）；
                 3. kind 只能是 person | vehicle | object | scene；
                 4. 不要抽泛称（如“众人”“士兵”），不要抽纯情绪/抽象概念；
                 5. 最多 12 条，按重要度排序。
-                只输出 JSON：{"subjects":[{"name":"宝玉","kind":"person","aliases":["贾宝玉","宝二爷"]}]}
+                6. ★ kind=person 时**必须**尽量确定并填写：gender（male|female|other，拿不准写 other，绝不允许猜反）、
+                   age（数字或年龄段，如 “17” / “十六七岁” / “中年”）、height、build（体态，如 清瘦/丰膾/嫗小/魁梧）、
+                   personality（性格）、appearance（外貌与服饰要点，写具体：发式/服色/配饰）。
+                   依据剧情与人名常识判断（如“宝玉”“贾宝玉”是男性少年）；拿不准就不写，禁止臆造。
+                   非 person（载具/物件/场景）不用填 gender/age，只填 appearance 描述外形。
+                只输出 JSON：{"subjects":[{"name":"宝玉","kind":"person","aliases":["贾宝玉","宝二爷"],
+                  "gender":"male","age":"17","height":"178cm","build":"清瘦",
+                  "personality":"多情敏感","appearance":"面若中秋之月，大红箭袖，项上金螭璎珞"}]}
                 """;
         StringBuilder user = new StringBuilder();
         user.append("项目：").append(plan.path("title").asText("")).append('\n');
         user.append("主题：").append(plan.path("script").path("theme").asText("")).append('\n');
+        // ★ P14：把「设定年代」也告诉场记 —— 年代影响称谓/服制/身份（影响年龄与造型的推断）
+        String era = plan.path("setting").path("era").asText("");
+        if (!era.isBlank()) {
+            user.append("设定年代：").append(era).append('\n');
+        }
         user.append("概要：").append(plan.path("logline").asText("")).append('\n');
         for (JsonNode s : plan.path("shots")) {
             user.append("第").append(s.path("shot_no").asInt()).append("镜：")
@@ -175,8 +191,16 @@ public class SubjectService {
                         aliases.add(v);
                     }
                 }
+                // ★ P14：连带人物档案一起解析（性别/年龄/身高/体态/性格/外貌）；
+                //   gender 走 normGender 归一（男/male/M → male），未知一律 other —— 宁可写 other 也不能猜反。
+                PlanSubjects.Traits traits = PlanSubjects.Traits.parse(n);
+                if (PlanSubjects.KIND_PERSON.equals(kind)
+                        && (traits.gender() == null || traits.gender().isBlank())) {
+                    traits = new PlanSubjects.Traits("other", traits.age(), traits.height(), traits.build(),
+                            traits.personality(), traits.appearance());
+                }
                 out.add(new PlanSubjects.Subject(name, kind, aliases, true, false,
-                        List.of(), "", 0));
+                        List.of(), "", 0, traits));
             }
         } catch (Exception ignored) {
             // 非法 JSON → 当作没产出

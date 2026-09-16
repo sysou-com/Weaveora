@@ -184,6 +184,18 @@ export interface PlanSubject {
   /** 定妆图（由素材图生成，优先用于分镜锚定） */
   portraitAssetId?: string
   portraitVersion?: number
+  /**
+   * ★ P14 主体设定（2026-09-16 用户要求）—— 「人物档案」，同时喂给 LLM 与视觉模型。
+   *
+   * 为什么必须有：定妆照只约束「长相」，而 LLM 写提示词、视觉模型画人还需要知道
+   * **性别/年龄段/体态** —— 实测出现过「宝玉被当女性」（模型对中文人名没有可靠的性别常识）。
+   */
+  gender?: 'male' | 'female' | 'other' | ''
+  age?: string
+  height?: string
+  build?: string
+  personality?: string
+  appearance?: string
 }
 
 export interface DirectorShot {
@@ -286,6 +298,13 @@ export interface BasePlan {
   mode: 'image' | 'video'
   title: string
   logline: string
+  /**
+   * ★ P14 设定年代/世界观（2026-09-16 用户要求）：项目必须交代剧情发生的时间/年代。
+   *
+   * 为什么不写在 script.theme 里：theme 是「主题」（讲什么），era 是「年代」（穿什么、有什么），
+   * 两者混在一起模型会把「主题词」当成年代约束。era 会被系统追加到每一镜的正词里（JobService.applySetting）。
+   */
+  setting?: { era?: string; notes?: string }
   /** P4 参考图与主体绑定（参考图面板标注后随方案保存；生成时按镜文案自动绑定） */
   referenceAssets?: Array<{
     assetId: string

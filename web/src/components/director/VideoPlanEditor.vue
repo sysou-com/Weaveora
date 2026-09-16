@@ -240,18 +240,72 @@ const planAspectCss = computed(() => {
 })
 
 const transitions = ['cut', 'dissolve', 'fade', 'wipe'].map((v) => ({ label: v, value: v }))
+
+/**
+ * ★ P14：设定年代 / 世界观补充。
+ *
+ * 为什么要手写 setter 而不是 v-model 到 plan.setting.era：plan.setting 可能整体不存在，
+ * 直接 v-model 会报 undefined（且不会触发响应式的“脏”标记）。此处保证先建对象再赋值。
+ */
+function ensureSetting(): { era?: string; notes?: string } {
+  const p = props.plan as unknown as { setting?: { era?: string; notes?: string } }
+  if (!p.setting || typeof p.setting !== 'object') p.setting = {}
+  return p.setting
+}
+function setEra(v: string): void {
+  ensureSetting().era = v
+}
+function setEraNotes(v: string): void {
+  ensureSetting().notes = v
+}
 </script>
 
 <template>
   <div class="editor-stack" data-testid="video-plan-editor">
     <section class="block">
-      <p class="block-label font-mono">主题</p>
+      <p class="block-label font-mono">主题 / 设定年代</p>
       <template v-if="props.plan.script">
         <label class="row">
           <span class="key">主题 theme（中文）</span>
           <NInput v-model:value="props.plan.script.theme" size="small" :disabled="disabled" />
         </label>
       </template>
+      <!--
+        ★ P14（2026-09-16 用户要求）：项目必须交代剧情的时间/年代。
+        为什么单独一栏：era 会被系统**追加到每一镜的正词**（JobService.applySetting），
+        并喂给导演/重写 LLM——否则会画出/写出与年代不符的人与物（清代人拿手机、汉制襷裙乱入）。
+      -->
+      <label class="row">
+        <span class="key" title="剧情发生的时代/年代；会追加进每一镜的正词">设定年代 era</span>
+        <NInput
+          :value="props.plan.setting?.era ?? ''"
+          size="small"
+          :disabled="disabled"
+          placeholder="如：清代 · 康熙年间 / 北宋汴京 / 近未来 2077 年"
+          data-testid="plan-era"
+          @update:value="(v: string) => setEra(v)"
+        />
+      </label>
+      <label class="row">
+        <span class="key" title="服化道 / 世界观约束（可选）；同样会追加进正词">世界观补充</span>
+        <NInput
+          :value="props.plan.setting?.notes ?? ''"
+          size="small"
+          :disabled="disabled"
+          placeholder="如：服化道按清代贵族宅院形制；不得出现现代物件"
+          data-testid="plan-era-notes"
+          @update:value="(v: string) => setEraNotes(v)"
+        />
+      </label>
+      <p class="era-hint" :class="{ warn: !((props.plan.setting?.era ?? '').trim()) }">
+        <template v-if="!(props.plan.setting?.era ?? '').trim()">
+          ⚠ 还没填设定年代：模型会自行推断，容易出现与年代不符的人与物（服饰/道具/建筑）。
+        </template>
+        <template v-else>
+          年代会写进每一镜的出图正词（按提示词语言自动选中文/英文话术）。
+        </template>
+        主体本身的性别/年龄/体态请在页面顶部的「剧情主体」里设。
+      </p>
     </section>
 
     <section class="block">
@@ -697,11 +751,13 @@ const transitions = ['cut', 'dissolve', 'fade', 'wipe'].map((v) => ({ label: v, 
   padding: 10px 12px;
   margin-bottom: 10px;
 }
-.sp-title {
-  font-size: 13px;
+.sp-title {  font-size: 13px;
   font-weight: 600;
   margin-bottom: 4px;
 }
+/* ★ P14：设定年代的说明行（小字，不抢主信息；未填时变警示色） */
+.era-hint { font-size: 11.5px; line-height: 1.6; margin: 6px 0 0; color: var(--wv-text-4); }
+.era-hint.warn { color: var(--wv-danger, #c45c4a); }
 .zh-head {
   display: flex;
   align-items: center;

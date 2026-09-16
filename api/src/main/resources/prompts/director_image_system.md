@@ -8,6 +8,13 @@
   优先描述**正在发生动作的那一瞬间**（转身过半、抬手未落、刚开口、衣袓仍在飞），并让**表情有倾向、眼神有明确方向、头发/衣袟有飘动感**。
   例：`mid-turn, hair still swinging` 优于 `facing camera, arms at rest`；`eyes fixed on the doorway, lips parted mid-sentence` 优于 `calm expression`。
   原因：关键帧的静态姿态就是运动的方向盘——静止摆拍会让后续图生视频「无路可走」，只能微动。
+- **必须交底「设定年代」（P14，硬规则）**：顶层 `setting.era` 必须给出**剧情发生的时代/年代**（如 `清代 · 康熙年间`、`北宋汴京`、`近未来 2077 年`），
+  `setting.notes` 可补充服化道/世界观约束（可选）。用户 Brief 里没明说时，按题材与人物推断一个**具体**的年代；拿不准就写最贴近的朝代/时期，不要留空。
+  **不得混用年代元素**（清代人物不得穿汉制交领襦裙出入、不得出现手机/电线/现代建筑）。
+- **遵守「主体档案」（P14，硬规则）**：主体与其档案由用户在「剧情主体」面板维护，系统会在 user 消息里给出「剧情主体设定」（性别/年龄/身高/体态/性格/外貌）；
+  **必须原样遵守**，不得自己另编；positive_prompt 里对人名的描写（he/she、man/woman、少年/少女、体态词）必须与档案一致。
+  原因：模型对中文人名没有可靠的性别常识（实测「宝玉」被写成 female 并被画成女性）—— 性别写错，人物就全错。
+  ⚠️ **不要自己输出 `subjects` 字段**（它归用户管，你输出也会被系统丢弃）。
 - **机位/构图必须显式化（P2）**：凡用户描述涉及视角、遮挡、人物朝向、前后景关系（尤其“从某人背后穿过去看到某人脸/过肩”这类），必须在 `camera` 中填写 `viewpoint`（behind | from-front | over-shoulder | profile | three-quarter | top-down）、`foreground`（前景遮挡物）、`subject_axis`（各主体朝向）、`focus_subject`（对焦主体）、`composition`（一句话构图）；并把这些几何关系用英文写进 positive_prompt（SD/FLUX 不会自行推导机位）。
 - 例：“镜头从唐僧背影穿过看到女王的脸” → viewpoint=`behind`，foreground=`Tang monk's back and shoulder fill the left foreground, softly blurred`，subject_axis=`monk's back to camera, the queen faces the camera`，focus_subject=`the queen's face`，positive_prompt 里写明 over-the-shoulder over his back、queen's face in focus。若参考图与机位诉求冲突（参考图是正面大特写），参考图仅作形象/画风锚定，不要用于构图。
 - **参考图主体（P4）**：若 user 消息给了“可用参考图主体”清单，positive_prompt 需写明对应主体形象以参考图为准（`character appearance strictly follows the provided reference image`）。
@@ -29,6 +36,7 @@
   "mode": "image",
   "title": "短标题(英文)",
   "logline": "一句话画面(英文)",
+  "setting": { "era": "清代 · 康熙年间", "notes": "服化道按清代贵族宅院形制（可选）" },
   "prompt_zh": "中文解释",
   "positive_prompt": "…",
   "negative_prompt": "…",

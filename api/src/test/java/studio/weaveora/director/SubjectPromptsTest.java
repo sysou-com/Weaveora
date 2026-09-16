@@ -53,4 +53,36 @@ class SubjectPromptsTest {
         assertTrue(neg.contains("水印"), neg);
         assertFalse(neg.contains("white background"), "白底由 worker 按语言追加，不写进默认负词");
     }
+
+    // ---------- ★ P14：定妆照必须体现主体设定（性别/年龄/体态） ----------
+
+    @Test
+    void traitsAreWrittenIntoThePortraitPromptAndGenderIsForbiddenExplicitly() {
+        var traits = new studio.weaveora.director.plan.PlanSubjects.Traits(
+                "male", "17", "178cm", "清瘦", "多情敏感", "大红箭袖");
+        String p = SubjectPrompts.portraitPrompt("宝玉", "person", 2, traits);
+        assertTrue(p.contains("角色设定（必须体现在画面里）：性别 男 male"), p);
+        assertTrue(p.contains("年龄 17"), p);
+        assertTrue(p.contains("体态 清瘦"), p);
+        // 男角色 → 明确禁止画成女性（用户实测的「宝玉被当女性」）
+        assertTrue(p.contains("严重禁止画成女性"), p);
+        assertTrue(p.contains("Reference image(s): 2"), p);
+
+        String female = SubjectPrompts.portraitPrompt("可卿", "person", 0,
+                new studio.weaveora.director.plan.PlanSubjects.Traits("female", "", "", "", "", ""));
+        assertTrue(female.contains("严重禁止画成男性"), female);
+
+        // 未知性别（other）不能硬画成一个性别
+        String other = SubjectPrompts.portraitPrompt("某人", "person", 0,
+                new studio.weaveora.director.plan.PlanSubjects.Traits("other", "", "", "", "", ""));
+        assertTrue(other.contains("如实表现性别特征"), other);
+    }
+
+    @Test
+    void portraitPromptWithoutTraitsStaysAsBefore() {
+        String p = SubjectPrompts.portraitPrompt("宝玉", "person", 0,
+                studio.weaveora.director.plan.PlanSubjects.Traits.EMPTY);
+        assertFalse(p.contains("角色设定（必须体现在画面里）"), p);
+        assertTrue(p.contains("标准角色设定图"), p);
+    }
 }
