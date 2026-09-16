@@ -676,7 +676,9 @@ async function confirmTraits(): Promise<void> {
 /** 主体档案一行摘要（列表用）；空则返回空串 */
 function traitsSummary(sub: PlanSubject): string {
   const g = sub.gender === 'male' ? '男' : sub.gender === 'female' ? '女' : sub.gender === 'other' ? '性别未定' : ''
-  return [g, sub.age, sub.build || sub.height].filter((x) => x && String(x).trim()).join(' · ')
+  // ★ 2026-09-16 夜：体态（build）单独一个 chip 显示（用户反馈“列表里看不到体态”），
+  //   这里就不再拿 build 顶替 height —— 否则「体态」会被身高盖住看不到。
+  return [g, sub.age, sub.height].filter((x) => x && String(x).trim()).join(' · ')
 }
 /** 人物主体缺性别 → 列表上给个红色提醒（就是「宝玉被当女性」的根因） */
 function traitsWarn(sub: PlanSubject): boolean {
@@ -711,7 +713,25 @@ async function openPortraitDialog(name: string): Promise<void> {
   await loadPortraitPrompt()
 }
 
-/** 拉取默认正/负向词（真源在后端 SubjectPrompts；拉不到就用本地弟底） */
+/**
+ * 定妆照弹框里的「本次会用哪几张参考图」说明（2026-09-16 夜）。
+ *
+ * 为什么要写清楚：用户实测「生成的定妆照没照我选定的参考图」—— 因为界面以前只写了个张数，
+ * 而且“未勾选（变暗）”的图也会被送进模型（bug 已修）。现在只认勾选的，所以这里要说准：
+ * 0 张时会回退到「当前定妆照」（后端行为），不是“纯文本生成”。
+ */
+const portraitRefHint = computed<string>(() => {
+  const n = portraitRefIds.value.length
+  if (n > 0) {
+    return `参考图 ${n} 张（已勾选的）`
+  }
+  const sub = planSubjects().find((x) => x.name === portraitSubject.value)
+  return sub?.portraitAssetId
+    ? '参考图 0 张 → 将用「当前定妆照」换一版（不改身份，只重生成）；想按素材图生成，先在参考图格子上勾选它'
+    : '参考图 0 张 → 没有任何身份参考，容易画得不像；先在参考图格子上勾选一张'
+})
+
+/** 拉取默认正/负向词（真源在后端 SubjectPrompts；拉不到就用本地兜底） */
 async function loadPortraitPrompt(): Promise<void> {
   const name = portraitSubject.value
   const revId = genRevisionId()
@@ -857,13 +877,27 @@ function addAlias(name: string): void {
 
 /** 剧情主体搜索（按名字 / 别名模糊过滤） */
 const subjectQuery = ref('')
+/**
+ * 主体列表排序（2026-09-16 夜用户要求）：① **选定的（勾选＝参与）排最上**；② 其余按名字**拼音首字母**。
+ *
+ * 为什么用 `Intl.Collator('zh-Hans-CN')` 而不再引一个拼音库：zh 的默认排序规则就是拼音
+ * （实测 宝玉 < 警幻 < 可卿 < 林黛玉 < 迷津 < 太虚 < 袭人 = bao/jing/ke/lin/mi/tai/xi），
+ * 浏览器与 Node 都支持，零依赖。
+ */
+const SUBJECT_COLLATOR = new Intl.Collator('zh-Hans-CN')
+
+function compareSubjects(a: PlanSubject, b: PlanSubject): number {
+  const pin = Number(!!b.enabled) - Number(!!a.enabled)   // 选定的在前
+  return pin !== 0 ? pin : SUBJECT_COLLATOR.compare(a.name, b.name)
+}
+
 function filteredSubjects(): PlanSubject[] {
   const q = subjectQuery.value.trim().toLowerCase()
   const all = planSubjects()
-  if (!q) return all
-  return all.filter(
+  const list = !q ? [...all] : all.filter(
     (s) => s.name.toLowerCase().includes(q) || (s.aliases ?? []).some((a) => a.toLowerCase().includes(q)),
   )
+  return list.sort(compareSubjects)
 }
 
 /**
@@ -872,11 +906,18 @@ function filteredSubjects(): PlanSubject[] {
  * 注：**不限制“别的角色用过就不给用”** —— 双胞胎/同人等场景本来就可以共用同一张参考图。
  */
 function subjectRefCandidates(name: string): string[] {
-  const inPlan = (planSubjects().find((x) => x.name === name)?.refs ?? []).map((r) => r.assetId)
+  // ★ 2026-09-16 夜 bug 修复（用户实测：定妆照没照她勾选的参考图，反而照了那张「暗掉」的）：
+  //   以前这里只看「在不在参考图列表里」，**完全忽略勾选状态** → 未勾选（变暗）的图照样被送进
+  //   模型；而用户的心智模型是「勾选＝做参考」。实测证据：未勾选的 310c269d 与新定妆照人脸相似度
+  //   0.759（就是照它画的），已勾选的 b1c8042e 只有 0.106。现在**只认勾选的**。
+  const checked = (id: string) => !refUnchecked.value.includes(id)
+  const inPlan = (planSubjects().find((x) => x.name === name)?.refs ?? [])
+    .filter((r) => r.checked !== false)
+    .map((r) => r.assetId)
   const named = Object.keys(refSubjects.value).filter(
-    (id) => (refSubjects.value[id] ?? '').trim() === name && refSelected.value.includes(id),
+    (id) => (refSubjects.value[id] ?? '').trim() === name && refSelected.value.includes(id) && checked(id),
   )
-  const unnamed = refSelected.value.filter((id) => (refSubjects.value[id] ?? '').trim() === '')
+  const unnamed = refSelected.value.filter((id) => (refSubjects.value[id] ?? '').trim() === '' && checked(id))
   return Array.from(new Set([...named, ...inPlan, ...unnamed]))
 }
 /**
@@ -1078,8 +1119,8 @@ function syncReferenceAssets(): void {
   for (const s of byName.values()) out.push({ ...s, refs: [] })
   ;(draft.value as unknown as { subjects?: PlanSubject[] }).subjects = out
 }
-/** 勾选/取消某张参考图参与锚定 */
-/** 新加入的参考图默认**不勾选**（它只是定妆的参照，默认不参与锚定；要用请显式勾选） */
+/** 勾选/取消某张参考图参与**生成定妆照**（唯一用途：定妆照的输入；出图锚定只认定妆照） */
+/** 新上传的参考图默认**不勾选**（先入列待选，要用请显式勾选） */
 function markUnchecked(id: string): void {
   if (!refUnchecked.value.includes(id)) {
     refUnchecked.value = [...refUnchecked.value, id]
@@ -1592,6 +1633,9 @@ type AudioTab = 'master' | 'portrait' | 'voice' | 'bgm' | 'still' | 'clip' | 'li
  * “全部”放最后。
  */
 const JOB_TABS: Array<{ key: AudioTab; label: string; kind?: string; hint: string }> = [
+  // ★ 2026-09-16 夜用户要求：任务区也加「定妆」Tab —— 否则生成定妆照时只能在「全部」里找，
+  //   不知道它到底有没有在跑/跑到哪了（定妆照要 5–7 分钟，中途没进度显示很慌）。
+  { key: 'portrait', label: '定妆', kind: 'portrait', hint: '剧情主体定妆照（生成中在这里看进度；它是所有分镜的唯一身份锚定）' },
   { key: 'voice', label: '配音', kind: 'voice', hint: '含试听产物 voice_preview' },
   { key: 'bgm', label: '配乐', kind: 'bgm', hint: '含试听产物 bgm_preview' },
   { key: 'still', label: '关键帧', kind: 'still', hint: '首帧图片 still' },
@@ -1888,9 +1932,11 @@ function setRefFromAsset(id: string): void {
     return
   }
   refSelected.value.push(id)
-  markUnchecked(id)
+  // ★ 2026-09-16 夜：点「参考」= 就是要用它 → 默认**勾选**（以前默认未勾选/变暗，
+  //   用户以为“点了没反应”，而它偏偏又会被当成候选送进模型，语义自相矛盾）。
+  refUnchecked.value = refUnchecked.value.filter((x) => x !== id)
   syncReferenceAssets()
-  message.success('已加入参考图（它只作为**生成定妆照**的依据，不参与出图锚定；出图锚定一律用定妆图）')
+  message.success('已加入参考图并勾选（它作为**生成定妆照**的依据；出图锚定一律用定妆图）')
 }
 
 function onPickFile(e: Event): void {
@@ -2464,7 +2510,7 @@ function confirmMotion(): void {
   motionOpen.value = false
   withShotPicker('运动(motion)', (shotNos) => startMotion(f, shotNos), 'clip')
 }
-const KIND_LABEL: Record<string, string> = { still: '关键帧', clip: '运动', voice: '配音', bgm: '配乐', lipsync: '对口型' }
+const KIND_LABEL: Record<string, string> = { still: '关键帧', clip: '运动', voice: '配音', bgm: '配乐', lipsync: '对口型', portrait: '定妆' }
 
 /** P7：逐镜配音（自托管 CosyVoice） */
 async function startVoice(shotNos?: number[] | null): Promise<void> {
@@ -3809,22 +3855,31 @@ const shotTotal = computed(() => {
                 <span v-if="sub.aliases?.length" class="subj-alias font-mono" :title="sub.aliases?.join('、')">
                   {{ sub.aliases?.slice(0, 2).join('/') }}<template v-if="(sub.aliases?.length ?? 0) > 2">…</template>
                 </span>
+                <!-- ★ 2026-09-16 夜用户要求：体态单独一格显示（以前 build 被塞进“设定”里、常被身高顶掉） -->
+                <span v-if="(sub.build ?? '').trim()" class="subj-build font-mono"
+                      :title="`体态：${sub.build}（点左边的「设定」可改）`">
+                  体态 {{ sub.build }}
+                </span>
                 <span :class="['subj-portrait', 'font-mono', { on: !!sub.portraitAssetId }]">
                   {{ sub.portraitAssetId ? `定妆图 v${sub.portraitVersion ?? 1}` : '定妆图 ✗' }}
                 </span>
-                <span class="subj-refs font-mono" :title="'该主体的素材参考图张数'">
+                <span class="subj-refs font-mono" :title="'该主体的素材参考图张数'"
+                      :aria-label="'该主体的素材参考图张数'">
                   {{ (sub.refs ?? []).length }} 图
                 </span>
-                <NDropdown
-                  trigger="click"
-                  size="small"
-                  :options="subjectActions(sub)"
-                  :disabled="!canEdit"
-                  :data-testid="`subj-ops-${sub.name}`"
-                  @select="(k: string) => onSubjectAction(k, sub.name)"
-                >
-                  <NButton size="tiny" secondary :loading="portraitBusy">操作 ▾</NButton>
-                </NDropdown>
+                <!-- ★ 2026-09-16 夜用户要求：操作按钮固定在最右（以前换行后会跟着行首往左跑） -->
+                <span class="subj-ops">
+                  <NDropdown
+                    trigger="click"
+                    size="small"
+                    :options="subjectActions(sub)"
+                    :disabled="!canEdit"
+                    :data-testid="`subj-ops-${sub.name}`"
+                    @select="(k: string) => onSubjectAction(k, sub.name)"
+                  >
+                    <NButton size="tiny" secondary :loading="portraitBusy">操作 ▾</NButton>
+                  </NDropdown>
+                </span>
               </div>
               </div>
               <p class="subj-hint text-secondary">
@@ -3853,8 +3908,10 @@ const shotTotal = computed(() => {
               >
                 <img v-if="thumbUrls[a.id]" :src="thumbUrls[a.id]" alt="参考图" loading="lazy" />
                 <span v-else class="ref-empty">…</span>
-                <!-- P13：勾选=作为生成定妆照的参考图（**不**参与出图锚定） -->
-                <label v-if="refSelected.includes(a.id)" class="ref-check" title="勾选=作为生成定妆照的参考图（不参与出图锚定）"
+                <!-- P13：勾选＝作为生成定妆照的参考图（★ 2026-09-16 夜：这个勾选现在真的生效了 ——
+                     以前生成定妆照时不管勾没勾全送进模型，用户在界面上看不到差别） -->
+                <label v-if="refSelected.includes(a.id)" class="ref-check"
+                       title="☑ 勾选＝这次「生成定妆照」用它作参考｜☐ 取消＝留在列表但不用（缩略图会变暗）"
                        @click.stop>
                   <input type="checkbox" :checked="!refUnchecked.includes(a.id)"
                          :data-testid="`ref-check-${a.id.slice(0, 8)}`"
@@ -4485,8 +4542,8 @@ const shotTotal = computed(() => {
               style="max-width: 720px" data-testid="portrait-modal">
         <p class="text-secondary" style="margin: 0 0 10px; font-size: 13px;">
           主体：<b>{{ portraitSubject }}</b> ·
-          参考图 {{ portraitRefIds.length }} 张
-          <span class="font-mono">{{ portraitRefIds.map((i) => '#' + i.slice(-4)).join(' ') || '（无：将按纯文本生成）' }}</span>
+          <span :class="{ 'portrait-ref-warn': portraitRefIds.length === 0 }">{{ portraitRefHint }}</span>
+          <span class="font-mono" v-if="portraitRefIds.length">{{ portraitRefIds.map((i) => '#' + i.slice(-4)).join(' ') }}</span>
           <template v-if="traitsSummary(planSubjects().find((x) => x.name === portraitSubject) ?? ({ name: '', } as PlanSubject))">
             · 主体设定：{{ traitsSummary(planSubjects().find((x) => x.name === portraitSubject) ?? ({ name: '' } as PlanSubject)) }}
           </template>
@@ -4962,7 +5019,18 @@ const shotTotal = computed(() => {
 .subj-alias { font-size: 10.5px; color: var(--wv-text-4); }
 .subj-portrait { font-size: 10.5px; color: var(--wv-text-4); }
 .subj-portrait.on { color: var(--wv-success, #7BC47F); }
-.subj-refs { font-size: 10.5px; color: var(--wv-text-4); margin-right: auto; }
+/* 体态单独一格（用户要求：列表里要看得见体态） */
+.subj-build {
+  font-size: 10.5px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--wv-accent) 12%, transparent);
+  color: var(--wv-text-3, var(--wv-text-2));
+  white-space: nowrap;
+}
+.subj-refs { font-size: 10.5px; color: var(--wv-text-4); }
+/* 操作按钮恒定贴右（flex-wrap 换行后也靠右，不再跟着内容左跑） */
+.subj-ops { margin-left: auto; display: inline-flex; align-items: center; }
 /* ★ P14 主体设定（性别/年龄/体态）：点一下就能改；缺性别时用警示色 ——
    因为「没填性别」就是实测「宝玉被画成女性」的根因，必须在列表上看得见。 */
 .subj-traits {
@@ -4982,6 +5050,7 @@ const shotTotal = computed(() => {
   color: var(--wv-danger, #c45c4a);
 }
 .subj-hint { margin: 2px 0 0; font-size: 11px; line-height: 1.6; }
+.portrait-ref-warn { color: var(--wv-danger, #c45c4a); }
 .ref-thumb.off img { opacity: 0.35; filter: grayscale(0.7); }
 .ref-check { position: absolute; top: 4px; left: 4px; z-index: 2; }
 .ref-check input { width: 14px; height: 14px; }
