@@ -72,9 +72,18 @@ export async function approveShot(
 }
 
 /** POST director/rewrite-prompt —— 中文描述 → LLM 重写正/负提示词（供确认后应用） */
+export interface RewriteFrame {
+  label?: string | null
+  composition?: string | null
+  positivePrompt?: string | null
+  negativePrompt?: string | null
+}
+
 export interface RewriteResult {
   positive_prompt: string
   negative_prompt: string
+  /** 运镜关键帧（P2）：本镜是 2–4 帧运镜镜头时逐帧返回，顺序与传入 frames 一致 */
+  keyframes?: Array<{ positive_prompt: string; negative_prompt: string }>
 }
 
 export async function rewritePromptFromZh(
@@ -84,12 +93,14 @@ export async function rewritePromptFromZh(
   originalPositive?: string,
   originalNegative?: string,
   lang: 'zh' | 'en' = 'en',
+  frames?: RewriteFrame[],
 ): Promise<RewriteResult> {
   return request<RewriteResult>(`/api/v1/projects/${projectId}/director/rewrite-prompt`, {
     method: 'POST',
     headers: { [WORKSPACE_HEADER]: workspaceId },
-    // lang：'zh' → LLM 返回**中文**正/负向词；'en' → 英文（默认，兼容旧行为）
-    body: { rawText, originalPositive, originalNegative, lang },
+    // lang：'zh' → LLM 返回**中文**正/负向词（含每帧）；'en' → 英文
+    // frames：运镜关键帧必须一起传，否则 keyframes[].positive_prompt 不会被重写
+    body: { rawText, originalPositive, originalNegative, lang, ...(frames && frames.length ? { frames } : {}) },
   })
 }
 

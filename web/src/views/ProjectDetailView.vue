@@ -8,7 +8,7 @@ import {
   Save,
   WandSparkles,
 } from 'lucide-vue-next'
-import { NAlert, NButton, NDropdown, NIcon, NInput, NInputNumber, NModal, NRadio, NRadioGroup, NSkeleton, NSpace, NTag, useDialog, useMessage } from 'naive-ui'
+import { NAlert, NButton, NDropdown, NIcon, NInput, NInputNumber, NModal, NRadioButton, NRadioGroup, NSkeleton, NTag, useDialog, useMessage } from 'naive-ui'
 import { computed, h, nextTick, onErrorCaptured, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
@@ -52,9 +52,11 @@ import {
   audioVideoHealthCheck,
   calibrateAllShots,
   modelClipCap,
+  planSubjectNames,
   planTailSec,
   planProblems,
   round2,
+  shotCastInfo,
   shotHasText,
 } from '@/utils/plan'
 import type { ImagePlan, VideoPlan } from '@/api/types'
@@ -1730,6 +1732,8 @@ watch(
 async function startGeneration(shotNos?: number[] | null): Promise<void> {
   const revId = genRevisionId()
   if (!revId) return
+  // P5：先过主体闸门（镜文本没点名主体 → 弹框让用户勾选，避免“全部注入/没参考图”）
+  if (!preflightCast()) return
   // P12：生成后自动切到对应 Tab（顺手解锁），否则用户看不到刚发起任务的进度
   focusJobTab('still')
   // P4：先把当前草稿（含参考图/主体标注/提示词改动）落库，再发起生成
@@ -2330,6 +2334,8 @@ function openLipsyncPicker(): void {
 async function startMotion(frames?: number, shotNos?: number[] | null): Promise<void> {
   const revId = genRevisionId()
   if (!revId) return
+  // P5：出片同样要过主体闸门（首帧就是关键帧，主体错了一路错）
+  if (!preflightCast()) return
   if (dirty.value && !(await handleSave())) return
   genBusy.value = true
   try {
@@ -2538,6 +2544,62 @@ const aiOpen = ref(false)
 const aiBusy = ref(false)
 const aiPreview = ref<RewriteResult | null>(null)
 const aiImageMode = ref(false)
+/** P5：AI 更新提示词的语言（用户要求：选中文则正/负词**含运镜关键帧**都用中文） */
+const aiLang = ref<'zh' | 'en'>('zh')
+/** 本次重写的运镜关键帧快照（应用时按序回写 keyframes[].positive_prompt） */
+const aiFrames = ref<Array<{ label: string; composition: string }>>([])
+
+// ---------- P5：生成前的主体闸门（用户要求：没指明主体要提示/弹框让用户勾选）----------
+/** 待用户勾选主体的镜（列在弹框里） */
+const castOpen = ref(false)
+const castBusy = ref(false)
+const castRows = ref<Array<{ shot: DirectorShot; names: string[]; picked: string[]; empty: boolean }>>([])
+
+/** 参与锚定的主体名（方案顺序） */
+const planSubjectsNow = computed<string[]>(() => {
+  const d = draft.value
+  return d && isVideoPlan(d) ? planSubjectNames(d) : []
+})
+
+/**
+ * 生成前预检：把「镜文本没点到任何主体」的镜列出来让用户勾选。
+ *
+ * 为什么需要（用户实测）：镜文本（action/zh/positive_prompt）没提到主体时，后端会
+ * 「回退为全部主体」——多角色时容易串脸；而个别帧看起来根本没拿到参考图。根因就是
+ * **提示词里没点名主体**，所以生成前必须让用户显式选一次。
+ *
+ * @returns true = 可以继续生成；false = 需要用户先勾选（弹框已打开）
+ */
+function preflightCast(): boolean {
+  const d = draft.value
+  if (!d || !isVideoPlan(d)) return true
+  const names = planSubjectsNow.value
+  if (names.length < 2) return true // 单主体没有歧义
+  const rows = (d.shots ?? [])
+    .filter((s) => shotCastInfo(s, names).ambiguous)
+    .map((s) => ({ shot: s, names, picked: [...shotCastInfo(s, names).subjects], empty: false }))
+  if (!rows.length) return true
+  castRows.value = rows
+  castOpen.value = true
+  return false
+}
+
+function confirmCast(): void {
+  for (const r of castRows.value) {
+    if (r.empty) {
+      r.shot.cast = [] // 明确的空镜（环境/道具镜）
+      continue
+    }
+    const picked = r.names.filter((n) => r.picked.includes(n))
+    if (!picked.length) {
+      message.warning(`第 ${r.shot.shot_no} 镜还没选主体：请勾选主体，或点「空镜（无主体）」`)
+      return
+    }
+    r.shot.cast = picked
+  }
+  castOpen.value = false
+  message.success('已记录本镜主体，请再点一次生成')
+}
 
 async function openAiImageRewrite(): Promise<void> {
   const plan = draft.value as unknown as { prompt_zh?: string } | undefined
@@ -2561,20 +2623,55 @@ async function openAiImageRewrite(): Promise<void> {
   }
 }
 
+/**
+ * 单镜 AI 更新提示词（取代原来的「AI 同步提示词（全部）」——
+ * 一次性跑全片会几十次 LLM 串行、前端卡死；现在按镜来，一次一镜）。
+ *
+ * 运镜关键帧（2–4 帧）必须一起重写：生成时每帧用的是**自己的** positive_prompt，
+ * 不一起重写就会出现「主正词更新了、关键帧还是旧稿」的不一致（用户实测第 3 镜）。
+ */
 async function openAiRewrite(shot: DirectorShot): Promise<void> {
   aiImageMode.value = false
   aiShot.value = shot
   aiOpen.value = true
   aiBusy.value = true
   aiPreview.value = null
+  aiFrames.value = (shot.keyframes ?? []).map((k) => ({
+    label: k.label ?? '',
+    composition: k.composition ?? '',
+  }))
   try {
-    const r = await rewritePromptFromZh(workspaceId.value, projectId.value, ((shot.action ?? shot.zh) ?? '').trim(), shot.positive_prompt, shot.negative_prompt)
-    aiPreview.value = r
+    aiPreview.value = await rewritePromptFromZh(
+      workspaceId.value,
+      projectId.value,
+      ((shot.action ?? shot.zh) ?? '').trim(),
+      shot.positive_prompt,
+      shot.negative_prompt,
+      aiLang.value,
+      (shot.keyframes ?? []).map((k) => ({
+        label: k.label ?? '',
+        composition: k.composition ?? '',
+        positivePrompt: k.positive_prompt ?? '',
+        negativePrompt: shot.negative_prompt ?? '',
+      })),
+    )
   } catch (e) {
     message.error(e instanceof Error ? e.message : '生成失败，请重试')
     aiOpen.value = false
   } finally {
     aiBusy.value = false
+  }
+}
+
+/** 在弹框里切换中/英文 → 重新生成（用户要的是「选了就整条换语言」） */
+async function changeAiLang(lang: 'zh' | 'en'): Promise<void> {
+  if (aiLang.value === lang) return
+  aiLang.value = lang
+  if (aiImageMode.value) {
+    await openAiImageRewrite()
+  } else if (aiShot.value) {
+    const s = aiShot.value
+    await openAiRewrite(s)
   }
 }
 
@@ -2596,71 +2693,21 @@ function applyAiPrompt(): void {
   if (!s) return
   s.positive_prompt = p.positive_prompt
   s.negative_prompt = p.negative_prompt
+  // ★ 运镜关键帧逐帧回写（漏了就会出现「帧提示词还是旧稿/旧语言」）
+  const kfs = s.keyframes ?? []
+  const got = p.keyframes ?? []
+  let written = 0
+  for (let i = 0; i < kfs.length; i++) {
+    const one = got[i]
+    if (!one) continue
+    kfs[i].positive_prompt = one.positive_prompt
+    written++
+  }
   s.en_synced = true
   aiOpen.value = false
-  message.success('已写入该镜提示词（记得保存方案）')
-}
-
-interface BatchItem {
-  shot: DirectorShot
-  zh: string
-  positive: string
-  negative: string
-}
-
-const aiBatchOpen = ref(false)
-const aiBatchBusy = ref(false)
-const aiBatch = ref<BatchItem[]>([])
-
-async function aiSyncAll(lang: 'zh' | 'en' = 'en'): Promise<void> {
-  // 只同步“改动过但未 AI 同步”的镜头（en_synced===false；未改动/已同步的跳过）
-  const shots = ((draft.value as unknown as { shots?: DirectorShot[] })?.shots ?? []).filter(
-    (s) => s.en_synced === false && ((s.action ?? s.zh) ?? '').trim().length > 0,
+  message.success(
+    written ? `已写入该镜提示词（含 ${written} 个运镜关键帧，记得保存方案）` : '已写入该镜提示词（记得保存方案）',
   )
-  if (!shots.length) {
-    message.info('没有待同步的镜头（改动画面动作后会标记待同步；未改动的不会重复生成）')
-    return
-  }
-  aiBatchBusy.value = true
-  aiBatch.value = []
-  try {
-    for (const shot of shots) {
-      const r = await rewritePromptFromZh(workspaceId.value, projectId.value, ((shot.action ?? shot.zh) ?? '').trim(), shot.positive_prompt, shot.negative_prompt, lang)
-      aiBatch.value.push({
-        shot,
-        zh: ((shot.action ?? shot.zh) ?? '').trim(),
-        positive: r.positive_prompt,
-        negative: r.negative_prompt,
-      })
-    }
-    aiBatchOpen.value = true
-  } catch (e) {
-    message.error(e instanceof Error ? e.message : '批量生成失败')
-  } finally {
-    aiBatchBusy.value = false
-  }
-}
-
-/** 同步前先让用户选中/英文（中文时 LLM 返回中文正/负向词并填充两框） */
-const aiLangOpen = ref(false)
-const aiLangPick = ref<'zh' | 'en'>('zh')
-function openAiLang(): void {
-  aiLangOpen.value = true
-}
-function confirmAiLang(): void {
-  const lang = aiLangPick.value
-  aiLangOpen.value = false
-  void aiSyncAll(lang)
-}
-
-function aiBatchApply(): void {
-  for (const item of aiBatch.value) {
-    item.shot.positive_prompt = item.positive
-    item.shot.negative_prompt = item.negative
-    item.shot.en_synced = true
-  }
-  aiBatchOpen.value = false
-  message.success('已写入 ' + aiBatch.value.length + ' 镜提示词（记得保存方案）')
 }
 
 async function handleSave(): Promise<boolean> {
@@ -3422,7 +3469,6 @@ const shotTotal = computed(() => {
                   @toggle-lock="toggleShotLock"
                   @approve-shot="handleApproveShot"
                   @ai-prompt="openAiRewrite"
-                  @ai-sync-all="openAiLang"
                   @preview-voice="previewVoice"
                   @preview-bgm="previewBgm"
                   @gen-line="genVoiceLine"
@@ -3772,43 +3818,94 @@ const shotTotal = computed(() => {
         </div>
       </NModal>
 
-      <!-- AI 语言选择（同步提示词前必选：中文 → LLM 返回中文正/负向词并填充两框） -->
-      <NModal v-model:show="aiLangOpen" preset="card" title="提示词语言" style="max-width: 420px" data-testid="ai-lang-modal">
-        <p class="text-secondary" style="margin:0 0 10px;font-size:13px;">
-          选择 LLM 产出提示词的语言（中文：正/负向都是中文；英文：正/负向都是英文）
-        </p>
-        <NRadioGroup v-model:value="aiLangPick">
-          <NSpace>
-            <NRadio value="zh">中文</NRadio>
-            <NRadio value="en">英文</NRadio>
-          </NSpace>
-        </NRadioGroup>
-        <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px;">
-          <NButton size="small" @click="aiLangOpen = false">取消</NButton>
-          <NButton size="small" type="primary" data-testid="ai-lang-confirm" @click="confirmAiLang">开始同步</NButton>
-        </div>
-      </NModal>
-
       <!-- AI 提示词确认（①：可确认/取消/微调后应用） -->
-      <NModal v-model:show="aiOpen" preset="card" title="AI 生成提示词（可确认或取消）" style="max-width: 720px">
+      <NModal v-model:show="aiOpen" preset="card" title="AI 生成提示词（可确认或取消）" style="max-width: 760px">
         <p class="text-secondary" style="margin: 0 0 10px; font-size: 13px;">
-          第 {{ aiShot?.shot_no ?? '' }} 镜 · 中文：{{ (aiShot?.action ?? aiShot?.zh) ?? '' }}
+          <template v-if="!aiImageMode">第 {{ aiShot?.shot_no ?? '' }} 镜 · </template>中文：{{ aiShot?.action ?? aiShot?.zh ?? '' }}
         </p>
+        <!-- 语言：选中文则正/负词（含运镜关键帧）全部中文；切换即重新生成 -->
+        <div class="ai-lang-row">
+          <span class="ai-label" style="margin: 0">提示词语言</span>
+          <NRadioGroup :value="aiLang" size="small" data-testid="ai-lang"
+                       @update:value="(v) => changeAiLang(v as 'zh' | 'en')">
+            <NRadioButton value="zh">中文</NRadioButton>
+            <NRadioButton value="en">English</NRadioButton>
+          </NRadioGroup>
+          <span class="text-secondary" style="font-size: 11.5px">
+            Qwen 系模型对中文理解好；选哪种，正/负词与运镜关键帧都用哪种
+          </span>
+        </div>
         <template v-if="aiBusy">
           <div class="g-loading" style="padding: 24px 0">AI 生成中…</div>
         </template>
         <template v-else-if="aiPreview">
           <div class="ai-fields">
-            <label class="ai-label">正向提示词（英文，可微调）</label>
+            <label class="ai-label">本镜正向提示词（可微调）</label>
             <NInput v-model:value="aiPreview.positive_prompt" type="textarea" :autosize="{ minRows: 3, maxRows: 8 }" />
-            <label class="ai-label">负向提示词（中文，可微调）</label>
+            <label class="ai-label">本镜负向提示词（可微调）</label>
             <NInput v-model:value="aiPreview.negative_prompt" type="textarea" :autosize="{ minRows: 2, maxRows: 6 }" />
+          </div>
+          <!-- 运镜关键帧：每帧用自己的正词出图，必须逐帧重写（否则帧提示词还是旧稿/旧语言） -->
+          <div v-if="aiPreview.keyframes?.length" class="ai-kf-block">
+            <p class="ai-label" style="margin: 0 0 6px">
+              运镜关键帧（{{ aiPreview.keyframes.length }} 帧 · 生成时逐帧出图、motion 用首/尾帧）
+            </p>
+            <div v-for="(kf, i) in aiPreview.keyframes" :key="i" class="ai-kf-item">
+              <span class="ai-kf-tag font-mono">
+                #{{ i + 1 }} {{ aiFrames[i]?.label || (i === 0 ? '起始帧' : (i === aiPreview.keyframes.length - 1 ? '结束帧' : '中段')) }}
+              </span>
+              <span v-if="aiFrames[i]?.composition" class="ai-kf-comp text-secondary">{{ aiFrames[i].composition }}</span>
+              <NInput v-model:value="kf.positive_prompt" type="textarea" :autosize="{ minRows: 2, maxRows: 5 }" />
+            </div>
           </div>
           <div class="ai-actions">
             <NButton size="small" @click="aiOpen = false">取消</NButton>
-            <NButton size="small" type="primary" data-testid="ai-apply" @click="applyAiPrompt">应用并写入</NButton>
+            <NButton size="small" type="primary" data-testid="ai-apply" @click="applyAiPrompt">
+              应用并写入{{ aiPreview?.keyframes?.length ? '（含关键帧）' : '' }}
+            </NButton>
           </div>
         </template>
+      </NModal>
+
+      <!--
+        P5 主体闸门：生成前发现「镜文本没点名主体」的镜 → 让用户勾选本镜主体（或标为空镜）。
+        用户实测问题：不点名时后端会“全部主体注入”→串脸；个别帧看起来没拿到参考图。
+      -->
+      <NModal v-model:show="castOpen" preset="card" title="这些镜头没点名主体，请勾选本镜出镜主体" style="max-width: 720px"
+              data-testid="cast-modal">
+        <p class="text-secondary" style="margin: 0 0 10px; font-size: 12.5px">
+          镜头的「画面动作 / 正向提示词」里没出现任何主体名，系统无法自动绑定参考图
+          （会退化成把<strong>全部主体</strong>的参考图都注入 → 多角色容易串脸，或看起来没参考图）。
+          请为下列镜头勾选本镜真正出镜的主体；确实是纯环境/道具镜请点「空镜（无主体）」。
+        </p>
+        <div v-for="r in castRows" :key="r.shot.shot_no" class="cast-row-card">
+          <p class="cast-row-title">
+            第 {{ r.shot.shot_no }} 镜 ·
+            <span class="text-secondary">{{ (r.shot.action ?? '').slice(0, 60) }}</span>
+          </p>
+          <div class="cast-row-items">
+            <label v-for="n in r.names" :key="n" class="cast-row-item">
+              <input type="checkbox" :checked="r.picked.includes(n)" :data-testid="`cast-pick-${r.shot.shot_no}-${n}`"
+                     @change="(e) => {
+                       const on = (e.target as HTMLInputElement).checked
+                       r.picked = on ? [...r.picked, n] : r.picked.filter((x) => x !== n)
+                       if (on) r.empty = false
+                     }" />
+              <span>{{ n }}</span>
+            </label>
+            <label class="cast-row-item">
+              <input type="checkbox" :checked="r.empty" :data-testid="`cast-empty-${r.shot.shot_no}`"
+                     @change="(e) => { r.empty = (e.target as HTMLInputElement).checked; if (r.empty) r.picked = [] }" />
+              <span>空镜（无主体）</span>
+            </label>
+          </div>
+        </div>
+        <div class="ai-actions">
+          <NButton size="small" @click="castOpen = false">取消（不生成）</NButton>
+          <NButton size="small" type="primary" :loading="castBusy" data-testid="cast-confirm" @click="confirmCast">
+            记录选择
+          </NButton>
+        </div>
       </NModal>
 
       <!-- AI 批量同步（①：多镜中文→LLM 更新，可确认/取消/逐镜微调） -->
@@ -3849,24 +3946,7 @@ const shotTotal = computed(() => {
         </div>
       </NModal>
 
-      <NModal v-model:show="aiBatchOpen" preset="card" title="AI 同步提示词（确认或取消）" style="max-width: 760px">
-        <template v-if="aiBatchBusy">
-          <div class="g-loading" style="padding: 24px 0">AI 批量生成中（逐镜进行）…</div>
-        </template>
-        <template v-else>
-          <div v-for="item in aiBatch" :key="item.shot.shot_no" class="ai-batch-item">
-            <p class="ai-batch-title">第 {{ item.shot.shot_no }} 镜 · {{ item.zh }}</p>
-            <label class="ai-label">正向提示词（英文，可微调）</label>
-            <NInput v-model:value="item.positive" type="textarea" :autosize="{ minRows: 2, maxRows: 6 }" />
-            <label class="ai-label">负向提示词（中文，可微调）</label>
-            <NInput v-model:value="item.negative" type="textarea" :autosize="{ minRows: 1, maxRows: 4 }" />
-          </div>
-          <div class="ai-actions">
-            <NButton size="small" @click="aiBatchOpen = false">取消（不应用）</NButton>
-            <NButton size="small" type="primary" data-testid="ai-batch-apply" @click="aiBatchApply">应用全部</NButton>
-          </div>
-        </template>
-      </NModal>
+
 
       <!-- 沉浸式预览（大图/大视频） -->
       <div v-if="immersive" class="im-overlay" @click.self="immersive = null">
@@ -4878,5 +4958,72 @@ const shotTotal = computed(() => {
     row-gap: 4px;
   }
   .job-bar { min-width: 70px; }
+}
+/* ---------- P5：AI 更新提示词弹框（语言 + 运镜关键帧）与主体闸门 ---------- */
+.ai-label {
+  display: block;
+  font-size: 11.5px;
+  color: var(--wv-text-4);
+  margin: 8px 0 4px;
+  letter-spacing: 0.04em;
+}
+.ai-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 14px;
+}
+.ai-lang-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--wv-line);
+}
+.ai-kf-block {
+  margin-top: 14px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--wv-line);
+}
+.ai-kf-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 10px;
+}
+.ai-kf-tag {
+  font-size: 11px;
+  color: var(--wv-accent, #d0a24e);
+}
+.ai-kf-comp {
+  font-size: 11px;
+  line-height: 1.5;
+}
+/* 主体闸门 */
+.cast-row-card {
+  border: 1px solid var(--wv-line);
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin-bottom: 10px;
+  background: var(--wv-surface-sunken);
+}
+.cast-row-title {
+  margin: 0 0 8px;
+  font-size: 12.5px;
+}
+.cast-row-items {
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+.cast-row-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12.5px;
+  color: var(--wv-text-2);
+  cursor: pointer;
 }
 </style>

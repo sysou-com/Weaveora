@@ -8,24 +8,27 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * P5 位置与「参考图 → 主体」映射。
+ * P5 位置与「参考图 → 主体」映射 / 语言一致性。
  *
- * <p>背景（2026-09-16 用户要求）：多主体同框时，Qwen-Image-Edit 拿到 image1/image2 却不知道
- * 哪张脸对应哪个角色名，只能自己猜 → 串脸/换人。所以正词里**必须点名主体**，并把「谁在哪」
- * 一并写清；位置来源三档（逐镜 layout &gt; 方案级 region &gt; 点选坐标）要能各就各位。
+ * <p>背景（2026-09-16 用户实测）：
+ * <ul>
+ *   <li>多主体同框时 Edit 模型拿到 image1/image2 不知道哪张脸对应谁 → 串脸；所以必须点名主体；</li>
+ *   <li>位置三档（逐镜 layout &gt; 方案级 region &gt; 点选坐标）要各就各位；</li>
+ *   <li>用户选「中文」时，系统**追加**的句子（锚定/位置/负面守卫）不能还是英文 —— 否则一半中文一半英文。</li>
+ * </ul>
  */
 class JobLayoutRegionsTest {
 
     private static final ObjectMapper M = new ObjectMapper();
 
-    /** 造一个带主体与参考图槽位的 payload。 */
-    private static ObjectNode payload() {
+    private static ObjectNode payload(String positive) {
         ObjectNode p = M.createObjectNode();
-        p.put("positive_prompt", "cinematic still of two figures");
+        p.put("positive_prompt", positive);
         return p;
     }
 
@@ -41,22 +44,70 @@ class JobLayoutRegionsTest {
         }
     }
 
-    @Test
-    void namesEveryBoundSubjectEvenWithoutAnyPosition() {
-        ObjectNode p = payload();
-        JobService.applyLayoutRegions(p, json("{}"), json("{}"), refs("宝玉", "可卿"));
+    // ---------- 语言探测 ----------
 
-        String pos = p.path("positive_prompt").asText();
-        // 没位置也必须有映射（后端兜底，不依赖 LLM 是否点名）
-        assertTrue(pos.contains("image1 = 宝玉"), pos);
-        assertTrue(pos.contains("image2 = 可卿"), pos);
-        // 无位置 → 不下发 referenceRegions（留空=不启用区域条件）
-        assertNull(p.get("referenceRegions"), String.valueOf(p.get("referenceRegions")));
+    @Test
+    void detectsChinesePromptsButNotEnglishWithChineseNames() {
+        assertTrue(JobService.isZhText("电影感关键帧：宝玉与可卿并肩而立，烛光摇曳，烟雾弥漫"));
+        assertFalse(JobService.isZhText(
+                "Cinematic film still, Baoyu (宝玉) walking through the wasteland, dramatic lighting"));
+        assertFalse(JobService.isZhText(""));
+        assertFalse(JobService.isZhText(null));
+    }
+
+    // ---------- 点名主体（锚定句，语言跟随镜文本） ----------
+
+    @Test
+    void anchorNamesEverySubjectInImageSlotsEnglish() {
+        String a = JobService.refAnchor("image1 = 宝玉, image2 = 可卿", false);
+        assertTrue(a.contains("Reference image mapping: image1 = 宝玉, image2 = 可卿"), a);
+        assertTrue(a.contains("do not share, blend or swap their faces"), a);
+    }
+
+    @Test
+    void anchorIsChineseWhenPromptIsChinese() {
+        String a = JobService.refAnchor("image1 = 宝玉, image2 = 可卿", true);
+        assertTrue(a.contains("参考图对应关系：image1 = 宝玉, image2 = 可卿"), a);
+        assertTrue(a.contains("禁止共用、混合或互换面容"), a);
+        // 整套中文时不得混英文句子
+        assertFalse(a.contains("Reference image"), a);
+    }
+
+    @Test
+    void anchorWithoutSubjectNameStaysGeneric() {
+        assertTrue(JobService.refAnchor("", false).contains("must strictly follow the provided reference image"));
+        assertTrue(JobService.refAnchor(null, true).contains("必须严格以给定参考图为准"));
+    }
+
+    // ---------- 本镜主体（shots[].cast） ----------
+
+    @Test
+    void castDistinguishesUnsetFromExplicitEmptyShot() {
+        // 不设 cast = 按镜文本自动匹配
+        assertNull(JobService.castOf(json("{}")));
+        assertNull(JobService.castOf(null));
+        // cast=[] = 明确的空镜（不注入任何人物参考图）
+        assertEquals(List.of(), JobService.castOf(json("{\"cast\":[]}")));
+        // 显式名单（去空、去空格）
+        assertEquals(List.of("宝玉", "可卿"), JobService.castOf(json("{\"cast\":[\"宝玉\",\" 可卿 \",\"\"]}")));
+        // 类型不对（老数据/手改）→ 当未指定，不炸
+        assertNull(JobService.castOf(json("{\"cast\":\"宝玉\"}")));
+    }
+
+    // ---------- 位置三档优先级 ----------
+
+    @Test
+    void noPositionLeavesPromptUntouched() {
+        ObjectNode p = payload("cinematic still of two figures");
+        JobService.applyLayoutRegions(p, json("{}"), json("{}"), refs("宝玉", "可卿"));
+        // 点名由 refs.anchor() 负责；这里没有位置 → 不该动正词、也不该下发 referenceRegions
+        assertEquals("cinematic still of two figures", p.path("positive_prompt").asText());
+        assertNull(p.get("referenceRegions"));
     }
 
     @Test
     void perShotLayoutWinsAndIsWrittenToPromptAndRegions() {
-        ObjectNode p = payload();
+        ObjectNode p = payload("cinematic still of two figures");
         JsonNode plan = json("""
                 {"referenceAssets":[{"assetId":"a1","subject":"宝玉",
                   "region":{"x":0.05,"y":0.05,"w":0.4,"h":0.9}}]}
@@ -73,7 +124,6 @@ class JobLayoutRegionsTest {
         // ① 逐镜 layout 覆盖方案级 region（0.05 → 0.62），并覆盖点选坐标
         assertTrue(pos.contains("image1 = 宝玉 (upper-center, x=0.62, y=0.10, box 0.30x0.60)"), pos);
         assertTrue(pos.contains("image2 = 可卿 (upper-left, x=0.10, y=0.20, box 0.25x0.55)"), pos);
-        assertTrue(pos.contains("strictly follow its own reference image"), pos);
 
         JsonNode regions = p.get("referenceRegions");
         assertEquals(2, regions.size());
@@ -84,7 +134,7 @@ class JobLayoutRegionsTest {
 
     @Test
     void planLevelRegionIsUsedWhenShotHasNoLayout() {
-        ObjectNode p = payload();
+        ObjectNode p = payload("cinematic still of two figures");
         JsonNode plan = json("""
                 {"referenceAssets":[{"assetId":"a1","subject":"宝玉",
                   "region":{"x":0.05,"y":0.05,"w":0.4,"h":0.9}}]}
@@ -99,7 +149,7 @@ class JobLayoutRegionsTest {
 
     @Test
     void planLevelRegionAlsoReadFromSubjectsRefs() {
-        ObjectNode p = payload();
+        ObjectNode p = payload("cinematic still of two figures");
         // 前端 syncReferenceAssets 会同时写 subjects[].refs[].region
         JsonNode plan = json("""
                 {"subjects":[{"name":"可卿","enabled":true,
@@ -114,7 +164,7 @@ class JobLayoutRegionsTest {
 
     @Test
     void facePickFallsBackToDefaultBoxCentredOnTheClick() {
-        ObjectNode p = payload();
+        ObjectNode p = payload("cinematic still of two figures");
         JsonNode shot = json("{\"lipsync_targets\":{\"宝玉\":{\"x\":0.30,\"y\":0.40}}}");
 
         JobService.applyLayoutRegions(p, json("{}"), shot, refs("宝玉"));
@@ -125,18 +175,29 @@ class JobLayoutRegionsTest {
     }
 
     @Test
-    void unnamedStyleReferenceIsNotNamed() {
-        ObjectNode p = payload();
-        JobService.applyLayoutRegions(p, json("{}"), json("{}"), refs("", "宝玉"));
+    void chinesePromptGetsChinesePlacementSentence() {
+        ObjectNode p = payload("电影感关键帧：宝玉与可卿并肩而立，烛光摇曳，烟雾弥漫");
+        JsonNode shot = json("{\"layout\":[{\"subject\":\"宝玉\",\"x\":0.05,\"y\":0.1,\"w\":0.4,\"h\":0.8}]}");
+
+        JobService.applyLayoutRegions(p, json("{}"), shot, refs("宝玉"));
 
         String pos = p.path("positive_prompt").asText();
-        assertTrue(pos.contains("image2 = 宝玉"), pos);
-        assertTrue(!pos.contains("image1 ="), pos);
+        assertTrue(pos.contains("主体位置（归一化画面坐标，原点在左上"), pos);
+        assertTrue(pos.contains("image1 = 宝玉（左上，x=0.05，y=0.10，框 0.40x0.80）"), pos);
+        assertFalse(pos.contains("Subject placement"), pos);
     }
 
     @Test
-    void noRefsLeavesPromptUntouched() {
-        ObjectNode p = payload();
+    void unnamedStyleReferenceIsNotPositioned() {
+        ObjectNode p = payload("cinematic still of two figures");
+        JobService.applyLayoutRegions(p, json("{}"), json("{}"), refs("", "宝玉"));
+        // 没有位置 → 正词不动（点名由 anchor 负责）
+        assertEquals("cinematic still of two figures", p.path("positive_prompt").asText());
+    }
+
+    @Test
+    void noRefsLeavesEverythingUntouched() {
+        ObjectNode p = payload("cinematic still of two figures");
         JobService.applyLayoutRegions(p, json("{}"), json("{}"), JobService.RefCtx.empty());
         assertEquals("cinematic still of two figures", p.path("positive_prompt").asText());
         assertNull(p.get("referenceRegions"));
@@ -144,14 +205,13 @@ class JobLayoutRegionsTest {
 
     @Test
     void illegalBoxesAreIgnored() {
-        ObjectNode p = payload();
+        ObjectNode p = payload("cinematic still of two figures");
         JsonNode shot = json("""
                 {"layout":[{"subject":"宝玉","x":0.1,"y":0.1,"w":0,"h":0.4},
                            {"subject":"可卿","x":-1,"y":0.1,"w":0.3,"h":0.4}]}
                 """);
         JobService.applyLayoutRegions(p, json("{}"), shot, refs("宝玉", "可卿"));
-        // 非法框全部丢弃 → 退化为「只有点名、没有位置」
         assertNull(p.get("referenceRegions"));
-        assertTrue(p.path("positive_prompt").asText().contains("image1 = 宝玉"));
+        assertEquals("cinematic still of two figures", p.path("positive_prompt").asText());
     }
 }

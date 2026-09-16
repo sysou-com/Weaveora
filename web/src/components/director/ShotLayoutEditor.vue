@@ -158,6 +158,29 @@ function nudge(subject: string, k: 'x' | 'y' | 'w' | 'h', delta: number): void {
   writeOne(subject, { ...base, subject, [k]: round3(base[k] + delta) })
 }
 
+/**
+ * 直接填值（用户要求：x/y/w/h 要能直接输入）。
+ *
+ * 输入的是**百分比 0–100**（跟画面位置预览卡口径一致，用户看百分比最直观），
+ * 存进去仍是归一化 0–1。空值/非数字 → 忽略（不写成 NaN，不把框弄丢）。
+ */
+function setVal(subject: string, k: 'x' | 'y' | 'w' | 'h', raw: string): void {
+  const n = Number(String(raw ?? '').trim().replace('%', ''))
+  if (!Number.isFinite(n)) return
+  const base = explicit.value[subject] ?? props.defaults?.[subject] ?? { subject, x: 0.35, y: 0.3, w: 0.3, h: 0.45 }
+  const next = { ...base, subject, [k]: round3(n / 100) }
+  // 框必须留在画面内：右/下越界时把左上角回推，而不是默默裁掉尺寸
+  if (k === 'w') next.x = round3(Math.min(next.x, 1 - next.w))
+  if (k === 'h') next.y = round3(Math.min(next.y, 1 - next.h))
+  writeOne(subject, next)
+}
+
+/** 输入框里显示的百分比（保留 1 位小数，去掉多余的 .0）。 */
+function showPct(v: number | undefined): string {
+  if (v === undefined) return ''
+  return String(Math.round(v * 1000) / 10)
+}
+
 /** 继承方案区域：把方案级默认写成本镜显式框（之后就能单独微调本镜） */
 function inherit(): void {
   const out: LayoutBox[] = []
@@ -260,14 +283,24 @@ function clear(): void {
         </div>
       </div>
 
-      <!-- 精确微调（拖不准时用；x/y=左上角，w/h=宽高，0–100%） -->
+      <!-- 精确填写（可直接输入百分比；x/y=左上角，w/h=宽高，0–100） -->
       <div class="sle-table">
         <div v-for="it in items" :key="it.name" class="sle-row">
           <span class="sle-name" :style="{ color: it.color }">{{ it.name }}</span>
           <template v-for="k in (['x', 'y', 'w', 'h'] as const)" :key="k">
             <span class="sle-k font-mono">{{ k }}</span>
             <button type="button" class="sle-step" :disabled="disabled" @click="nudge(it.name, k, -0.01)">−</button>
-            <span class="sle-v font-mono">{{ it.box ? (it.box[k] * 100).toFixed(0) : '—' }}</span>
+            <input
+              class="sle-input font-mono"
+              type="text"
+              inputmode="decimal"
+              :disabled="disabled"
+              :data-testid="`sle-${k}-${it.name}`"
+              :value="showPct(it.box?.[k])"
+              :placeholder="k"
+              @change="setVal(it.name, k, ($event.target as HTMLInputElement).value)"
+              @keyup.enter="setVal(it.name, k, ($event.target as HTMLInputElement).value)"
+            />
             <button type="button" class="sle-step" :disabled="disabled" @click="nudge(it.name, k, 0.01)">+</button>
           </template>
         </div>
@@ -443,5 +476,21 @@ function clear(): void {
   min-width: 26px;
   text-align: center;
   color: var(--wv-text-2);
+}
+.sle-input {
+  width: 46px;
+  min-width: 0;
+  text-align: center;
+  font-size: 11px;
+  padding: 1px 2px;
+  color: var(--wv-text-2);
+  background: var(--wv-surface);
+  border: 1px solid var(--wv-line);
+  border-radius: 4px;
+  appearance: none;
+}
+.sle-input:focus {
+  outline: none;
+  border-color: var(--wv-accent, #d0a24e);
 }
 </style>

@@ -1,4 +1,4 @@
-import type { DirectorPlan, DirectorShot, ImagePlan, VideoPlan } from '@/api/types'
+import type { DirectorPlan, DirectorShot, ImagePlan, PlanSubject, VideoPlan } from '@/api/types'
 
 /**
  * 与存储格式无关的**稳定序列化**：对象键递归排序后再 stringify（数组顺序保留）。
@@ -160,6 +160,76 @@ export function shotHasText(s: DirectorShot): boolean {
 
 export function isImagePlan(p: DirectorPlan | null | undefined): p is ImagePlan {
   return !!p && p.mode === 'image'
+}
+
+// ---------- P5：主体绑定（与后端 JobService 的口径必须一致） ----------
+
+/**
+ * 主体名是否出现在文本里。
+ *
+ * 与后端 {@code JobService.subjectMatches} **同规则**（两边不一致会出现「界面说命中、后端没绑上」）：
+ * 先精确包含；中文全名（≥ 3 字）再退一步做「2 字片段」匹配 ——
+ * 方案里绑的是全名（秦可卿），镜文里常只写名（可卿），精确包含会把参考图默默丢掉。
+ */
+export function subjectMatches(text: string | null | undefined, subject: string | null | undefined): boolean {
+  const t = text ?? ''
+  const s = (subject ?? '').trim()
+  if (!s) return true
+  if (t.includes(s)) return true
+  if (s.length < 3) return false
+  for (let i = 0; i + 2 <= s.length; i++) {
+    if (t.includes(s.slice(i, i + 2))) return true
+  }
+  return false
+}
+
+/** 参与锚定的主体名（enabled 且非空），保持方案里的声明顺序。 */
+export function planSubjectNames(p: { subjects?: PlanSubject[] } | null | undefined): string[] {
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const s of p?.subjects ?? []) {
+    const n = (s.name ?? '').trim()
+    if (!n || s.enabled === false || seen.has(n)) continue
+    seen.add(n)
+    out.push(n)
+  }
+  return out
+}
+
+/** 镜文本：后端 resolveRefs 用的就是这三段拼起来的串（多一段少一段都会判定不一致）。 */
+export function shotText(s: DirectorShot): string {
+  return [s.action ?? '', (s as unknown as { zh?: string }).zh ?? '', s.positive_prompt ?? ''].join(' ')
+}
+
+/**
+ * 本镜可能出镜的主体（P5）：
+ * ① 显式 `cast`（用户在镜卡勾选的「本镜主体」）优先 —— 空数组 = 明确的空镜（不注入任何主体）；
+ * ② 否则按「旁白标注的说话人 + 镜文本命中」推断；
+ * ③ 一个都没命中 → 返回全部主体名（与后端“回退为全部”一致），并由调用方提醒用户勾选。
+ */
+export interface ShotCastInfo {
+  /** 最终会注入的主体（顺序同方案） */
+  subjects: string[]
+  /** 是否为用户显式指定（含显式空镜） */
+  explicit: boolean
+  /** 未显式指定，且文本没点到任何主体（易串脸 / 可能无参考图） */
+  ambiguous: boolean
+}
+
+export function shotCastInfo(shot: DirectorShot, names: string[]): ShotCastInfo {
+  const cast = shot.cast
+  if (Array.isArray(cast)) {
+    return { subjects: names.filter((n) => cast.includes(n)), explicit: true, ambiguous: false }
+  }
+  if (!names.length) return { subjects: [], explicit: false, ambiguous: false }
+  const marked = new Set(
+    (shot.narrations ?? []).map((n) => (n.subject ?? '').trim()).filter((x) => x && names.includes(x)),
+  )
+  const t = shotText(shot)
+  const hit = names.filter((n) => marked.has(n) || subjectMatches(t, n))
+  return hit.length
+    ? { subjects: hit, explicit: false, ambiguous: false }
+    : { subjects: names, explicit: false, ambiguous: true }
 }
 
 export function isVideoPlan(p: DirectorPlan | null | undefined): p is VideoPlan {

@@ -29,6 +29,19 @@ WF_SRC="$(cd "$(dirname "$0")/windows" && pwd)/lipsync_workflow_api.json"
 WF_DST="$DIR/lipsync_workflow_api.json"
 
 cd "$(dirname "$0")/../worker"
+
+# ---- 安全闸（2026-09-16 补）：worker 是**单线程认领**，重启正在跑的任务会把它打断 ----
+# 与 deploy/gpu2_restart.sh 同口径：有 running 就拦住，除非 WEAVEORA_WORKER_FORCE=1。
+echo "== 0/5 预检：是否有正在跑的生成任务 =="
+STATUS="$("${SSH[@]}" "sudo -u postgres psql -d weaveora -tA -c \"select state, count(*) from generation_jobs where state in ('queued','running') group by state;\"" || true)"
+printf '%s
+' "$STATUS" | sed 's/^/   /' | grep . || echo "   （无 queued/running）"
+RUNNING="$(printf '%s
+' "$STATUS" | awk -F'|' '$1=="running"{print $2}' | tr -d ' ')"
+if [ -n "${RUNNING:-}" ] && [ "${RUNNING:-0}" != "0" ] && [ "${WEAVEORA_WORKER_FORCE:-0}" != "1" ]; then
+  echo "!! 有 $RUNNING 个 running 任务，重启 worker 会打断它们。等它跑完，或用 WEAVEORA_WORKER_FORCE=1 强推。"
+  exit 1
+fi
 SSH=(ssh -i "$KEY" -o BatchMode=yes -o ConnectTimeout=15 "$HOST")
 TS="$(date +%Y%m%d-%H%M%S)"
 

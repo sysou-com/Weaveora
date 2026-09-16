@@ -630,16 +630,32 @@ public class DirectorService {
         }
     }
 
-    /** ① 中文描述 → LLM 重写该镜正/负提示词（供前端确认后再应用）。 */
-    @Transactional(readOnly = true)
-    public java.util.Map<String, String> rewritePrompt(UUID userId, UUID workspaceId, UUID projectId,
+    /**
+     * 运镜关键帧（P2）：每帧有自己的构图与正词。
+     *
+     * <p>为什么 AI 更新提示词必须**逐帧**一起更新（2026-09-16 用户实测）：第 3 镜是 2 帧运镜镜头，
+     * 「AI 同步提示词」只改了 shot 级 positive_prompt，`keyframes[].positive_prompt` 还是旧稿
+     * → 生成时**每帧用的是自己的正词**（JobService 逐帧建 still 任务），于是帧提示词与主正词语言/内容
+     * 都对不上（用户看到的「关键帧还是英文」）。所以重写必须整镜（含帧）一起做。
+     */
+    public record RewriteFrame(String label, String composition, String positivePrompt, String negativePrompt) {
+    }
+
+    /**
+     * ① 中文描述 → LLM 重写该镜正/负提示词（含运镜关键帧逐帧重写）。
+     *
+     * @param lang   'zh' → 正/负词全部中文（含每帧）；'en'（默认）→ 英文
+     * @param frames 运镜关键帧；空/单帧时为 null（普通单帧镜头）
+     * @return {positive_prompt, negative_prompt, keyframes:[{positive_prompt, negative_prompt}]}
+     */
+    public java.util.Map<String, Object> rewritePrompt(UUID userId, UUID workspaceId, UUID projectId,
                                                        String rawText, String originalPositive,
-                                                       String originalNegative, String lang) {
+                                                       String originalNegative, String lang,
+                                                       java.util.List<RewriteFrame> frames) {
         context.require(userId, workspaceId, projectId);
         boolean amend = originalPositive != null && !originalPositive.isBlank();
-        // ★ 语言可选（2026-09-16）：lang='zh' → 正/负向词都用**中文**（Qwen 系模型对中文理解好；
-        //   用户明确要求“选中文就返回中文提示词并填充两个框”）；'en'（默认）保持原行为。
         boolean zh = lang != null && "zh".equalsIgnoreCase(lang.trim());
+        boolean multi = frames != null && frames.size() > 1;
         String sysBase = zh
                 ? "你是专业提示词工程师。positive_prompt 与 negative_prompt 均使用**中文**；"
                 + "positive_prompt 含主体（要点名角色名）/镜头/光线/氛围/质感细节（<=60 个中文词）；"
@@ -652,8 +668,14 @@ public class DirectorService {
         // ★ 点名主体（2026-09-16 用户要求）：原正词里的角色名是身份锚定信号，不能被泛称冲掉
         sysBase += " 硬规则：原正词里的角色名（专有名词）必须**保留并点名**，不得换成 a man / the woman / 一个男人这类泛称；"
                 + "多主体同框时写清各自位置与左右关系（left/right/center、foreground/background）。";
+        // ★ 语言纯度（2026-09-16 用户报「一半中文一半英文」）：语言必须**整条一致**，不得只换一半
+        sysBase += zh
+                ? "【语言硬规则】输出必须**全部为中文**：禁止混入英文单词（负面词、质量词也一样），"
+                + "角色专有名词/模型名可保留原文。negative_prompt 必须是中文负面词清单，不得含 blurry/watermark 这类英文词。"
+                : "【语言硬规则】输出必须**全部为英文**，不得混入中文（角色专有名词可保留原文）。";
         String system;
         String user;
+        String outSpec = zh ? "中文" : "英文";
         if (amend) {
             // 修正模式：保留原有画面/风格基础上，按新的中文动作做补充或修正，而非整句翻译
             system = sysBase + " 当提供“原正向/负向提示词”与“新的中文动作描述”时：基于原正向词，结合新动作的差异"
@@ -667,13 +689,50 @@ public class DirectorService {
             system = sysBase;
             user = "中文描述：\n" + rawText + "\n请按上述要求输出 JSON。";
         }
+        if (multi) {
+            // 逐帧重写：帧数必须一致，语言一致，每帧正词必须匹配它自己的构图（composition）
+            system = sysBase + " 本镜是**运镜镜头**（一条相机路径分多帧）：必须逐帧重写每帧的正/负向词，"
+                    + "每帧的正词必须与它自己的 composition（机位/朝向/遮挡/前景关系）相符，"
+                    + "帧与帧之间保持主体、风格、光线一致，但**构图按各自 composition 变化**；语言与 shot 级保持一致。"
+                    + "输出 JSON：{\"positive_prompt\":\"...\",\"negative_prompt\":\"...\","
+                    + "\"keyframes\":[{\"positive_prompt\":\"...\",\"negative_prompt\":\"...\"}]}"
+                    + "；keyframes 个数必须与输入帧**逐个对应**、顺序不变；`positive_prompt` 仍填**结束帧**作为单帧兼容值"
+                    + "（与 keyframes 最后一帧一致）。";
+            StringBuilder fb = new StringBuilder("\n\n本镜运镜关键帧（请逐帧重写，共 " + frames.size() + " 帧）：");
+            for (int i = 0; i < frames.size(); i++) {
+                RewriteFrame f = frames.get(i);
+                fb.append("\n【第 ").append(i + 1).append(" 帧】")
+                  .append(f.label() == null || f.label().isBlank() ? "" : "" + f.label())
+                  .append(f.composition() == null || f.composition().isBlank() ? "" : "｜构图：" + f.composition())
+                  .append("\n  原正词：").append(f.positivePrompt() == null ? "" : f.positivePrompt())
+                  .append("\n  原负词：").append(f.negativePrompt() == null ? "" : f.negativePrompt());
+            }
+            user = user + fb + "\n\n请输出 **" + outSpec + "** 的 JSON（含 keyframes 数组，" + frames.size() + " 个元素）。";
+        }
         LlmRequest req = new LlmRequest(system, user, "rewrite", rawText, "image", "16:9", null, null);
         try {
             String raw = llm.generateJson(req);
             JsonNode n = mapper.readTree(raw);
-            java.util.Map<String, String> out = new java.util.LinkedHashMap<>();
+            java.util.Map<String, Object> out = new java.util.LinkedHashMap<>();
             out.put("positive_prompt", n.path("positive_prompt").asText(""));
             out.put("negative_prompt", n.path("negative_prompt").asText(""));
+            if (multi) {
+                java.util.List<java.util.Map<String, String>> kfs = new java.util.ArrayList<>();
+                JsonNode arr = n.path("keyframes");
+                for (int i = 0; i < frames.size(); i++) {
+                    JsonNode k = arr.isArray() && i < arr.size() ? arr.get(i) : null;
+                    java.util.Map<String, String> one = new java.util.LinkedHashMap<>();
+                    String kp = k == null ? "" : k.path("positive_prompt").asText("");
+                    String kn = k == null ? "" : k.path("negative_prompt").asText("");
+                    // 模型漏帧/少给 → 宁可回退到该帧原词，也不要把空词写回方案（空词=出图无约束）
+                    one.put("positive_prompt", kp.isBlank() ? frames.get(i).positivePrompt() : kp);
+                    one.put("negative_prompt", kn.isBlank() ? n.path("negative_prompt").asText("") : kn);
+                    kfs.add(one);
+                }
+                out.put("keyframes", kfs);
+                log.info("rewrite: 逐帧重写 {} 帧（lang={}，模型返回 {} 帧）", frames.size(), outSpec,
+                        arr.isArray() ? arr.size() : 0);
+            }
             return out;
         } catch (Exception e) {
             throw new IllegalStateException("提示词重写失败: " + e.getMessage(), e);

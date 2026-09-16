@@ -4,7 +4,7 @@ import { NButton, NIcon, NInput } from 'naive-ui'
 import { computed, ref } from 'vue'
 
 import type { DirectorShot } from '@/api/types'
-import { shotHasText } from '@/utils/plan'
+import { shotCastInfo, shotHasText } from '@/utils/plan'
 import ShotLayoutEditor, { type LayoutBox } from '@/components/director/ShotLayoutEditor.vue'
 
 const props = withDefaults(
@@ -43,9 +43,37 @@ const emit = defineEmits<{
   previewVoice: [shotNo: number]
   /** P12：切换封版 */
   toggleLock: [shotNo: number, locked: boolean]
+  /** P5：AI 更新本镜提示词（含运镜关键帧逐帧）——由父级弹框确认后写入 */
+  aiPrompt: [shot: DirectorShot]
 }>()
 
 const approved = computed(() => props.status === 'approved')
+
+// ---------- P5：本镜主体（cast）----------
+/** 主体绑定情况：显式 cast / 文本自动 / 都未命中（ambiguous） */
+const castInfo = computed(() => shotCastInfo(props.shot, props.subjects ?? []))
+/** 勾选状态（未显式指定时按自动推断显示，避免“看着是空的”） */
+const castChecked = computed<Record<string, boolean>>(() => {
+  const set = new Set(castInfo.value.subjects)
+  const out: Record<string, boolean> = {}
+  for (const n of props.subjects ?? []) out[n] = set.has(n)
+  return out
+})
+function toggleCast(name: string, on: boolean): void {
+  const next = new Set(castInfo.value.subjects)
+  if (on) next.add(name)
+  else next.delete(name)
+  // 「本镜主体」的实际注入顺序按方案主体顺序
+  props.shot.cast = (props.subjects ?? []).filter((n) => next.has(n))
+}
+/** 回到「按镜文本自动」：删掉 cast 字段（而不是写空数组——空数组 = 明确的空镜） */
+function castAuto(): void {
+  delete (props.shot as unknown as Record<string, unknown>).cast
+}
+/** 明确的空镜（环境/道具镜）：不注入任何人物参考图 */
+function castEmpty(): void {
+  props.shot.cast = []
+}
 
 /** 分镜折叠板：默认收起，只展示“画面动作”摘要，展开才显示全部字段 */
 const open = ref(false)
@@ -86,6 +114,16 @@ const sizeOptions = [
         @click="emit('toggleLock', shot.shot_no, !locked)"
       >
         {{ locked ? '🔒 已封版' : '封版' }}
+      </NButton>
+      <NButton
+        size="tiny"
+        quaternary
+        :disabled="disabled"
+        data-testid="shot-ai-prompt"
+        title="用本镜的「画面动作」让 AI 重写正/负提示词（运镜关键帧会一起逐帧重写）"
+        @click="emit('aiPrompt', shot)"
+      >
+        AI 更新提示词
       </NButton>
       <NButton
         v-if="shotHasText(shot)"
@@ -171,11 +209,46 @@ const sizeOptions = [
           :disabled="disabled"
         />
       </label>
+      <!-- P5 本镜主体：不点明就会“全部注入”（多角色串脸）或拿不到参考图，所以显式勾选 -->
+      <div v-if="(subjects ?? []).length" class="field wide">
+        <span class="fl">
+          本镜主体
+          <span v-if="castInfo.explicit" class="cast-tag on font-mono">已指定</span>
+          <span v-else class="cast-tag font-mono">自动（按镜文本匹配）</span>
+        </span>
+        <div class="cast-row">
+          <label v-for="n in subjects" :key="n" class="cast-item" :class="{ off: !castChecked[n] }">
+            <input
+              type="checkbox"
+              :checked="castChecked[n]"
+              :disabled="disabled"
+              :data-testid="`shot-cast-${shot.shot_no}-${n}`"
+              @change="toggleCast(n, ($event.target as HTMLInputElement).checked)"
+            />
+            <span>{{ n }}</span>
+          </label>
+          <span class="cast-actions">
+            <button v-if="castInfo.explicit" type="button" class="link-btn" :disabled="disabled" @click="castAuto">
+              改回自动
+            </button>
+            <button type="button" class="link-btn" :disabled="disabled" title="本镜没人（纯环境/道具镜）：不注入任何人物参考图" @click="castEmpty">
+              标记为空镜
+            </button>
+          </span>
+        </div>
+        <p v-if="castInfo.ambiguous" class="cast-warn" data-testid="shot-cast-warn">
+          ⚠️ 本镜的「画面动作/正向提示词」没点到任何主体 —— 生成时会按**全部 {{ subjects?.length }} 个主体**注入参考图（多角色容易串脸）。
+          请勾选本镜真正出镜的主体，或点「标记为空镜」。
+        </p>
+        <p v-else-if="castInfo.explicit && !castInfo.subjects.length" class="cast-note text-secondary">
+          已标记为空镜：本镜不注入人物参考图（仅文生图 + 风格）。
+        </p>
+      </div>
       <!-- P5 逐镜画面位置：写 shots[].layout（后端优先级高于方案级区域与点选坐标） -->
       <div class="field wide">
         <ShotLayoutEditor
           :model-value="shot.layout ?? null"
-          :subjects="subjects"
+          :subjects="castInfo.subjects"
           :defaults="defaultLayout"
           :aspect="aspect"
           :disabled="disabled"
@@ -346,6 +419,63 @@ const sizeOptions = [
   font-size: 11px;
   color: var(--wv-text-4);
   letter-spacing: 0.04em;
+}
+/* P5：本镜主体勾选（不点名就会全部注入 → 串脸，所以做成看得见的选择） */
+.cast-tag {
+  margin-left: 6px;
+  padding: 0 5px;
+  border-radius: 3px;
+  border: 1px solid var(--wv-line);
+  color: var(--wv-text-4);
+}
+.cast-tag.on {
+  border-color: color-mix(in srgb, var(--wv-accent, #d0a24e) 55%, var(--wv-line));
+  color: var(--wv-accent, #d0a24e);
+}
+.cast-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.cast-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--wv-text-2);
+  cursor: pointer;
+}
+.cast-item.off {
+  color: var(--wv-text-4);
+}
+.cast-actions {
+  display: inline-flex;
+  gap: 10px;
+  margin-left: auto;
+}
+.cast-actions .link-btn {
+  appearance: none;
+  border: 0;
+  background: none;
+  padding: 0;
+  font-size: 11px;
+  color: var(--wv-accent, #d0a24e);
+  cursor: pointer;
+}
+.cast-actions .link-btn:disabled {
+  color: var(--wv-text-4);
+  cursor: not-allowed;
+}
+.cast-warn {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--wv-danger, #c45c4a);
+}
+.cast-note {
+  margin: 0;
+  font-size: 11.5px;
 }
 .select,
 .text {

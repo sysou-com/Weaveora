@@ -10,6 +10,7 @@ import type { LayoutBox } from '@/components/director/ShotLayoutEditor.vue'
 import VoiceBindingsTable from '@/components/director/VoiceBindingsTable.vue'
 import type { DirectorShot, ShotRecord, VideoPlan } from '@/api/types'
 import { MUSIC_MOOD_PRESETS, VOICE_PRESETS, moodOptions } from '@/utils/audio'
+import { planSubjectNames } from '@/utils/plan'
 
 const props = defineProps<{
   plan: VideoPlan
@@ -36,7 +37,6 @@ const props = defineProps<{
 const emit = defineEmits<{
   approveShot: [shotNo: number]
   aiPrompt: [shot: DirectorShot]
-  aiSyncAll: []
   previewVoice: [shotNo?: number]
   /** P12：切换某镜封版 */
   toggleLock: [shotNo: number, locked: boolean]
@@ -58,9 +58,6 @@ const emit = defineEmits<{
   'update:plan': []
   closePreview: []
 }>()
-
-const hasAction = computed(() =>
-  (props.plan.shots ?? []).some((s) => (s.action ?? '').trim().length > 0))
 
 /** P8：是否有任何语音内容（旁白或台词），用于渲染前景提示 */
 const hasNarration = computed(() => {
@@ -198,13 +195,9 @@ const statusOf = (no: number): string =>
 
 const approvedAll = computed(() => props.disabled)
 
-// ---------- P5：逐镜画面位置（shots[].layout）的默认值来源 ----------
-/** 参与锚定的主体名（方案顺序） */
-const planSubjectNames = computed<string[]>(() =>
-  (props.plan.subjects ?? [])
-    .filter((s) => s.enabled !== false && (s.name ?? '').trim() !== '')
-    .map((s) => s.name.trim()),
-)
+// ---------- P5：主体（cast）与逐镜画面位置（shots[].layout）----------
+/** 参与锚定的主体名（方案顺序）；镜卡里的「本镜主体」勾选与位置编辑器都用它 */
+const planSubjectList = computed<string[]>(() => planSubjectNames(props.plan))
 
 function boxOf(r: { x: number; y: number; w: number; h: number } | null | undefined): LayoutBox | null {
   if (!r) return null
@@ -242,35 +235,6 @@ const planAspectCss = computed(() => {
   return w > 0 && h > 0 ? `${w} / ${h}` : '16 / 9'
 })
 
-/** 与后端 JobService.subjectMatches 同步：精确包含，或中文名退一步做 2 字片段匹配 */
-function subjectMatches(text: string, subject: string): boolean {
-  const t = text ?? ''
-  const s = (subject ?? '').trim()
-  if (!s) return true
-  if (t.includes(s)) return true
-  if (s.length < 3) return false
-  for (let i = 0; i + 2 <= s.length; i++) {
-    if (t.includes(s.slice(i, i + 2))) return true
-  }
-  return false
-}
-
-/** 本镜可能出镜的主体：先看旁白/台词标注，再看镜文本匹配；一个都没命中则带回全部（与后端一致） */
-function shotSubjectsOf(shot: DirectorShot): string[] {
-  const names = planSubjectNames.value
-  if (!names.length) return []
-  const marked = new Set(
-    (shot.narrations ?? []).map((n) => (n.subject ?? '').trim()).filter((x) => x && names.includes(x)),
-  )
-  const text = [
-    shot.action ?? '',
-    (shot as unknown as { zh?: string }).zh ?? '',
-    shot.positive_prompt ?? '',
-  ].join(' ')
-  const hit = names.filter((n) => marked.has(n) || subjectMatches(text, n))
-  return hit.length ? hit : names
-}
-
 const transitions = ['cut', 'dissolve', 'fade', 'wipe'].map((v) => ({ label: v, value: v }))
 </script>
 
@@ -290,18 +254,8 @@ const transitions = ['cut', 'dissolve', 'fade', 'wipe'].map((v) => ({ label: v, 
       <div class="zh-head">
         <p class="block-label font-mono" style="margin: 0">
           <NIcon size="12" style="vertical-align: -1px"><Film /></NIcon>&nbsp;分镜 / 镜头表
-          <span class="hint">（逐镜可改可单镜确认；展开卡片编辑 EN 提示词）</span>
+          <span class="hint">（逐镜可改可单镜确认；展开卡片可编辑 EN 提示词 / 本镜主体 / 画面位置，或用卡上「AI 更新提示词」）</span>
         </p>
-        <NButton
-          size="small"
-          type="primary"
-          secondary
-          :disabled="!!disabled || !hasAction"
-          data-testid="ai-sync-all"
-          @click="emit('aiSyncAll')"
-        >
-          AI 同步提示词（按画面动作）
-        </NButton>
       </div>
       <div class="shot-list">
         <ShotCard
@@ -313,7 +267,7 @@ const transitions = ['cut', 'dissolve', 'fade', 'wipe'].map((v) => ({ label: v, 
           :busy="busyShot === shot.shot_no"
           :preview-busy="previewBusy"
           :locked="(props.lockedShots ?? []).includes(shot.shot_no)"
-          :subjects="shotSubjectsOf(shot)"
+          :subjects="planSubjectList"
           :default-layout="planDefaultRegions"
           :aspect="planAspectCss"
           @toggle-lock="(no: number, l: boolean) => emit('toggleLock', no, l)"

@@ -406,7 +406,25 @@ positive_prompt += """
   参考图中**没有 subject 名的通用风格图不点名**（否则会凭空造出一个角色）。
 - 路线 A（提示词描述位置，默认生效） vs 路线 B（`ConditioningSetAreaPercentage` 区域条件，`WEAVEORA_IMAGE_AREA_COND=1`，
   在 Edit 档会抛 `IndexError: tuple index out of range`，待离线调通）。UI 与后端**两路都发**，切开关不用改代码。
-- 单测：`api/src/test/java/studio/weaveora/job/JobLayoutRegionsTest.java`（8 例，含三档优先级与非法框丢弃）。
+- 单测：`api/src/test/java/studio/weaveora/job/JobLayoutRegionsTest.java`（14 例：三档优先级、中文/英文句、主体点名、`cast` 空镜语义）。
+
+### 3.9 出图档位旋钮（2026-09-16：修好 cfg 推送）
+
+| 旋钮 | 下发路径 | 优先级 | 备注 |
+|---|---|---|---|
+| `workflow` / `editWorkflow` / `img2imgWorkflow` | `services.image.*` → worker `IMAGE_*_WF` | — | 路径是 **worker（VPS）机器上的绝对路径**，不是 GPU 机；有参考图且有 editWorkflow → Edit |
+| `steps` | `services.image.steps` → `IMAGE_STEPS` | 配置页 > `payload.params.steps` > 工作流 JSON | |
+| `cfg` | `services.image.cfg` → `IMAGE_CFG` | 配置页 > `payload.params.cfg` > 工作流 JSON | ⛔ **2026-09-16 前是死字段**：worker 从没读过它（配置页填了也不生效）。修好后启动日志会打印 `cfg=` |
+| `denoise` | `services.image.denoise` → `IMAGE_DENOISE` | 配置页 > 工作流 JSON | Edit 档恒 1.0（由代码强制） |
+
+**Qwen-Image-Edit 2511 官方档位（基准）**：`steps 40` / `cfg(true_cfg_scale) 4.0` / `euler + simple` / `denoise 1.0` /
+`ModelSamplingAuraFlow shift 3.1`（2509 是 3.0）；Qwen 官方口径 40/4.0，ComfyUI 模板同值。
+低步数档（Lightning LoRA）才是 4 步 / cfg 1.0 —— **本项目不用 Lightning**（用户要求不为速度牺牲细节）。
+
+**参考图接线（官方三套模板一致，我们已对齐）**：参考图 **同时**走两条线 ——
+① `ImageScale → VAEEncode → KSampler.latent_image`（决定输出画布尺寸；`denoise=1.0` 时内容被丢弃、只有 shape 生效）；
+② 同一张图 → `TextEncodeQwenImageEditPlus` 的 `image1/image2/image3` **且必须接 `vae`**（否则只进 VL 语义、没有 reference latents → 出图与参考图毫无关系）。
+负词节点也用 `TextEncodeQwenImageEditPlus`（prompt 留空 + 同样接图与 vae），官方如此。
 
 ---
 

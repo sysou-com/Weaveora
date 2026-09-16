@@ -37,6 +37,12 @@ IMAGE_EDIT_WF = os.environ.get("WEAVEORA_IMAGE_EDIT_WORKFLOW", "").strip()
 IMAGE_MODEL = os.environ.get("WEAVEORA_IMAGE_MODEL", "").strip()
 IMAGE_STEPS = int(os.environ.get("WEAVEORA_IMAGE_STEPS", "0") or 0)
 IMAGE_DENOISE = float(os.environ.get("WEAVEORA_IMAGE_DENOISE", "0.65") or 0.65)
+# ★ cfg（true_cfg_scale / CFG）：0 = 不改，用工作流 JSON 里的值。
+#   为什么必须有这条（2026-09-16 排查"参数推送"）：引擎配置页一直只有 steps/denoise，
+#   没有 cfg —— 想调 cfg 只能去手改工作流 JSON。Qwen-Image-Edit 的官方 Qwen 口径是
+#   steps 40 / cfg 4.0（Comfy 模板默认同值），而 cfg 直接决定**提示词遵从度**，
+#   是"出图效果不好"时第一个该调的旋钮，必须能从配置页下发。
+IMAGE_CFG = float(os.environ.get("WEAVEORA_IMAGE_CFG", "0") or 0)
 # ★ 区域条件（位置优先）开关：默认关闭。
 #   原因（2026-09-16 实测两轮）：Qwen-Image-Edit 的 conditioning（TextEncodeQwenImageEditPlus 带参考图
 #   latent）被 ConditioningSetAreaPercentage 包裹再用 ConditioningCombine 合并后，KSampler 必报
@@ -325,7 +331,8 @@ def generate_via_workflow(client_id, payload, progress_fn=None, on_tick=None):
     _wf_inject_model(graph, IMAGE_MODEL)
     _wf_inject_size(graph, width, height)
     steps = IMAGE_STEPS or (params.get("steps") if isinstance(params.get("steps"), (int, float)) else 0)
-    cfg = params.get("cfg") if isinstance(params.get("cfg"), (int, float)) else None
+    # cfg 优先级：引擎配置页（IMAGE_CFG）> payload.params.cfg > 工作流 JSON 自带值
+    cfg = IMAGE_CFG if IMAGE_CFG > 0 else (params.get("cfg") if isinstance(params.get("cfg"), (int, float)) else None)
     is_i2i = _wf_latent_is_img2img(graph)
     denoise = 1.0
     if mode == "edit":
@@ -2634,7 +2641,7 @@ def apply_services(svc):
     # 只要换一个 JSON，不用改 worker、不用重启；参数注入靠 class_type/标题约定（见 generate_via_workflow）。
     img = g("image")
     if isinstance(img, dict):
-        global IMAGE_ENGINE, IMAGE_COMFY, IMAGE_TXT2IMG_WF, IMAGE_IMG2IMG_WF, IMAGE_EDIT_WF, IMAGE_MODEL, IMAGE_STEPS, IMAGE_DENOISE
+        global IMAGE_ENGINE, IMAGE_COMFY, IMAGE_TXT2IMG_WF, IMAGE_IMG2IMG_WF, IMAGE_EDIT_WF, IMAGE_MODEL, IMAGE_STEPS, IMAGE_DENOISE, IMAGE_CFG
         eng = img.get("engine")
         if isinstance(eng, str) and eng.strip():
             IMAGE_ENGINE = eng.strip().lower()
@@ -2659,9 +2666,12 @@ def apply_services(svc):
         dn = img.get("denoise")
         if isinstance(dn, (int, float)) and 0 < float(dn) <= 1:
             IMAGE_DENOISE = float(dn)
-        print("[comfy] 文生图配置（引擎配置下发）：engine=%s workflow=%s img2img=%s model=%s steps=%s denoise=%s"
-              % (IMAGE_ENGINE, IMAGE_TXT2IMG_WF or "-", IMAGE_IMG2IMG_WF or "-", IMAGE_MODEL or "-",
-                 IMAGE_STEPS or "-", IMAGE_DENOISE), flush=True)
+        cg = img.get("cfg")
+        if isinstance(cg, (int, float)) and float(cg) > 0:
+            IMAGE_CFG = float(cg)
+        print("[comfy] 文生图配置（引擎配置下发）：engine=%s workflow=%s img2img=%s edit=%s model=%s steps=%s cfg=%s denoise=%s"
+              % (IMAGE_ENGINE, IMAGE_TXT2IMG_WF or "-", IMAGE_IMG2IMG_WF or "-", IMAGE_EDIT_WF or "-",
+                 IMAGE_MODEL or "-", IMAGE_STEPS or "-", IMAGE_CFG or "-", IMAGE_DENOISE), flush=True)
     node = g("face", "latentsyncDir")
     if isinstance(node, str) and node.strip():
         LATENTSYNC_DIR = node.strip()

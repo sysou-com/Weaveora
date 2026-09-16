@@ -14,6 +14,10 @@
 - **点名主体（P5，硬规则）**：positive_prompt **必须用方案里的主体名点名**出镜主体（中文专有名词可直接用，如 `Baoyu (宝玉)`），并写明位置/朝向（left / right / center、foreground / background）；**禁止**用 `a man` / `the woman` 这类泛称替代已绑定主体。多主体同框时必须逐个点名并写清相互关系。系统按参考图顺序映射为 `image1`/`image2`…（`image1=宝玉`），需要时可写 `Baoyu (image1)` 加固。
 - 用户没要求文字，则 negative_prompt 必须包含 text, watermark, logo, subtitle。
 - 用户没要求真人，则不要发明可识别人脸；人物诉求用非可识别面孔（远景/背影/剪影）。
+- **构图与出图口径（P6，2026-09-16）**：出图引擎是 **Qwen-Image-Edit（2511）**，参考图是定妆照（纯色背景头像）。
+  ① 主体占画面**约 30%–60%**、沿运动方向留白；
+  ② 用**正向描述**塑造场景，**别靠负向词排除元素**（Qwen-Image-Edit 对负词不敏感，官方负词就是一个空格）；
+  ③ 白色/纯色背景残留只能靠"把背景写清楚"来消除，而不是写"no white background"。
 - 中文 Brief 可保留专有名词；positive_prompt 用英文，prompt_zh 用中文解释给不懂 SD 的用户看。
 - palette 给 3–5 个十六进制色。
 

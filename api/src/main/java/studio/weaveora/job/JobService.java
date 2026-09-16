@@ -1150,8 +1150,26 @@ public class JobService {
                 ? plan.path("positive_prompt").asText("") + " " + plan.path("prompt_zh").asText("")
                 : shot.path("action").asText("") + " " + shot.path("zh").asText("")
                   + " " + shot.path("positive_prompt").asText("");
+        // ★ P5 显式主体（`shots[].cast`）：UI「本镜主体」勾选的结果，优先于文本匹配。
+        //   null = 未指定（按文本自动）；[] = 明确的空镜（不注入任何人物参考图，只留风格图）；
+        //   非空 = 本镜就这几个主体。用户实测反馈：不点名时后端会「回退为全部主体」→ 串脸，
+        //   个别人物镜甚至看起来没拿到参考图 —— 所以让用户能明确指定。
+        java.util.List<String> cast = castOf(shot);
+        if (cast != null && cast.isEmpty()) {
+            com.fasterxml.jackson.databind.node.ArrayNode styleOnly = mapper().createArrayNode();
+            for (JsonNode b : plan.path("referenceAssets")) {
+                if (b.path("subject").asText("").isBlank()) {
+                    styleOnly.add(b.deepCopy());
+                }
+            }
+            log.info("refs: 第{}镜标记为空镜（cast=[]）→ 不注入人物参考图（仅保留 {} 张无主体风格图）",
+                    shot == null ? 0 : shot.path("shot_no").asInt(), styleOnly.size());
+            RefCtx only = bindFrom(styleOnly, text, workspaceId);
+            return enforcePortraits(only == null ? RefCtx.empty() : only, plan, projectId, workspaceId,
+                    shot == null ? 0 : shot.path("shot_no").asInt(), text);
+        }
         // P13：按「剧情主体」取锚定资产 —— **定妆图优先**（一致性靠它），没有定妆图才退回勾选的素材图
-        RefCtx fromSubjects = bindFromSubjects(plan, text, workspaceId);
+        RefCtx fromSubjects = bindFromSubjects(plan, text, workspaceId, cast);
         RefCtx picked = null;
         if (fromSubjects != null) {
             picked = fromSubjects;
@@ -1170,7 +1188,7 @@ public class JobService {
             }
         }
         return enforcePortraits(picked, plan, projectId, workspaceId,
-                shot == null ? 0 : shot.path("shot_no").asInt());
+                shot == null ? 0 : shot.path("shot_no").asInt(), text);
     }
 
     /**
@@ -1194,7 +1212,8 @@ public class JobService {
      *       其他主体剔除并记日志。</li>
      * </ol>
      */
-    private RefCtx enforcePortraits(RefCtx refs, JsonNode plan, UUID projectId, UUID workspaceId, int shotNo) {
+    private RefCtx enforcePortraits(RefCtx refs, JsonNode plan, UUID projectId, UUID workspaceId,
+                                   int shotNo, String shotText) {
         if (refs == null || refs.subjects() == null || refs.subjects().isEmpty()) {
             return refs;   // 没有主体标注（纯风格参考图）→ 保持原样
         }
@@ -1249,13 +1268,12 @@ public class JobService {
         StringBuilder mapping = new StringBuilder();
         for (int i = 0; i < subjects.size(); i++) {
             if (subjects.get(i).isBlank()) continue;
-            if (mapping.length() > 0) mapping.append("; ");
-            mapping.append(i + 1).append(") ").append(subjects.get(i)).append("(定妆图)");
+            if (mapping.length() > 0) mapping.append(", ");
+            mapping.append("image").append(i + 1).append(" = ").append(subjects.get(i));
         }
+        // 语言跟随镜文本：整套中文提示词时不要在这里塞英文句子（用户实测报过中英混杂）
         String anchor = mapping.length() > 0
-                ? "\nReference images in order: " + mapping
-                  + ". Each subject MUST strictly match its own portrait (face / hair / costume);"
-                  + " keep subjects distinct and never blend or swap their identities."
+                ? refAnchor(mapping.toString(), isZhText(shotText))
                 : refs.anchor();
         return new RefCtx(ids, keys, subjects, regions, anchor,
                 (primary == null || primary.isBlank()) ? refs.primarySubject() : primary);
@@ -1315,7 +1333,8 @@ public class JobService {
      *   <li>顺序：先「镜文案里出现且为主主体」的，再按方案里的声明顺序 —— 保住「第 i 张图 = 哪个主体」。</li>
      * </ol>
      */
-    private RefCtx bindFromSubjects(JsonNode plan, String text, UUID workspaceId) {
+    private RefCtx bindFromSubjects(JsonNode plan, String text, UUID workspaceId,
+                                    java.util.List<String> cast) {
         java.util.List<studio.weaveora.director.plan.PlanSubjects.Subject> subjects =
                 studio.weaveora.director.plan.PlanSubjects.parse(plan);
         if (subjects.isEmpty()) {
@@ -1329,12 +1348,26 @@ public class JobService {
             return null;
         }
         String t = text == null ? "" : text;
-        java.util.List<studio.weaveora.director.plan.PlanSubjects.Subject> picked = enabled.stream()
-                .filter(s -> studio.weaveora.director.plan.PlanSubjects.matches(t, s))
-                .toList();
+        java.util.List<studio.weaveora.director.plan.PlanSubjects.Subject> picked;
+        if (cast != null && !cast.isEmpty()) {
+            // 用户显式勾选优先：镜文本经常写不出全名（甚至只有环境描写），文本匹配会漏
+            picked = enabled.stream().filter(s -> cast.contains(s.name())).toList();
+            log.info("refs: 本镜主体由方案显式指定（cast）→ {}/{} 命中：{}",
+                    picked.size(), cast.size(), picked.stream().map(studio.weaveora.director.plan.PlanSubjects.Subject::name).toList());
+            if (picked.isEmpty()) {
+                log.info("refs: cast 里的名字对不上任何已启用主体（可能改名）→ 退回镜文本匹配");
+            }
+        } else {
+            picked = java.util.List.of();
+        }
+        if (picked.isEmpty()) {
+            picked = enabled.stream()
+                    .filter(s -> studio.weaveora.director.plan.PlanSubjects.matches(t, s))
+                    .toList();
+        }
         if (picked.isEmpty()) {
             picked = enabled;
-            log.info("refs: 镜文本未命中任何主体，回退为全部 {} 个主体（{}）",
+            log.info("refs: 镜文本未命中任何主体，回退为全部 {} 个主体（{}）——建议在镜卡勾选「本镜主体」",
                     picked.size(), picked.stream().map(studio.weaveora.director.plan.PlanSubjects.Subject::name).toList());
         }
         java.util.List<UUID> ids = new ArrayList<>();
@@ -1357,6 +1390,7 @@ public class JobService {
         java.util.List<String> subjNames = new ArrayList<>();
         java.util.List<String> regions = new ArrayList<>();
         StringBuilder mapping = new StringBuilder();
+        StringBuilder detail = new StringBuilder();
         String primary = "";
         for (studio.weaveora.director.plan.PlanSubjects.Subject sub : picked) {
             studio.weaveora.asset.domain.Asset a = byId.get(sub.anchorAssetId());
@@ -1368,11 +1402,15 @@ public class JobService {
             keys.add(a.storageKey());
             okIds.add(a.id().toString());
             regions.add(null);
+            // imageN 口径：与 worker 的 LoadImage 槽位顺序一致（见 comfy_client._wf_set_image）
             if (mapping.length() > 0) {
-                mapping.append("; ");
+                mapping.append(", ");
             }
-            mapping.append(keys.size()).append(") ").append(sub.name())
-                    .append(portrait ? "(定妆图)" : "(素材图)");
+            mapping.append("image").append(keys.size()).append(" = ").append(sub.name());
+            if (detail.length() > 0) {
+                detail.append("; ");
+            }
+            detail.append(sub.name()).append(portrait ? "(定妆图)" : "(素材图)");
             if (primary.isEmpty() && studio.weaveora.director.plan.PlanSubjects.nameMatches(t, sub.name())) {
                 primary = sub.name();
             }
@@ -1383,10 +1421,8 @@ public class JobService {
         if (primary.isEmpty()) {
             primary = subjNames.get(0);
         }
-        String anchor = "\nReference images in order: " + mapping
-                + ". Each subject MUST strictly match its own reference image (face / hair / costume / shape);"
-                + " keep subjects distinct and never blend or swap their identities.";
-        log.info("refs: 本镜锚定 {} 张（{}）primary={}", keys.size(), mapping, primary);
+        String anchor = refAnchor(mapping.toString(), isZhText(t));
+        log.info("refs: 本镜锚定 {} 张（{}）primary={}", keys.size(), detail, primary);
         return new RefCtx(okIds, keys, subjNames, regions, anchor, primary);
     }
 
@@ -1453,8 +1489,8 @@ public class JobService {
             subjects.add(subject);
             regions.add(regionCsv(b.path("region")));
             if (!subject.isBlank()) {
-                if (mapping.length() > 0) mapping.append("; ");
-                mapping.append(keys.size()).append(") ").append(subject);
+                if (mapping.length() > 0) mapping.append(", ");
+                mapping.append("image").append(keys.size()).append(" = ").append(subject);
                 if (primary.isBlank() && t.contains(subject)) primary = subject;
                 String reg = regionCsv(b.path("region"));
                 if (!reg.isBlank()) {
@@ -1467,18 +1503,36 @@ public class JobService {
         if (primary.isBlank()) {
             for (String s : subjects) { if (!s.isBlank()) { primary = s; break; } }
         }
-        String anchor;
-        if (subjects.stream().anyMatch(s -> !s.isBlank())) {
-            anchor = " Reference images in order: " + mapping
-                    + ". Each character's identity, face and costume must strictly follow its own reference image;"
-                    + " keep the characters distinct and do not share, blend or swap their faces.";
-            if (layout.length() > 0) {
-                anchor = anchor + " Spatial layout: " + layout + ".";
-            }
-        } else {
-            anchor = " The subject appearance must strictly follow the provided reference image.";
+        boolean zh = isZhText(t);
+        String anchor = refAnchor(mapping.toString(), zh);
+        if (layout.length() > 0) {
+            anchor = anchor + (zh ? " 空间位置：" : " Spatial layout: ") + layout + "。";
         }
         return new RefCtx(okIds, keys, subjects, regions, anchor, primary);
+    }
+
+    /**
+     * {@code shots[].cast}：本镜出镜主体（UI「本镜主体」勾选）。
+     *
+     * @return null = 未指定（按镜文本自动匹配）；空 list = 明确的空镜（不注入人物参考图）；
+     *         非空 = 本镜就这几个主体
+     */
+    static java.util.List<String> castOf(JsonNode shot) {
+        if (shot == null) {
+            return null;
+        }
+        JsonNode c = shot.path("cast");
+        if (!c.isArray()) {
+            return null;
+        }
+        java.util.List<String> out = new ArrayList<>();
+        for (JsonNode n : c) {
+            String v = n.asText("").trim();
+            if (!v.isEmpty()) {
+                out.add(v);
+            }
+        }
+        return out;
     }
 
     /** 归一化区域 {x,y,w,h}（0–1）→ "x,y,w,h"；非法返回 ""。 */
@@ -1558,12 +1612,57 @@ public class JobService {
         return false;
     }
 
-    /** 多主体时追加“防串脸”负词。 */
+    /**
+     * 提示词语言探测（P5，2026-09-16）：用户可能整套用中文（AI 更新提示词选「中文」）也可能是英文。
+     * 系统**追加**的锚定句/负面守卫必须跟随用户提示词的语言，否则会出现「一半中文一半英文」
+     * （用户实测报过：选了中文，负词里还留着英文负面项）。
+     *
+     * <p>判据：汉字数 ≥ 6 **且** 汉字在「汉字+拉丁字母」中占比 ≥ 20%。
+     * 这样「英文提示词里带中文角色名（Baoyu (宝玉)）」不会误判为中文。
+     */
+    static boolean isZhText(String s) {
+        if (s == null || s.isEmpty()) {
+            return false;
+        }
+        int cjk = 0, latin = 0;
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (c >= 0x4E00 && c <= 0x9FFF) {
+                cjk++;
+            } else if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) {
+                latin++;
+            }
+        }
+        return cjk >= 6 && cjk * 100 >= (cjk + latin) * 20;
+    }
+
+    /**
+     * 参考图锚定句（追加到正词）。
+     *
+     * @param slots 每个参考图的 “imageN = 主体名” 片段（按 worker 的 LoadImage 槽位顺序拼好）
+     * @param zh    是否用中文（跟随镜文本语言）
+     */
+    static String refAnchor(String slots, boolean zh) {
+        if (slots == null || slots.isBlank()) {
+            return zh ? " 人物/主体形象必须严格以给定参考图为准。"
+                      : " The subject appearance must strictly follow the provided reference image.";
+        }
+        return zh
+                ? " 参考图对应关系：" + slots + "。每个角色的身份、面容与服饰必须严格以其自己的参考图为依据；"
+                  + "角色之间必须互相区分，禁止共用、混合或互换面容。"
+                : " Reference image mapping: " + slots
+                  + ". Each character's identity, face and costume must strictly follow its own reference image;"
+                  + " keep the characters distinct and do not share, blend or swap their faces.";
+    }
+
+    /** 多主体时追加“防串脸”负词（语言跟随负词本身）。 */
     private static String negWithRefGuard(String neg, RefCtx refs) {
         if (refs == null) return neg;
         long distinct = refs.subjects().stream().filter(s -> s != null && !s.isBlank()).distinct().count();
         if (distinct <= 1) return neg;
-        String extra = "identical faces, face swap, same person repeated, mixed identities, cloned face";
+        String extra = isZhText(neg)
+                ? "同一张脸重复, 换脸, 同一人出现两次, 身份混淆, 复制脸庞"
+                : "identical faces, face swap, same person repeated, mixed identities, cloned face";
         return (neg == null || neg.isBlank()) ? extra : neg + ", " + extra;
     }
 
@@ -2333,7 +2432,9 @@ public class JobService {
         String neg = negWithRefGuard(styledNegative(style, shot.path("negative_prompt").asText("")), refs);
         if ("clip".equals(kind)) {
             neg = studio.weaveora.director.plan.DirectorPlanValidator.mergeNegative(
-                    neg, studio.weaveora.director.plan.DirectorPlanValidator.MOTION_NEGATIVE);
+                    neg, isZhText(neg)
+                            ? studio.weaveora.director.plan.DirectorPlanValidator.MOTION_NEGATIVE_ZH
+                            : studio.weaveora.director.plan.DirectorPlanValidator.MOTION_NEGATIVE);
         }
         payload.put("negative_prompt", neg);
         stampRevisionMeta(payload, revisionNo, pos);
@@ -2465,40 +2566,48 @@ public class JobService {
             log.info("refs: 位置下发 {} 个主体（来源 {}）：{}", pos.size(), src, pos.keySet());
         }
 
-        // ★ 路线 A（2026-09-16）：位置 + 主体点名以**提示词**形式生效。
+        // ★ 路线 A（2026-09-16）：位置先以**提示词**形式生效。
         //   为什么不用区域条件（referenceRegions → ConditioningSetAreaPercentage + ConditioningCombine）：
         //   Qwen-Image-Edit 的 conditioning（TextEncodeQwenImageEditPlus，带参考图 latent）被区域包裹/合并后，
         //   KSampler 会抛 `IndexError: tuple index out of range`（实测两轮），所以先走提示词描述；
         //   referenceRegions 仍然保留，供后续路线 B（离线调通后再切）。
+        //
+        //   注：「imageN = 谁」的点名已由 refs.anchor() 统一负责（语言跟随镜文本），
+        //   这里只补**位置**，避免同一件事在正词里写两遍（冗余会抢词数预算）。
+        if (pos.isEmpty()) {
+            return;
+        }
+        String cur = payload.path("positive_prompt").asText("");
+        boolean zh = isZhText(cur);
         StringBuilder sb = new StringBuilder();
-        java.util.List<String> subj = refs.subjects();
-        for (int i = 0; i < subj.size(); i++) {
-            String name = subj.get(i);
+        for (int i = 0; i < refs.subjects().size(); i++) {
+            String name = refs.subjects().get(i);
             if (name == null || name.isBlank()) {
-                continue;   // 无主体名的图是通用风格参考图，不点名
+                continue;
+            }
+            double[] p = pos.get(name);
+            if (p == null) {
+                continue;
             }
             if (sb.length() > 0) {
                 sb.append("; ");
             }
-            sb.append("image").append(i + 1).append(" = ").append(name);
-            double[] p = pos.get(name);
-            if (p != null) {
-                sb.append(" (").append(posHint(p[0], p[1]))
-                  .append(", x=").append(fmt2(p[0])).append(", y=").append(fmt2(p[1]))
-                  .append(", box ").append(fmt2(p[2])).append("x").append(fmt2(p[3])).append(")");
-            }
+            sb.append("image").append(i + 1).append(" = ").append(name).append(zh ? "（" : " (")
+              .append(zh ? posHintZh(p[0], p[1]) : posHint(p[0], p[1]))
+              .append(zh ? "，x=" : ", x=").append(fmt2(p[0]))
+              .append(zh ? "，y=" : ", y=").append(fmt2(p[1]))
+              .append(zh ? "，框 " : ", box ").append(fmt2(p[2])).append("x").append(fmt2(p[3]))
+              .append(zh ? "）" : ")");
         }
         if (sb.length() > 0) {
-            String add = "\nReference image mapping: " + sb
-                    + ". Each subject's face, hair and costume strictly follow its own reference image"
-                    + (pos.isEmpty()
-                        ? "."
-                        : ", and each character is placed exactly at the position and relative size given"
-                          + " (normalized frame coordinates, origin top-left; smaller y = higher in frame,"
-                          + " larger box = closer to camera); keep the characters clearly apart.");
-            String cur = payload.path("positive_prompt").asText("");
+            String add = zh
+                    ? "\n主体位置（归一化画面坐标，原点在左上；y 越小越靠上，框越大越靠近镜头）：" + sb
+                      + "。请把每个角色严格放在给定位置与相对大小上，角色之间保持明显分开。"
+                    : "\nSubject placement (normalized frame coordinates, origin top-left; smaller y = higher in"
+                      + " frame, larger box = closer to camera): " + sb
+                      + ". Place each character exactly at that position and relative size; keep them clearly apart.";
             payload.put("positive_prompt", cur + add);
-            log.info("refs: 参考图→主体映射已写入正词（含位置={}）：{}", !pos.isEmpty(), sb);
+            log.info("refs: 位置已写入正词（路线A，zh={}）：{}", zh, sb);
         }
     }
 
@@ -2559,6 +2668,16 @@ public class JobService {
         String h = x < 0.34 ? "left" : (x > 0.66 ? "right" : "center");
         String v = y < 0.34 ? "upper" : (y > 0.66 ? "lower" : "middle");
         return v + "-" + h;
+    }
+
+    /** 同上，中文口径（提示词整套中文时保持一致，别中英混杂）。中文方位习惯「左上 / 右下」。 */
+    private static String posHintZh(double x, double y) {
+        String h = x < 0.34 ? "左" : (x > 0.66 ? "右" : "");
+        String v = y < 0.34 ? "上" : (y > 0.66 ? "下" : "");
+        if (h.isEmpty() && v.isEmpty()) return "正中";
+        if (h.isEmpty()) return v + "方";
+        if (v.isEmpty()) return h + "侧";
+        return h + v;
     }
 
     /** P2：按关键帧序号选 still 产物（job payload.keyframe_index 标记帧号；无标记时首帧取最新、末帧取最早）。 */

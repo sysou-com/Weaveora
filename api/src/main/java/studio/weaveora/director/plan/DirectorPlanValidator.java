@@ -33,6 +33,10 @@ public final class DirectorPlanValidator {
     public static final List<String> MOTION_NEGATIVE = List.of(
             "static", "motionless", "frozen", "still photo", "no movement", "freeze frame");
 
+    /** 同上，中文口径（提示词整套中文时用，避免中英混杂）。 */
+    public static final List<String> MOTION_NEGATIVE_ZH = List.of(
+            "静止", "几乎不动", "定格", "静帧", "没有动作", "画面凝固");
+
     /** 单镜正向提示词长度约束（§10.3）。 */
     public static final int SHOT_POSITIVE_MIN = 20;
     public static final int SHOT_POSITIVE_MAX = 1200;

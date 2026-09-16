@@ -115,21 +115,28 @@ public class DirectorController {
     }
 
     @PostMapping("/director/rewrite-prompt")
-    public ResponseEntity<java.util.Map<String, String>> rewritePrompt(
+    public ResponseEntity<java.util.Map<String, Object>> rewritePrompt(
             HttpServletRequest request,
             @RequestHeader(value = ProjectController.WORKSPACE_HEADER, required = false) String workspaceId,
             @PathVariable UUID projectId,
             @Valid @RequestBody RewritePromptRequest body) {
         return ResponseEntity.ok(directorService.rewritePrompt(
                 uid(request), ws(workspaceId), projectId, body.rawText(),
-                body.originalPositive(), body.originalNegative(), body.lang()));
+                body.originalPositive(), body.originalNegative(), body.lang(), body.frames()));
     }
 
-    /** lang：'zh' → 正/负向词都用中文；'en'（默认）→ 都用英文。 */
+    /**
+     * 单帧重写请求体。
+     *
+     * @param lang   'zh' → 正/负向词（含每帧）全部中文；'en'（默认）→ 英文
+     * @param frames 运镜关键帧（P2）：本镜是 2–4 帧运镜镜头时**必须**一起传，
+     *               否则帧提示词不会被重写（用户实测：第 3 镜的 2 帧仍是旧英文）
+     */
     public record RewritePromptRequest(@NotBlank String rawText,
                                        String originalPositive,
                                        String originalNegative,
-                                       String lang) {
+                                       String lang,
+                                       java.util.List<DirectorService.RewriteFrame> frames) {
     }
 
     @PostMapping("/director/generate")

@@ -73,12 +73,14 @@ public class EngineSettingsService {
                 .put("url", gpu.isBlank() ? "" : gpu + "/talk")
                 .put("enabled", true).put("jawGain", 1.0)));
         // ★ image（文生图，本机 ComfyUI）：engine=comfy 时 worker 直接把 workflow（文生图）/
-        //   img2imgWorkflow（关键帧当底图）两个 API 格式 JSON POST 给 ComfyUI（当前 Qwen-Image + Lightning 8 步）。
-        //   两个路径是 **worker 机器上的绝对路径**（装在哪台机就填哪台的）→ 默认留空 = worker 自带默认（老 SDXL 路线）。
+        //   editWorkflow（参考图锚定，Qwen-Image-Edit）/ img2imgWorkflow（关键帧当底图）的 API 格式 JSON
+        //   POST 给 ComfyUI。路径是 **worker 机器上的绝对路径**（装在哪台机就填哪台的）→ 默认留空 = worker 自带默认。
+        //   steps/cfg/denoise 是**出图档位旋钮**：cfg（true_cfg_scale）直接决定提示词遵从度，
+        //   0 = 不改（用工作流 JSON 自带值）。Qwen-Image-Edit 官方 Qwen 口径 = steps 40 / cfg 4.0。
         out.set("image", merge(cur, "image", mapper.createObjectNode()
                 .put("engine", "builtin").put("comfyUrl", gpu)
-                .put("workflow", "").put("img2imgWorkflow", "").put("model", "")
-                .put("steps", 0).put("denoise", 0.65)));
+                .put("workflow", "").put("img2imgWorkflow", "").put("editWorkflow", "").put("model", "")
+                .put("steps", 0).put("cfg", 0).put("denoise", 0.65)));
         // ★ motion：自托管图生视频（Wan2.2 I2V-A14B 双专家）的**档位**随任务下发。
         //   为什么必须走这里：clip 的 payload.params 在 JobService.videoShotPayload() 里只塞了
         //   {width,height}，preset/steps/lora_*/cfg_* 若不靠这条链路下发就永远到不了 worker ——

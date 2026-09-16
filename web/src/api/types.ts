@@ -211,6 +211,17 @@ export interface DirectorShot {
    */
   layout?: Array<{ subject: string; x: number; y: number; w: number; h: number }> | null
   /**
+   * P5：**本镜出镜主体**（显式声明，覆盖后端按文本自动匹配）。
+   *
+   * - 不设（undefined）= 自动：后端按镜文本（action/zh/positive_prompt）匹配主体名；
+   * - 非空数组 = 本镜就这几个主体（按这个名字顺序注入参考图）；
+   * - **空数组 = 明确的空镜**（不注入任何人物参考图，避免把不相干的角色塞进环境镜）。
+   *
+   * 为什么需要它（用户实测）：镜文本没点到任何主体时，后端会「回退为全部主体」——
+   * 多角色时容易串脸；某些帧甚至看起来没拿参考图。所以要在卡上勾选并回传。
+   */
+  cast?: string[] | null
+  /**
    * P13：对口型的**底片**（用哪份画面驱动嘴型）——`'clip'` = 该镜最新 motion 片段，
    * `'still'` = 关键帧静帧；不设 = 自动（有 motion 用 motion，除非该镜是「惊恐/喊叫」
    * 这类底片里嘴本来就大张的镜头 → 自动改用静帧）。
@@ -526,18 +537,23 @@ export interface ServiceEndpoints {
   /**
    * 文生图（本机 ComfyUI 出图，Qwen-Image / FLUX）。
    *
-   * `engine=comfy` 时 worker 用 `workflow`（文生图）/`img2imgWorkflow`（关键帧当底图）两个 API 格式 JSON
-   * 直接 POST 给 ComfyUI；两个路径是**worker 机器上的绝对路径**（装在哪台机就填哪台机的）。
+   * `engine=comfy` 时 worker 用 `workflow`（文生图）/`editWorkflow`（参考图锚定，Qwen-Image-Edit）/
+   * `img2imgWorkflow`（关键帧当底图）的 API 格式 JSON 直接 POST 给 ComfyUI；
+   * 路径是**worker 机器上的绝对路径**（装在哪台机就填哪台机的）。
    * 留空 = worker 用自带默认（老 SDXL/IP-Adapter 路线）。
+   * 优先级：有参考图且有 editWorkflow → Edit；否则 img2img；再否则 txt2img。
    */
   image?: {
     engine?: string | null
     comfyUrl?: string | null
     workflow?: string | null
+    /** 参考图锚定工作流（Qwen-Image-Edit）；填了就优先走它 */
+    editWorkflow?: string | null
     img2imgWorkflow?: string | null
     model?: string | null
     sampler?: string | null
     steps?: number | null
+    /** true_cfg_scale（CFG）：直接决定提示词遵从度；0/留空 = 用工作流 JSON 自带值 */
     cfg?: number | null
     width?: number | null
     height?: number | null

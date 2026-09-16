@@ -70,8 +70,10 @@ const svcImageEngine = ref('comfy')
 const svcImageComfy = ref('')
 const svcImageWorkflow = ref('')
 const svcImageImg2img = ref('')
+const svcImageEdit = ref('')
 const svcImageModel = ref('')
 const svcImageSteps = ref<number | null>(null)
+const svcImageCfg = ref<number | null>(null)
 const svcImageDenoise = ref<number | null>(0.65)
 const imagePresets = ref<ModelPreset[]>([])
 const videoPresets = ref<ModelPreset[]>([])
@@ -278,8 +280,10 @@ async function load(): Promise<void> {
     svcImageComfy.value = sv.image?.comfyUrl ?? ''
     svcImageWorkflow.value = sv.image?.workflow ?? ''
     svcImageImg2img.value = sv.image?.img2imgWorkflow ?? ''
+    svcImageEdit.value = sv.image?.editWorkflow ?? ''
     svcImageModel.value = sv.image?.model ?? ''
     svcImageSteps.value = sv.image?.steps ?? null
+    svcImageCfg.value = sv.image?.cfg ?? null
     svcImageDenoise.value = sv.image?.denoise ?? 0.65
     applySettings(s)
     ready.value = true
@@ -328,8 +332,10 @@ async function save(): Promise<void> {
           comfyUrl: svcImageComfy.value || null,
           workflow: svcImageWorkflow.value || null,
           img2imgWorkflow: svcImageImg2img.value || null,
+          editWorkflow: svcImageEdit.value || null,
           model: svcImageModel.value || null,
           steps: svcImageSteps.value,
+          cfg: svcImageCfg.value,
           denoise: svcImageDenoise.value,
         },
       },
@@ -699,15 +705,24 @@ onMounted(load)
         <NFormItem label="文生图工作流（API 格式 JSON 绝对路径）">
           <NInput v-model:value="svcImageWorkflow" placeholder="如 /opt/weaveora/qwen_image_txt2img_api.json" />
         </NFormItem>
+        <NFormItem label="参考图锚定工作流 editWorkflow（Qwen-Image-Edit；填了就优先走它）">
+          <NInput v-model:value="svcImageEdit" placeholder="如 /opt/weaveora/workflows/qwen_image_edit_api.json" />
+        </NFormItem>
         <NFormItem label="图生图工作流（关键帧当底图；可留空）">
           <NInput v-model:value="svcImageImg2img" placeholder="如 /opt/weaveora/qwen_image_img2img_api.json" />
         </NFormItem>
+        <p class="mdl-hint text-secondary" style="margin: -4px 0 8px">
+          优先级：有参考图且有 editWorkflow → <strong>Edit（参考图锚定）</strong>；否则 img2img；再否则 txt2img。
+        </p>
         <div class="mdl-row">
           <NFormItem label="主模型名（留空=用工作流里的）" class="grow">
             <NInput v-model:value="svcImageModel" placeholder="如 qwen_image_fp8_e4m3fn.safetensors" />
           </NFormItem>
-          <NFormItem label="步数" style="width: 160px">
-            <NInputNumber v-model:value="svcImageSteps" :min="1" :max="60" placeholder="8" style="width: 110px" />
+          <NFormItem label="步数 steps" style="width: 160px">
+            <NInputNumber v-model:value="svcImageSteps" :min="1" :max="60" placeholder="40" style="width: 110px" />
+          </NFormItem>
+          <NFormItem label="cfg（提示词遵从度）" style="width: 200px">
+            <NInputNumber v-model:value="svcImageCfg" :min="0" :max="12" :step="0.5" placeholder="4.0 / 留空=工作流默认" style="width: 140px" />
           </NFormItem>
           <NFormItem label="图生图 denoise" style="width: 200px">
             <NInputNumber v-model:value="svcImageDenoise" :min="0.1" :max="1" :step="0.05" placeholder="0.65" style="width: 110px" />
