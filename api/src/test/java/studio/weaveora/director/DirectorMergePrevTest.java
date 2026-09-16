@@ -195,4 +195,54 @@ class DirectorMergePrevTest {
         DirectorService.mergePrevSubjectsAndSetting(now, prev);
         assertFalse(now.has("subjects"), "上一版没有主体时不应写入空数组");
     }
+
+    // ------------------------------------------------------------------
+    // P14：**保存路径**也要保护 setting（2026-09-16 夜实测事故）
+    //   浏览器里已经打开的旧页面，草稿里没有 setting 键 → 一保存整份 plan 回写
+    //   → era/notes 静默消失（rev52 有、用户另存 rev53 后没了）。
+    // ------------------------------------------------------------------
+
+    @Test
+    void savePathInheritsSettingWhenSubmissionHasNoKey() {
+        ObjectNode prev = plan(1);
+        prev.putObject("setting").put("era", "清代 · 康熙年间").put("notes", "按清代贵族宅院形制");
+
+        ObjectNode staleDraft = plan(1);   // 旧页面草稿：没有 setting 键
+        assertTrue(DirectorService.inheritSettingIfAbsent(staleDraft, prev));
+        assertEquals("清代 · 康熙年间", staleDraft.path("setting").path("era").asText());
+        assertEquals("按清代贵族宅院形制", staleDraft.path("setting").path("notes").asText());
+    }
+
+    @Test
+    void savePathKeepsWhatTheUserSubmitted() {
+        ObjectNode prev = plan(1);
+        prev.putObject("setting").put("era", "清代 · 康熙年间");
+
+        // 用户有意改成别的：以提交为准
+        ObjectNode edited = plan(1);
+        edited.putObject("setting").put("era", "北宋汴京");
+        assertFalse(DirectorService.inheritSettingIfAbsent(edited, prev));
+        assertEquals("北宋汴京", edited.path("setting").path("era").asText());
+
+        // 用户有意清空（前端点清就是带空串的 setting）→ 不能被“继承”复活
+        ObjectNode cleared = plan(1);
+        cleared.putObject("setting").put("era", "");
+        assertFalse(DirectorService.inheritSettingIfAbsent(cleared, prev));
+        assertEquals("", cleared.path("setting").path("era").asText());
+    }
+
+    @Test
+    void savePathDoesNotInventSettingWhenThereIsNone() {
+        ObjectNode prev = plan(1);
+        ObjectNode now = plan(1);
+        assertFalse(DirectorService.inheritSettingIfAbsent(now, prev), "上一版没有 setting 就不写");
+        assertFalse(now.has("setting"));
+
+        // 上一版只有空对象 setting → 也不当成“有"
+        ObjectNode prevEmpty = plan(1);
+        prevEmpty.putObject("setting");
+        ObjectNode now2 = plan(1);
+        assertFalse(DirectorService.inheritSettingIfAbsent(now2, prevEmpty));
+        assertFalse(now2.has("setting"));
+    }
 }

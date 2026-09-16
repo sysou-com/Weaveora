@@ -358,6 +358,10 @@ public class DirectorService {
         com.fasterxml.jackson.databind.node.ObjectNode obj = plan.deepCopy();
         String curMode = r.schemaJson() == null ? "" : r.schemaJson().path("mode").asText("");
         enrich(obj, curMode, project.aspectRatio());
+        // ★ 防“旧草稿洗掉 setting”：前端草稿若是在 setting 写入之前加载的，提交里就没这个键
+        if (inheritSettingIfAbsent(obj, r.schemaJson())) {
+            log.info("plan/inplace 继承上一版 setting（提交里没有该键）: project={} rev={}", projectId, revisionId);
+        }
         // P13：就地保存放宽「时长一致性」（镜头时长由配音决定，总和必然变化）
         validateOrThrow(obj, curMode, project.durationSec(), false);
         r.replacePlan(obj);
@@ -485,6 +489,10 @@ public class DirectorService {
         String newMode = incoming.path("mode").asText(curMode);
         if (!curMode.equals(newMode)) {
             throw new BizException(ErrorCode.VALIDATION, "不可通过编辑切换导演模式（请新建项目/brief）");
+        }
+        // ★ 防“旧草稿洗掉 setting”（2026-09-16 夜实测：rev52→rev53 就是这么丢的年代）
+        if (incoming instanceof ObjectNode inc && inheritSettingIfAbsent(inc, r.schemaJson())) {
+            log.info("patchRevision 继承上一版 setting（提交里没有该键）: project={} rev={}", projectId, revisionId);
         }
         enrich(incoming, curMode, project.aspectRatio());
         validateOrThrow(incoming, curMode, project.durationSec());
@@ -1106,6 +1114,33 @@ public class DirectorService {
         if (prevSetting != null && prevSetting.isObject() && !po.has("setting")) {
             po.set("setting", prevSetting.deepCopy());
         }
+    }
+
+    /**
+     * P14 补丁（2026-09-16 夜）：**保存路径**也要保护 {@code setting}。
+     *
+     * <p>为什么 LLM 那条路不够：{@code setting} 是 P14 才新增的顶层键，而浏览器里
+     * **已经打开的旧页面**（草稿里没有这个键）一保存就会整份 plan 回写 →
+     * {@code setting} 键连同 era/notes 一起**静默消失**。实测：rev52 已有
+     * {@code setting}（21:05 写入），用户 21:08 从旧草稿另存 rev53 后 `setting` 没了 ——
+     * 那批任务的出图正词里就没有【设定年代】，而“年代”正是 P14 要解决的问题。
+     *
+     * <p>规则与 {@link #mergePrevSubjectsAndSetting} 同口径：**只当提交里根本没有这个键**
+     * 时才继承；提交里带了 {@code setting}（哪怕 {@code {"era":""}}，前端手清也就长这样）
+     * 就说明用户是有意改的/清空的，一律不动。
+     *
+     * @return true 表示发生了继承（调用方打日志用）
+     */
+    static boolean inheritSettingIfAbsent(ObjectNode incoming, JsonNode prev) {
+        if (incoming == null || prev == null || incoming.has("setting")) {
+            return false;
+        }
+        JsonNode prevSetting = prev.get("setting");
+        if (prevSetting == null || !prevSetting.isObject() || prevSetting.isEmpty()) {
+            return false;
+        }
+        incoming.set("setting", prevSetting.deepCopy());
+        return true;
     }
 
     /** 优先按 shot_no 找上一版同镜（镜头数变了也能对上），否则按下标。 */
