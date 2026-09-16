@@ -1122,24 +1122,59 @@ public class DirectorService {
      * <p>为什么 LLM 那条路不够：{@code setting} 是 P14 才新增的顶层键，而浏览器里
      * **已经打开的旧页面**（草稿里没有这个键）一保存就会整份 plan 回写 →
      * {@code setting} 键连同 era/notes 一起**静默消失**。实测：rev52 已有
-     * {@code setting}（21:05 写入），用户 21:08 从旧草稿另存 rev53 后 `setting` 没了 ——
-     * 那批任务的出图正词里就没有【设定年代】，而“年代”正是 P14 要解决的问题。
+     * {@code setting}（21:05 写入），用户 21:08 / 21:29 / 21:46 从旧草稿连存三版
+     * （rev53/54/55），后两版都没了这个键 —— 那批任务的出图正词里就没有【设定年代】，
+     * 而“年代”正是 P14 要解决的问题。
      *
-     * <p>规则与 {@link #mergePrevSubjectsAndSetting} 同口径：**只当提交里根本没有这个键**
-     * 时才继承；提交里带了 {@code setting}（哪怕 {@code {"era":""}}，前端手清也就长这样）
-     * 就说明用户是有意改的/清空的，一律不动。
+     * <p>规则（**逐字段补空**，与 {@code subjects} 的 {@code subjects/meta} 同一套心理模型）：
+     * <ul>
+     *   <li>提交里 <b>没有</b> {@code setting} 键，或这字段是空串，而上一版有值 → 继承上一版的；</li>
+     *   <li>提交里写了非空值（哪怕是改成另一个年代）→ 一律以提交为准；</li>
+     *   <li>两版都空 → 不写空对象（保持方案干净）。</li>
+     * </ul>
+     * 代价说明：{@code era}/{@code notes} 一旦写过，就**不能再靠“清空”删掉**（要改就改成非空的值）。
+     * 这是故意的 —— {@code setting.era} 在 §7.5.2 里是**必填语义**（前端未填会红字提醒），
+     * 而“被旧草稿洗掉”是真实且频发的损失；宁可把这两种情形都当成“保留原值”。
      *
-     * @return true 表示发生了继承（调用方打日志用）
+     * @return true 表示发生了继承/补空（调用方打日志用）
      */
     static boolean inheritSettingIfAbsent(ObjectNode incoming, JsonNode prev) {
-        if (incoming == null || prev == null || incoming.has("setting")) {
+        if (incoming == null) {
             return false;
         }
-        JsonNode prevSetting = prev.get("setting");
-        if (prevSetting == null || !prevSetting.isObject() || prevSetting.isEmpty()) {
+        ObjectNode own = incoming.has("setting") && incoming.get("setting").isObject()
+                ? (ObjectNode) incoming.get("setting") : null;
+        JsonNode prevSetting = prev == null ? null : prev.get("setting");
+        boolean prevUsable = prevSetting != null && prevSetting.isObject() && !allBlankSetting(prevSetting);
+        if (!prevUsable) {
+            if (own != null && allBlankSetting(own)) {
+                incoming.remove("setting");     // 上一版没值、提交也是空 → 不保留空壳
+            }
             return false;
         }
-        incoming.set("setting", prevSetting.deepCopy());
+        ObjectNode cur = own != null ? own : incoming.putObject("setting");
+        boolean changed = false;
+        for (String k : new String[]{"era", "notes"}) {
+            String mine = cur.path(k).asText("").trim();
+            String old = prevSetting.path(k).asText("").trim();
+            if (mine.isEmpty() && !old.isEmpty()) {
+                cur.put(k, old);
+                changed = true;
+            }
+        }
+        if (!changed && allBlankSetting(cur)) {
+            incoming.remove("setting");     // 两边都空就不留空对象
+        }
+        return changed;
+    }
+
+    /** {@code setting} 是否“等于没写”（没键 / 没值 / 值全是空白）。 */
+    private static boolean allBlankSetting(JsonNode setting) {
+        for (String k : new String[]{"era", "notes"}) {
+            if (!setting.path(k).asText("").trim().isEmpty()) {
+                return false;
+            }
+        }
         return true;
     }
 

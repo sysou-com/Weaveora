@@ -260,6 +260,66 @@ def portrait_prompt(entry, token, api, db, names):
     return 0
 
 
+def selftest_guard(api, db, title, secret):
+    """部署后自检：验证「保存路径的 setting 继承守卫」（DirectorService.inheritSettingIfAbsent）是否生效。
+
+    步骤（全在一个一次性项目上，末尾自清理）：
+      1. 起点必须没有 setting（否则不动，避免洗用户数据）
+      2. 写入哨兵 era（PATCH plan/inplace）
+      3. 模拟“旧页面草稿”：提交里**没有 setting 键**再 PATCH 一次 → 旧代码会把 era 洗掉，新代码应继承
+      4. 清理：提交 setting={}（键在 → 不继承）把哨兵抹掉
+    """
+    print("=== setting 继承守卫自检（项目：%s）===" % title)
+    tgt = plan_targets(title, db)
+    if not tgt:
+        print("  ✗ 找不到项目")
+        return 1
+    pid, rid, ws = tgt["project_id"], tgt["revision_id"], tgt["workspace_id"]
+    token = mint_token(secret, tgt["user_id"])
+    base = "%s/api/v1/projects/%s/revisions/%s" % (api, pid, rid)
+    _, d0 = http_json("GET", base, token, ws)
+    plan = d0.get("plan") or {}
+    if (plan.get("setting") or {}).get("era"):
+        print("  ✗ 该项目已有 era（%r）——请换一个干净的一次性项目" % plan["setting"]["era"])
+        return 1
+    sentinel = "守卫自检·勿用"
+
+    p1 = dict(plan)
+    p1["setting"] = {"era": sentinel, "notes": "selftest"}
+    http_json("PATCH", base + "/plan/inplace", token, ws, {"plan": p1})
+    _, d1 = http_json("GET", base, token, ws)
+    step1 = (d1["plan"].get("setting") or {}).get("era") == sentinel
+    print("  1) 写入哨兵 era …………………… %s" % ("OK" if step1 else "✗ 写不进"))
+
+    p2 = dict(d1["plan"])
+    p2.pop("setting", None)          # ★ 形态①模拟旧草稿：整份 plan 里没有 setting 键
+    http_json("PATCH", base + "/plan/inplace", token, ws, {"plan": p2})
+    _, d2 = http_json("GET", base, token, ws)
+    step2 = (d2["plan"].get("setting") or {}).get("era") == sentinel
+    print("  2) 不带 setting 键的保存后 era ……… %s"
+          % ("OK（继承住了 = 守卫生效）" if step2 else "✗ 被洗掉了（守卫未生效！）"))
+
+    p2b = dict(d2["plan"])
+    p2b["setting"] = {"era": "", "notes": ""}   # ★ 形态②前端手清/旧草稿：字段是空串
+    http_json("PATCH", base + "/plan/inplace", token, ws, {"plan": p2b})
+    _, d2b = http_json("GET", base, token, ws)
+    step2b = (d2b["plan"].get("setting") or {}).get("era") == sentinel
+    print("  2b) era 空串的保存后 era …………… %s"
+          % ("OK（逐字段补空生效）" if step2b else "✗ 被空串洗掉了"))
+    d2 = d2b
+
+    # 清理：★ 不能用“空提交”—— 按设计，空值会被继承回来（这正是守卫的目的）。
+    #        一次性测试项目的收尾就直接删键（产品路径不提供“清空年代”，因为 era 是必填语义）。
+    psql("update prompt_revisions set schema_json = schema_json - 'setting' where id = %s;"
+         % sql_str(rid), db)
+    _, d3 = http_json("GET", base, token, ws)
+    step3 = not (d3["plan"].get("setting") or {}).get("era")
+    print("  3) 清理哨兵（SQL 删键）…………… %s" % ("OK" if step3 else "✗ 没清干净"))
+
+    print("  => %s" % ("PASS" if (step1 and step2 and step2b and step3) else "FAIL"))
+    return 0 if (step1 and step2 and step2b and step3) else 1
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--data", required=True)
@@ -271,6 +331,8 @@ def main():
     ap.add_argument("--force", action="store_true")
     ap.add_argument("--print-portrait", default=None,
                     help="只读校验：打印这些主体的定妆照默认提示词（逗号分隔，如 宝玉,可卿）")
+    ap.add_argument("--selftest-guard", default=None, metavar="项目标题",
+                    help="部署后自检：验证保存路径的 setting 继承守卫（用一次性项目，自清理）")
     args = ap.parse_args()
 
     with io.open(args.data, "r", encoding="utf-8") as f:
@@ -289,6 +351,9 @@ def main():
         tgt = plan_targets(entry["title"], args.db)
         return portrait_prompt(entry, mint_token(secret, tgt["user_id"]), args.api, args.db,
                                [n.strip() for n in args.print_portrait.split(",") if n.strip()])
+
+    if args.selftest_guard:
+        return selftest_guard(args.api, args.db, args.selftest_guard, secret)
 
     print("回填计划：%d 个项目%s" % (len(todo), "（dry-run）" if args.dry_run else ""))
 
