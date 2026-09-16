@@ -1508,6 +1508,42 @@ function autoLayoutRegions(silent = false): void {
 }
 
 // 位置预览拖动（移动 / 右下角缩放）
+/**
+ * 位置框 → **估计脸宽（px）** 的经验公式（2026-09-16 实测标定，仅在 UI 上做提前预告）。
+ *
+ * 为什么要预告：位置框只影响**构图**（它只拼进正词，从不会把参考图裁/缩 —— 2026-09-16 已用 md5
+ * 逐字节比对确认“送进模型的就是库里原图”）。但框画得远，生成图里的脸就小，**小到一定程度
+ * 身份锚定（定妆照）就失效了** —— 实测：框高 h=1.00 → 脸 47~59px（掉身份）；h=0.76 → 100px（相似度 0.609 ✓）；
+ * h=0.50 → 138px。拟合：脸宽 ≈ 0.09 × 画幅高 ÷ 框高（1280x704 时 h=1.0→63px、0.6→106px、0.45→141px）。
+ *
+ * 阈值（insightface det 下限 + ArcFace 经验 + 上述实测）：
+ *   < 40px 检测极限以下（体检都测不出）；< 64px 身份基本失效（红）；64~96px 能用但脆弱（黄）；
+ *   ≥ 96px 可用；≥ 112px 稳。
+ */
+const FACE_PX_RED = 64
+const FACE_PX_AMBER = 96
+
+/** 估计脸宽（px）。frameH = 出图画幅高（如 1280x704 → 704）；h = 主体框高（0~1）。取不到就返回 0（不预告）。 */
+function estFacePx(h: number, frameH: number): number {
+  if (!(h > 0) || !(frameH > 0)) return 0
+  return Math.round(0.09 * frameH / h)
+}
+
+/** 当前画幅高度（按项目的宽高比 + 关键帧宽度 1280 估：1280x704 / 1280x720 …） */
+const stillFrameH = computed<number>(() => {
+  const ar = project.data.value?.aspectRatio ?? '16:9'
+  const [w, h] = String(ar).split(':').map((n) => Number(n) || 0)
+  return w > 0 && h > 0 ? Math.round(1280 * h / w) : 704
+})
+
+/** 位置总控：当前范围每个主体的「估计脸宽」与告警档（仅提示，不阻断） */
+function faceSizeHint(sub: string): { px: number; level: 'ok' | 'warn' | 'bad' } | null {
+  const h = Number(String(posPctStr(sub).h ?? '').trim()) / 100
+  if (!(h > 0)) return null
+  const px = estFacePx(h, stillFrameH.value)
+  return { px, level: px < FACE_PX_RED ? 'bad' : px < FACE_PX_AMBER ? 'warn' : 'ok' }
+}
+
 let posDragRect = { w: 1, h: 1 }
 let posDrag: { id: string; mode: 'move' | 'resize'; sx: number; sy: number; orig: { x: number; y: number; w: number; h: number } } | null = null
 function onBoxPointerDown(e: PointerEvent, item: { id: string; region: { x: number; y: number; w: number; h: number } | null }, mode: 'move' | 'resize'): void {
@@ -4063,6 +4099,22 @@ const shotTotal = computed(() => {
                         :title="subjectAnchorInfo(sub).title" :data-testid="'anchor-' + sub">
                     {{ subjectAnchorInfo(sub).label }}
                   </span>
+                  <!--
+                    ★ 2026-09-16 夜（用户要求）：脸太小提前预告。
+                    位置框只影响构图（不会裁/缩参考图 —— 已 md5 逐字节验证），但框画得远、生成图里的脸就小，
+                    小到一定程度定妆照的身份锤定就失效（实测：h=1.0 → 47~59px 掉身份；h=0.76 → 100px 相似度 0.609）。
+                    阈值：<64px 红、64~96px 黄、≥96px 绿（详见 estFacePx 注释）。
+                  -->
+                  <span v-if="faceSizeHint(sub)" class="font-mono"
+                        :class="['pos-face', faceSizeHint(sub)!.level]"
+                        :data-testid="'face-hint-' + sub"
+                        :title="faceSizeHint(sub)!.level === 'ok'
+                          ? `估计生成图里这张脸约 ${faceSizeHint(sub)!.px}px —— 身份锤定够用（≥96px）`
+                          : faceSizeHint(sub)!.level === 'warn'
+                            ? `估计只有 ${faceSizeHint(sub)!.px}px（64~96px）：能用但脆弱，容易不像；把框改小（更近）会更稳`
+                            : `估计只有 ${faceSizeHint(sub)!.px}px（<64px）：身份锤定基本失效，出图容易换脸/不像 —— 请把框改小（更近/半身）或拆镜`">
+                    脸≈{{ faceSizeHint(sub)!.px }}px
+                  </span>
                   <span v-if="posIsInherited(sub)" class="ref-subject-tag font-mono" title="本层未设定，继承上一层的框">
                     继承{{ posScope.kind === 'frame' ? '镜/方案' : '方案' }}默认
                   </span>
@@ -5077,6 +5129,11 @@ const shotTotal = computed(() => {
 }
 .subj-hint { margin: 2px 0 0; font-size: 11px; line-height: 1.6; }
 .portrait-ref-warn { color: var(--wv-danger, #c45c4a); }
+/* 位置总控：估计脸宽告警（<64px 红 / 64~96px 黄 / ≥96px 绿） */
+.pos-face { font-size: 10.5px; white-space: nowrap; }
+.pos-face.ok { color: var(--wv-success, #7BC47F); }
+.pos-face.warn { color: var(--wv-warn, #C8A25E); }
+.pos-face.bad { color: var(--wv-danger, #c45c4a); font-weight: 600; }
 .ref-check { position: absolute; top: 4px; left: 4px; z-index: 2; }
 .ref-check input { width: 14px; height: 14px; }
 
