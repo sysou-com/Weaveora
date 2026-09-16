@@ -72,6 +72,21 @@ public class AssetController {
     }
 
     /**
+     * ★ 2026-09-16 夜（用户要求）：从资产库点「参考」→ **复制一份**进参考图（只留「勾选 / 删除」两态）。
+     *
+     * <p>原资产已是 kind=reference 时后端直接返回它（不重复复制）。
+     */
+    @PostMapping("/projects/{projectId}/assets/{assetId}/as-reference")
+    public ResponseEntity<AssetResponse> asReference(
+            HttpServletRequest request,
+            @RequestHeader(value = ProjectController.WORKSPACE_HEADER, required = false) String workspaceId,
+            @PathVariable UUID projectId,
+            @PathVariable UUID assetId) {
+        return ResponseEntity.ok(assetService.referenceFromAsset(
+                uid(request), ws(workspaceId), projectId, assetId));
+    }
+
+    /**
      * P9：克隆音色 —— 上传样本 → 处理 → 返回原件/处理后两个资产（前端做 A/B 对比试听）。
      */
     @PostMapping(value = "/projects/{projectId}/voice-presets", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)

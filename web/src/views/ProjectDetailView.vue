@@ -26,7 +26,7 @@ import {
 import { createBrief, listBriefs } from '@/api/briefs'
 import { createJobs, listJobs, cancelJob, rerunJob, retryJobs, deleteJobs, JOB_STATE_LABEL } from '@/api/jobs'
 import { shareProject } from '@/api/market'
-import { listAssets, uploadReference, fetchAssetBlob, deleteAssets, uploadVoiceLine, useSampleAsLineVoice, deleteVoicePreset, auditionVoicePreset, assetAsPortrait } from '@/api/assets'
+import { listAssets, uploadReference, fetchAssetBlob, deleteAssets, uploadVoiceLine, useSampleAsLineVoice, deleteVoicePreset, auditionVoicePreset, assetAsPortrait, assetAsReference } from '@/api/assets'
 import { createExport, fetchExportBlob, renderMaster, timecode } from '@/api/export'
 import { aiGenerateLines, aiGenerateMusic, extractSubjects, patchPlanInPlace, patchSubjectMeta, portraitPromptDefaults } from '@/api/director'
 import { getEngineSettings } from '@/api/engineSettings'
@@ -509,8 +509,10 @@ function shortTime(iso: string): string {
   return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
 }
 const refSelected = ref<string[]>([])
-/** P13：未勾选 = 不作为参考（默认全部参与） */
+/** 未勾选 = 不作为定妆照的参考（2026-09-16 用户裁定：参考图只留「勾选 / 删除」两态，没有“变暗”中间态） */
 const refUnchecked = ref<string[]>([])
+/** 正在「从资产复制成参考图」的资产 id（按钮 loading） */
+const refBusy = ref('')
 const subjectBusy = ref('')
 const portraitBusy = ref(false)
 
@@ -731,6 +733,13 @@ const portraitRefHint = computed<string>(() => {
     : '参考图 0 张 → 没有任何身份参考，容易画得不像；先在参考图格子上勾选一张'
 })
 
+/** 能否生成定妆照：至少得有一个输入（勾选的参考图，或已绑定的当前定妆照）——否则后端会直接拒（零参考出噪声图，2026-09-16 实测） */
+const portraitCanGenerate = computed<boolean>(() => {
+  if (portraitRefIds.value.length > 0) return true
+  const sub = planSubjects().find((x) => x.name === portraitSubject.value)
+  return !!sub?.portraitAssetId
+})
+
 /** 拉取默认正/负向词（真源在后端 SubjectPrompts；拉不到就用本地兜底） */
 async function loadPortraitPrompt(): Promise<void> {
   const name = portraitSubject.value
@@ -786,15 +795,14 @@ async function confirmPortrait(): Promise<void> {
     await queryClient.invalidateQueries({ queryKey: ['assets'] })
     await queryClient.invalidateQueries({ queryKey: ['jobs'] })
     await refreshGallery()
-    // 参考图只是“生成定妆的素材”：用完**立即释放选中**（不再当锚定图）
+    // 参考图只是“生成定妆的素材”：用完**自动取消勾选**（不删图、不删主体标注；
+    // 按用户裁定参考图只留「勾选/删除」两态，系统不替用户做“移除”）
     const used = new Set<string>(pickedIds)
     const sub = planSubjects().find((x) => x.name === name)
     for (const r of sub?.refs ?? []) used.add(r.assetId)
-    for (const id of used) markUnchecked(id)
-    refSelected.value = refSelected.value.filter((id) => !used.has(id))
-    for (const id of used) delete refSubjects.value[id]
+    for (const id of used) setRefChecked(id, false)
     syncReferenceAssets()
-    message.success(`「${name}」定妆图已生成（参考图已复位为未选中）—— 用「操作 ▾ → 把最新定妆照设为锚定图」`)
+    message.success(`「${name}」定妆图已生成（用过的参考图已自动取消勾选）—— 用「操作 ▾ → 把最新定妆照设为锚定图」`)
   } catch (e) {
     message.error(e instanceof Error ? e.message : '生成定妆图失败')
   } finally {
@@ -943,10 +951,8 @@ async function useRefAsPortrait(name: string): Promise<void> {
       ? { ...x, portraitAssetId: made.id, portraitVersion: ver }
       : x)))
     void queryClient.invalidateQueries({ queryKey: ['assets'] })
-    // 与「生成定妆照」一致：用完立即释放勾选（图仍在图库里；双胞胎等需共用时再勾选同一张即可）
-    refSelected.value = refSelected.value.filter((id) => id !== srcId)
-    delete refSubjects.value[srcId]
-    pruneUnchecked()
+    // 与「生成定妆照」一致：用完只**取消勾选**（参考图仍在列表里，主体标注也保留）
+    setRefChecked(srcId, false)
     void saveSubjectMeta()
     message.success(
       `已把所选参考图复制为「${name}」的定妆照（v${ver} ·#${made.id.slice(-6)}，已就地保存）。`
@@ -1117,17 +1123,20 @@ function syncReferenceAssets(): void {
   for (const s of byName.values()) out.push({ ...s, refs: [] })
   ;(draft.value as unknown as { subjects?: PlanSubject[] }).subjects = out
 }
-/** 勾选/取消某张参考图参与**生成定妆照**（唯一用途：定妆照的输入；出图锚定只认定妆照） */
-/** 新上传的参考图默认**不勾选**（先入列待选，要用请显式勾选） */
-function markUnchecked(id: string): void {
-  if (!refUnchecked.value.includes(id)) {
-    refUnchecked.value = [...refUnchecked.value, id]
-  }
-}
-
+/** 勾选/取消勾选某张参考图（**唯一**的参与开关：定妆照的参考输入只看勾选） */
 function toggleRefChecked(id: string, on: boolean): void {
   refUnchecked.value = on ? refUnchecked.value.filter((x) => x !== id) : [...new Set([...refUnchecked.value, id])]
   syncReferenceAssets()
+}
+
+/**
+ * 参考图格子的点击行为（2026-09-16 夜用户要求：只留「勾选 / 删除」两态）。
+ *
+ * 点击图片 = 切「勾选」（不再“再点一下就移出”——以前那样用户分不清“加入”和“取消”）；
+ * **移出**只留右上角 × 按钮；缩略图**不再变暗**（取消勾选只靠复选框本身表达）。
+ */
+function toggleRefTile(id: string): void {
+  toggleRefChecked(id, refUnchecked.value.includes(id))
 }
 
 const POS_COLORS = ['#8FB9B4', '#C8A25E', '#C45C4A', '#7AA87A']
@@ -1538,15 +1547,22 @@ function onBoxPointerUp(): void {
 
 /** 删除参考图（仅 reference 类可删；资产库产物请到资产库删除） */
 async function removeRefAsset(id: string): Promise<void> {
-  if (!window.confirm('删除这张参考图？不可恢复。')) return
+  const a = assetById.value[id]
+  const isRefCopy = (a?.kind ?? 'reference') === 'reference'
+  if (!window.confirm(isRefCopy
+    ? '删除这张参考图？不可恢复。'
+    : '把这张图移出参考图列表？（它是 still/定妆等原件，不会被删除）')) return
   try {
-    await deleteAssets(workspaceId.value, projectId.value, [id])
+    if (isRefCopy) {
+      await deleteAssets(workspaceId.value, projectId.value, [id])
+    }
     refSelected.value = refSelected.value.filter((x) => x !== id)
     delete refSubjects.value[id]
     delete refRegions.value[id]
+    pruneUnchecked()
     syncReferenceAssets()
-    await queryClient.invalidateQueries({ queryKey: ['assets'] })
-    message.success('已删除参考图')
+    if (isRefCopy) await queryClient.invalidateQueries({ queryKey: ['assets'] })
+    message.success(isRefCopy ? '已删除参考图' : '已移出参考图列表（原图保留）')
   } catch (e) {
     message.error(e instanceof Error ? e.message : '删除失败')
   }
@@ -1923,18 +1939,36 @@ function openImmersive(id: string, mime: string): void {
   if (!url) return
   immersive.value = { url, mime }
 }
-function setRefFromAsset(id: string): void {
+async function setRefFromAsset(id: string): Promise<void> {
   if (refSelected.value.includes(id)) return
   if (refSelected.value.length >= MAX_REFS) {
     message.warning(`参考图最多 ${MAX_REFS} 张`)
     return
   }
-  refSelected.value.push(id)
-  // ★ 2026-09-16 夜：点「参考」= 就是要用它 → 默认**勾选**（以前默认未勾选/变暗，
-  //   用户以为“点了没反应”，而它偏偏又会被当成候选送进模型，语义自相矛盾）。
-  refUnchecked.value = refUnchecked.value.filter((x) => x !== id)
-  syncReferenceAssets()
-  message.success('已加入参考图并勾选（它作为**生成定妆照**的依据；出图锚定一律用定妆图）')
+  // ★ 2026-09-16 夜（用户要求）：从资产库点「参考」→ **复制一份**到参考图里。
+  //   为什么：参考图只支持「勾选 / 删除」两态，是独立的一堆候选素材；
+  //   直接引用原资产 id 的话，删参考图会把那张 still/portrait 原件一起删掉。
+  const a = assetById.value[id]
+  const srcKind = a?.kind ?? 'reference'
+  refBusy.value = id
+  try {
+    const refId = srcKind === 'reference'
+      ? id
+      : (await assetAsReference(workspaceId.value, projectId.value, id)).id
+    if (refId !== id) {
+      await queryClient.invalidateQueries({ queryKey: ['assets'] })
+    }
+    refSelected.value = [...refSelected.value, refId]
+    refUnchecked.value = refUnchecked.value.filter((x) => x !== refId)   // 新加入＝已勾选
+    syncReferenceAssets()
+    message.success(srcKind === 'reference'
+      ? '已加入参考图并勾选（它作为**生成定妆照**的依据；出图锚定一律用定妆图）'
+      : `已把这张 ${srcKind} 图**复制**一份进参考图并勾选（原件不受影响）`)
+  } catch (e) {
+    message.error(e instanceof Error ? e.message : '复制为参考图失败')
+  } finally {
+    refBusy.value = ''
+  }
 }
 
 function onPickFile(e: Event): void {
@@ -1949,7 +1983,7 @@ function onPickFile(e: Event): void {
       if (refSelected.value.length >= MAX_REFS) {
         message.warning(`参考图最多 ${MAX_REFS} 张（已加入的不受影响）`)
       }
-      else { refSelected.value.push(a.id); markUnchecked(a.id) }
+      else { refSelected.value = [...refSelected.value, a.id] }   // 上传即已勾选（只留勾选/删除两态）
     } catch (err) {
       message.error(err instanceof Error ? err.message : '上传失败')
     } finally {
@@ -1961,22 +1995,14 @@ function onPickFile(e: Event): void {
 function pruneUnchecked(): void {
   refUnchecked.value = refUnchecked.value.filter((x) => refSelected.value.includes(x))
 }
-function toggleRef(id: string, on: boolean): void {
-  if (on) {
-    if (refSelected.value.length >= MAX_REFS) {
-      message.warning(`参考图最多 ${MAX_REFS} 张`)
-      return
-    }
-    if (!refSelected.value.includes(id)) { refSelected.value.push(id); markUnchecked(id) }
-  } else {
-    refSelected.value = refSelected.value.filter((x) => x !== id)
-    delete refSubjects.value[id]
-    delete refRegions.value[id]
-    pruneUnchecked()
-  }
-  syncReferenceAssets()
+/** 勾选状态唯一入口（on=true 勾选参与，false 取消） */
+function setRefChecked(id: string, on: boolean): void {
+  refUnchecked.value = on
+    ? refUnchecked.value.filter((x) => x !== id)
+    : [...new Set([...refUnchecked.value, id])]
 }
 
+/** 参考图格子的 × ：删除参考图（reference 副本才删资产；非 reference 只从列表移出，不碰原件） */
 /* ---------------- P12：生成前弹分镜勾选（>3 镜时） ---------------- */
 const pickOpen = ref(false)
 const pickBusy = ref(false)
@@ -3898,18 +3924,17 @@ const shotTotal = computed(() => {
               <div
                 v-for="a in refLibrary.slice(0, 8)"
                 :key="a.id"
-                :class="['ref-thumb', { sel: refSelected.includes(a.id) && !refUnchecked.includes(a.id), off: refUnchecked.includes(a.id) }]"
+                :class="['ref-thumb', { sel: refSelected.includes(a.id) && !refUnchecked.includes(a.id) }]"
                 :title="refSelected.includes(a.id)
-                  ? '点击移出（不再作为生成定妆照的参考）'
+                  ? (refUnchecked.includes(a.id) ? '已加入但未勾选 —— 点一下勾选（它才会作为生成定妆照的参考）' : '已勾选：本次生成定妆照会用它 —— 点一下取消勾选')
                   : '点击加入并勾选（作为生成定妆照的参考图；出图锚定只认绑定的定妆照）'"
-                @click="toggleRef(a.id, !refSelected.includes(a.id))"
+                @click="toggleRefTile(a.id)"
               >
                 <img v-if="thumbUrls[a.id]" :src="thumbUrls[a.id]" alt="参考图" loading="lazy" />
                 <span v-else class="ref-empty">…</span>
-                <!-- P13：勾选＝作为生成定妆照的参考图（★ 2026-09-16 夜：这个勾选现在真的生效了 ——
-                     以前生成定妆照时不管勾没勾全送进模型，用户在界面上看不到差别） -->
+                <!-- 参考图只留「勾选 / 删除」两态：勾选框是**唯一**的参与开关，缩略图不变暗 -->
                 <label v-if="refSelected.includes(a.id)" class="ref-check"
-                       title="☑ 勾选＝这次「生成定妆照」用它作参考｜☐ 取消＝留在列表但不用（缩略图会变暗）"
+                       title="☑ 勾选＝这次「生成定妆照」用它作参考｜☐ 取消＝留在列表但不参与"
                        @click.stop>
                   <input type="checkbox" :checked="!refUnchecked.includes(a.id)"
                          :data-testid="`ref-check-${a.id.slice(0, 8)}`"
@@ -3918,10 +3943,10 @@ const shotTotal = computed(() => {
                 <i v-else class="ref-badge font-mono">REF</i>
                 <span class="ref-time font-mono">{{ shortTime(a.createdAt) }}</span>
                 <button
-                  v-if="a.kind === 'reference'"
+                  v-if="refSelected.includes(a.id)"
                   type="button"
                   class="ref-del"
-                  title="删除该参考图"
+                  :title="a.kind === 'reference' ? '删除这张参考图' : '移出参考图列表（原件保留）'"
                   @click.stop="removeRefAsset(a.id)"
                 >
                   ×
@@ -4570,7 +4595,9 @@ const shotTotal = computed(() => {
           <div class="ai-actions">
             <NButton size="small" :disabled="portraitGenBusy" @click="portraitOpen = false">取消</NButton>
             <NButton size="small" :disabled="portraitGenBusy" @click="loadPortraitPrompt">恢复默认词</NButton>
-            <NButton size="small" type="primary" :loading="portraitGenBusy" data-testid="portrait-generate"
+            <NButton size="small" type="primary" :loading="portraitGenBusy" :disabled="!portraitCanGenerate"
+                     data-testid="portrait-generate"
+                     :title="portraitCanGenerate ? '用上面的参考图 + 提示词生成定妆照' : '先在参考图格子上勾选一张（或先给它绑定一个旧定妆照）'"
                      @click="confirmPortrait">
               生成定妆照
             </NButton>
@@ -5050,7 +5077,6 @@ const shotTotal = computed(() => {
 }
 .subj-hint { margin: 2px 0 0; font-size: 11px; line-height: 1.6; }
 .portrait-ref-warn { color: var(--wv-danger, #c45c4a); }
-.ref-thumb.off img { opacity: 0.35; filter: grayscale(0.7); }
 .ref-check { position: absolute; top: 4px; left: 4px; z-index: 2; }
 .ref-check input { width: 14px; height: 14px; }
 

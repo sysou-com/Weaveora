@@ -246,6 +246,24 @@ export async function assetAsPortrait(
   })
 }
 
+/**
+ * ★ 2026-09-16 夜（用户要求）：从资产库点「参考」→ 把这张图**复制一份**进参考图（kind=reference）。
+ *
+ * 为什么要复制：参考图是独立的一堆候选素材（只支持勾选/删除两态）。
+ * 若直接引用原资产 id：① 删参考图会把那张 still/portrait 原件一起删；② 它会同时出现在「关键帧/定妆」Tab 里。
+ * 幂等：同一资产重复调用返回已复制那张；原资产本身已是 reference 时后端直接返回它。
+ */
+export async function assetAsReference(
+  workspaceId: string,
+  projectId: string,
+  assetId: string,
+): Promise<AssetRef> {
+  return request<AssetRef>(`/api/v1/projects/${projectId}/assets/${assetId}/as-reference`, {
+    method: 'POST',
+    headers: { [WORKSPACE_HEADER]: workspaceId },
+  })
+}
+
 /** 删除所选资产（删行 + 删存储文件） */
 export async function deleteAssets(
   workspaceId: string,

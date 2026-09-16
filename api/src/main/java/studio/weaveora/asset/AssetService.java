@@ -145,6 +145,66 @@ public class AssetService {
     }
 
     /**
+     * ★ 2026-09-16 夜（用户要求）：把资产库里的**任意一张图**复制一份进「参考图」。
+     *
+     * <p>为什么要复制而不是直接引用原资产 id：
+     * <ul>
+     *   <li>参考图是**独立的一堆候选素材**，只支持「勾选 / 删除」两态；如果直接指向某张 still/portrait，
+     *       删参考图就会把那张原图一起删掉（数据库删连坐），而且它会同时出现在「关键帧」「定妆」两个 Tab 里；</li>
+     *   <li>复制件带 {@code source_asset_id} 快照，能回溯“这张参考图从哪来”。</li>
+     * </ul>
+     * 若原资产**本身就是** kind=reference（用户上传的素材图），则不复制 —— 它已经是参考图了，直接返回。
+     */
+    @Transactional
+    public AssetResponse referenceFromAsset(UUID userId, UUID workspaceId, UUID projectId, UUID assetId) {
+        guard.requireMember(userId, workspaceId);
+        projects.require(userId, workspaceId, projectId);
+        studio.weaveora.asset.domain.Asset src = assets.findByIdAndWorkspaceId(assetId, workspaceId)
+                .orElseThrow(() -> new BizException(ErrorCode.NOT_FOUND, "资产不存在"));
+        if (!projectId.equals(src.projectId())) {
+            throw new BizException(ErrorCode.VALIDATION, "该资产不属于本项目");
+        }
+        if ("reference".equals(src.kind())) {
+            return toResponse(src);      // 已经是参考图：不重复复制
+        }
+        // 幂等：同一资产已复制过一次就复用
+        for (studio.weaveora.asset.domain.Asset a : assets
+                .findByProjectIdAndWorkspaceIdAndKindOrderByCreatedAtDesc(projectId, workspaceId, "reference")) {
+            com.fasterxml.jackson.databind.JsonNode snap = a.promptSnapshot();
+            if (snap != null && assetId.toString().equals(snap.path("source_asset_id").asText(""))) {
+                return toResponse(a);
+            }
+        }
+        String mime = src.mime() == null || src.mime().isBlank() ? "image/png" : src.mime();
+        String key = workspaceId + "/" + projectId + "/ref/" + UUID.randomUUID() + "." + ext(mime);
+        long size = 0;
+        try (InputStream in = storage.get(src.storageKey()).stream()) {
+            byte[] bytes = in.readAllBytes();
+            size = bytes.length;
+            storage.put(key, new java.io.ByteArrayInputStream(bytes), size, mime);
+        } catch (Exception e) {
+            throw new IllegalStateException("参考图复制失败（复制资产字节）: " + e.getMessage(), e);
+        }
+        com.fasterxml.jackson.databind.node.ObjectNode snap = mapper.createObjectNode();
+        snap.put("kind", "reference");
+        snap.put("source", "from-asset");
+        snap.put("source_asset_id", assetId.toString());
+        snap.put("source_kind", src.kind());
+        // 原图如果带了主体标注（定妆照/产物快照里的 subject）就一起带过来，便于前端显示与排查
+        com.fasterxml.jackson.databind.JsonNode srcSnap = src.promptSnapshot();
+        if (srcSnap != null && !srcSnap.path("subject").asText("").isBlank()) {
+            snap.put("source_subject", srcSnap.path("subject").asText(""));
+        }
+        snap.put("prompt", "（由资产库中的图复制而来，未重新生成）");
+        studio.weaveora.asset.domain.Asset made = studio.weaveora.asset.domain.Asset.output(
+                workspaceId, projectId, null, null, null, "reference", key, mime,
+                src.width(), src.height(), null, null, snap);
+        studio.weaveora.asset.domain.Asset saved = assets.save(made);
+        log.info("asset: {} {} → 参考图 {}（{} bytes）", src.kind(), assetId, saved.id(), size);
+        return toResponse(saved);
+    }
+
+    /**
      * P8：用户上传「一段配音」（导入自己配好的声音）。
      *
      * <p>落的资产 kind=voice、shot_no 有值，并在 prompt_snapshot 里写

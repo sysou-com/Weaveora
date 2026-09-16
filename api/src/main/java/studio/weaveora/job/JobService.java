@@ -2346,6 +2346,15 @@ public class JobService {
             throw new BizException(ErrorCode.VALIDATION,
                     "方案里没有主体「" + subject + "」，且没有指定参考图（先在参考图卡片里「一键生成主体」或手动添加）");
         }
+        // ★ 2026-09-16 夜实测事故：零参考图的定妆任务 → worker 回退到**纯文生图**通路，
+        //   出一张 1280x704 的**噪声图**（脸探针命中 0；块内 std 0.191 vs 正常图 0.017）——
+        //   而正词里还写着「严格保持参考图的人物特征」，自相矛盾。定妆照的意义就是“按参考图定型”，
+        //   没有输入就不该发任务（要纯文字出图请走「关键帧」或先上传/勾选一张素材图）。
+        if (ids.isEmpty()) {
+            throw new BizException(ErrorCode.VALIDATION,
+                    "「" + subject + "」没有可用的参考图：请在参考图格子上**勾选**一张（或先给它绑定一个已有定妆照）"
+                            + "再生成定妆照 —— 零参考的定妆照会退化成纯文生图，实测出噪声图");
+        }
         java.util.List<String> keys = new ArrayList<>();
         for (studio.weaveora.asset.domain.Asset a : assetRepo.findByIdInAndWorkspaceId(ids, workspaceId)) {
             keys.add(a.storageKey());
