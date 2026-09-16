@@ -77,8 +77,9 @@ public class InternalController {
     @PostMapping("/jobs/{jobId}/progress")
     public ResponseEntity<Map<String, Object>> progress(@PathVariable UUID jobId,
                                                         @RequestBody ProgressRequest req) {
-        jobService.progress(jobId, req.progress(), req.stage());
-        return ResponseEntity.ok(Map.of("ok", true));
+        boolean cancelled = jobService.progress(jobId, req.progress(), req.stage());
+        // ★ 把「是否已取消」回给 worker：它才能立刻中断 ComfyUI 并退出（见 JobService.progress 注释）
+        return ResponseEntity.ok(Map.of("ok", true, "cancelRequested", cancelled));
     }
 
     @PostMapping("/jobs/{jobId}/complete")
