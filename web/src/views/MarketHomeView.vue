@@ -5,10 +5,12 @@ import { NIcon, NSkeleton, useMessage } from 'naive-ui'
 import { computed, reactive, ref, watch } from 'vue'
 
 import { fetchMarketPreview, listMarketPage, toggleMark } from '@/api/market'
-import type { ProjectCard } from '@/api/types'
+import { listScriptMarketPage, toggleScriptMark } from '@/api/scripts'
+import type { ProjectCard, ScriptCard } from '@/api/types'
 import { marketThumb } from '@/utils/thumbs'
 import { useAuthStore } from '@/stores/auth'
 import { aspectNote, formatDateShort, modeLabel } from '@/utils/format'
+import { formatChars } from '@/utils/script'
 
 const PAGE_SIZE = 8
 const auth = useAuthStore()
@@ -39,6 +41,35 @@ watch(
 
 // 只读详情（含视频/图资产点击可由详情展开——本页先以卡片信息+预览图为主）
 const detail = ref<ProjectCard | null>(null)
+
+/* ---------------- 剧本精选（Q1：与项目精选并列上首页） ---------------- */
+const scriptPage = ref(0)
+const { data: scriptMarket, isPending: scriptPending } = useQuery({
+  queryKey: ['home-script-market', scriptPage],
+  queryFn: () => listScriptMarketPage(scriptPage.value, PAGE_SIZE),
+})
+const scriptTotal = computed(() => scriptMarket.value?.total ?? 0)
+const scriptPages = computed(() => Math.max(1, Math.ceil(scriptTotal.value / PAGE_SIZE)))
+const scriptDetail = ref<ScriptCard | null>(null)
+
+async function doScriptMark(id: string, kind: 'like' | 'fav'): Promise<void> {
+  try {
+    const r = await toggleScriptMark(id, kind)
+    const it = (scriptMarket.value?.items ?? []).find((x) => x.id === id)
+    const target = scriptDetail.value?.id === id ? scriptDetail.value : it
+    if (target) {
+      if (r.kind === 'like') {
+        target.likeCount = r.count
+        target.liked = r.active
+      } else {
+        target.favoriteCount = r.count
+        target.favorited = r.active
+      }
+    }
+  } catch (e) {
+    message.error(e instanceof Error ? e.message : '操作失败')
+  }
+}
 
 async function doMark(id: string, kind: 'like' | 'fav'): Promise<void> {
   try {
@@ -143,6 +174,82 @@ async function downloadPreview(id: string): Promise<void> {
       </div>
     </section>
 
+    <!-- ============ 剧本精选 ============ -->
+    <section class="zone" data-testid="zone-home-script-market">
+      <div class="zone-head">
+        <p class="eyebrow font-mono">SCRIPTS · 剧本精选</p>
+        <h2 class="zone-title">剧本精选</h2>
+      </div>
+      <div v-if="scriptPending" class="grid">
+        <div v-for="i in 4" :key="i" class="skel"><NSkeleton text /><NSkeleton text style="margin-top:10px" /></div>
+      </div>
+      <template v-else-if="scriptTotal > 0">
+        <div class="grid">
+          <div v-for="p in scriptMarket?.items ?? []" :key="p.id" class="card">
+            <button type="button" class="card-inner" @click="scriptDetail = p">
+              <div class="card-top">
+                <span class="card-mode font-mono">{{ p.genre }}</span>
+                <span class="card-date font-mono">{{ p.ownerName || '匿名' }}</span>
+              </div>
+              <h3 class="card-title">{{ p.title }}</h3>
+              <p class="card-meta font-mono text-secondary">
+                {{ p.episodeCount }} 集 · 约 {{ formatChars(p.charCount) }}
+              </p>
+              <p class="card-excerpt text-secondary">{{ p.excerpt }}</p>
+              <div class="card-foot">
+                <span class="card-date font-mono">{{ formatDateShort(p.updatedAt) }}</span>
+              </div>
+            </button>
+            <div v-if="logged" class="mark-bar">
+              <button type="button" class="mk" :class="{ on: p.liked }" @click="doScriptMark(p.id, 'like')">
+                {{ p.liked ? '♥' : '♡' }} {{ p.likeCount }}
+              </button>
+              <button type="button" class="mk" :class="{ on: p.favorited }" @click="doScriptMark(p.id, 'fav')">
+                {{ p.favorited ? '★' : '☆' }} {{ p.favoriteCount }}
+              </button>
+            </div>
+          </div>
+        </div>
+        <nav v-if="scriptPages > 1" class="pager">
+          <button class="op" :disabled="scriptPage === 0" @click="scriptPage--">上一页</button>
+          <span class="pager-info font-mono">{{ scriptPage + 1 }} / {{ scriptPages }}</span>
+          <button class="op" :disabled="scriptPage >= scriptPages - 1" @click="scriptPage++">下一页</button>
+        </nav>
+      </template>
+      <div v-else class="empty-state">
+        <p class="text-secondary">剧本精选还没有内容——分享、管理员审核通过后会展示在这里。</p>
+      </div>
+    </section>
+
+    <!-- 剧本只读详情 -->
+    <div v-if="scriptDetail" class="overlay" @click.self="scriptDetail = null">
+      <div class="overlay-card">
+        <button type="button" class="op x" @click="scriptDetail = null"><X :size="14" /></button>
+        <h3 class="overlay-title font-display">{{ scriptDetail.title }}</h3>
+        <p class="overlay-meta font-mono">
+          {{ scriptDetail.genre }} · {{ scriptDetail.episodeCount }} 集 · 约 {{ formatChars(scriptDetail.charCount) }}
+          · 分享者：{{ scriptDetail.ownerName || '匿名' }}
+        </p>
+        <div class="overlay-excerpt">
+          <p class="text-secondary">{{ scriptDetail.excerpt || '（暂无摘要）' }}</p>
+        </div>
+        <p class="overlay-note text-secondary">剧本精选为只读浏览，不能编辑；创作请前往「我的剧本」。</p>
+        <div class="overlay-ops">
+          <template v-if="logged">
+            <button type="button" class="op" :class="{ on: scriptDetail.liked }" @click="doScriptMark(scriptDetail.id, 'like')">
+              {{ scriptDetail.liked ? '♥' : '♡' }} 赞 {{ scriptDetail.likeCount }}
+            </button>
+            <button type="button" class="op" :class="{ on: scriptDetail.favorited }" @click="doScriptMark(scriptDetail.id, 'fav')">
+              {{ scriptDetail.favorited ? '★' : '☆' }} 收藏 {{ scriptDetail.favoriteCount }}
+            </button>
+          </template>
+          <button type="button" class="op primary" @click="$router.push({ name: 'script-market', params: { scriptId: scriptDetail.id } })">
+            查看完整剧本(只读)
+          </button>
+        </div>
+      </div>
+    </div>
+
     <!-- 只读详情 -->
     <div v-if="detail" class="overlay" @click.self="detail = null">
       <div class="overlay-card">
@@ -184,6 +291,12 @@ async function downloadPreview(id: string): Promise<void> {
 .title { font-size: 30px; line-height: 1.2; }
 .desc { margin: 8px 0 0; font-size: 14px; }
 .zone { display: flex; flex-direction: column; gap: 14px; }
+.zone-head { }
+.zone-head .eyebrow { margin-bottom: 6px; }
+.zone-title { margin: 0; font-size: 22px; font-family: var(--wv-font-display); }
+.card-excerpt { margin: 0; font-size: 12px; line-height: 1.6; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.overlay-excerpt { padding: 14px; border-radius: var(--wv-radius-s); background: var(--wv-surface-sunken); border: 1px solid var(--wv-line); }
+.overlay-excerpt p { margin: 0; font-size: 13px; line-height: 1.7; }
 .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(252px, 1fr)); gap: 16px; }
 .card { border: 1px solid var(--wv-line); border-radius: var(--wv-radius-m); background: var(--wv-surface); overflow: hidden; position: relative; transition: border-color var(--wv-dur) var(--wv-ease), background var(--wv-dur) var(--wv-ease); }
 .card:hover { background: var(--wv-surface-raised); border-color: color-mix(in srgb, var(--wv-accent) 38%, var(--wv-line)); }

@@ -671,6 +671,48 @@ sequenceDiagram
 
 默认 **关闭「真人模特」类模板**。用户 Brief 明确要求人物时，导演层用非可识别面孔（远景、背影、剪影）。
 
+### 7.10 我的剧本（Script，v2.1）
+
+**定位**：项目的**创作上游**。先把「要素 → 分集」写扎实，再「转成项目」出分镜动作与提示词；
+与「项目」形成同构但独立的模块（同样的工作区隔离、集市/精选、管理态删除与分页）。
+
+**8 个要素**（标题 / 类型 由用户填写；其余 6 项可由 AI 生成与更新）：
+
+| key | 名称 | 上限 | AI |
+| --- | --- | --- | --- |
+| `title` | 剧本标题 | 100 | 否（生成的依据） |
+| `genre` | 剧本类型 | 50 | 否 |
+| `characters` | 剧本人物及人物介绍 | 8000 | AI 生成 / AI 更新 |
+| `story` | 剧本故事 | 8000 | 同上 |
+| `conflict` | 剧本冲突 | 8000 | 同上 |
+| `plotStructure` | 剧本情节结构 | 8000 | 同上 |
+| `language` | 剧本语言 | 8000 | 同上 |
+| `stageDirections` | 舞台说明 | 8000 | 同上 |
+
+口径（用户裁定 2026-09-17）：
+
+1. 字段上限 8000 字（输入上限；用户原始要求「不要小于 4000」），AI 生成/更新**硬要求 ≥4000 字**；
+   输入框用 `autosize {minRows:10, maxRows:12}`——高度适中、超出内部滚动。
+2. 两个 AI 动作：**AI 生成**（仅凭标题+类型）/ **AI 更新**（读全部要素 + 已写集数后重写）。
+   两者都**先弹 diff**，用户确认后才写入字段（Q3）。
+3. **AI 只产出值**：所有 AI 结果由用户确认后才会落库（铁律 ④ 的延伸）。
+
+**分集与「精简的故事」**：
+
+- 「开始下一集」先问**是否需要 AI 润色**：要则 AI 先读「精简的故事」再结合要素生成本集；不要则给空编辑器。
+- 保存一集时：前端二次确认 → 后端刷新 `condensed_story`（唯一连续记忆）→ 跑一致性检查。
+- 一致性检查只**提议**受影响的历史章节（`script_changes.kind=consistency_proposal`）；
+  **Q4：用户确认（`apply-sync`）后才改写**，改写结果另记 `consistency_applied`。
+- 「AI 引导」基于精简故事与情节结构给出：当前阶段 / 缺失结构 / 下一步建议 / 预计还需几集。
+
+**转成项目**：每集一个按钮 → 弹框设项目要素（类型/画幅/时长/每镜/风格）→
+后端建项目 + 走**内部 brief 通道**（`ProjectService.createBriefInternal`，上限 20000 字，Q6）
+→ `DirectorService.generate` 产出分镜动作 + 正/负提示词 → 跳项目页。
+导演失败时项目与 brief 已落库（`ScriptService.toProject` 刻意不开事务），不丢数据。
+
+**剧本集市（Q1）**：与项目集市同构——分享 → 待审 → 管理员审批 → **剧本精选**
+（列表页与**首页**都展示）；点赞/收藏落在 `script_marks`；只读详情公开路由 `/script-market/:scriptId`。
+
 ---
 
 ## 8. 信息架构（Web）
@@ -1286,6 +1328,24 @@ JPA 映射要点：
 - Repository：`interface ProjectRepository extends JpaRepository<Project, UUID>`，工作区隔离写成 `findByWorkspaceIdAndIdAndDeletedAtIsNull`。
 - 额度预扣必须用 `@Modifying @Query` 带 `WHERE balance - frozen >= :c`，检查 `updated row count`。
 
+### 14.1 剧本表（V17 `V17__script.sql`，我的剧本模块）
+
+```sql
+scripts(id, workspace_id, created_by, title, genre, characters, story, conflict,
+        plot_structure, language, stage_directions, condensed_story, status,
+        share_status, shared_at, created_at, updated_at, deleted_at)
+script_episodes(id, script_id, workspace_id, episode_no, title, content, summary, ai_polished,
+        created_at, updated_at, UNIQUE(script_id, episode_no))
+script_changes(id, script_id, workspace_id, episode_id, episode_no, kind, changed_episodes jsonb,
+        note, actor, created_at)          -- 「记录之前章节哪些地方有改动」
+script_marks(script_id, user_id, kind, created_at, PK(script_id,user_id,kind))
+```
+
+- `condensed_story` = AI 持续维护的「精简的故事」，是后续每一集生成的**唯一连续记忆**。
+- 触发器 `trg_script_touch_episodes` / `trg_script_touch_changes` → 任何集/变更活动都 touch `scripts.updated_at`
+  （与 V3 的 `weaveora_touch_project` 同口径，保证「最近更新」排序一致）。
+- 集为**硬删除**（避免软删与 `UNIQUE(script_id, episode_no)` 冲突），删除后后端重排 `episode_no`。
+
 ---
 
 ## 15. 技术选型（已锁定）
@@ -1581,6 +1641,33 @@ GET    /api/v1/exports/{id}/download
 
 GET    /api/v1/styles
 GET    /api/v1/models
+
+# 我的剧本（v2.1，与 /projects 同构）
+GET    /api/v1/scripts
+POST   /api/v1/scripts
+GET    /api/v1/scripts/own
+GET    /api/v1/scripts/{id}
+PATCH  /api/v1/scripts/{id}
+POST   /api/v1/scripts/delete
+POST   /api/v1/scripts/{id}/share
+GET    /api/v1/scripts/marketplace            # 剧本精选（游客可读）
+GET    /api/v1/scripts/marketplace/{id}
+GET    /api/v1/scripts/marketplace/{id}/episodes
+GET    /api/v1/scripts/marketplace/pending
+POST   /api/v1/scripts/marketplace/review
+POST   /api/v1/scripts/marketplace/{id}/toggle/{kind}
+GET    /api/v1/scripts/{id}/episodes
+POST   /api/v1/scripts/{id}/episodes
+PATCH  /api/v1/scripts/{id}/episodes/{eid}
+DELETE /api/v1/scripts/{id}/episodes/{eid}
+GET    /api/v1/scripts/{id}/changes
+POST   /api/v1/scripts/{id}/episodes/{eid}/apply-sync     # Q4：确认后改写历史章节
+POST   /api/v1/scripts/ai/preview-field                   # 新建页（无剧本 ID，不落库）
+POST   /api/v1/scripts/{id}/ai/field
+POST   /api/v1/scripts/{id}/ai/next-episode
+POST   /api/v1/scripts/{id}/ai/condensed
+POST   /api/v1/scripts/{id}/ai/guide
+POST   /api/v1/scripts/{id}/episodes/{eid}/to-project      # → 项目 + 分镜动作与提示词
 
 WS     /api/v1/ws
 ```

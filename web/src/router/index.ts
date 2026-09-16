@@ -39,6 +39,12 @@ const router = createRouter({
       meta: { public: true, title: '集市项目 · 织影 Weaveora' },
     },
     {
+      path: '/script-market/:scriptId',
+      name: 'script-market',
+      component: () => import('@/views/ScriptMarketView.vue'),
+      meta: { public: true, title: '剧本精选 · 织影 Weaveora' },
+    },
+    {
       path: '/app',
       component: () => import('@/layouts/AppLayout.vue'),
       meta: { requiresAuth: true },
@@ -54,6 +60,24 @@ const router = createRouter({
           name: 'projects',
           component: () => import('@/views/ProjectListView.vue'),
           meta: { title: '我的项目 · 织影 Weaveora' },
+        },
+        {
+          path: 'scripts',
+          name: 'scripts',
+          component: () => import('@/views/ScriptListView.vue'),
+          meta: { title: '我的剧本 · 织影 Weaveora' },
+        },
+        {
+          path: 'scripts/new',
+          name: 'script-new',
+          component: () => import('@/views/ScriptNewView.vue'),
+          meta: { title: '新建剧本 · 织影 Weaveora' },
+        },
+        {
+          path: 'scripts/:scriptId',
+          name: 'script-detail',
+          component: () => import('@/views/ScriptDetailView.vue'),
+          meta: { title: '剧情详情 · 织影 Weaveora' },
         },
         {
           path: 'admin/queue',
@@ -95,8 +119,7 @@ router.beforeEach(async (to) => {
     // 已登录且有完整会话才允许跳过登录页
     if (to.name === 'login' && auth.hasSession() && auth.user) {
       return { name: 'projects' }
-    }
-    return true
+    }    return true
   }
 
   if (!auth.hasSession()) {

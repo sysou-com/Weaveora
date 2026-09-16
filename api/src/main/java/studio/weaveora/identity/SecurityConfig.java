@@ -44,7 +44,9 @@ public class SecurityConfig {
                         .requestMatchers(HttpMethod.POST, "/api/v1/auth/**").permitAll()
                         // 集市浏览/预览/资产读公开（点赞/收藏/审批仍走鉴权 POST）
                         .requestMatchers(HttpMethod.GET, "/api/v1/projects/marketplace/**").permitAll()
-                        .requestMatchers("/api/v1/me", "/api/v1/projects/**").authenticated()
+                        // 剧本精选浏览/只读集列表公开（点赞/收藏/审批/编辑仍走鉴权）
+                        .requestMatchers(HttpMethod.GET, "/api/v1/scripts/marketplace/**").permitAll()
+                        .requestMatchers("/api/v1/me", "/api/v1/projects/**", "/api/v1/scripts/**").authenticated()
                         .requestMatchers("/api/v1/assets/**", "/api/v1/exports/**").authenticated()
                         .requestMatchers("/swagger-ui/**", "/swagger-ui.html", "/v3/api-docs/**").permitAll()
                         .requestMatchers("/internal/**", "/api/v1/ws/**").permitAll() // WS 握手内自行鉴权

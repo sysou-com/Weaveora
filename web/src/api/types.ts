@@ -691,3 +691,161 @@ export interface ApiErrorBody {
   message: string
   traceId?: string
 }
+
+/* ==================================================================
+   我的剧本（/api/v1/scripts）—— 字段与后端 record 一一对应
+   ================================================================== */
+
+/** 6 个可 AI 生成/更新的要素字段（标题与类型除外） */
+export type ScriptFieldKey =
+  | 'characters'
+  | 'story'
+  | 'conflict'
+  | 'plotStructure'
+  | 'language'
+  | 'stageDirections'
+
+/** 剧本详情（ScriptResponse） */
+export interface Script {
+  id: string
+  workspaceId: string
+  title: string
+  genre: string
+  characters: string
+  story: string
+  conflict: string
+  plotStructure: string
+  language: string
+  stageDirections: string
+  /** AI 持续维护的「精简的故事」（后续每一集生成的唯一连续记忆） */
+  condensedStory: string
+  status: 'draft' | 'writing' | 'completed' | string
+  shareStatus: string | null
+  episodeCount: number
+  charCount: number
+  createdAt: string
+  updatedAt: string
+}
+
+/** 剧本列表卡片（我的剧本 / 剧本精选 / 待审共用） */
+export interface ScriptCard {
+  id: string
+  title: string
+  genre: string
+  status: string
+  shareStatus: string | null
+  ownerName: string
+  episodeCount: number
+  charCount: number
+  excerpt: string
+  createdAt: string
+  updatedAt: string
+  likeCount: number
+  favoriteCount: number
+  liked: boolean
+  favorited: boolean
+}
+
+/** 剧本分页（默认 8/页） */
+export interface ScriptPage {
+  items: ScriptCard[]
+  page: number
+  size: number
+  total: number
+  hasMore: boolean
+}
+
+/** 一集 */
+export interface ScriptEpisode {
+  id: string
+  episodeNo: number
+  title: string
+  content: string
+  summary: string
+  aiPolished: boolean
+  createdAt: string
+  updatedAt: string
+}
+
+/** AI 一致性检查给出的一条「历史章节需改动」建议（Q4：用户确认后才应用） */
+export interface ScriptConflict {
+  episodeNo: number | null
+  title: string
+  issue: string
+  fix: string
+}
+
+/** 变更记录（含被同步改动的历史章节） */
+export interface ScriptChange {
+  id: string
+  kind: string
+  episodeNo: number | null
+  changedEpisodes: Array<{ episodeNo: number | null; title: string; what: string }>
+  note: string
+  actor: 'user' | 'ai' | string
+  createdAt: string
+}
+
+/** 保存一集的结果（含待确认的历史章节改动） */
+export interface EpisodeSaveResult {
+  episode: ScriptEpisode
+  condensedStory?: string
+  conflicts?: ScriptConflict[]
+  changes?: ScriptChange[]
+  completedBeats?: string[]
+  source?: string
+}
+
+/** 单字段 AI 结果（Q3：前端做 diff，用户确认后再写入） */
+export interface AiFieldResult {
+  field: ScriptFieldKey | string
+  value: string
+  note: string
+  changed: boolean
+  source: string
+}
+
+/** 下一集草稿（未落库） */
+export interface AiNextEpisodeResult {
+  episodeNo: number
+  title: string
+  summary: string
+  content: string
+  source: string
+}
+
+/** 精简故事刷新 + 一致性检查结果 */
+export interface AiCondensedResult {
+  condensedStory: string
+  conflicts: ScriptConflict[]
+  completedBeats: string[]
+  source: string
+}
+
+/** AI 引导 */
+export interface AiGuideResult {
+  stage: string
+  missingBeats: string[]
+  suggestions: string[]
+  estimatedRemainingEpisodes: number
+  source: string
+}
+
+/** 应用一致性改动结果 */
+export interface ApplySyncResult {
+  episodes: ScriptEpisode[]
+  condensedStory?: string
+  changes?: ScriptChange[]
+  source?: string
+}
+
+/** 转成项目结果 */
+export interface ConvertToProjectResult {
+  projectId: string
+  briefId: string
+  revisionId: string | null
+  shotCount: number
+  projectTitle: string
+  note?: string
+}
+

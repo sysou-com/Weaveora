@@ -171,6 +171,31 @@ public class ProjectService implements ProjectContextPort {
         return toBriefResponse(briefs.save(b));
     }
 
+    /**
+     * 剧本模块专用**内部 brief 通道**：把整集内容（可超 2000 字）带入项目，不走公开端点的 10–2000 校验。
+     *
+     * <p>为什么需要它：{@code POST /briefs} 的 DTO 有 {@code @Size(max=2000)}，而「我的剧本 → 转成项目」
+     * 要求把每集正文与标题真正带入项目（Q6 已确认）。上限 20000，超出即截断并留日志。
+     * 只允许同工作区的项目调用（内部方法，不对 Controller 暴露）。
+     */
+    @Transactional
+    public BriefResponse createBriefInternal(UUID workspaceId, UUID projectId, String rawText,
+                                             String mode, com.fasterxml.jackson.databind.JsonNode constraints) {
+        Project project = findInWorkspace(workspaceId, projectId);
+        String raw = rawText == null ? "" : rawText.trim();
+        if (raw.length() < 10) {
+            throw new BizException(ErrorCode.BRIEF_TOO_SHORT, "Brief 至少 10 字（脚本来源）");
+        }
+        if (raw.length() > 20000) {
+            raw = raw.substring(0, 20000);
+        }
+        String m = (mode == null || mode.isBlank()) ? project.mode() : mode;
+        Brief b = Brief.create(workspaceId, projectId, raw, m, constraints);
+        Brief saved = briefs.save(b);
+        briefs.flush();   // 同事务内随后 director.generate 会读它，先落库避免不可见
+        return toBriefResponse(saved);
+    }
+
     /** constraints（用户 JSON）+ referenceAssetIds（≤4，去重）合并进 "referenceAssetIds"。 */
     private static com.fasterxml.jackson.databind.JsonNode mergeConstraints(
             com.fasterxml.jackson.databind.JsonNode user, java.util.List<UUID> refIds) {

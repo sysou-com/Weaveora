@@ -38,7 +38,12 @@ const menuOptions = computed<DropdownOption[]>(() => {
 
 function navActive(name: string): boolean {
   const cur = String(route.name ?? '')
-  return cur === name
+  if (cur === name) return true
+  // 「我的剧本」三个路由（列表/新建/详情）统一高亮
+  if (name === 'scripts') {
+    return cur === 'script-new' || cur === 'script-detail'
+  }
+  return false
 }
 
 async function onMenuSelect(key: string): Promise<void> {
@@ -79,6 +84,7 @@ const contact = { qq: '358532433', email: 'sysou.com@outlook.com' }
       <nav class="topnav" aria-label="主导航">
         <button type="button" class="nav-link" :class="{ on: navActive('home') }" @click="router.push({ name: 'home' })">首页</button>
         <button type="button" class="nav-link" :class="{ on: navActive('projects') }" @click="router.push({ name: 'projects' })">我的项目</button>
+        <button type="button" class="nav-link" :class="{ on: navActive('scripts') }" data-testid="nav-scripts" @click="router.push({ name: 'scripts' })">我的剧本</button>
         <button type="button" class="nav-link" :class="{ on: navActive('guide') }" @click="router.push({ name: 'guide' })">使用指南</button>
         <NDropdown :options="moreOptions" trigger="click" @select="onMoreSelect">
           <button type="button" class="nav-link more">更多 <span class="caret">▾</span></button>
