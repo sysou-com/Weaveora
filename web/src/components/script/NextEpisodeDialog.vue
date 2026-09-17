@@ -130,6 +130,7 @@ function submit(): void {
       />
       <p class="tip text-secondary">
         AI 只会改文笔与节奏（精修台词、补舞台说明、理顺衔接），<b>不会改剧情</b>；结果进编辑器，你确认后再保存。
+        要「保持原长度」（不增不减），保存后在分集里点「AI 润色」并勾「保持原长度」。
       </p>
     </div>
 
@@ -146,7 +147,7 @@ function submit(): void {
       />
       <div class="len-block">
         <p class="lbl len-lbl">
-          {{ mode === 'ai' ? '本集目标字数' : '润色目标字数（可保持原长度）' }}
+          {{ mode === 'ai' ? '本集目标字数' : '润色后的目标字数（按你写的正文改，目标是这么长）' }}
         </p>
         <ScriptLengthField v-model="targetChars" label="本集字数" />
       </div>

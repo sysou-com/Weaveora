@@ -451,20 +451,31 @@ public class ScriptService {
     /** 应用 AI 刷新结果（短事务）：精简的故事 + 待用户确认的一致性改动（Q4：不自动改历史章节）。 */
     private EpisodeSaveResult applyCondensedTx(UUID workspaceId, UUID scriptId, Saved saved,
                                               AiCondensedResult cond) {
-        Script s = requireScript(workspaceId, scriptId);
         List<ScriptConflict> conflicts = cond.conflicts() == null ? List.of() : cond.conflicts();
-        if (cond.condensedStory() != null && !cond.condensedStory().isBlank()) {
-            s.setCondensedStory(cond.condensedStory());
-            scripts.save(s);
-        }
+        applyCondensedStory(workspaceId, scriptId, cond.condensedStory());
         if (!conflicts.isEmpty()) {
             changes.save(ScriptChange.create(scriptId, workspaceId, saved.episodeId(), saved.episodeNo(),
                     "consistency_proposal", conflictsJson(conflicts),
                     "一致性检查建议（待用户确认后改写）", "ai"));
         }
-        return new EpisodeSaveResult(saved.episode(), s.condensedStory(), conflicts,
-                recentChanges(scriptId, 5),
+        return new EpisodeSaveResult(saved.episode(), requireScript(workspaceId, scriptId).condensedStory(),
+                conflicts, recentChanges(scriptId, 5),
                 cond.completedBeats() == null ? List.of() : cond.completedBeats(), ai.source());
+    }
+
+    /**
+     * 把 AI 产出的「精简的故事」落库（**唯一入口**：保存后刷新 / 后台或手动刷新共用）。
+     *
+     * <p>2026-09-17 自查：原先保存路径与 {@code aiCondensed} 各写一份「setCondensedStory + save」，
+     * 两处口径迟早会漂；现在只留这一个方法，传空串/ null 时不动库（不静默清空用户数据）。
+     */
+    private void applyCondensedStory(UUID workspaceId, UUID scriptId, String story) {
+        if (story == null || story.isBlank()) {
+            return;
+        }
+        Script cur = requireScript(workspaceId, scriptId);
+        cur.setCondensedStory(story);
+        scripts.save(cur);
     }
 
     @Transactional
@@ -626,11 +637,7 @@ public class ScriptService {
         // AI 调用在**事务外**（长 LLM 调用不占数据库连接，§5.7）：前端“保存一集”后会后台调它。
         AiCondensedResult r = ai.refreshCondensed(s, episodes.findByScriptIdOrderByEpisodeNoAsc(scriptId));
         tx.execute(st -> {
-            Script cur = requireScript(workspaceId, scriptId);
-            if (r.condensedStory() != null && !r.condensedStory().isBlank()) {
-                cur.setCondensedStory(r.condensedStory());
-                scripts.save(cur);
-            }
+            applyCondensedStory(workspaceId, scriptId, r.condensedStory());
             changes.save(ScriptChange.create(scriptId, workspaceId, null, null, "condensed_refresh",
                     conflictsJson(r.conflicts()), "刷新精简的故事", "ai"));
             return null;
