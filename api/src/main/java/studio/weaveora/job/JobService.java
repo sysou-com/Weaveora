@@ -19,6 +19,7 @@ import studio.weaveora.identity.domain.UserRepository;
 import studio.weaveora.infra.storage.StoragePort;
 import studio.weaveora.infra.ws.JobWsHandler;
 import studio.weaveora.job.api.CreateJobRequest;
+import studio.weaveora.job.api.EngineStatusResponse;
 import studio.weaveora.job.api.JobView;
 import studio.weaveora.job.domain.GenerationJob;
 import studio.weaveora.job.domain.GenerationJobRepository;
@@ -261,10 +262,9 @@ public class JobService {
         if (req.kind() == null || !List.of("still", "clip", "voice", "bgm", "portrait", "lipsync", "talk").contains(req.kind())) {
             throw new BizException(ErrorCode.VALIDATION, "kind 必须为 still|clip|voice|bgm|portrait|lipsync|talk");
         }
-        // 生成前置闸门：目标执行面**没有在线节点**就直接报错，而不是让任务悄悄排到天荒地老
-        // （2026-09-17：GPU 公网地址被平台映射到**别人的实例**，我们停了 worker 止血 ——
-        //   此时用户点生成只会「一直排队」，没有任何节点会 claim）
-        requireEngineOnline(laneFor(userId, req.kind()));
+        // 引擎不在线时**不报错**（用户 2026-09-17 口径）：任务照常入队、节点恢复后自动开始，
+        // 界面给一条提示即可（前端拿 `/api/v1/engine/status`），别打断用户编辑分镜/提示词。
+        logEngineOfflineIfAny(userId, req.kind());
         if (project.approvedRevisionId() == null || !project.approvedRevisionId().equals(req.revisionId())) {
             throw new BizException(ErrorCode.REVISION_NOT_APPROVED, "请先确认该方案（未确认不可生成）");
         }
@@ -702,8 +702,8 @@ public class JobService {
             if (!List.of("failed", "cancelled").contains(old.state())) {
                 throw new BizException(ErrorCode.VALIDATION, "仅失败/已取消的任务可重试");
             }
-            // 重试同样要过闸门：节点不在线时创建出来的任务也只会排队
-            requireEngineOnline(laneFor(userId, old.kind()));
+            // 引擎不在线也照常入队（只留日志 + 给前端提示），不拦住用户
+            logEngineOfflineIfAny(userId, old.kind());
             Retarget t = repointToCurrentApproved(old, project, userId);
             // 注意：不能直接沿袭 old.engineRoute() —— 若旧任务当初路由错了（例如 lipsync 被
             // 派到 cloud，云上没有口型工作流），重试会原样复现错误。自托管 kind 一律重算为 gpu，
@@ -1935,21 +1935,49 @@ public class JobService {
      * <p>判据与任务回收同一口径：{@code worker_nodes.last_seen_at} 在
      * {@link #WORKER_ALIVE_GRACE_MIN} 分钟内 = 在线。
      */
-    private void requireEngineOnline(String lane) {
+    /**
+     * 引擎离线时**只记日志、只给提示，不抛异常**。
+     *
+     * <p>口径变更（2026-09-17 用户）：前一天做成了「无在线节点 → 503 拦住」，但用户明确要求
+     * **GPU 不在线不要报错**：他还要继续处理分镜动作、提示词等不依赖 GPU 的工作，
+     * 出图/出片任务排在队列里等节点恢复即可。所以这里降级为"不静默地提示"：
+     * 后端记 INFO 日志，前端用 {@code GET /api/v1/engine/status} 拿提示展示。
+     */
+    private void logEngineOfflineIfAny(UUID userId, String kind) {
+        EngineStatusResponse st = engineStatus();
+        if (st.notice() != null && !st.notice().isBlank()) {
+            log.info("生成任务入队时引擎不在线（lane={}）：{}", laneFor(userId, kind), st.notice());
+        }
+    }
+
+    /**
+     * 引擎在线状态（只读，**不抛异常**）：给前端做「GPU 不在线」的提示。
+     *
+     * <p>{@code notice} 为空串 = 都在线；否则是一句可直接展示的中文提示。
+     */
+    public EngineStatusResponse engineStatus() {
         java.time.OffsetDateTime now = java.time.OffsetDateTime.now();
-        boolean online = nodes.findAll().stream()
-                .anyMatch(n -> nodeServes(lane, n.capabilities()) && nodeAlive(n.lastSeenAt(), now));
-        if (online) {
-            return;
+        List<WorkerNode> all = nodes.findAll();
+        boolean gpu = all.stream().anyMatch(n -> nodeServes("gpu", n.capabilities()) && nodeAlive(n.lastSeenAt(), now));
+        boolean cloud = all.stream().anyMatch(n -> nodeServes("cloud", n.capabilities()) && nodeAlive(n.lastSeenAt(), now));
+        return new EngineStatusResponse(gpu, cloud, offlineNotice(gpu, cloud));
+    }
+
+    /** 离线提示文案（纯函数）：在线返回空串；否则说清「仍可做什么」。 */
+    static String offlineNotice(boolean gpuOnline, boolean cloudOnline) {
+        if (gpuOnline && cloudOnline) {
+            return "";
         }
-        if ("cloud".equals(lane)) {
-            throw new BizException(ErrorCode.WORKER_UNAVAILABLE,
-                    "云引擎当前没有在线节点（worker 未注册或已离线）——请稍后重试。");
+        List<String> who = new ArrayList<>();
+        if (!gpuOnline) {
+            who.add("GPU（自托管）");
         }
-        throw new BizException(ErrorCode.WORKER_UNAVAILABLE,
-                "自托管引擎（GPU）当前没有在线节点：最近一次心跳已超过 " + WORKER_ALIVE_GRACE_MIN
-                        + " 分钟。请到「生成引擎配置」核对服务器地址与端口，或等节点恢复后再生成"
-                        + "（现在提交也只会一直排队）。若刚在平台重开了实例，改完地址请重启节点进程。");
+        if (!cloudOnline) {
+            who.add("云 API");
+        }
+        return String.join("、", who) + "当前没有在线节点：出图/出片任务会留在队列里，节点恢复后自动开始"
+                + "（最近心跳超过 " + WORKER_ALIVE_GRACE_MIN + " 分钟即视为离线）。"
+                + "你现在仍可继续编辑分镜动作、提示词与方案。";
     }
 
     /** 纯函数（便于单测）：节点能力是否服务于该执行面（gpu = 自托管 ComfyUI；cloud = 云 API）。 */
@@ -1990,8 +2018,7 @@ public class JobService {
         }
         try {
             return nodes.findById(UUID.fromString(workerId))
-                    .map(n -> n.lastSeenAt() != null
-                            && n.lastSeenAt().isAfter(now.minusMinutes(WORKER_ALIVE_GRACE_MIN)))
+                    .map(n -> nodeAlive(n.lastSeenAt(), now))
                     .orElse(false);
         } catch (IllegalArgumentException e) {
             return false;   // 非 UUID（历史行）→ 当作失联，按老逻辑回收

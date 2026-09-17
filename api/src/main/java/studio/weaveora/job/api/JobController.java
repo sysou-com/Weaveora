@@ -31,6 +31,18 @@ public class JobController {
         this.jobService = jobService;
     }
 
+    /**
+     * 引擎在线状态（只读）—— 供前端展示「GPU 不在线」的**提示**。
+     *
+     * <p>2026-09-17 用户口径：GPU 不在线不要报错，给提示就行（用户还要继续处理分镜动作/提示词；
+     * 出图任务留队列等节点恢复）。所以这个接口只回答「在不在线 + 一句人话提示」，不拦截任何请求。
+     */
+    @GetMapping("/engine/status")
+    public ResponseEntity<EngineStatusResponse> engineStatus(HttpServletRequest request) {
+        uid(request);   // 仅要求已登录
+        return ResponseEntity.ok(jobService.engineStatus());
+    }
+
     @PostMapping("/projects/{projectId}/jobs")
     public ResponseEntity<List<JobView>> create(
             HttpServletRequest request,

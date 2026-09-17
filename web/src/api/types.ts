@@ -829,6 +829,14 @@ export interface AiNextEpisodeResult {
   outline?: string[] | null
 }
 
+/** 引擎在线状态（GET /api/v1/engine/status）：GPU 不在线时只给提示，不拦截生成 */
+export interface EngineStatus {
+  gpuOnline: boolean
+  cloudOnline: boolean
+  /** 可直接展示的中文提示；空串 = 都在线 */
+  notice: string
+}
+
 /** 润色「我自己写的正文」结果（不落库：前端填进编辑器，用户确认再保存） */
 export interface AiPolishResult {
   content: string

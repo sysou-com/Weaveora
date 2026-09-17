@@ -5,6 +5,7 @@ import org.junit.jupiter.api.Test;
 
 import java.time.OffsetDateTime;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -60,5 +61,18 @@ class JobEngineGateTest {
         assertTrue(JobService.nodeAlive(now.minusMinutes(4), now), "宽限期内 → 在线");
         assertFalse(JobService.nodeAlive(now.minusMinutes(6), now), "超过宽限期 → 离线");
         assertFalse(JobService.nodeAlive(null, now), "没心跳过 → 离线");
+    }
+
+    @Test
+    void offlineNoticeIsEmptyOnlyWhenBothLanesAreOnlineAndTellsUserWhatStillWorks() {
+        // 2026-09-17 用户口径：GPU 不在线**不要报错**，给提示就行；提示里要说清「还能干什么」
+        assertEquals("", JobService.offlineNotice(true, true));
+        String gpuOnly = JobService.offlineNotice(false, true);
+        assertTrue(gpuOnly.contains("GPU（自托管）"), gpuOnly);
+        assertFalse(gpuOnly.contains("云 API"), gpuOnly);
+        assertTrue(gpuOnly.contains("仍可继续编辑分镜动作、提示词与方案"), gpuOnly);
+        assertTrue(gpuOnly.contains("节点恢复后自动开始"), gpuOnly);
+        String both = JobService.offlineNotice(false, false);
+        assertTrue(both.contains("GPU（自托管）") && both.contains("云 API"), both);
     }
 }

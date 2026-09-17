@@ -1,9 +1,18 @@
 import { request } from './client'
 import { WORKSPACE_HEADER } from './projects'
-import type { JobRecord } from './types'
+import type { EngineStatus, JobRecord } from './types'
 
-/** POST /api/v1/projects/{id}/jobs —— 需已整版确认（approved revision） */
-export async function createJobs(
+/**
+ * GET /api/v1/engine/status —— 引擎在线状态（只读）。
+ *
+ * <p>用途：GPU 不在线时**不让生成报错**（用户 2026-09-17 口径：给提示就行，用户还要继续处理
+ * 分镜动作/提示词），前端拿 `notice` 展示一条黄色提示即可。
+ */
+export async function getEngineStatus(): Promise<EngineStatus> {
+  return request<EngineStatus>('/api/v1/engine/status')
+}
+
+/** POST /api/v1/projects/{id}/jobs —— 需已整版确认（approved revision） */export async function createJobs(
   workspaceId: string,
   projectId: string,
   input: {

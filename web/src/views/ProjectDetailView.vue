@@ -24,7 +24,7 @@ import {
   type RewriteResult,
 } from '@/api/director'
 import { createBrief, listBriefs } from '@/api/briefs'
-import { createJobs, listJobs, cancelJob, rerunJob, retryJobs, deleteJobs, JOB_STATE_LABEL } from '@/api/jobs'
+import { createJobs, getEngineStatus, listJobs, cancelJob, rerunJob, retryJobs, deleteJobs, JOB_STATE_LABEL } from '@/api/jobs'
 import { shareProject } from '@/api/market'
 import { listAssets, uploadReference, fetchAssetBlob, deleteAssets, uploadVoiceLine, useSampleAsLineVoice, deleteVoicePreset, auditionVoicePreset, assetAsPortrait, assetAsReference } from '@/api/assets'
 import { createExport, fetchExportBlob, renderMaster, timecode } from '@/api/export'
@@ -1661,6 +1661,18 @@ watch(() => [...refLibrary.value.map((a) => a.id)].join(','), () => { void refre
 
 /** P12：本方案最多可绑定的参考图张数（各模型对「一次能输入几张」另有各自上限，见引擎配置） */
 const MAX_REFS = 15
+
+/**
+ * 引擎在线状态（只提示、**不拦**生成）：GPU 不在线时用户仍可编辑分镜动作/提示词，
+ * 出图任务留在队列里等节点恢复（用户 2026-09-17 口径）。
+ */
+const engineStatus = useQuery({
+  queryKey: ['engine-status'],
+  queryFn: () => getEngineStatus(),
+  staleTime: 20_000,
+  refetchInterval: 30_000,
+})
+const engineNotice = computed(() => engineStatus.data.value?.notice ?? '')
 
 /** 当前图片模型一次能收几张参考图（来自模型 schema 的 mapping.refsMax；未知则 0=不提示） */
 const engineSettings = useQuery({
@@ -3890,6 +3902,22 @@ const shotTotal = computed(() => {
       </div>
     </div>
 
+    <!-- 引擎不在线：**只提示不拦**（用户口径：仍可继续处理分镜动作/提示词，出图任务排队等节点） -->
+    <NAlert
+      v-if="engineNotice"
+      type="warning"
+      :bordered="false"
+      class="engine-offline"
+      data-testid="engine-offline-notice"
+    >
+      <div class="eo-row">
+        <span>{{ engineNotice }}</span>
+        <NButton size="tiny" quaternary :loading="engineStatus.isFetching.value" @click="engineStatus.refetch()">
+          重新检测
+        </NButton>
+      </div>
+    </NAlert>
+
     <!-- 加载中骨架 -->
     <template v-if="project.isPending.value || briefs.isPending.value">
       <div class="skel-row">
@@ -5286,6 +5314,9 @@ const shotTotal = computed(() => {
   gap: 10px;
   padding-top: 8px;
 }
+/* 引擎不在线提示条（黄色、仅提示不拦）：见模板 data-testid="engine-offline-notice" */
+.engine-offline { margin-bottom: 4px; }
+.eo-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; line-height: 1.7; }
 .back {
   display: inline-flex;
   align-items: center;
