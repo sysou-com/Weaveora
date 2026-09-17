@@ -13,6 +13,8 @@ import studio.weaveora.script.api.AiFieldResult;
 import studio.weaveora.script.api.AiGuideResult;
 import studio.weaveora.script.api.AiNextEpisodeRequest;
 import studio.weaveora.script.api.AiNextEpisodeResult;
+import studio.weaveora.script.api.AiPolishRequest;
+import studio.weaveora.script.api.AiPolishResult;
 import studio.weaveora.script.api.ScriptConflict;
 import studio.weaveora.script.domain.Script;
 import studio.weaveora.script.domain.ScriptEpisode;
@@ -91,11 +93,19 @@ public class ScriptAiService {
         StringBuilder acc = new StringBuilder();
         String system = ScriptPrompts.fieldSystem();
         String note = "";
-        // 允许比计划多写 1 段补齐（模型每段可能少写一点）
-        int maxPass = Math.min(ScriptPrompts.MAX_PASSES, plan.passes() + 1);
+        // 【口径一致】计划段数 = plan.passes()（提示词里「请拆成 N 段」就是它）；
+        // 多出的那 1 段只作「模型少写了就补一段」的余量，且本段预算要按**剩余目标**算
+        // （之前每段都用整篇目标 → 多段必然写超，见 ScriptPrompts#segmentBudget 的注释）。
+        int planned = plan.passes();
+        int maxPass = Math.min(ScriptPrompts.MAX_PASSES, planned + 1);
         for (int pass = 1; pass <= maxPass; pass++) {
+            int remaining = target - acc.length();
+            if (pass > planned && remaining < ScriptPrompts.PASS_MIN_CHARS) break;   // 剩余太少，不值得再调一次
+            ScriptPrompts.PassPlan passPlan = pass <= planned
+                    ? plan
+                    : plan.withPerPass(ScriptPrompts.segmentBudget(remaining, 1));
             String user = ScriptPrompts.fieldUser(script, episodes, field, req.hint(), current,
-                    req.fromContent(), pass, acc.toString(), target, outline);
+                    req.fromContent(), pass, acc.toString(), passPlan, outline);
             JsonNode node;
             LlmJson res;
             try {
@@ -142,14 +152,14 @@ public class ScriptAiService {
             note = (note == null || note.isBlank() ? "" : note + "；")
                     + "AI 本次产出 " + value.length() + " 字（目标 " + target
                     + " 字），可重试或手写补全";
-        } else if (value.length() > target * 1.5) {
-            // 写超 → 自动压缩一次（保留内容与结尾）
+        } else if (value.length() > ScriptPrompts.allowedChars(plan)) {
+            // 写超 → 自动压缩一次（保留内容与结尾）。阈值见 ScriptPrompts#allowedChars：
+            // 不能只用「目标×1.5」，否则「老实按封顶写完」的稿子也会被冤枉压一次。
             String origin = String.valueOf(value.length());
             value = compressToTarget(system, script, "字段「" + field.label() + "」", value, target,
                     "字段「" + field.label() + "」");
             note = (note == null || note.isBlank() ? "" : note + "；")
-                    + "AI 写超了（原 " + origin + " 字 > 目标 " + target + " 字），已自动压缩到 "
-                    + value.length() + " 字";
+                    + "已按目标字数自动精简（原 " + origin + " 字 → " + value.length() + " 字）";
         }
         boolean changed = !value.equals(current.trim());
         return new AiFieldResult(field.key(), value, note, changed, llm.source(),
@@ -180,7 +190,12 @@ public class ScriptAiService {
         // 分段续写：一集拆成多段（起 / 承转 / 合与钩子），目标字数由用户设定，避开 max_tokens 截断
         int epTarget = ScriptPrompts.clampTarget(req.targetChars() == null ? 0 : req.targetChars());
         ScriptPrompts.PassPlan epPlan = ScriptPrompts.planFor(epTarget);
-        int epMaxPass = Math.min(ScriptPrompts.MAX_PASSES, epPlan.passes() + 1);
+        // 【口径一致】计划段数 = epPlan.passes()（提纲、提示词里「会被拆成 N 段」都是它）；
+        // 多出的 1 段只作「没写够就补一段」的余量，且**本段预算按剩余目标平摊**。
+        // 旧实现：循环到 passes+1，但每段都用「整集目标」当预算 —— 目标 500 字时计划 1 段/却写 2 段、
+        // 每段被要求「约 500 字」（实测共 1335 字）→ 必然触发一次压缩调用（多几十秒）+ 弹「写超了…」。
+        int epPlanned = epPlan.passes();
+        int epHardMax = Math.min(ScriptPrompts.MAX_PASSES, epPlanned + 1);
         logTrim("第 " + nextNo + " 集", script, episodes, null, true);
         // 【B】先要本集的**节拍提纲**（起/承转/合），每段照一条写
         ScriptPrompts.Outline outline = outlineFor(
@@ -191,9 +206,14 @@ public class ScriptAiService {
         String summary = "";
         String note = "";
         StringBuilder acc = new StringBuilder();
-        for (int pass = 1; pass <= epMaxPass; pass++) {
+        for (int pass = 1; pass <= epHardMax; pass++) {
+            int remaining = epTarget - acc.length();
+            if (pass > epPlanned && remaining < ScriptPrompts.PASS_MIN_CHARS) break;   // 剩余太少，不值得再调一次
+            ScriptPrompts.PassPlan passPlan = pass <= epPlanned
+                    ? epPlan
+                    : epPlan.withPerPass(ScriptPrompts.segmentBudget(remaining, 1));
             String user = ScriptPrompts.episodeUser(script, episodes, nextNo, hint, req.instruction(),
-                    pass, acc.toString(), outline, epTarget);
+                    pass, acc.toString(), outline, passPlan);
             JsonNode node;
             LlmJson res;
             try {
@@ -231,7 +251,9 @@ public class ScriptAiService {
             }
             if (acc.length() > 0) acc.append("\n\n");
             acc.append(part);
-            if (acc.length() >= ScriptPrompts.EPISODE_MIN_CHARS) {
+            // 达标即停：旧实现写死 `>= EPISODE_MIN_CHARS(4000)`，与用户设定的小目标脱钩 ——
+            // 这正是「选 500 字也慢」的主因（明明够了还要再写一段，然后因为抄字又去压缩一次）。
+            if (acc.length() >= epTarget) {
                 break;
             }
         }
@@ -250,15 +272,101 @@ public class ScriptAiService {
             String warn = "AI 本次产出 " + content.length() + " 字（目标 " + epTarget
                     + " 字），可重试或手写补全";
             note = note.isBlank() ? warn : note + "；" + warn;
-        } else if (content.length() > epTarget * 1.5) {
+        } else if (content.length() > ScriptPrompts.allowedChars(epPlan)) {
             String origin = String.valueOf(content.length());
             content = compressToTarget(system, script, "第 " + nextNo + " 集正文", content, epTarget,
                     "第 " + nextNo + " 集");
-            String warn = "AI 写超了（原 " + origin + " 字 > 目标 " + epTarget + " 字），已自动压缩到 "
-                    + content.length() + " 字";
+            String warn = "已按目标字数自动精简（原 " + origin + " 字 → " + content.length() + " 字）";
             note = note.isBlank() ? warn : note + "；" + warn;
         }
         return new AiNextEpisodeResult(nextNo, title, summary, content, llm.source(), note, outline.isEmpty() ? null : outline.segments());
+    }
+
+    // ------------------------------------------------------------ 润色（作者自己写的正文）
+
+    /**
+     * 在**作者自己写的正文**上润色（用户 2026-09-17：「选『我自己写』也要能 AI 润色」）。
+     *
+     * <p>三条设计口径：
+     * <ol>
+     *   <li><b>不重编剧情</b>：与 {@link #nextEpisode} 不同 —— 不生成提纲、不另写一集，只改文笔与节奏
+     *       （系统词 {@code prompts/script_polish_system.md} 明写「不得新增/删除人物、事件、设定与结局」）。</li>
+     *   <li><b>一次一段</b>：作者正文按 {@link ScriptPrompts#chunk} 切块（每块 ≤ {@link ScriptPrompts#EPISODE_PASS_CHARS} 字），
+     *       逐块润色再拼回 —— 避免单次输出超过 `max_tokens` 被截断（实测 422）。**短稿（最常见）就是一次调用。**</li>
+     *   <li><b>目标字数</b>：不传 = **保持原长度**（只改文笔）；传了才按「全篇目标 / 块数」平摊，口径与提示词一致。</li>
+     * </ol>
+     *
+     * <p>只产出值、不落库（与其它 AI 能力一致）：前端拿到后填进编辑器，用户确认再保存。
+     */
+    public AiPolishResult polishEpisode(Script script, List<ScriptEpisode> episodes, AiPolishRequest req) {
+        String draft = req.content() == null ? "" : req.content().trim();
+        if (draft.isEmpty()) {
+            throw new BizException(ErrorCode.VALIDATION,
+                    "还没有可润色的正文 —— 请先写（或粘贴）一点内容，再让 AI 润色");
+        }
+        boolean keepLength = req.targetChars() == null || req.targetChars() <= 0;
+        int target = ScriptPrompts.clampTarget(keepLength ? draft.length() : req.targetChars());
+        if (stub()) {
+            return new AiPolishResult(draft, "离线示例（未接 LLM）：正文原样返回", llm.source(), draft.length());
+        }
+        String system = ScriptPrompts.polishSystem();
+        logTrim("润色", script, episodes, null, true);
+        List<String> chunks = ScriptPrompts.chunk(draft, ScriptPrompts.EPISODE_PASS_CHARS);
+        int avgPer = ScriptPrompts.segmentBudget(target, chunks.size());
+        StringBuilder out = new StringBuilder();
+        String note = "";
+        for (int i = 0; i < chunks.size(); i++) {
+            String chunk = chunks.get(i);
+            // 保持原长度时以「本块自己的字数」为目标（只改文笔，不瘦不胖）
+            int per = keepLength
+                    ? Math.max(200, Math.min(ScriptPrompts.MAX_SEGMENT_CHARS, chunk.length()))
+                    : avgPer;
+            ScriptPrompts.PassPlan passPlan = new ScriptPrompts.PassPlan(target, chunks.size(), per);
+            String user = ScriptPrompts.polishUser(script, episodes, i + 1, chunks.size(), chunk,
+                    out.toString(), passPlan, req.instruction());
+            String what = "润色第 " + (i + 1) + "/" + chunks.size() + " 段";
+            LlmJson res;
+            try {
+                res = callJson(system, user, script.title(), what);
+            } catch (RuntimeException e) {
+                // 韧性：已有润色结果就保留（不要让后段失败把前段一起丢掉）
+                if (out.length() > 0) {
+                    note = "第 " + (i + 1) + " 段润色失败，已保留前 " + out.length() + " 字（可重试）";
+                    log.warn("{} 失败，保留已润色 {} 字：{}", what, out.length(), e.getMessage());
+                    break;
+                }
+                throw e;
+            }
+            String part = pickText(res, "value", what);
+            if (part.isEmpty()) {
+                LlmJson again = retryBlank(system, user, script.title(), what);
+                if (again == null) {
+                    break;
+                }
+                part = pickText(again, "value", what + "（重试）");
+                if (part.isEmpty()) {
+                    break;
+                }
+            }
+            if (out.length() > 0) out.append("\n\n");
+            out.append(part);
+        }
+        String value = out.toString().trim();
+        if (value.isBlank()) {
+            // 一段都没成功：**保留原稿**（宁可没润色，也不能把用户写的字弄丢）
+            return new AiPolishResult(draft, "润色没有产出结果，已保留原文（可重试）", llm.source(), draft.length());
+        }
+        ScriptPrompts.PassPlan guard = new ScriptPrompts.PassPlan(target, chunks.size(), avgPer);
+        if (value.length() > ScriptPrompts.allowedChars(guard)) {
+            String origin = String.valueOf(value.length());
+            value = compressToTarget(system, script, "本集正文（润色稿）", value, target, "润色稿");
+            note = (note.isBlank() ? "" : note + "；")
+                    + "已按目标字数自动精简（原 " + origin + " 字 → " + value.length() + " 字）";
+        }
+        if (chunks.size() > 1) {
+            note = (note.isBlank() ? "" : note + "；") + "长文分 " + chunks.size() + " 段润色后拼回";
+        }
+        return new AiPolishResult(value, note, llm.source(), draft.length());
     }
 
     // ------------------------------------------------------------ 精简故事 + 一致性检查

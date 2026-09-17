@@ -326,4 +326,67 @@ class ScriptPromptsTest {
         assertEquals("短", ScriptPrompts.clip("短", 10));
         assertEquals("", ScriptPrompts.clip(null, 10));
     }
+
+    // ---------------------------------------------------------------- 2026-09-17 修：字数口径
+
+    @Test
+    void smallTargetAsksForTheWholeEpisodeInOneSegmentWithTheSameNumbers() {
+        // 用户报「选 500 字也一样慢」：旧实现计划 1 段，却在提示词里写「约 500 字」而循环写 2 段
+        ScriptPrompts.PassPlan plan = ScriptPrompts.planFor(500);
+        assertEquals(1, plan.passes());
+        assertEquals(500, plan.perPass());
+        String user = ScriptPrompts.episodeUser(script(), List.of(), 2, null, null, 1, "", NO_OUTLINE, plan);
+        assertTrue(user.contains("会被拆成 1 段"), user);
+        assertTrue(user.contains("本集只有这一段"), user);
+        assertTrue(user.contains("约 500 字"), user);
+        assertTrue(user.contains("严格不超过 800 字"), user);   // segmentCeiling(500)=800
+    }
+
+    @Test
+    void segmentBudgetSplitsRemainingTargetAcrossRemainingPasses() {
+        // 4400 目标分 2 段：每段 2200；只剩 1 段时按剩余给
+        assertEquals(2200, ScriptPrompts.segmentBudget(4400, 2));
+        assertEquals(600, ScriptPrompts.segmentBudget(600, 1));
+        assertEquals(ScriptPrompts.PASS_MIN_CHARS, ScriptPrompts.segmentBudget(50, 1), "低于下限用下限");
+        assertEquals(ScriptPrompts.MAX_SEGMENT_CHARS, ScriptPrompts.segmentBudget(9000, 2), "高于封顶用封顶");
+    }
+
+    @Test
+    void allowedCharsNeverPunishesWritingUpToTheSegmentCeiling() {
+        // 目标 500：封顶 800（>750=目标×1.5）—— 老实按上限写完的稿子不得被判「写超」
+        assertTrue(ScriptPrompts.allowedChars(ScriptPrompts.planFor(500))
+                >= ScriptPrompts.segmentCeiling(ScriptPrompts.planFor(500).perPass()));
+        assertEquals(6000, ScriptPrompts.allowedChars(ScriptPrompts.planFor(4000)), "4000 → 目标×1.5=6000");
+    }
+
+    @Test
+    void chunkSplitsOnParagraphsAndNeverExceedsLimit() {
+        List<String> one = ScriptPrompts.chunk("第一段\n第二段", 2200);
+        assertEquals(1, one.size());
+        assertTrue(one.get(0).contains("第二段"));
+
+        List<String> many = ScriptPrompts.chunk(("一".repeat(2000) + "\n" + "二".repeat(2000)), 2200);
+        assertEquals(2, many.size());
+        for (String c : many) {
+            assertTrue(c.length() <= 2200, "块不得超限：" + c.length());
+        }
+
+        List<String> hard = ScriptPrompts.chunk("长".repeat(5000), 2200);
+        assertEquals(3, hard.size(), "单段超限要硬切，不能丢字");
+        assertEquals(5000, hard.stream().mapToInt(String::length).sum());
+        assertEquals(0, ScriptPrompts.chunk("   ", 2200).size());
+    }
+
+    @Test
+    void polishPromptCarriesAuthorTextAndForbidsRewritingPlot() {
+        ScriptPrompts.PassPlan plan = new ScriptPrompts.PassPlan(500, 1, 500);
+        String user = ScriptPrompts.polishUser(script(), List.of(), 1, 1,
+                "林知远说：今天不卖书。", "", plan, "台词更冷");
+        assertTrue(user.contains("林知远说：今天不卖书。"), user);      // 作者的原文必须给全
+        assertTrue(user.contains("不得改动剧情事实"), user);
+        assertTrue(user.contains("台词更冷"), user);
+        assertTrue(user.contains("约 500 字"), user);
+        assertTrue(ScriptPrompts.polishSystem().contains("不重编剧情"), ScriptPrompts.polishSystem());
+        assertTrue(ScriptPrompts.polishSystem().contains("不得新增／删除人物"), ScriptPrompts.polishSystem());
+    }
 }

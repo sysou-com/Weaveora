@@ -243,6 +243,21 @@ public class ScriptController {
         return ResponseEntity.ok(scriptService.aiNextEpisode(uid(request), ws(workspaceId), scriptId, req));
     }
 
+    /**
+     * 润色「作者自己写的正文」（用户 2026-09-17：「选『我自己写』也要能 AI 润色」）。
+     *
+     * <p>与 next-episode 的区别：那个是「按精简的故事另写一集」，这个是「在已有正文上改文笔、不重编剧情」；
+     * 不落库，结果回给前端填进编辑器。
+     */
+    @PostMapping("/{scriptId}/ai/polish")
+    public ResponseEntity<AiPolishResult> aiPolish(
+            HttpServletRequest request,
+            @RequestHeader(value = "X-Workspace-Id", required = false) String workspaceId,
+            @PathVariable UUID scriptId,
+            @Valid @RequestBody AiPolishRequest req) {
+        return ResponseEntity.ok(scriptService.aiPolish(uid(request), ws(workspaceId), scriptId, req));
+    }
+
     @PostMapping("/{scriptId}/ai/condensed")
     public ResponseEntity<AiCondensedResult> aiCondensed(
             HttpServletRequest request,

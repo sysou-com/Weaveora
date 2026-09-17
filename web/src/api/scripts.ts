@@ -6,6 +6,7 @@ import type {
   AiFieldResult,
   AiGuideResult,
   AiNextEpisodeResult,
+  AiPolishResult,
   ApplySyncResult,
   ConvertToProjectResult,
   EpisodeSaveResult,
@@ -294,6 +295,29 @@ export async function aiNextEpisode(
   },
 ): Promise<AiNextEpisodeResult> {
   return request<AiNextEpisodeResult>(`/api/v1/scripts/${scriptId}/ai/next-episode`, {
+    method: 'POST',
+    headers: { [WORKSPACE_HEADER]: workspaceId },
+    body: input,
+  })
+}
+
+/**
+ * POST /api/v1/scripts/{id}/ai/polish —— 润色**作者自己写的正文**（用户 2026-09-17：「我自己写」也要能 AI 润色）。
+ *
+ * 与 next-episode 的区别：那个是「按精简的故事另写一集」，这个是「在已有正文上改文笔、不重编剧情」。
+ * 不落库，结果由前端填进编辑器。
+ */
+export async function aiPolish(
+  workspaceId: string,
+  scriptId: string,
+  input: {
+    content: string
+    instruction?: string
+    /** 目标字数；不传/0 = 保持原长度（只改文笔） */
+    targetChars?: number
+  },
+): Promise<AiPolishResult> {
+  return request<AiPolishResult>(`/api/v1/scripts/${scriptId}/ai/polish`, {
     method: 'POST',
     headers: { [WORKSPACE_HEADER]: workspaceId },
     body: input,

@@ -481,6 +481,16 @@ public class ScriptService {
         return ai.nextEpisode(s, episodes.findByScriptIdOrderByEpisodeNoAsc(scriptId), req);
     }
 
+    /**
+     * 润色作者自己写的正文（「我自己写」路径也能用 AI）：只产出值，不落库 ——
+     * 前端拿回后填进编辑器，用户确认再保存。
+     */
+    public AiPolishResult aiPolish(UUID userId, UUID workspaceId, UUID scriptId, AiPolishRequest req) {
+        guard.requireMember(userId, workspaceId);
+        Script s = requireScript(workspaceId, scriptId);
+        return ai.polishEpisode(s, episodes.findByScriptIdOrderByEpisodeNoAsc(scriptId), req);
+    }
+
     @Transactional
     public AiCondensedResult aiCondensed(UUID userId, UUID workspaceId, UUID scriptId) {
         guard.requireMember(userId, workspaceId);

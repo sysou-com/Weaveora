@@ -17,6 +17,7 @@ import {
 import {
   NAlert,
   NButton,
+  NCheckbox,
   NCollapse,
   NCollapseItem,
   NDrawer,
@@ -34,6 +35,7 @@ import {
   aiCondensed,
   aiGuide,
   aiNextEpisode,
+  aiPolish,
   applyScriptSync,
   convertEpisodeToProject,
   createScriptEpisode,
@@ -52,10 +54,11 @@ import NextEpisodeDialog from '@/components/script/NextEpisodeDialog.vue'
 import PagedTextarea from '@/components/script/PagedTextarea.vue'
 import ScriptChangeList from '@/components/script/ScriptChangeList.vue'
 import ScriptFieldCard from '@/components/script/ScriptFieldCard.vue'
+import ScriptLengthField from '@/components/script/ScriptLengthField.vue'
 import SyncConfirmDialog from '@/components/script/SyncConfirmDialog.vue'
 import { useAuthStore } from '@/stores/auth'
 import { formatDateShort } from '@/utils/format'
-import { SCRIPT_FIELDS, formatChars, rememberEpisodeTarget } from '@/utils/script'
+import { SCRIPT_FIELDS, formatChars, rememberEpisodeTarget, rememberedEpisodeTarget } from '@/utils/script'
 
 /**
  * 剧情详情：折叠框列表展示各集；顶部「开始下一集」；
@@ -245,6 +248,53 @@ async function applySync(items: ScriptConflict[]): Promise<void> {
   }
 }
 
+// ---------------------------------------------------------------- AI 润色（在你自己写的正文上改）
+/** 润色设置弹层：默认「保持原长度」（只改文笔），需要加长/缩短再自定目标字数 */
+const polishShow = ref(false)
+const polishBusy = ref(false)
+const polishKeepLength = ref(true)
+const polishTarget = ref(rememberedEpisodeTarget())
+const polishInstruction = ref('')
+
+function openPolish(): void {
+  if (!epDrawer.content.trim()) {
+    message.info('先写（或粘贴）一点正文，再让 AI 润色')
+    return
+  }
+  polishKeepLength.value = true
+  polishInstruction.value = ''
+  polishShow.value = true
+}
+
+async function runPolish(): Promise<void> {
+  const before = epDrawer.content
+  polishBusy.value = true
+  try {
+    const r = await aiPolish(workspaceId.value, scriptId.value, {
+      content: before,
+      instruction: polishInstruction.value,
+      targetChars: polishKeepLength.value ? undefined : polishTarget.value,
+    })
+    const ok = window.confirm(
+      `AI 润色完成：${before.length} → ${r.content.length} 字。\n` +
+        '用润色稿替换编辑器里的正文？（取消则保留你的原文）',
+    )
+    if (!ok) {
+      message.info('已保留你的原文')
+      return
+    }
+    epDrawer.content = r.content
+    epDrawer.aiPolished = true
+    polishShow.value = false
+    message.success('已替换为润色稿 —— 记得点「保存本集」')
+    if (r.note) message.info(r.note)
+  } catch (e) {
+    message.error(e instanceof Error ? e.message : '润色失败')
+  } finally {
+    polishBusy.value = false
+  }
+}
+
 async function removeEpisode(e: { id: string; episodeNo: number }): Promise<void> {
   if (!window.confirm(`删除第 ${e.episodeNo} 集？后面的集号会自动前移，不可恢复。`)) return
   try {
@@ -265,9 +315,29 @@ async function chooseNext(payload: {
   titleHint: string
   instruction: string
   targetChars: number
+  draft: string
 }): Promise<void> {
   nextBusy.value = true
   try {
+    // 「我自己写」+ 已经写了草稿 → **只润色这份草稿**（不重编剧情），结果进编辑器待确认
+    if (!payload.polished && payload.draft.trim()) {
+      const r = await aiPolish(workspaceId.value, scriptId.value, {
+        content: payload.draft,
+        instruction: payload.instruction,
+        targetChars: payload.targetChars,
+      })
+      nextShow.value = false
+      openEpisodeDrawer({
+        no: nextNo.value,
+        title: payload.titleHint.trim() || `第 ${nextNo.value} 集`,
+        content: r.content,
+        summary: '',
+        aiPolished: true,
+      })
+      message.success(`AI 已在你的稿子上润色（${r.originalChars} → ${r.content.length} 字），请检查后保存`)
+      if (r.note) message.info(r.note)
+      return
+    }
     if (payload.polished) rememberEpisodeTarget(payload.targetChars)
     const r = await aiNextEpisode(workspaceId.value, scriptId.value, {
       polished: payload.polished,
@@ -574,6 +644,10 @@ function fieldValue(key: ScriptFieldKey): string {
         </div>
         <template #footer>
           <NButton quaternary @click="epDrawer.show = false">取消</NButton>
+          <NButton :disabled="savingEp" data-testid="episode-ai-polish" @click="openPolish">
+            <template #icon><NIcon><Wand2 :size="14" /></NIcon></template>
+            AI 润色
+          </NButton>
           <NButton type="primary" :loading="savingEp" @click="saveEpisode">
             <template #icon><NIcon><Save :size="14" /></NIcon></template>
             保存本集
@@ -643,6 +717,34 @@ function fieldValue(key: ScriptFieldKey): string {
           <NButton type="primary" @click="guideShow = false; nextShow = true">
             <template #icon><NIcon><Plus :size="14" /></NIcon></template>
             开始下一集
+          </NButton>
+        </div>
+      </template>
+    </NModal>
+    <!-- ============ AI 润色（在你自己写的正文上改文笔） ============ -->
+    <NModal
+      :show="polishShow"
+      preset="card"
+      title="AI 润色 · 在你自己的正文上改文笔"
+      style="max-width: 560px"
+      @update:show="(v: boolean) => (polishShow = v)"
+    >
+      <p class="polish-lead text-secondary">
+        AI 会读《精简的故事》与剧本要素来保持人物/年代一致，但<b>只改文笔与节奏、不改剧情</b>：
+        精修台词、补【舞台说明】、理顺衔接、去重复。结果先让你确认，再替换编辑器里的正文。
+      </p>
+      <NCheckbox v-model:checked="polishKeepLength">保持原长度（只改文笔，不增不减）</NCheckbox>
+      <div v-if="!polishKeepLength" class="polish-len">
+        <ScriptLengthField v-model="polishTarget" label="润色后字数" />
+      </div>
+      <label class="lbl">额外要求（可选）</label>
+      <NInput v-model:value="polishInstruction" :maxlength="2000" placeholder="例如：台词更冷硬一些" />
+      <p class="polish-chars font-mono text-secondary">当前正文 {{ epDrawer.content.length }} 字</p>
+      <template #footer>
+        <div class="polish-foot">
+          <NButton quaternary :disabled="polishBusy" @click="polishShow = false">取消</NButton>
+          <NButton type="primary" :loading="polishBusy" data-testid="polish-run" @click="runPolish">
+            开始润色
           </NButton>
         </div>
       </template>
@@ -719,4 +821,9 @@ function fieldValue(key: ScriptFieldKey): string {
 .guide-list svg { margin-top: 4px; color: var(--wv-accent); flex: none; }
 .guide-note { display: flex; gap: 6px; margin: 8px 0 0; font-size: 12px; }
 .guide-foot { display: flex; justify-content: flex-end; gap: 10px; }
+
+.polish-lead { margin: 0 0 14px; font-size: 12.5px; line-height: 1.8; }
+.polish-len { margin: 12px 0 4px; }
+.polish-chars { margin: 12px 0 0; font-size: 12px; }
+.polish-foot { display: flex; justify-content: flex-end; gap: 10px; }
 </style>

@@ -173,6 +173,11 @@ public final class ScriptPrompts {
      * <p>不变式：每段 ≤ {@link #MAX_SEGMENT_CHARS}（否则单次输出会被 `max_tokens` 截断）。
      */
     public record PassPlan(int target, int passes, int perPass) {
+
+        /** 同一目标与段数，只换「本段预算」——供「按剩余目标平摊」的单段提示词使用（段数口径不变）。 */
+        public PassPlan withPerPass(int per) {
+            return new PassPlan(target, passes, per);
+        }
     }
 
     /** 按目标字数算出分段计划（目标会被夹到 {@code [FIELD_TARGET_MIN, FIELD_TARGET_MAX]} 内）。 */
@@ -189,6 +194,34 @@ public final class ScriptPrompts {
     public static int clampTarget(int targetChars) {
         if (targetChars <= 0) return FIELD_TARGET_DEFAULT;
         return Math.max(FIELD_TARGET_MIN, Math.min(FIELD_TARGET_MAX, targetChars));
+    }
+
+    /**
+     * 本段预算：把**剩余目标**平摊给**剩余段数**（下限 {@link #PASS_MIN_CHARS}、上限 {@link #MAX_SEGMENT_CHARS}）。
+     *
+     * <p>2026-09-17 实测事故（用户报「字数很少也很慢，还弹 AI 生成内容超长」）：分集生成的循环上限是
+     * {@code plan.passes() + 1}（留一段补齐），但每段提示词里的数字仍是 {@code planFor(target).perPass()}
+     * ——也就是**整集的目标字数**。目标 500 字时：计划 1 段 / 每段却被要求「约 500 字、严格不超过 800 字」，
+     * 循环又写了 2 段 → 实测 1335 字 → 触发一次压缩调用（多几十秒）+ 弹「写超了…已自动压缩」。
+     * 现在改成「剩余目标 / 剩余段数」，保证多段加起来 ≈ 目标。
+     */
+    public static int segmentBudget(int remaining, int passesLeft) {
+        int p = Math.max(1, passesLeft);
+        int per = (int) Math.ceil(Math.max(0, remaining) / (double) p);
+        return Math.max(PASS_MIN_CHARS, Math.min(MAX_SEGMENT_CHARS, per));
+    }
+
+    /**
+     * 「写超」判定阈值：只有**同时**超过目标 1.5 倍、又超过「按分段封顶本可以写到的上限」时才做压缩重写。
+     *
+     * <p>为什么不能只用 {@code target × 1.5}：单段封顶 {@link #segmentCeiling(int)} 是目标 × 1.3（下限 800），
+     * 目标 500 时封顶 800 &gt; 750 —— 老实按提示词上限写完的稿子会被判「写超」再压一次（白花一次调用，
+     * 还要弹一条看着像报错的提示）。
+     */
+    public static int allowedChars(PassPlan plan) {
+        long byCeiling = (long) segmentCeiling(plan.perPass()) * Math.max(1, plan.passes());
+        long byRatio = (long) plan.target() * 3 / 2;
+        return (int) Math.min(Integer.MAX_VALUE, Math.max(byCeiling, byRatio));
     }
 
     // ---------------------------------------------------------------- 提纲
@@ -280,7 +313,17 @@ public final class ScriptPrompts {
     public static String fieldUser(Script s, List<ScriptEpisode> episodes, ScriptField field,
                                    String hint, String currentValue, boolean fromContent,
                                    int pass, String soFar, int targetChars, Outline outline) {
-        PassPlan plan = planFor(targetChars);
+        return fieldUser(s, episodes, field, hint, currentValue, fromContent, pass, soFar,
+                planFor(targetChars), outline);
+    }
+
+    /**
+     * 同 {@link #fieldUser}，但**本段预算由调用方给定**：{@code plan.perPass()} = 本段字数、
+     * {@code plan.passes()} = 计划段数（多段时用「剩余目标 / 剩余段数」平摊，见 {@link #segmentBudget(int, int)}）。
+     */
+    public static String fieldUser(Script s, List<ScriptEpisode> episodes, ScriptField field,
+                                   String hint, String currentValue, boolean fromContent,
+                                   int pass, String soFar, PassPlan plan, Outline outline) {
         StringBuilder sb = new StringBuilder();
         sb.append(context(s, episodes, field.key(), fromContent).text());
         sb.append("\n【字段】").append(field.label()).append("（key=").append(field.key()).append("）\n");
@@ -307,7 +350,17 @@ public final class ScriptPrompts {
     public static String episodeUser(Script s, List<ScriptEpisode> episodes, int nextNo,
                                      String titleHint, String instruction, int pass, String soFar,
                                      Outline outline, int targetChars) {
-        PassPlan plan = planFor(targetChars);
+        return episodeUser(s, episodes, nextNo, titleHint, instruction, pass, soFar, outline,
+                planFor(targetChars));
+    }
+
+    /**
+     * 同 {@link #episodeUser}，但**本段预算由调用方给定**：{@code plan.perPass()} = 本段字数、
+     * {@code plan.passes()} = 计划段数（与「【本集总量】…拆成 N 段」保持同一口径）。
+     */
+    public static String episodeUser(Script s, List<ScriptEpisode> episodes, int nextNo,
+                                     String titleHint, String instruction, int pass, String soFar,
+                                     Outline outline, PassPlan plan) {
         StringBuilder sb = new StringBuilder();
         sb.append(context(s, episodes, null, true).text());
         sb.append("\n【本集编号】第 ").append(nextNo).append(" 集\n");
@@ -360,6 +413,90 @@ public final class ScriptPrompts {
         }
         sb.append("只输出 JSON：{\"value\":\"<本段内容>\",\"note\":\"<本段要点，可选>\"}");
         return sb.toString();
+    }
+
+    // ---------------------------------------------------------------- 润色（用户自己写的正文）
+
+    /** 润色系统词（在**用户自己的正文**上改文笔，不重编剧情）。 */
+    public static String polishSystem() {
+        return load("script_polish_system.md", POLISH_SYSTEM_FALLBACK);
+    }
+
+    private static final String POLISH_SYSTEM_FALLBACK = """
+            你是这部剧的编剧／润色编辑。用户会给你**他自己写的一段正文**，以及剧本上下文（精简的故事、要素、已写各集）。
+            任务：**只改文笔与节奏，不重编剧情**。
+            硬规则：
+            1. **不得新增／删除人物、事件、设定与结局**：作者已写的事实（谁做了什么、结果如何）一律保留；
+               缺细节可以补动作/神态/舞台说明，但不能改变情节走向；
+            2. 可以做的事：精修台词、补【舞台说明】、理顺衔接、去重复与口语病、强化冲突与情绪；
+            3. **禁止**写成剧情提要或大纲，必须仍是可直接拍摄的剧本正文（对话 + 【舞台说明】）；
+            4. 篇幅以用户消息给出的字数为准；【硬上限】**严格不超过 %d 字** —— 超出会被接口截断，必须自己收住；
+            5. 若给了「已润色的前文」，只用于衔接称呼与语气，**不得重复它的内容**。
+            只输出 JSON：{"value":"<润色后的本段正文>","note":"<本次改了什么，一句话，可选>"}
+            【格式】JSON 字符串内**不得出现真实换行**（需要分段请写 \\n 转义），不要输出注释或多余文字。
+            """.formatted(MAX_SEGMENT_CHARS);
+
+    /**
+     * 润色请求的 user：把作者的正文**按块**送去润色（块内原文给全）。
+     *
+     * @param pass      当前块号（1 起）
+     * @param total     总块数
+     * @param chunk     本块原文
+     * @param soFar     已润色好的前文（仅用于衔接，不给全文）
+     */
+    public static String polishUser(Script s, List<ScriptEpisode> episodes, int pass, int total,
+                                    String chunk, String soFar, PassPlan plan, String instruction) {
+        StringBuilder sb = new StringBuilder();
+        sb.append(context(s, episodes, null, true).text());
+        sb.append("\n【本次任务】润色**作者自己写的**第 ").append(pass).append('/').append(total)
+                .append(" 段正文：只改文笔与节奏，**不得改动剧情事实**。\n");
+        sb.append("【全篇目标】约 ").append(plan.target()).append(" 字；本段约 ")
+                .append(plan.perPass()).append(" 字，**严格不超过 ")
+                .append(segmentCeiling(plan.perPass())).append(" 字**。\n");
+        if (instruction != null && !instruction.isBlank()) {
+            sb.append("【用户对润色的额外要求】").append(instruction.trim()).append('\n');
+        }
+        if (soFar != null && !soFar.isBlank()) {
+            sb.append("【已润色的前文（只用于衔接称呼与语气，**勿重复**）】\n")
+                    .append(clip(tail(soFar, 800), 800)).append('\n');
+        }
+        sb.append("\n【待润色的原文（本段）】\n").append(chunk).append('\n');
+        sb.append("只输出 JSON：{\"value\":\"<润色后的本段正文>\"}");
+        return sb.toString();
+    }
+
+    /**
+     * 把长文按**段落**切块（每块 ≤ {@code max} 字；单段超限就硬切）。
+     *
+     * <p>为什么：润色是「一段一段改」—— 一次要模型输出上万字会被 `max_tokens` 截断（实测 422）。
+     */
+    public static List<String> chunk(String text, int max) {
+        List<String> out = new ArrayList<>();
+        if (text == null || text.isBlank()) return out;
+        int limit = Math.max(200, max);
+        StringBuilder cur = new StringBuilder();
+        for (String para : text.split("\\n")) {
+            String p = para.strip();
+            if (p.isEmpty()) continue;
+            if (p.length() > limit) {
+                if (cur.length() > 0) {
+                    out.add(cur.toString());
+                    cur.setLength(0);
+                }
+                for (int i = 0; i < p.length(); i += limit) {
+                    out.add(p.substring(i, Math.min(p.length(), i + limit)));
+                }
+                continue;
+            }
+            if (cur.length() > 0 && cur.length() + p.length() + 1 > limit) {
+                out.add(cur.toString());
+                cur.setLength(0);
+            }
+            if (cur.length() > 0) cur.append('\n');
+            cur.append(p);
+        }
+        if (cur.length() > 0) out.add(cur.toString());
+        return out;
     }
 
     /** 把提纲整份给出（模型需要知道全貌才能不越界写后面的内容）。 */

@@ -824,6 +824,16 @@ export interface AiNextEpisodeResult {
   outline?: string[] | null
 }
 
+/** 润色「我自己写的正文」结果（不落库：前端填进编辑器，用户确认再保存） */
+export interface AiPolishResult {
+  content: string
+  /** 需要告知用户的提示（分段润色/自动精简/某段失败）；无则空串 */
+  note: string
+  source: string
+  /** 润色前字数（便于展示「N → M 字」） */
+  originalChars: number
+}
+
 /** 精简故事刷新 + 一致性检查结果 */
 export interface AiCondensedResult {
   condensedStory: string
