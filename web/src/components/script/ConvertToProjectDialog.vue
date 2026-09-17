@@ -3,6 +3,7 @@ import { useQuery } from '@tanstack/vue-query'
 import { NAlert, NButton, NFormItem, NModal, NRadioButton, NRadioGroup, NSelect, NSwitch } from 'naive-ui'
 import { computed, ref, watch } from 'vue'
 
+import { getEngineStatus } from '@/api/jobs'
 import { fetchStyleTemplates } from '@/api/styleTemplates'
 import { ASPECT_OPTIONS, VIDEO_DURATIONS } from '@/utils/format'
 
@@ -40,20 +41,36 @@ const SHOT_DURATIONS = [
   { label: '自动（导演定镜）', value: 0 },
   { label: '每镜 2 秒', value: 2 },
   { label: '每镜 3 秒', value: 3 },
+  { label: '每镜 4 秒（推荐 · 单段留足余量）', value: 4 },
   { label: '每镜 5 秒', value: 5 },
-  { label: '每镜 8 秒', value: 8 },
-  { label: '每镜 10 秒', value: 10 },
+  { label: '每镜 8 秒（会切成 2 段）', value: 8 },
+  { label: '每镜 10 秒（会切成 2 段）', value: 10 },
 ]
 
 const mode = ref<'image' | 'video'>('video')
 const aspectRatio = ref('16:9')
 const durationSec = ref<number>(30)
-const shotDurationSec = ref<number>(0)
+const shotDurationSec = ref<number>(4)
 const styleTemplateId = ref<string>('')
 const condenseBrief = ref(true)
 const runDirector = ref(true)
 /** 提示词语言（用户 2026-09-17：转项目时选，**默认中文**） */
 const promptLang = ref<'zh' | 'en'>('zh')
+
+/** 引擎状态（只读）：单段上限秒数用它算，避免用户选了才发现要切段 */
+const engineStatus = useQuery({
+  queryKey: ['engine-status'],
+  queryFn: () => getEngineStatus(),
+  staleTime: 20_000,
+})
+/** 本机 GPU 单段上限（秒）= 帧上限 ÷ 原生 fps（没有方案时按本机口径估） */
+const singleClipSec = computed(() => {
+  const d = engineStatus.data.value
+  if (!d) return 0
+  const frames = d.gpuMaxFrames ?? 121
+  const nf = Math.max(1, d.nativeFps ?? 16)
+  return Math.round((frames / nf) * 100) / 100
+})
 
 const { data: styleTemplates } = useQuery({
   queryKey: ['style-templates'],
@@ -72,7 +89,7 @@ watch(
       mode.value = 'video'
       aspectRatio.value = '16:9'
       durationSec.value = 30
-      shotDurationSec.value = 0
+      shotDurationSec.value = 4
       styleTemplateId.value = ''
       condenseBrief.value = true
       runDirector.value = true
@@ -147,8 +164,9 @@ function submit(): void {
       <NFormItem v-if="mode === 'video'" label="每镜时长">
         <NSelect v-model:value="shotDurationSec" :disabled="!!existing" :options="SHOT_DURATIONS" />
         <em class="lang-hint text-secondary">
-          超过视频模型单次上限的镜头会**自动切段**生成（上限：本机 GPU 由显存决定 ≈6s；云看模型，常见 5s）。
-          生成完会告知具体几个镜超限。
+          本机 GPU 单段上限 ≈ <b>{{ singleClipSec }}</b>s（{{ engineStatus.data.value?.gpuMaxFrames }} 帧 ÷ 原生
+          {{ engineStatus.data.value?.nativeFps }}fps，含插帧到 {{ 30 }}fps）；超过它的档位会**自动切段**（每段独立推理一次）。
+          选 4 秒最稳（余量充足、不切段、插帧伪影最少）。
         </em>
       </NFormItem>
 

@@ -840,6 +840,12 @@ export interface EngineStatus {
   cloudOnline: boolean
   /** 可直接展示的中文提示；空串 = 都在线 */
   notice: string
+  /** motion 模型原生帧率（A14B=16）：帧上限 ÷ 它 = 真实秒数 */
+  nativeFps?: number | null
+  /** 本机 GPU 单段帧数上限 */
+  gpuMaxFrames?: number | null
+  /** 云车道单段帧数上限 */
+  cloudMaxFrames?: number | null
 }
 
 /** 润色「我自己写的正文」结果（不落库：前端填进编辑器，用户确认再保存） */

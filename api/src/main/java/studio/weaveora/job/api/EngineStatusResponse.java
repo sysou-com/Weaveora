@@ -9,10 +9,16 @@ package studio.weaveora.job.api;
  * @param gpuOnline  自托管（ComfyUI）车道是否有在线节点
  * @param cloudOnline 云 API 车道是否有在线节点
  * @param notice     可直接展示的中文提示；空串 = 都在线，不需要提示
+ * @param nativeFps  motion 模型原生帧率（A14B=16）：**帧数上限 ÷ 它才是真实秒数**
+ * @param gpuMaxFrames   本机 GPU 单段帧数上限（motion-frames-max，线上 121）
+ * @param cloudMaxFrames 云车道单段帧数上限（motion-frames-max-cloud；有方案时以方案里的模型上限为准）
  */
 public record EngineStatusResponse(
         boolean gpuOnline,
         boolean cloudOnline,
-        String notice
+        String notice,
+        Integer nativeFps,
+        Integer gpuMaxFrames,
+        Integer cloudMaxFrames
 ) {
 }

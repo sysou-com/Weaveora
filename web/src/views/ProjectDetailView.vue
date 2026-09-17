@@ -735,14 +735,17 @@ const portraitRefHint = computed<string>(() => {
   const sub = planSubjects().find((x) => x.name === portraitSubject.value)
   return sub?.portraitAssetId
     ? '参考图 0 张 → 将用「当前定妆照」换一版（不改身份，只重生成）；想按素材图生成，先在参考图格子上勾选它'
-    : '参考图 0 张 → 没有任何身份参考，容易画得不像；先在参考图格子上勾选一张'
+    : '参考图 0 张 → 零参考会退化为纯文生图、容易出噪声图/画得不像（仍可生成，会先确认；建议先勾选一张素材图）'
 })
 
-/** 能否生成定妆照：至少得有一个输入（勾选的参考图，或已绑定的当前定妆照）——否则后端会直接拒（零参考出噪声图，2026-09-16 实测） */
-const portraitCanGenerate = computed<boolean>(() => {
-  if (portraitRefIds.value.length > 0) return true
+/**
+ * 定妆照参考图提示（用户 2026-09-17：**不再硬拦**，只提示）——把原来的"能不能生成"改成"建不建议生成"。
+ * 零参考时会退化为纯文生图（实测可能出噪声图），所以点击时仍要二次确认。
+ */
+const portraitNoRef = computed<boolean>(() => {
+  if (portraitRefIds.value.length > 0) return false
   const sub = planSubjects().find((x) => x.name === portraitSubject.value)
-  return !!sub?.portraitAssetId
+  return !sub?.portraitAssetId
 })
 
 /** 拉取默认正/负向词（真源在后端 SubjectPrompts；拉不到就用本地兜底） */
@@ -778,6 +781,13 @@ async function confirmPortrait(): Promise<void> {
   if (!pos) {
     message.warning('正向提示词不能为空')
     return
+  }
+  if (!portraitRefIds.value.length) {
+    const ok = window.confirm(
+      '这张定妆照没有任何参考图（零参考）：会退化成纯文生图，实测可能出噪声图/画得不像。\n' +
+        '建议先在参考图格子上勾选一张素材图。\n\n仍然继续生成？',
+    )
+    if (!ok) return
   }
   portraitGenBusy.value = true
   portraitBusy.value = true
@@ -4827,9 +4837,9 @@ const shotTotal = computed(() => {
           <div class="ai-actions">
             <NButton size="small" :disabled="portraitGenBusy" @click="portraitOpen = false">取消</NButton>
             <NButton size="small" :disabled="portraitGenBusy" @click="loadPortraitPrompt">恢复默认词</NButton>
-            <NButton size="small" type="primary" :loading="portraitGenBusy" :disabled="!portraitCanGenerate"
+            <NButton size="small" type="primary" :loading="portraitGenBusy"
                      data-testid="portrait-generate"
-                     :title="portraitCanGenerate ? '用上面的参考图 + 提示词生成定妆照' : '先在参考图格子上勾选一张（或先给它绑定一个旧定妆照）'"
+                     :title="portraitNoRef ? '零参考：会退化成纯文生图，可能出噪声图（仍可继续，会二次确认）' : '用上面的参考图 + 提示词生成定妆照'"
                      @click="confirmPortrait">
               生成定妆照
             </NButton>
