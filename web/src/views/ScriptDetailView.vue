@@ -194,8 +194,9 @@ const syncBusy = ref(false)
 async function saveEpisode(): Promise<void> {
   if (!epDrawer.title.trim()) epDrawer.title = `第 ${epDrawer.no} 集`
   const ok = window.confirm(
-    '保存后 AI 将自动更新《精简的故事》，并检查前面章节是否需要同步修改。\n' +
-      '（历史章节只有在你确认后才会被改写，且会记入变更记录。）\n\n是否继续？',
+    '保存会立即完成（只写正文与提纲，约 10ms）。\n' +
+      '《精简的故事》与「历史章节一致性检查」改由 AI 在**后台**跑（实测 4–70s，随模型波动），' +
+      '不占你的等待；完成后右下角会提示，若发现历史章节需同步改动会弹确认框。\n\n是否继续？',
   )
   if (!ok) return
   savingEp.value = true
@@ -205,7 +206,8 @@ async function saveEpisode(): Promise<void> {
       content: epDrawer.content,
       summary: epDrawer.summary,
       aiPolished: epDrawer.aiPolished,
-      syncPrevious: true,
+      // 保存不等 AI：记忆刷新走后台（否则每存一集都要等一次 LLM，实测 3.8–70s）
+      syncPrevious: false,
       outline: epOutline.value,
     }
     const res =
@@ -214,19 +216,39 @@ async function saveEpisode(): Promise<void> {
         : await updateScriptEpisode(workspaceId.value, scriptId.value, epDrawer.id, input)
     await refresh()
     epDrawer.show = false
-    const conflicts = res.conflicts ?? []
-    if (conflicts.length) {
-      syncList.value = conflicts
-      syncAnchor.value = res.episode.id
-      syncShow.value = true
-      message.warning(`AI 检查到 ${conflicts.length} 处历史章节需同步，请确认`)
-    } else {
-      message.success(`第 ${res.episode.episodeNo} 集已保存，精简的故事已更新`)
-    }
+    message.success(`第 ${res.episode.episodeNo} 集已保存`)
+    void backgroundCondense(res.episode.id)
   } catch (e) {
     message.error(e instanceof Error ? e.message : '保存失败')
   } finally {
     savingEp.value = false
+  }
+}
+
+/**
+ * 保存后的**后台**刷新「精简的故事」+ 一致性检查（用户 2026-09-17：保存太慢）。
+ *
+ * 不阻塞页面；失败只提示（已保存的正文不受影响）；有历史章节改动建议时弹 Q4 确认框。
+ */
+async function backgroundCondense(anchorEpisodeId: string): Promise<void> {
+  condensing.value = true
+  try {
+    const r = await aiCondensed(workspaceId.value, scriptId.value)
+    await refresh()
+    changesQuery.refetch()
+    const conflicts = r.conflicts ?? []
+    if (conflicts.length) {
+      syncList.value = conflicts
+      syncAnchor.value = anchorEpisodeId
+      syncShow.value = true
+      message.warning(`AI 检查到 ${conflicts.length} 处历史章节需同步，请确认`)
+    } else {
+      message.success('《精简的故事》已由 AI 在后台更新')
+    }
+  } catch (e) {
+    message.warning('后台更新《精简的故事》失败，可点「AI 刷新」重试')
+  } finally {
+    condensing.value = false
   }
 }
 
@@ -367,20 +389,8 @@ async function chooseNext(payload: {
 // ---------------------------------------------------------------- 精简故事 / AI 引导 / 变更记录
 const condensing = ref(false)
 async function refreshCondensed(): Promise<void> {
-  condensing.value = true
-  try {
-    const r = await aiCondensed(workspaceId.value, scriptId.value)
-    await refresh()
-    if ((r.conflicts ?? []).length) {
-      message.warning('AI 检查到历史章节需要同步，请在保存下一集时确认或手动修改')
-    } else {
-      message.success('已刷新《精简的故事》')
-    }
-  } catch (e) {
-    message.error(e instanceof Error ? e.message : '刷新失败')
-  } finally {
-    condensing.value = false
-  }
+  const list = episodes.value ?? []
+  await backgroundCondense(list.length ? list[list.length - 1].id : '')
 }
 
 const guideShow = ref(false)
@@ -405,10 +415,28 @@ const changesShow = ref(false)
 const convertShow = ref(false)
 const convertBusy = ref(false)
 const convertTarget = ref<{ id: string; episodeNo: number; title: string } | null>(null)
+/** 这集已转过的项目（有值 → 弹层里红色提示 + 在同一项目出 V+1） */
+const convertExisting = ref<{ projectId: string; projectTitle: string; revisionNo?: number | null } | null>(null)
 
-function openConvert(e: { id: string; episodeNo: number; title: string }): void {
-  convertTarget.value = e
+function openConvert(e: {
+  id: string
+  episodeNo: number
+  title: string
+  projectId?: string | null
+  projectTitle?: string | null
+  projectRevisionNo?: number | null
+}): void {
+  convertTarget.value = { id: e.id, episodeNo: e.episodeNo, title: e.title }
+  convertExisting.value = e.projectId
+    ? { projectId: e.projectId, projectTitle: e.projectTitle ?? '', revisionNo: e.projectRevisionNo ?? null }
+    : null
   convertShow.value = true
+}
+
+/** 生成/查看这集的项目（已转过 → 直接跳项目页）。 */
+function openProject(e: { projectId?: string | null }): void {
+  if (!e.projectId) return
+  void router.push({ name: 'project-detail', params: { projectId: e.projectId } })
 }
 
 async function doConvert(payload: ConvertPayload): Promise<void> {
@@ -421,6 +449,8 @@ async function doConvert(payload: ConvertPayload): Promise<void> {
     convertShow.value = false
     if (r.note) {
       message.warning(r.note)
+    } else if (r.appended) {
+      message.success(`已在同一项目里生成新版本 V${r.revisionNo ?? '?'}（${r.shotCount} 个分镜）`)
     } else {
       message.success(`已创建项目并生成 ${r.shotCount} 个分镜（动作 + 提示词）`)
     }
@@ -503,7 +533,7 @@ function fieldValue(key: ScriptFieldKey): string {
       <section class="block memory">
         <div class="memory-head">
           <h2 class="block-title">精简的故事 <span class="tag font-mono">AI 连续记忆</span></h2>
-          <NButton size="small" quaternary :loading="condensing" @click="refreshCondensed">
+          <NButton size="small" quaternary :loading="condensing" :disabled="condensing" @click="refreshCondensed">
             <template #icon><NIcon><RefreshCw :size="13" /></NIcon></template>
             AI 刷新
           </NButton>
@@ -551,9 +581,18 @@ function fieldValue(key: ScriptFieldKey): string {
                   <template #icon><NIcon><Pencil :size="12" /></NIcon></template>
                   编辑
                 </NButton>
+                <NButton
+                  v-if="e.projectId"
+                  size="tiny"
+                  data-testid="episode-view-project"
+                  @click="openProject(e)"
+                >
+                  <template #icon><NIcon><Clapperboard :size="12" /></NIcon></template>
+                  查看项目{{ e.projectRevisionNo ? ` V${e.projectRevisionNo}` : '' }}
+                </NButton>
                 <NButton size="tiny" @click="openConvert(e)">
                   <template #icon><NIcon><Clapperboard :size="12" /></NIcon></template>
-                  转成项目
+                  {{ e.projectId ? '出新版本' : '转成项目' }}
                 </NButton>
                 <NButton size="tiny" quaternary type="error" @click="removeEpisode(e)">
                   <template #icon><NIcon><Trash2 :size="12" /></NIcon></template>
@@ -638,7 +677,8 @@ function fieldValue(key: ScriptFieldKey): string {
           />
 
           <NAlert type="info" :bordered="false" class="hint">
-            保存时 AI 会刷新《精简的故事》（后续每一集的唯一依据），并检查前面章节是否需要同步修改；
+            保存立即完成（只写正文与提纲）；《精简的故事》刷新与历史章节一致性检查由 AI 在
+            <b>后台</b>完成，不占你的等待（右下角会提示结果）。
             <b>历史章节只有在你确认后才会被改写</b>。
           </NAlert>
         </div>
@@ -669,6 +709,7 @@ function fieldValue(key: ScriptFieldKey): string {
     <ConvertToProjectDialog
       v-model:show="convertShow"
       :episode-label="convertLabel"
+      :existing="convertExisting"
       :busy="convertBusy"
       @submit="doConvert"
     />

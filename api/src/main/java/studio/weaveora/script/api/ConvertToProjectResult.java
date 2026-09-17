@@ -9,6 +9,10 @@ public record ConvertToProjectResult(
         UUID revisionId,
         int shotCount,
         String projectTitle,
-        String note
+        String note,
+        /** 本次生成的是项目里的第几版（V{n}） */
+        Integer revisionNo,
+        /** true = 复用了已有项目出**新版本**（不是新建项目） */
+        boolean appended
 ) {
 }

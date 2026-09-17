@@ -8,10 +8,14 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 import studio.weaveora.director.DirectorService;
 import studio.weaveora.director.api.GenerateRequest;
 import studio.weaveora.director.api.GenerateResponse;
+import studio.weaveora.director.domain.PromptRevision;
+import studio.weaveora.director.domain.PromptRevisionRepository;
 import studio.weaveora.identity.api.WorkspaceGuard;
 import studio.weaveora.identity.domain.User;
 import studio.weaveora.identity.domain.UserRepository;
@@ -19,6 +23,8 @@ import studio.weaveora.project.ProjectService;
 import studio.weaveora.project.api.BriefResponse;
 import studio.weaveora.project.api.CreateProjectRequest;
 import studio.weaveora.project.api.ProjectResponse;
+import studio.weaveora.project.domain.Brief;
+import studio.weaveora.project.domain.BriefRepository;
 import studio.weaveora.script.api.*;
 import studio.weaveora.script.domain.Script;
 import studio.weaveora.script.domain.ScriptChange;
@@ -33,6 +39,7 @@ import studio.weaveora.shared.api.ErrorCode;
 
 import java.math.BigDecimal;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -65,6 +72,10 @@ public class ScriptService {
     private final ScriptAiService ai;
     private final ProjectService projects;
     private final DirectorService director;
+    private final BriefRepository briefs;
+    private final PromptRevisionRepository revisions;
+    /** 写库用**短事务**：AI 调用必须在事务外（长 LLM 调用不得占着数据库连接，见交接纪律 §5.7）。 */
+    private final TransactionTemplate tx;
 
     private final String adminEmail;
     private final boolean restrictCreate;
@@ -75,6 +86,8 @@ public class ScriptService {
                          ScriptChangeRepository changes, ScriptMarkRepository marks,
                          UserRepository users, WorkspaceGuard guard, ScriptAiService ai,
                          ProjectService projects, DirectorService director,
+                         BriefRepository briefs, PromptRevisionRepository revisions,
+                         PlatformTransactionManager txManager,
                          @Value("${weaveora.access.admin-email:sysou.com@outlook.com}") String adminEmail,
                          @Value("${weaveora.access.restrict-create:false}") boolean restrictCreate,
                          @Value("${weaveora.access.creator-suffix:}") String creatorSuffix,
@@ -88,6 +101,9 @@ public class ScriptService {
         this.ai = ai;
         this.projects = projects;
         this.director = director;
+        this.briefs = briefs;
+        this.revisions = revisions;
+        this.tx = new TransactionTemplate(txManager);
         this.adminEmail = adminEmail == null ? "" : adminEmail;
         this.restrictCreate = restrictCreate;
         this.creatorSuffix = creatorSuffix == null ? "" : creatorSuffix.trim().toLowerCase();
@@ -259,8 +275,91 @@ public class ScriptService {
     public List<ScriptEpisodeResponse> listEpisodes(UUID userId, UUID workspaceId, UUID scriptId) {
         guard.requireMember(userId, workspaceId);
         requireScript(workspaceId, scriptId);
-        return episodes.findByScriptIdOrderByEpisodeNoAsc(scriptId).stream()
-                .map(ScriptMapper::toEpisode).toList();
+        return withProjectLinks(userId, workspaceId,
+                episodes.findByScriptIdOrderByEpisodeNoAsc(scriptId));
+    }
+
+    /** 一集 → 它转出的项目（含项目当前版本号）。 */
+    public record EpisodeProjectLink(UUID projectId, String projectTitle, Integer revisionNo) {
+    }
+
+    /**
+     * 给一批集补上「集 → 项目」链接（用户 2026-09-17：每集若有已转过的项目，要能在行上「查看项目」）。
+     *
+     * <p>关联存在 {@code briefs.constraints.scriptEpisodeId}（转项目时写入），一次批量查询即可。
+     */
+    private List<ScriptEpisodeResponse> withProjectLinks(UUID userId, UUID workspaceId, List<ScriptEpisode> all) {
+        Map<UUID, EpisodeProjectLink> links = linksOf(userId, workspaceId, all);
+        return all.stream().map(e -> {
+            EpisodeProjectLink l = links.get(e.id());
+            return l == null ? ScriptMapper.toEpisode(e)
+                    : ScriptMapper.toEpisode(e, l.projectId(), l.projectTitle(), l.revisionNo());
+        }).toList();
+    }
+
+    /** 单集 + 链接（保存后回传给前端用）。 */
+    private ScriptEpisodeResponse episodeOf(UUID userId, UUID workspaceId, ScriptEpisode e) {
+        EpisodeProjectLink l = linksOf(userId, workspaceId, List.of(e)).get(e.id());
+        return l == null ? ScriptMapper.toEpisode(e)
+                : ScriptMapper.toEpisode(e, l.projectId(), l.projectTitle(), l.revisionNo());
+    }
+
+    /** 批量取「集 → 项目」链接；同一集若历史上转过多次（老版本会各建项目），取**最近一次**那个。 */
+    private Map<UUID, EpisodeProjectLink> linksOf(UUID userId, UUID workspaceId, List<ScriptEpisode> all) {
+        if (all == null || all.isEmpty()) {
+            return Map.of();
+        }
+        List<String> ids = all.stream().map(e -> e.id().toString()).toList();
+        List<Brief> found = briefs.findByScriptEpisodeIds(workspaceId, ids);
+        if (found.isEmpty()) {
+            return Map.of();
+        }
+        Map<UUID, UUID> epToProject = new LinkedHashMap<>();
+        for (Brief b : found) {     // 已按 created_at desc：每个集第一次见到的就是最近那个
+            String raw = b.constraints() == null ? "" : b.constraints().path("scriptEpisodeId").asText("");
+            UUID epId = parseUuid(raw);
+            if (epId != null) {
+                epToProject.putIfAbsent(epId, b.projectId());
+            }
+        }
+        if (epToProject.isEmpty()) {
+            return Map.of();
+        }
+        Set<UUID> projectIds = new HashSet<>(epToProject.values());
+        Map<UUID, String> titles = new HashMap<>();
+        for (UUID pid : projectIds) {
+            try {
+                titles.put(pid, projects.get(userId, workspaceId, pid).title());
+            } catch (RuntimeException ex) {
+                // 项目已被删/不可见 → 不展示链接（不是错误）
+                log.debug("剧本集的项目链接失效：project={} : {}", pid, ex.getMessage());
+            }
+        }
+        Map<UUID, Integer> revs = new HashMap<>();
+        if (!titles.isEmpty()) {
+            for (PromptRevision r : revisions.findByProjectIdInOrderByRevisionNoDesc(titles.keySet())) {
+                revs.putIfAbsent(r.projectId(), r.revisionNo());
+            }
+        }
+        Map<UUID, EpisodeProjectLink> out = new HashMap<>();
+        epToProject.forEach((epId, pid) -> {
+            String title = titles.get(pid);
+            if (title != null) {
+                out.put(epId, new EpisodeProjectLink(pid, title, revs.get(pid)));
+            }
+        });
+        return out;
+    }
+
+    private static UUID parseUuid(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return null;
+        }
+        try {
+            return UUID.fromString(raw.trim());
+        } catch (IllegalArgumentException ex) {
+            return null;
+        }
     }
 
     /** 剧本精选只读：已上架剧本的集列表（游客可读）。 */
@@ -274,12 +373,40 @@ public class ScriptService {
     }
 
     /**
-     * 新增 / 更新一集；保存后可刷新「精简的故事」并给出历史章节改动**提议**（Q4：不自动改）。
+     * 新增 / 更新一集。
+     *
+     * <h3>性能：保存为什么慢（2026-09-17 用户报「剧情不多保存也慢」，实测定位）</h3>
+     * 写库本体 ≈ **0.01s**；慢的全部是保存后那一次 AI 调用（刷新「精简的故事」+ 一致性检查），
+     * 实测 **3.8–70s**（随 LLM 延迟与上下文大小波动；失败重试时更久）。所以：
+     * <ul>
+     *   <li>{@code sync=false}（前端「保存」走这条）→ 只写库、**立即返回**，前端拿到后再去后台刷新记忆；</li>
+     *   <li>{@code sync=true}（接口兼容路径）→ 仍然同步刷新，但 AI 调用被挪到**事务外**
+     *       （长 LLM 调用不得占着数据库连接，交接纪律 §5.7），结果另开短事务落库。</li>
+     * </ul>
      */
-    @Transactional
     public EpisodeSaveResult saveEpisode(UUID userId, UUID workspaceId, UUID scriptId,
                                          UUID episodeId, SaveEpisodeRequest req) {
         guard.requireMember(userId, workspaceId);
+        requireScript(workspaceId, scriptId);
+        // ① 写库（短事务）
+        Saved saved = tx.execute(st -> saveEpisodeTx(userId, workspaceId, scriptId, episodeId, req));
+        if (!req.sync()) {
+            return new EpisodeSaveResult(saved.episode(), saved.condensedStory(), List.of(),
+                    recentChanges(scriptId, 5), List.of(), ai.source());
+        }
+        // ② AI 刷新（**事务外**）
+        Script s = requireScript(workspaceId, scriptId);
+        AiCondensedResult cond = ai.refreshCondensed(s, episodes.findByScriptIdOrderByEpisodeNoAsc(scriptId));
+        // ③ 应用（短事务）
+        return tx.execute(st -> applyCondensedTx(workspaceId, scriptId, saved, cond));
+    }
+
+    /** 保存的「写库」部分（短事务，**绝不调 LLM**）。 */
+    private record Saved(int episodeNo, UUID episodeId, ScriptEpisodeResponse episode, String condensedStory) {
+    }
+
+    private Saved saveEpisodeTx(UUID userId, UUID workspaceId, UUID scriptId, UUID episodeId,
+                                SaveEpisodeRequest req) {
         Script s = requireScript(workspaceId, scriptId);
 
         boolean created = episodeId == null;
@@ -313,30 +440,31 @@ public class ScriptService {
                 created ? "episode_create" : "episode_update",
                 JsonNodeFactory.instance.arrayNode(), "", "user"));
 
-        List<ScriptEpisode> all = episodes.findByScriptIdOrderByEpisodeNoAsc(scriptId);
-        List<ScriptConflict> conflicts = List.of();
-        List<String> beats = List.of();
-        if (req.sync()) {
-            AiCondensedResult cond = ai.refreshCondensed(s, all);
-            if (cond.condensedStory() != null && !cond.condensedStory().isBlank()) {
-                s.setCondensedStory(cond.condensedStory());
-            }
-            conflicts = cond.conflicts();
-            beats = cond.completedBeats();
-            if (!conflicts.isEmpty()) {
-                changes.save(ScriptChange.create(scriptId, workspaceId, saved.id(), saved.episodeNo(),
-                        "consistency_proposal", conflictsJson(conflicts),
-                        "一致性检查建议（待用户确认后改写）", "ai"));
-            }
-        }
         if ("draft".equals(s.status())) {
             s.setStatus("writing");
         }
         scripts.save(s);
-        log.info("script episode saved: script={} no={} created={} conflicts={}",
-                scriptId, saved.episodeNo(), created, conflicts.size());
-        return new EpisodeSaveResult(ScriptMapper.toEpisode(saved), s.condensedStory(),
-                conflicts, recentChanges(scriptId, 5), beats, ai.source());
+        log.info("script episode saved: script={} no={} created={}", scriptId, saved.episodeNo(), created);
+        return new Saved(saved.episodeNo(), saved.id(), episodeOf(userId, workspaceId, saved), s.condensedStory());
+    }
+
+    /** 应用 AI 刷新结果（短事务）：精简的故事 + 待用户确认的一致性改动（Q4：不自动改历史章节）。 */
+    private EpisodeSaveResult applyCondensedTx(UUID workspaceId, UUID scriptId, Saved saved,
+                                              AiCondensedResult cond) {
+        Script s = requireScript(workspaceId, scriptId);
+        List<ScriptConflict> conflicts = cond.conflicts() == null ? List.of() : cond.conflicts();
+        if (cond.condensedStory() != null && !cond.condensedStory().isBlank()) {
+            s.setCondensedStory(cond.condensedStory());
+            scripts.save(s);
+        }
+        if (!conflicts.isEmpty()) {
+            changes.save(ScriptChange.create(scriptId, workspaceId, saved.episodeId(), saved.episodeNo(),
+                    "consistency_proposal", conflictsJson(conflicts),
+                    "一致性检查建议（待用户确认后改写）", "ai"));
+        }
+        return new EpisodeSaveResult(saved.episode(), s.condensedStory(), conflicts,
+                recentChanges(scriptId, 5),
+                cond.completedBeats() == null ? List.of() : cond.completedBeats(), ai.source());
     }
 
     @Transactional
@@ -495,13 +623,18 @@ public class ScriptService {
     public AiCondensedResult aiCondensed(UUID userId, UUID workspaceId, UUID scriptId) {
         guard.requireMember(userId, workspaceId);
         Script s = requireScript(workspaceId, scriptId);
+        // AI 调用在**事务外**（长 LLM 调用不占数据库连接，§5.7）：前端“保存一集”后会后台调它。
         AiCondensedResult r = ai.refreshCondensed(s, episodes.findByScriptIdOrderByEpisodeNoAsc(scriptId));
-        if (r.condensedStory() != null && !r.condensedStory().isBlank()) {
-            s.setCondensedStory(r.condensedStory());
-            scripts.save(s);
-        }
-        changes.save(ScriptChange.create(scriptId, workspaceId, null, null, "condensed_refresh",
-                conflictsJson(r.conflicts()), "手动刷新精简的故事", "ai"));
+        tx.execute(st -> {
+            Script cur = requireScript(workspaceId, scriptId);
+            if (r.condensedStory() != null && !r.condensedStory().isBlank()) {
+                cur.setCondensedStory(r.condensedStory());
+                scripts.save(cur);
+            }
+            changes.save(ScriptChange.create(scriptId, workspaceId, null, null, "condensed_refresh",
+                    conflictsJson(r.conflicts()), "刷新精简的故事", "ai"));
+            return null;
+        });
         return r;
     }
 
@@ -547,9 +680,25 @@ public class ScriptService {
         }
 
         String projectTitle = clip(s.title() + " · 第" + e.episodeNo() + "集 " + e.title(), 100);
-        ProjectResponse project = projects.create(userId, workspaceId,
+        // 这一集已经转过项目？→ 默认在**同一个项目**里出新版本（V+1），不再新建项目（用户 2026-09-17）
+        EpisodeProjectLink link = linksOf(userId, workspaceId, List.of(e)).get(e.id());
+        ProjectResponse existing = null;
+        if (link != null && !req.newProjectOrFalse()) {
+            try {
+                existing = projects.get(userId, workspaceId, link.projectId());
+            } catch (RuntimeException ex) {
+                log.warn("剧本转项目：原项目不可用（{}），改为新建项目", ex.getMessage());
+            }
+        }
+        boolean appended = existing != null;
+        ProjectResponse project = appended ? existing
+                : projects.create(userId, workspaceId,
                 new CreateProjectRequest(projectTitle, mode, req.aspectRatio(), duration,
                         req.styleTemplateId(), req.shotDurationSec()));
+        if (appended) {
+            // 类型/画幅/时长/风格是**项目级**设置：新版本沿用项目本身（要换规格请新建项目）
+            mode = project.mode();
+        }
 
         ObjectNode constraints = JsonNodeFactory.instance.objectNode();
         constraints.put("source", "script");
@@ -570,16 +719,31 @@ public class ScriptService {
             } catch (RuntimeException ex) {
                 log.warn("剧本转项目：导演生成失败（项目与 brief 已创建）script={} ep={} : {}",
                         scriptId, e.episodeNo(), ex.getMessage());
-                note = "项目与 brief 已创建，但导演生成失败（" + safeMsg(ex) + "）；可到项目页点「生成方案」重试。";
+                note = "brief 已写入，但导演生成失败（" + safeMsg(ex) + "）；可到项目页点「生成方案」重试。";
             }
         } else {
-            note = "已创建项目与 brief（未自动生成方案）。";
+            note = "已写入 brief（未自动生成方案）。";
+        }
+        if (appended) {
+            note = appendNote(gen != null
+                    ? "该集已有项目《" + project.title() + "》—— 已在同一个项目中生成新版本 V" + gen.revisionNo()
+                            + "（未新建项目）。"
+                    : "该集已有项目《" + project.title()
+                            + "》—— brief 已写入该项目，但没有生成新版本（需勾「立即生成分镜与提示词」）。",
+                    note);
         }
         int shotCount = gen == null ? 0 : gen.plan().path("shots").size();
-        log.info("script->project: script={} ep={} project={} revision={} shots={}",
-                scriptId, e.episodeNo(), project.id(), gen == null ? null : gen.revisionId(), shotCount);
+        log.info("script->project: script={} ep={} project={} revision={} appended={} shots={}",
+                scriptId, e.episodeNo(), project.id(),
+                gen == null ? null : gen.revisionNo(), appended, shotCount);
         return new ConvertToProjectResult(project.id(), brief.id(),
-                gen == null ? null : gen.revisionId(), shotCount, project.title(), note);
+                gen == null ? null : gen.revisionId(), shotCount, project.title(), note,
+                gen == null ? null : gen.revisionNo(), appended);
+    }
+
+    /** 拼接两条提示（空串不产生多余分隔）。 */
+    private static String appendNote(String a, String b) {
+        return (a == null || a.isBlank()) ? b : a + " " + b;
     }
 
     /** 原文带入（不精简）时的结构化 brief。 */

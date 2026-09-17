@@ -14,7 +14,12 @@ public record ConvertToProjectRequest(
         /** true（默认）= 先把整集 AI 精简成 ≤1800 字 brief；false = 原文带入（内部 brief 通道，上限 20000）。 */
         Boolean condenseBrief,
         /** true（默认）= 立即调导演生成分镜动作 + 正/负提示词。 */
-        Boolean runDirector
+        Boolean runDirector,
+        /**
+         * 这集已经转过项目时：false（默认）= 在**同一个项目**里出**新版本（V+1）**；
+         * true = 不管历史，另建一个新项目（接口保留，界面不暴露）。
+         */
+        Boolean newProject
 ) {
     public String modeOrDefault() {
         return mode == null || mode.isBlank() ? "video" : mode;
@@ -26,5 +31,9 @@ public record ConvertToProjectRequest(
 
     public boolean director() {
         return runDirector == null || runDirector;
+    }
+
+    public boolean newProjectOrFalse() {
+        return newProject != null && newProject;
     }
 }

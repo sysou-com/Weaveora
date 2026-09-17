@@ -27,9 +27,16 @@ public final class ScriptMapper {
     }
 
     public static ScriptEpisodeResponse toEpisode(ScriptEpisode e) {
+        return toEpisode(e, null, null, null);
+    }
+
+    /** 带「集 → 项目」链接的一集（projectId 为 null = 这集还没转过项目）。 */
+    public static ScriptEpisodeResponse toEpisode(ScriptEpisode e, java.util.UUID projectId,
+                                                 String projectTitle, Integer projectRevisionNo) {
         return new ScriptEpisodeResponse(
                 e.id(), e.episodeNo(), e.title(), e.content(), e.summary(),
-                e.aiPolished(), outlineList(e.outline()), e.createdAt(), e.updatedAt());
+                e.aiPolished(), outlineList(e.outline()), e.createdAt(), e.updatedAt(),
+                projectId, projectTitle, projectRevisionNo);
     }
 
     /** JsonNode 数组 → List<String>（空/非数组 → 空列表）。 */

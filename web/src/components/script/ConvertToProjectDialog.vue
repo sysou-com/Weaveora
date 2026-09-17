@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { useQuery } from '@tanstack/vue-query'
-import { NButton, NFormItem, NModal, NSelect, NSwitch } from 'naive-ui'
+import { NAlert, NButton, NFormItem, NModal, NSelect, NSwitch } from 'naive-ui'
 import { computed, ref, watch } from 'vue'
 
 import { fetchStyleTemplates } from '@/api/styleTemplates'
@@ -21,11 +21,12 @@ export interface ConvertPayload {
   condenseBrief: boolean
   runDirector: boolean
 }
-
 const props = defineProps<{
   show: boolean
   episodeLabel: string
   busy?: boolean
+  /** 这集已经转过的项目：有值时红色提示 + 规格锁在项目上（新版本 V+1） */
+  existing?: { projectId: string; projectTitle: string; revisionNo?: number | null } | null
 }>()
 
 const emit = defineEmits<{
@@ -92,18 +93,32 @@ function submit(): void {
   <NModal
     :show="show"
     preset="card"
-    title="转成项目"
+    :title="existing ? '在已有项目里出新版本' : '转成项目'"
     style="max-width: 640px"
     @update:show="(v: boolean) => emit('update:show', v)"
   >
     <p class="lead text-secondary">
-      把 <b>{{ episodeLabel }}</b> 的标题与内容带入一个新项目，并按下面的项目要素转化成分镜动作与提示词。
+      <template v-if="existing">
+        这一集已经生成过项目《{{ existing.projectTitle }}》
+        <b v-if="existing.revisionNo">（当前 V{{ existing.revisionNo }}）</b>。
+      </template>
+      <template v-else>
+        把 <b>{{ episodeLabel }}</b> 的标题与内容带入一个新项目，并按下面的项目要素转化成分镜动作与提示词。
+      </template>
     </p>
+
+    <NAlert v-if="existing" type="error" :bordered="false" class="warn">
+      <b>这一集已经有项目了，重复转成项目不会新建项目。</b><br />
+      继续会在<b>同一个项目</b>里生成<b>新版本 V{{ (existing.revisionNo ?? 0) + 1 }}</b>
+      （老版本仍保留、可切回）；类型/画幅/时长/风格沿用项目原有设置。
+      确实想另建一个项目，请在项目页复制或联系管理员。
+    </NAlert>
 
     <div class="grid">
       <NFormItem label="创作类型">
         <NSelect
           v-model:value="mode"
+          :disabled="!!existing"
           :options="[
             { label: '视频（出分镜 · 推荐）', value: 'video' },
             { label: '图片', value: 'image' },
@@ -112,22 +127,29 @@ function submit(): void {
       </NFormItem>
 
       <NFormItem label="画幅">
-        <NSelect v-model:value="aspectRatio" :options="ASPECT_OPTIONS" />
+        <NSelect v-model:value="aspectRatio" :disabled="!!existing" :options="ASPECT_OPTIONS" />
       </NFormItem>
 
       <NFormItem v-if="mode === 'video'" label="目标时长">
         <NSelect
           v-model:value="durationSec"
+          :disabled="!!existing"
           :options="VIDEO_DURATIONS.map((d) => ({ label: d.label, value: d.value }))"
         />
       </NFormItem>
 
       <NFormItem v-if="mode === 'video'" label="每镜时长">
-        <NSelect v-model:value="shotDurationSec" :options="SHOT_DURATIONS" />
+        <NSelect v-model:value="shotDurationSec" :disabled="!!existing" :options="SHOT_DURATIONS" />
       </NFormItem>
 
       <NFormItem label="视觉风格" class="span-2">
-        <NSelect v-model:value="styleTemplateId" :options="styleOptions" clearable placeholder="默认（跟随描述）" />
+        <NSelect
+          v-model:value="styleTemplateId"
+          :disabled="!!existing"
+          :options="styleOptions"
+          clearable
+          placeholder="默认（跟随描述）"
+        />
       </NFormItem>
     </div>
 
@@ -152,7 +174,7 @@ function submit(): void {
       <div class="foot">
         <NButton quaternary :disabled="busy" @click="emit('update:show', false)">取消</NButton>
         <NButton type="primary" :loading="busy" @click="submit">
-          {{ runDirector ? '创建项目并生成分镜' : '仅创建项目' }}
+          {{ existing ? `在项目里生成 V${(existing.revisionNo ?? 0) + 1}` : runDirector ? '创建项目并生成分镜' : '仅创建项目' }}
         </NButton>
       </div>
     </template>
@@ -164,6 +186,7 @@ function submit(): void {
 .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 16px; }
 .span-2 { grid-column: span 2; }
 .switches { display: flex; flex-direction: column; gap: 12px; margin-top: 4px; }
+.warn { margin: 0 0 16px; font-size: 12.5px; line-height: 1.85; }
 .sw { display: flex; align-items: flex-start; gap: 10px; cursor: pointer; }
 .sw span { display: flex; flex-direction: column; gap: 2px; }
 .sw b { font-size: 13.5px; font-weight: 600; }

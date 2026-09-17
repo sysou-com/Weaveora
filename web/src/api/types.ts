@@ -767,6 +767,11 @@ export interface ScriptEpisode {
   aiPolished: boolean
   /** 【B】本集写作时用的节拍提纲（重开可见）；无则空数组 */
   outline?: string[] | null
+  /** 这一集已经转出的项目（无则不返回）——行上显示「查看项目 V{n}」 */
+  projectId?: string | null
+  projectTitle?: string | null
+  /** 该项目当前版本号（V{n}） */
+  projectRevisionNo?: number | null
   createdAt: string
   updatedAt: string
 }
@@ -867,5 +872,9 @@ export interface ConvertToProjectResult {
   shotCount: number
   projectTitle: string
   note?: string
+  /** 本次生成的是项目里的第几版（V{n}） */
+  revisionNo?: number | null
+  /** true = 复用了已有项目出**新版本**（没有新建项目） */
+  appended?: boolean
 }
 
