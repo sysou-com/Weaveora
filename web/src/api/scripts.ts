@@ -360,6 +360,8 @@ export async function convertEpisodeToProject(
     styleTemplateId?: string | null
     condenseBrief?: boolean
     runDirector?: boolean
+    /** 提示词语言（默认 zh 中文）；写进 brief 与方案，项目级生效 */
+    promptLang?: 'zh' | 'en'
   },
 ): Promise<ConvertToProjectResult> {
   return request<ConvertToProjectResult>(

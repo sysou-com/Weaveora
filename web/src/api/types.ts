@@ -313,6 +313,11 @@ export interface BasePlan {
    * 两者混在一起模型会把「主题词」当成年代约束。era 会被系统追加到每一镜的正词里（JobService.applySetting）。
    */
   setting?: { era?: string; notes?: string }
+  /**
+   * 提示词语言（**项目级**，用户 2026-09-17 裁定）：转项目时选定（默认 zh），导演首次生成按它输出，
+   * 项目页「AI 更新提示词」的默认语言也读它。
+   */
+  promptLang?: 'zh' | 'en'
   /** P4 参考图与主体绑定（参考图面板标注后随方案保存；生成时按镜文案自动绑定） */
   referenceAssets?: Array<{
     assetId: string

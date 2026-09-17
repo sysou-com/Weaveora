@@ -19,10 +19,17 @@ public record ConvertToProjectRequest(
          * 这集已经转过项目时：false（默认）= 在**同一个项目**里出**新版本（V+1）**；
          * true = 不管历史，另建一个新项目（接口保留，界面不暴露）。
          */
-        Boolean newProject
+        Boolean newProject,
+        /** 提示词语言：zh | en（**默认 zh** —— 用户 2026-09-17 裁定）；写进 brief 与方案，项目级生效 */
+        String promptLang
 ) {
     public String modeOrDefault() {
         return mode == null || mode.isBlank() ? "video" : mode;
+    }
+
+    /** 提示词语言（默认中文）：只有显式传 en 才是英文。 */
+    public String promptLangOrDefault() {
+        return promptLang != null && promptLang.trim().equalsIgnoreCase("en") ? "en" : "zh";
     }
 
     public boolean condense() {

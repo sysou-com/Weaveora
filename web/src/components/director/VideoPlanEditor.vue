@@ -21,6 +21,9 @@ const props = defineProps<{
   busyShot?: number | null
   /** 配音试听中 */
   previewBusy?: boolean
+  /** 【P13 口径】本机 GPU 车道的「模型上限(s)」无效（上限由显存决定）→ 置灰并给提示 */
+  modelCapDisabled?: boolean
+  modelCapHint?: string
   /** 试听播放条（父级持有 URL，这里按 slot 把它靠到对应按钮下一行） */
   audioPreview?: {
     url: string
@@ -378,9 +381,10 @@ function setEraNotes(v: string): void {
             :min="1"
             :max="60"
             :step="1"
-            :disabled="disabled"
+            :disabled="disabled || !!modelCapDisabled"
             @update:value="(v: number | null) => props.plan.edit_plan && (props.plan.edit_plan.video_model_max_sec = v ?? 5)"
           />
+          <em v-if="modelCapDisabled" class="cap-hint text-secondary">{{ modelCapHint }}</em>
         </label>
         <label class="row">
           <span class="key" title="镜头尾部留白，避免配音贴着画面切走">呼吸余量(s)</span>

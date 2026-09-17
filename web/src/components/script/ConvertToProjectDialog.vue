@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { useQuery } from '@tanstack/vue-query'
-import { NAlert, NButton, NFormItem, NModal, NSelect, NSwitch } from 'naive-ui'
+import { NAlert, NButton, NFormItem, NModal, NRadioButton, NRadioGroup, NSelect, NSwitch } from 'naive-ui'
 import { computed, ref, watch } from 'vue'
 
 import { fetchStyleTemplates } from '@/api/styleTemplates'
@@ -20,6 +20,8 @@ export interface ConvertPayload {
   styleTemplateId: string | null
   condenseBrief: boolean
   runDirector: boolean
+  /** 提示词语言（默认 zh）—— 项目级：导演首次生成与后续 AI 更新提示词都看它 */
+  promptLang: 'zh' | 'en'
 }
 const props = defineProps<{
   show: boolean
@@ -50,6 +52,8 @@ const shotDurationSec = ref<number>(0)
 const styleTemplateId = ref<string>('')
 const condenseBrief = ref(true)
 const runDirector = ref(true)
+/** 提示词语言（用户 2026-09-17：转项目时选，**默认中文**） */
+const promptLang = ref<'zh' | 'en'>('zh')
 
 const { data: styleTemplates } = useQuery({
   queryKey: ['style-templates'],
@@ -72,6 +76,7 @@ watch(
       styleTemplateId.value = ''
       condenseBrief.value = true
       runDirector.value = true
+      promptLang.value = 'zh'
     }
   },
 )
@@ -85,6 +90,7 @@ function submit(): void {
     styleTemplateId: styleTemplateId.value || null,
     condenseBrief: condenseBrief.value,
     runDirector: runDirector.value,
+    promptLang: promptLang.value,
   })
 }
 </script>
@@ -140,6 +146,10 @@ function submit(): void {
 
       <NFormItem v-if="mode === 'video'" label="每镜时长">
         <NSelect v-model:value="shotDurationSec" :disabled="!!existing" :options="SHOT_DURATIONS" />
+        <em class="lang-hint text-secondary">
+          超过视频模型单次上限的镜头会**自动切段**生成（上限：本机 GPU 由显存决定 ≈6s；云看模型，常见 5s）。
+          生成完会告知具体几个镜超限。
+        </em>
       </NFormItem>
 
       <NFormItem label="视觉风格" class="span-2">
@@ -150,6 +160,17 @@ function submit(): void {
           clearable
           placeholder="默认（跟随描述）"
         />
+      </NFormItem>
+
+      <NFormItem label="提示词语言" class="span-2">
+        <NRadioGroup v-model:value="promptLang" data-testid="convert-prompt-lang">
+          <NRadioButton value="zh">中文</NRadioButton>
+          <NRadioButton value="en">English</NRadioButton>
+        </NRadioGroup>
+        <em class="lang-hint text-secondary">
+          默认中文（Qwen 系对中文理解好）：导演**首次生成**的正/负词与运镜关键帧就用这个语言，
+          之后项目页「AI 更新提示词」也默认用它。
+        </em>
       </NFormItem>
     </div>
 
@@ -188,6 +209,7 @@ function submit(): void {
 .switches { display: flex; flex-direction: column; gap: 12px; margin-top: 4px; }
 .warn { margin: 0 0 16px; font-size: 12.5px; line-height: 1.85; }
 .sw { display: flex; align-items: flex-start; gap: 10px; cursor: pointer; }
+.lang-hint { display: block; margin-top: 6px; font-style: normal; font-size: 11.5px; line-height: 1.7; }
 .sw span { display: flex; flex-direction: column; gap: 2px; }
 .sw b { font-size: 13.5px; font-weight: 600; }
 .sw em { font-style: normal; font-size: 12px; }

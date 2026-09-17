@@ -19,6 +19,7 @@ import studio.weaveora.director.domain.PromptRevisionRepository;
 import studio.weaveora.identity.api.WorkspaceGuard;
 import studio.weaveora.identity.domain.User;
 import studio.weaveora.identity.domain.UserRepository;
+import studio.weaveora.job.JobService;
 import studio.weaveora.project.ProjectService;
 import studio.weaveora.project.api.BriefResponse;
 import studio.weaveora.project.api.CreateProjectRequest;
@@ -74,6 +75,8 @@ public class ScriptService {
     private final DirectorService director;
     private final BriefRepository briefs;
     private final PromptRevisionRepository revisions;
+    /** 只用它算「镜头时长 vs 引擎单次上限」的提示（与项目页同一口径，不重建一套算法）。 */
+    private final JobService jobs;
     /** 写库用**短事务**：AI 调用必须在事务外（长 LLM 调用不得占着数据库连接，见交接纪律 §5.7）。 */
     private final TransactionTemplate tx;
 
@@ -91,7 +94,8 @@ public class ScriptService {
                          @Value("${weaveora.access.admin-email:sysou.com@outlook.com}") String adminEmail,
                          @Value("${weaveora.access.restrict-create:false}") boolean restrictCreate,
                          @Value("${weaveora.access.creator-suffix:}") String creatorSuffix,
-                         @Value("${weaveora.video.max-duration-sec:300}") int maxVideoSec) {
+                         @Value("${weaveora.video.max-duration-sec:300}") int maxVideoSec,
+                         JobService jobs) {
         this.scripts = scripts;
         this.episodes = episodes;
         this.changes = changes;
@@ -103,6 +107,7 @@ public class ScriptService {
         this.director = director;
         this.briefs = briefs;
         this.revisions = revisions;
+        this.jobs = jobs;
         this.tx = new TransactionTemplate(txManager);
         this.adminEmail = adminEmail == null ? "" : adminEmail;
         this.restrictCreate = restrictCreate;
@@ -712,6 +717,10 @@ public class ScriptService {
         constraints.put("scriptId", scriptId.toString());
         constraints.put("scriptEpisodeId", episodeId.toString());
         constraints.put("episodeNo", e.episodeNo());
+        // 提示词语言（用户 2026-09-17：转项目时选，默认中文）—— 写进 brief 与方案，项目级生效：
+        // ①导演首次生成就按它输出；②项目页「AI 更新提示词」的默认语言也读它。
+        String promptLang = req.promptLangOrDefault();
+        constraints.put("promptLang", promptLang);
         String rawText = req.condense()
                 ? ai.condenseBrief(s, e)
                 : buildRawBrief(s, e);
@@ -722,7 +731,7 @@ public class ScriptService {
         if (req.director()) {
             try {
                 gen = director.generate(userId, workspaceId, project.id(),
-                        new GenerateRequest(brief.id(), mode));
+                        new GenerateRequest(brief.id(), mode, promptLang));
             } catch (RuntimeException ex) {
                 log.warn("剧本转项目：导演生成失败（项目与 brief 已创建）script={} ep={} : {}",
                         scriptId, e.episodeNo(), ex.getMessage());
@@ -739,6 +748,7 @@ public class ScriptService {
                             + "》—— brief 已写入该项目，但没有生成新版本（需勾「立即生成分镜与提示词」）。",
                     note);
         }
+        note = appendNote(note, durationOverLimitNote(userId, gen));
         int shotCount = gen == null ? 0 : gen.plan().path("shots").size();
         log.info("script->project: script={} ep={} project={} revision={} appended={} shots={}",
                 scriptId, e.episodeNo(), project.id(),
@@ -751,6 +761,42 @@ public class ScriptService {
     /** 拼接两条提示（空串不产生多余分隔）。 */
     private static String appendNote(String a, String b) {
         return (a == null || a.isBlank()) ? b : a + " " + b;
+    }
+
+    /**
+     * 镜头时长超过**当前引擎单次上限**时的提示（用户 2026-09-17：「超过模型上限要提示」）。
+     *
+     * <p>上限走 {@link JobService#motionLimits} —— 与项目页「运动帧数」弹层**同一口径**
+     * （本机 GPU = 显存决定；云 = 项目模型上限×fps / 模型 schema / 配置）。不阻断，只说清会被自动切段。
+     */
+    private String durationOverLimitNote(UUID userId, GenerateResponse gen) {
+        if (gen == null || gen.plan() == null) {
+            return "";
+        }
+        try {
+            Map<String, Object> limits = jobs.motionLimits(userId, "clip", gen.plan());
+            // 用**原生帧率**换算的真实秒数（本机 96 帧 = 6s，而不是 edit fps 算出的 3.2s），
+            // 否则会把 4–6s 的正常镜头误报成「超上限」。
+            double cap = limits.get("maxClipSecNative") instanceof Number n ? n.doubleValue()
+                    : (limits.get("maxClipSec") instanceof Number n2 ? n2.doubleValue() : 0d);
+            if (cap <= 0) {
+                return "";
+            }
+            int over = 0;
+            for (JsonNode sh : gen.plan().path("shots")) {
+                if (sh.path("duration_sec").asDouble(0) > cap + 0.05) {
+                    over++;
+                }
+            }
+            if (over <= 0) {
+                return "";
+            }
+            return "有 " + over + " 个镜头时长超过当前引擎单次上限 " + String.format("%.2f", cap)
+                    + "s（来源：" + limits.get("source") + "）—— 会自动切段生成；要避免请缩短每镜时长或调整引擎上限。";
+        } catch (RuntimeException ex) {
+            log.debug("计算「镜头时长超上限」提示失败（不影响转项目）：{}", ex.getMessage());
+            return "";
+        }
     }
 
     /** 原文带入（不精简）时的结构化 brief。 */

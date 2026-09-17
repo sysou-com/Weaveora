@@ -138,6 +138,9 @@ watch(
     if (initKey.value === key && draft.value) return
     initKey.value = key
     draft.value = normalizePlan(clonePlan(det.plan))
+    // 提示词语言（项目级）：方案里存了 zh/en 就用它当默认（用户 2026-09-17 转项目时选的）
+    const storedLang = (draft.value as { promptLang?: string }).promptLang
+    aiLang.value = storedLang === 'en' ? 'en' : 'zh'
     // P4：从方案回填参考图选择与主体标注（参考图随方案落库）
     const ra = (draft.value as unknown as { referenceAssets?: Array<{ assetId?: string; subject?: string }> }).referenceAssets
     const ids: string[] = []
@@ -226,6 +229,8 @@ async function doGenerate(briefId: string, dirMode?: 'image' | 'video'): Promise
     const res = await generateDirector(workspaceId.value, projectId.value, {
       briefId,
       ...(dirMode ? { mode: dirMode } : {}),
+      // 语言跟随项目（也可在「AI 生成提示词」弹窗里改后重新生成）
+      promptLang: aiLang.value,
     })
     await invalidateAll()
     selectedRevId.value = res.revisionId
@@ -1673,6 +1678,23 @@ const engineStatus = useQuery({
   refetchInterval: 30_000,
 })
 const engineNotice = computed(() => engineStatus.data.value?.notice ?? '')
+
+/** 改 fps → 立刻重算并回写「模型上限(s)」（用户 2026-09-17：两者要同步；**反向不做**，秒变了不改帧率） */
+watch(
+  () => (draft.value as { edit_plan?: { fps?: number } } | null)?.edit_plan?.fps,
+  (now, before) => {
+    if (now === undefined || now === before) return
+    void motionLimits.refetch()
+  },
+)
+
+/** 【P13 口径】本机 GPU 车道：单次上限由显存决定，「模型上限(s)」无效 → 置灰 + 提示实际值 */const gpuMotionLane = computed(() => (motionLimits.data.value?.engine ?? 'gpu') !== 'cloud')
+const modelCapHint = computed(() => {
+  const v = motionLimits.data.value
+  if (!v) return '本机 GPU 上限由显存决定（此值对本机车道无效）'
+  const fps = Math.max(1, Number(v.fps) || 30)
+  return `本机 GPU 上限由显存决定 ≈ ${(Number(v.gpuMaxFrames) / fps).toFixed(2)}s（此值对本机车道无效）`
+})
 
 /** 当前图片模型一次能收几张参考图（来自模型 schema 的 mapping.refsMax；未知则 0=不提示） */
 const engineSettings = useQuery({
@@ -4323,6 +4345,8 @@ const shotTotal = computed(() => {
                   :plan="vidPlanForEdit"
                   :records="detail.data.value?.shots ?? []"
                   :disabled="!canEdit"
+                  :model-cap-disabled="gpuMotionLane"
+                  :model-cap-hint="modelCapHint"
                   :busy-shot="shotBusy"
                   :preview-busy="previewBusy"
                   :audio-preview="audioPreview"

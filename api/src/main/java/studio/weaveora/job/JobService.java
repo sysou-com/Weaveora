@@ -140,6 +140,8 @@ public class JobService {
      * 本机（GPU/ComfyUI）仍用 {@link #motionFramesMax}（3070Ti 显存口径）。
      */
     private final int motionFramesMaxCloud;
+    /** 原生帧率（A14B=16）：把帧数上限换算成真实秒数时用它（见 motionLimits.maxClipSecNative）。 */
+    private final int motionNativeFps;
     private final boolean motionAppendAction;
     private final int queuedTimeoutMin;   // queued 超时回收阈值（分钟）
     private final int runningTimeoutMin;  // running 超时回收阈值（分钟）
@@ -160,6 +162,14 @@ public class JobService {
                               "${weaveora.video.motion-frames-max:96}") int motionFramesMax,
                               @org.springframework.beans.factory.annotation.Value(
                               "${weaveora.video.motion-frames-max-cloud:300}") int motionFramesMaxCloud,
+                      /**
+                       * motion 模型的原生帧率（与 worker 的 WEAVEORA_MOTION_NATIVE_FPS 同口径，A14B=16）。
+                       *
+                       * <p>用途：把「帧数上限」换算成**真实秒数**。不能用 edit_plan.fps(30) 除 —— 那会把本机
+                       * 96 帧算成 3.2s，而实际能出 96/16 = 6s（真正生成/播放帧率是原生 16，30 是成片帧率）。
+                       */
+                      @org.springframework.beans.factory.annotation.Value(
+                              "${weaveora.video.motion-native-fps:16}") int motionNativeFps,
                       @org.springframework.beans.factory.annotation.Value(
                               "${weaveora.job.queued-timeout-minutes:1440}") int queuedTimeoutMin,
                       @org.springframework.beans.factory.annotation.Value(
@@ -193,6 +203,7 @@ public class JobService {
         this.motionFramesMin = motionFramesMin;
         this.motionFramesMax = motionFramesMax;
         this.motionFramesMaxCloud = motionFramesMaxCloud;
+        this.motionNativeFps = motionNativeFps;
         this.motionAppendAction = motionAppendAction;
         this.queuedTimeoutMin = queuedTimeoutMin;
         this.runningTimeoutMin = runningTimeoutMin;
@@ -2590,6 +2601,10 @@ public class JobService {
                 "maxFrames", hi,
                 "fps", fps,
                 "maxClipSec", Math.round(hi * 100.0 / fps) / 100.0,
+                // 真实秒数（用**原生 16fps** 除）：本机 96 帧 = 6s；云车道与 maxClipSec 等价。
+                // 只作展示/提示用（不改切段与校准口径 —— maxClipSec 仍是两者共用的旧口径）。
+                "nativeFps", Math.max(1, motionNativeFps),
+                "maxClipSecNative", Math.round(hi * 100.0 / Math.max(1, motionNativeFps)) / 100.0,
                 "gpuMaxFrames", motionFramesMax,
                 "cloudMaxFrames", motionFramesMaxCloud,
                 "source", !"cloud".equals(route)

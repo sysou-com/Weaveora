@@ -102,6 +102,14 @@ public class DirectorService {
 
         String system = loadSystemPrompt(mode);
         JsonNode prev = latestPlan(projectId, project.approvedRevisionId(), mode);
+        String promptLang = resolvePromptLang(req, brief);
+        if ("zh".equals(promptLang)) {
+            // 用户 2026-09-17 裁定：转项目时可选提示词语言（默认中文）→ **首次生成就跟随**。
+            // ⚠️ 2026-09-17 实测教训：只把「语言覆盖」追加到 **user** 消息时，模型仍输出英文
+            // （系统词里“prompt 字段用英文”出现多次，权重更高）。所以挂到 **system** 上 —— 
+            // 追加在系统词末尾且标明最高优先级，才是真正能压过它的位置。
+            system = system + PROMPT_LANG_ZH_OVERRIDE;
+        }
         String user = buildUserPrompt(brief, project, mode, prev);
         long t0 = System.nanoTime();
         JsonNode plan;
@@ -116,6 +124,10 @@ public class DirectorService {
         }
         if (plan instanceof ObjectNode obj && !obj.has("mode")) {
             obj.put("mode", mode);
+        }
+        // 把语言钉进方案（项目级真源）：项目页「AI 更新提示词」的默认语言、后续重生成都看它
+        if (plan instanceof ObjectNode objLang) {
+            objLang.put("promptLang", promptLang);
         }
         // 新一版保留上一版同镜的中文描述与旁白（zh/narration 是用户编辑字段，LLM 不自带）
         mergePrevMeta(plan, prev);
@@ -706,6 +718,32 @@ public class DirectorService {
         }
         throw new BizException(ErrorCode.VALIDATION, "无法确定导演模式（brief.mode / project.mode 均未提供）");
     }
+
+    /**
+     * 提示词语言：请求参数 &gt; {@code brief.constraints.promptLang} &gt; 默认 {@code en}。
+     *
+     * <p>默认 en 是**刻意保留的历史口径**（{@code director_video_system.md} 里写着 prompt 字段用英文），
+     * 只有显式选中文（转项目弹层默认中文 / 项目页选了中文重新生成）才覆盖成中文。
+     */
+    private static String resolvePromptLang(GenerateRequest req, BriefSnapshot brief) {
+        String v = req == null ? null : req.promptLang();
+        if (v == null || v.isBlank()) {
+            JsonNode c = brief == null ? null : brief.constraints();
+            v = c == null || c.isNull() ? "" : c.path("promptLang").asText("");
+        }
+        return "zh".equalsIgnoreCase(v.trim()) ? "zh" : "en";
+    }
+
+    /** 中文提示词的显式覆盖指令（追加到**系统词末尾**，才压得过系统词里「prompt 字段用英文」）。 */
+    private static final String PROMPT_LANG_ZH_OVERRIDE = """
+
+            【语言覆盖·最高优先级（优先于本文档前面所有关于语言的要求）】
+            本项目的提示词语言 = **中文**：
+            · positive_prompt / negative_prompt / keyframes[].positive_prompt 一律用**中文**书写；
+            · 专有名词可用「宝玉 (Baoyu)」这种中英并列形式，但**不要整句英文**；
+            · 其它描述性字段（action / composition 等）也用中文。
+            前面所有写「prompt 字段用英文」「英文 positive_prompt」的规则**本次全部不适用**。
+            """;
 
     private String loadSystemPrompt(String mode) {
         String file = "image".equals(mode) ? "director_image_system.md" : "director_video_system.md";

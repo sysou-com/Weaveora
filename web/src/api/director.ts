@@ -6,7 +6,7 @@ import type { DirectorPlan, GenerateResult, RevisionDetail, RevisionSummary } fr
 export async function generateDirector(
   workspaceId: string,
   projectId: string,
-  input: { briefId: string; mode?: string },
+  input: { briefId: string; mode?: string; promptLang?: 'zh' | 'en' },
 ): Promise<GenerateResult> {
   return request<GenerateResult>(`/api/v1/projects/${projectId}/director/generate`, {
     method: 'POST',
