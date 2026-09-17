@@ -261,6 +261,10 @@ public class JobService {
         if (req.kind() == null || !List.of("still", "clip", "voice", "bgm", "portrait", "lipsync", "talk").contains(req.kind())) {
             throw new BizException(ErrorCode.VALIDATION, "kind 必须为 still|clip|voice|bgm|portrait|lipsync|talk");
         }
+        // 生成前置闸门：目标执行面**没有在线节点**就直接报错，而不是让任务悄悄排到天荒地老
+        // （2026-09-17：GPU 公网地址被平台映射到**别人的实例**，我们停了 worker 止血 ——
+        //   此时用户点生成只会「一直排队」，没有任何节点会 claim）
+        requireEngineOnline(laneFor(userId, req.kind()));
         if (project.approvedRevisionId() == null || !project.approvedRevisionId().equals(req.revisionId())) {
             throw new BizException(ErrorCode.REVISION_NOT_APPROVED, "请先确认该方案（未确认不可生成）");
         }
@@ -698,6 +702,8 @@ public class JobService {
             if (!List.of("failed", "cancelled").contains(old.state())) {
                 throw new BizException(ErrorCode.VALIDATION, "仅失败/已取消的任务可重试");
             }
+            // 重试同样要过闸门：节点不在线时创建出来的任务也只会排队
+            requireEngineOnline(laneFor(userId, old.kind()));
             Retarget t = repointToCurrentApproved(old, project, userId);
             // 注意：不能直接沿袭 old.engineRoute() —— 若旧任务当初路由错了（例如 lipsync 被
             // 派到 cloud，云上没有口型工作流），重试会原样复现错误。自托管 kind 一律重算为 gpu，
@@ -1912,6 +1918,57 @@ public class JobService {
 
     /** worker 心跳间隔 25s（见 stub_worker.py），宽限期给足 12 倍余量。 */
     private static final long WORKER_ALIVE_GRACE_MIN = 5;
+
+    /** 目标执行面（gpu|cloud）：沿用路由纯函数；定妆照（portrait）按**图片引擎**走。 */
+    private String laneFor(UUID userId, String kind) {
+        String k = "portrait".equals(kind) ? "still" : kind;
+        return routeForKind(k, engineSettings.resolveEngine(userId, k));
+    }
+
+    /**
+     * 生成前置闸门：目标执行面**没有在线节点**时直接报错（不静默排队）。
+     *
+     * <p>为什么要它（2026-09-17 事故）：GPU#2 的公网地址被平台映射到**别人的实例**，
+     * 我们把 worker 停了止血；此时用户点生成，任务会被写进队列但**永远不会被 claim**，
+     * 界面上只显示「排队中」——用户会以为在跑。宁可在提交时就明确告诉他引擎不在线。
+     *
+     * <p>判据与任务回收同一口径：{@code worker_nodes.last_seen_at} 在
+     * {@link #WORKER_ALIVE_GRACE_MIN} 分钟内 = 在线。
+     */
+    private void requireEngineOnline(String lane) {
+        java.time.OffsetDateTime now = java.time.OffsetDateTime.now();
+        boolean online = nodes.findAll().stream()
+                .anyMatch(n -> nodeServes(lane, n.capabilities()) && nodeAlive(n.lastSeenAt(), now));
+        if (online) {
+            return;
+        }
+        if ("cloud".equals(lane)) {
+            throw new BizException(ErrorCode.WORKER_UNAVAILABLE,
+                    "云引擎当前没有在线节点（worker 未注册或已离线）——请稍后重试。");
+        }
+        throw new BizException(ErrorCode.WORKER_UNAVAILABLE,
+                "自托管引擎（GPU）当前没有在线节点：最近一次心跳已超过 " + WORKER_ALIVE_GRACE_MIN
+                        + " 分钟。请到「生成引擎配置」核对服务器地址与端口，或等节点恢复后再生成"
+                        + "（现在提交也只会一直排队）。若刚在平台重开了实例，改完地址请重启节点进程。");
+    }
+
+    /** 纯函数（便于单测）：节点能力是否服务于该执行面（gpu = 自托管 ComfyUI；cloud = 云 API）。 */
+    static boolean nodeServes(String lane, JsonNode capabilities) {
+        if (capabilities == null || capabilities.isNull()) {
+            return false;
+        }
+        String engine = capabilities.path("engine").asText("");
+        String gpu = capabilities.path("gpu").asText("");
+        if ("cloud".equals(lane)) {
+            return "cloud".equals(engine) || "cloud".equals(gpu);
+        }
+        return "gpu".equals(engine) || "comfy".equals(gpu);
+    }
+
+    /** 纯函数（便于单测）：心跳在宽限期内 = 在线（与任务回收同一口径）。 */
+    static boolean nodeAlive(java.time.OffsetDateTime lastSeenAt, java.time.OffsetDateTime now) {
+        return lastSeenAt != null && lastSeenAt.isAfter(now.minusMinutes(WORKER_ALIVE_GRACE_MIN));
+    }
 
     /**
      * 纯函数（便于单测）：这个 running 任务该不该被回收。
