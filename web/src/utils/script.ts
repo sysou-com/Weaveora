@@ -32,6 +32,19 @@ export function rememberFieldTarget(n: number): void {
   window.localStorage.setItem(TARGET_STORAGE_KEY, String(clampTarget(n)))
 }
 
+/** 分集目标字数单独记一份（与要素可以不同：一集通常比单个要素长） */
+const EPISODE_TARGET_KEY = 'weaveora:script:episodeTarget'
+
+export function rememberedEpisodeTarget(): number {
+  const raw = window.localStorage.getItem(EPISODE_TARGET_KEY)
+  const n = raw ? Number(raw) : NaN
+  return clampTarget(Number.isFinite(n) ? n : 4000)
+}
+
+export function rememberEpisodeTarget(n: number): void {
+  window.localStorage.setItem(EPISODE_TARGET_KEY, String(clampTarget(n)))
+}
+
 export function clampTarget(n: number): number {
   const v = Math.round(Number(n))
   if (!Number.isFinite(v)) return SCRIPT_TARGET_DEFAULT

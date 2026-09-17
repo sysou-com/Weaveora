@@ -55,7 +55,7 @@ import ScriptFieldCard from '@/components/script/ScriptFieldCard.vue'
 import SyncConfirmDialog from '@/components/script/SyncConfirmDialog.vue'
 import { useAuthStore } from '@/stores/auth'
 import { formatDateShort } from '@/utils/format'
-import { SCRIPT_FIELDS, formatChars } from '@/utils/script'
+import { SCRIPT_FIELDS, formatChars, rememberEpisodeTarget } from '@/utils/script'
 
 /**
  * 剧情详情：折叠框列表展示各集；顶部「开始下一集」；
@@ -162,7 +162,15 @@ function openEpisodeDrawer(p: Partial<typeof epDrawer>): void {
   epOutline.value = p.outline ?? []
 }
 
-function editEpisode(e: { id: string; episodeNo: number; title: string; content: string; summary: string; aiPolished: boolean }): void {
+function editEpisode(e: {
+  id: string
+  episodeNo: number
+  title: string
+  content: string
+  summary: string
+  aiPolished: boolean
+  outline?: string[] | null
+}): void {
   openEpisodeDrawer({
     id: e.id,
     no: e.episodeNo,
@@ -170,6 +178,7 @@ function editEpisode(e: { id: string; episodeNo: number; title: string; content:
     content: e.content,
     summary: e.summary,
     aiPolished: e.aiPolished,
+    outline: e.outline ?? [],
   })
 }
 
@@ -194,6 +203,7 @@ async function saveEpisode(): Promise<void> {
       summary: epDrawer.summary,
       aiPolished: epDrawer.aiPolished,
       syncPrevious: true,
+      outline: epOutline.value,
     }
     const res =
       epDrawer.mode === 'create'
@@ -250,13 +260,20 @@ async function removeEpisode(e: { id: string; episodeNo: number }): Promise<void
 const nextShow = ref(false)
 const nextBusy = ref(false)
 
-async function chooseNext(payload: { polished: boolean; titleHint: string; instruction: string }): Promise<void> {
+async function chooseNext(payload: {
+  polished: boolean
+  titleHint: string
+  instruction: string
+  targetChars: number
+}): Promise<void> {
   nextBusy.value = true
   try {
+    if (payload.polished) rememberEpisodeTarget(payload.targetChars)
     const r = await aiNextEpisode(workspaceId.value, scriptId.value, {
       polished: payload.polished,
       titleHint: payload.titleHint,
       instruction: payload.instruction,
+      targetChars: payload.targetChars,
     })
     nextShow.value = false
     openEpisodeDrawer({
@@ -453,6 +470,10 @@ function fieldValue(key: ScriptFieldKey): string {
               </div>
             </template>
             <div class="ep-body">
+              <details v-if="e.outline?.length" class="ep-outline-saved">
+                <summary>本集写作提纲（{{ e.outline.length }} 段）</summary>
+                <p v-for="(seg, i) in e.outline" :key="i" class="ep-outline-seg">{{ seg }}</p>
+              </details>
               <p v-if="e.summary" class="ep-summary text-secondary">摘要：{{ e.summary }}</p>
               <p class="ep-content">{{ e.content || '（本集暂无正文）' }}</p>
               <div class="ep-ops">
@@ -505,6 +526,7 @@ function fieldValue(key: ScriptFieldKey): string {
             :workspace-id="workspaceId"
             :elements="draftElements"
             :page-rows="25"
+            :stored-outline-count="script?.outlines?.[f.key]?.length ?? 0"
           />
         </div>
         <template #footer>
@@ -664,6 +686,9 @@ function fieldValue(key: ScriptFieldKey): string {
 .ep-tag { font-size: 10px; color: var(--wv-accent-text); background: var(--wv-accent-soft); padding: 2px 6px; border-radius: 5px; }
 .ep-chars { margin-left: auto; font-size: 11px; color: var(--wv-text-4); }
 .ep-body { display: flex; flex-direction: column; gap: 10px; }
+.ep-outline-saved { font-size: 12.5px; color: var(--wv-text-2); padding: 10px 12px; border-radius: var(--wv-radius-s); background: var(--wv-surface-sunken); border: 1px solid var(--wv-line); }
+.ep-outline-saved summary { cursor: pointer; color: var(--wv-accent-text); font-size: 12px; }
+.ep-outline-saved .ep-outline-seg { margin: 4px 0 0; line-height: 1.7; }
 .ep-summary { margin: 0; font-size: 12.5px; }
 .ep-content { margin: 0; font-size: 14px; line-height: 1.95; white-space: pre-wrap; word-break: break-word; }
 .ep-ops { display: flex; gap: 8px; }

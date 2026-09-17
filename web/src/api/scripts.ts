@@ -44,6 +44,8 @@ export interface EpisodeInput {
   aiPolished?: boolean
   /** true（默认）= 保存后刷新「精简的故事」并做一致性检查 */
   syncPrevious?: boolean
+  /** 【B】本集节拍提纲（AI 生成后原样带回，随集保存） */
+  outline?: string[] | null
 }
 
 // ---------------------------------------------------------------- 剧本 CRUD
@@ -249,6 +251,8 @@ export async function aiScriptField(
     currentValue?: string
     /** 用户设定的目标字数（≤8000；不传=4000） */
     targetChars?: number
+    /** true = 强制重新生成提纲（默认复用已存提纲） */
+    refreshOutline?: boolean
   },
 ): Promise<AiFieldResult> {
   return request<AiFieldResult>(`/api/v1/scripts/${scriptId}/ai/field`, {
@@ -280,7 +284,14 @@ export async function aiScriptFieldPreview(input: {
 export async function aiNextEpisode(
   workspaceId: string,
   scriptId: string,
-  input: { polished: boolean; titleHint?: string; instruction?: string; episodeNo?: number },
+  input: {
+    polished: boolean
+    titleHint?: string
+    instruction?: string
+    episodeNo?: number
+    /** 本集目标字数（≤8000；不传=4000） */
+    targetChars?: number
+  },
 ): Promise<AiNextEpisodeResult> {
   return request<AiNextEpisodeResult>(`/api/v1/scripts/${scriptId}/ai/next-episode`, {
     method: 'POST',

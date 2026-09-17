@@ -719,6 +719,8 @@ export interface Script {
   stageDirections: string
   /** AI 持续维护的「精简的故事」（后续每一集生成的唯一连续记忆） */
   condensedStory: string
+  /** 【B】各要素已持久化的分段写作提纲（key=ScriptFieldKey）；「AI 更新」可复用 */
+  outlines?: Record<string, string[]> | null
   status: 'draft' | 'writing' | 'completed' | string
   shareStatus: string | null
   episodeCount: number
@@ -763,6 +765,8 @@ export interface ScriptEpisode {
   content: string
   summary: string
   aiPolished: boolean
+  /** 【B】本集写作时用的节拍提纲（重开可见）；无则空数组 */
+  outline?: string[] | null
   createdAt: string
   updatedAt: string
 }

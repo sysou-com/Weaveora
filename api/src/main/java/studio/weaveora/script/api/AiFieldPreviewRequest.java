@@ -32,6 +32,6 @@ public record AiFieldPreviewRequest(
     }
 
     public AiFieldRequest toFieldRequest() {
-        return new AiFieldRequest(field, mode, hint, currentValue, targetChars);
+        return new AiFieldRequest(field, mode, hint, currentValue, targetChars, null);
     }
 }

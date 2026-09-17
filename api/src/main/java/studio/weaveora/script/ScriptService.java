@@ -298,6 +298,12 @@ public class ScriptService {
             saved = episodes.save(saved);
         }
 
+        // 【B】保存本集提纲（该集照着哪份提纲写的；重开可见、便于续写与复盘）
+        if (req.outline() != null && !req.outline().isEmpty()) {
+            saved.setOutline(ScriptMapper.toJson(req.outline()));
+            saved = episodes.save(saved);
+        }
+
         if (saved.title().isBlank()) {
             saved.patch("第 " + saved.episodeNo() + " 集", null, null, null);
             saved = episodes.save(saved);
@@ -419,15 +425,34 @@ public class ScriptService {
 
     // ------------------------------------------------------------ AI
 
-    /** 只读 + 长 LLM 调用：**不开事务**，避免调用期间占住数据库连接。 */
-    public AiFieldResult aiField(UUID userId, UUID workspaceId, UUID scriptId, AiFieldRequest req) {        guard.requireMember(userId, workspaceId);
+    /**
+     * 单字段 AI 生成/更新。
+     *
+     * <p>写事务只有一个目的：【B】把本次提纲持久化（`scripts.outlines`），供下次「AI 更新」**复用同一份提纲**。
+     * LLM 调用期间仍不持有事务——先读上下文 → 调 LLM → 再写提纲。
+     */
+    @Transactional
+    public AiFieldResult aiField(UUID userId, UUID workspaceId, UUID scriptId, AiFieldRequest req) {
+        guard.requireMember(userId, workspaceId);
         ScriptField field = ScriptField.of(req.field());
         if (field == null) {
             throw new BizException(ErrorCode.VALIDATION, "field 非法（可选：characters|story|conflict|"
                     + "plotStructure|language|stageDirections）");
         }
         Script s = requireScript(workspaceId, scriptId);
-        return ai.generateField(s, episodes.findByScriptIdOrderByEpisodeNoAsc(scriptId), field, req);
+        ScriptPrompts.Outline stored = storedOutline(s, field.key());
+        AiFieldResult r = ai.generateField(s, episodes.findByScriptIdOrderByEpisodeNoAsc(scriptId), field, req, stored);
+        // 【B】本次提纲存入 scripts.outlines（与已存一致则不动，避免无意义写）
+        if (r.outline() != null && !r.outline().isEmpty() && !r.outline().equals(stored.segments())) {
+            s.putOutline(field.key(), ScriptMapper.toJson(r.outline()));
+            scripts.save(s);
+        }
+        return r;
+    }
+
+    /** 读取已持久化的要素提纲（供复用；无则空）。 */
+    private static ScriptPrompts.Outline storedOutline(Script s, String fieldKey) {
+        return new ScriptPrompts.Outline(ScriptMapper.outlineList(s.outlineOf(fieldKey)));
     }
 
     /**
@@ -436,7 +461,8 @@ public class ScriptService {
      * <p>把页面上已填的其它要素组装成一个**未持久化**的 Script 作为上下文，
      * 复用与正式路径完全相同的提示词与解析（避免“新建页一套、详情页另一套”）。
      */
-    public AiFieldResult aiFieldPreview(AiFieldPreviewRequest req) {        ScriptField field = ScriptField.of(req.field());
+    public AiFieldResult aiFieldPreview(AiFieldPreviewRequest req) {
+        ScriptField field = ScriptField.of(req.field());
         if (field == null) {
             throw new BizException(ErrorCode.VALIDATION, "field 非法（可选：characters|story|conflict|"
                     + "plotStructure|language|stageDirections）");
@@ -445,7 +471,7 @@ public class ScriptService {
         Script tmp = Script.create(null, null, req.title().trim(), req.genre().trim(),
                 el.get("characters"), el.get("story"), el.get("conflict"),
                 el.get("plotStructure"), el.get("language"), el.get("stageDirections"));
-        return ai.generateField(tmp, List.of(), field, req.toFieldRequest());
+        return ai.generateField(tmp, List.of(), field, req.toFieldRequest(), ScriptPrompts.Outline.empty());
     }
 
     public AiNextEpisodeResult aiNextEpisode(UUID userId, UUID workspaceId, UUID scriptId,

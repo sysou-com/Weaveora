@@ -100,7 +100,7 @@ class ScriptPromptsTest {
 
     @Test
     void episodeUserCarriesCondensedStoryAndNextNo() {
-        String user = ScriptPrompts.episodeUser(script(), List.of(episode(1, "纸船", "正文")), 2, "重逢", "留钩子", 1, "", OUTLINE);
+        String user = ScriptPrompts.episodeUser(script(), List.of(episode(1, "纸船", "正文")), 2, "重逢", "留钩子", 1, "", OUTLINE, 4000);
         assertTrue(user.contains("精简的故事"), user);
         assertTrue(user.contains("第 2 集"), user);
         assertTrue(user.contains("重逢"), user);
@@ -111,16 +111,16 @@ class ScriptPromptsTest {
 
     @Test
     void episodeSegmentsHaveDistinctRolesAndContinuationRules() {
-        String p1 = ScriptPrompts.episodeUser(script(), List.of(), 1, null, null, 1, "", OUTLINE);
+        String p1 = ScriptPrompts.episodeUser(script(), List.of(), 1, null, null, 1, "", OUTLINE, 4000);
         assertTrue(p1.contains("起"), p1);
         assertTrue(p1.contains("这是第一集"), p1);
 
-        String p2 = ScriptPrompts.episodeUser(script(), List.of(), 1, null, null, 2, "前文内容XYZ", OUTLINE);
+        String p2 = ScriptPrompts.episodeUser(script(), List.of(), 1, null, null, 2, "前文内容XYZ", OUTLINE, 4000);
         assertTrue(p2.contains("承"), p2);
         assertTrue(p2.contains("勿重复"), p2);
         assertTrue(p2.contains("前文内容XYZ"), p2);
 
-        String p3 = ScriptPrompts.episodeUser(script(), List.of(), 1, null, null, 3, "前文内容XYZ", OUTLINE);
+        String p3 = ScriptPrompts.episodeUser(script(), List.of(), 1, null, null, 3, "前文内容XYZ", OUTLINE, 4000);
         assertTrue(p3.contains("钩子"), p3);
     }
 
@@ -275,7 +275,7 @@ class ScriptPromptsTest {
         assertTrue(ScriptPrompts.guideUser(script(), List.of()).contains("精简的故事"));
         assertTrue(ScriptPrompts.fieldUser(script(), List.of(), ScriptField.STORY, null, null, false, 1, "", 4000, NO_OUTLINE)
                 .contains("精简的故事"));
-        assertTrue(ScriptPrompts.episodeUser(script(), List.of(), 1, null, null, 1, "", NO_OUTLINE)
+        assertTrue(ScriptPrompts.episodeUser(script(), List.of(), 1, null, null, 1, "", NO_OUTLINE, 4000)
                 .contains("精简的故事"));
         assertTrue(ScriptPrompts.context(script(), List.of(), null, false).text().contains("尚无"));
     }
@@ -305,6 +305,18 @@ class ScriptPromptsTest {
         assertTrue(user.contains("1. 起"), user);          // 全貌可见，避免越界写后面段落
         assertTrue(user.contains("2. 承转"), user);        // 本段要写的那一条
         assertTrue(user.contains("严格按提纲这一条写"), user);
+    }
+
+    @Test
+    void storedOutlineIsReusedOnlyWhenSegmentCountMatches() {
+        // 【B】「AI 更新复用同一份提纲」的判定规则
+        ScriptPrompts.PassPlan two = ScriptPrompts.planFor(4000);    // 2 段
+        ScriptPrompts.PassPlan four = ScriptPrompts.planFor(8000);   // 4 段
+        ScriptPrompts.Outline stored2 = new ScriptPrompts.Outline(List.of("1. a", "2. b"));
+        assertTrue(ScriptPrompts.canReuseOutline(stored2, two, false), "段数一致应复用");
+        assertFalse(ScriptPrompts.canReuseOutline(stored2, four, false), "段数不一致必须重生成");
+        assertFalse(ScriptPrompts.canReuseOutline(stored2, two, true), "用户要求刷新则不复用");
+        assertFalse(ScriptPrompts.canReuseOutline(ScriptPrompts.Outline.empty(), two, false), "空提纲不复用");
     }
 
     @Test

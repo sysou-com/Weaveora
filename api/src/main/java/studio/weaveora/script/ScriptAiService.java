@@ -56,8 +56,14 @@ public class ScriptAiService {
 
     // ------------------------------------------------------------ 字段生成 / 更新
 
+    /**
+     * 单字段生成/更新。
+     *
+     * @param stored 【B】已持久化的提纲：若段数与本次目标一致且用户未要求刷新，则**直接复用**
+     *               （省一次调用，也避免每次重写得结构不一致）
+     */
     public AiFieldResult generateField(Script script, List<ScriptEpisode> episodes, ScriptField field,
-                                       AiFieldRequest req) {
+                                       AiFieldRequest req, ScriptPrompts.Outline stored) {
         String current = req.currentValue() != null && !req.currentValue().isBlank()
                 ? req.currentValue() : currentValueOf(script, field);
         if (stub()) {
@@ -70,12 +76,18 @@ public class ScriptAiService {
         int target = ScriptPrompts.clampTarget(req.targetChars() == null ? 0 : req.targetChars());
         ScriptPrompts.PassPlan plan = ScriptPrompts.planFor(target);
         logTrim("字段「" + field.label() + "」", script, episodes, field.key(), false);
-        // 【B】结构先行：先要一份与段数 1:1 的提纲，每段照提纲写（不跑偏、不重复、可展示）
-        ScriptPrompts.Outline outline = outlineFor(
-                ScriptPrompts.outlineSystem(),
-                ScriptPrompts.outlineUserForField(script, episodes, field, req.hint(), target,
-                        req.fromContent(), current),
-                script.title(), "字段「" + field.label() + "」提纲");
+        // 【B】结构先行：先要一份与段数 1:1 的提纲；已存且在段数一致时直接复用
+        ScriptPrompts.Outline outline;
+        if (ScriptPrompts.canReuseOutline(stored, plan, req.refresh())) {
+            outline = stored;
+            log.info("字段「{}」复用已存提纲（{} 段）", field.label(), stored.segments().size());
+        } else {
+            outline = outlineFor(
+                    ScriptPrompts.outlineSystem(),
+                    ScriptPrompts.outlineUserForField(script, episodes, field, req.hint(), target,
+                            req.fromContent(), current),
+                    script.title(), "字段「" + field.label() + "」提纲");
+        }
         StringBuilder acc = new StringBuilder();
         String system = ScriptPrompts.fieldSystem();
         String note = "";
@@ -130,6 +142,14 @@ public class ScriptAiService {
             note = (note == null || note.isBlank() ? "" : note + "；")
                     + "AI 本次产出 " + value.length() + " 字（目标 " + target
                     + " 字），可重试或手写补全";
+        } else if (value.length() > target * 1.5) {
+            // 写超 → 自动压缩一次（保留内容与结尾）
+            String origin = String.valueOf(value.length());
+            value = compressToTarget(system, script, "字段「" + field.label() + "」", value, target,
+                    "字段「" + field.label() + "」");
+            note = (note == null || note.isBlank() ? "" : note + "；")
+                    + "AI 写超了（原 " + origin + " 字 > 目标 " + target + " 字），已自动压缩到 "
+                    + value.length() + " 字";
         }
         boolean changed = !value.equals(current.trim());
         return new AiFieldResult(field.key(), value, note, changed, llm.source(),
@@ -157,14 +177,15 @@ public class ScriptAiService {
                     "stub", null, null);
         }
         String system = ScriptPrompts.episodeSystem();
-        // 分段续写：一集拆成多段（起 / 承转 / 合与钩子），每段字数由预算决定，避开 max_tokens 截断
-        ScriptPrompts.PassPlan epPlan = ScriptPrompts.planFor(ScriptPrompts.EPISODE_MIN_CHARS);
+        // 分段续写：一集拆成多段（起 / 承转 / 合与钩子），目标字数由用户设定，避开 max_tokens 截断
+        int epTarget = ScriptPrompts.clampTarget(req.targetChars() == null ? 0 : req.targetChars());
+        ScriptPrompts.PassPlan epPlan = ScriptPrompts.planFor(epTarget);
         int epMaxPass = Math.min(ScriptPrompts.MAX_PASSES, epPlan.passes() + 1);
         logTrim("第 " + nextNo + " 集", script, episodes, null, true);
         // 【B】先要本集的**节拍提纲**（起/承转/合），每段照一条写
         ScriptPrompts.Outline outline = outlineFor(
                 ScriptPrompts.outlineSystem(),
-                ScriptPrompts.outlineUserForEpisode(script, episodes, nextNo, hint, req.instruction()),
+                ScriptPrompts.outlineUserForEpisode(script, episodes, nextNo, hint, req.instruction(), epTarget),
                 script.title(), "第 " + nextNo + " 集提纲");
         String title = "";
         String summary = "";
@@ -172,7 +193,7 @@ public class ScriptAiService {
         StringBuilder acc = new StringBuilder();
         for (int pass = 1; pass <= epMaxPass; pass++) {
             String user = ScriptPrompts.episodeUser(script, episodes, nextNo, hint, req.instruction(),
-                    pass, acc.toString(), outline);
+                    pass, acc.toString(), outline, epTarget);
             JsonNode node;
             LlmJson res;
             try {
@@ -225,9 +246,16 @@ public class ScriptAiService {
             // 兜底：没有摘要就用正文开头（「精简的故事」需要每集有据可依）
             summary = ScriptPrompts.clip(content, 120);
         }
-        if (content.length() < ScriptPrompts.EPISODE_MIN_CHARS) {
-            String warn = "AI 本次产出 " + content.length() + " 字（未达 " + ScriptPrompts.EPISODE_MIN_CHARS
-                    + "），可重试或手写补全";
+        if (content.length() < epTarget) {
+            String warn = "AI 本次产出 " + content.length() + " 字（目标 " + epTarget
+                    + " 字），可重试或手写补全";
+            note = note.isBlank() ? warn : note + "；" + warn;
+        } else if (content.length() > epTarget * 1.5) {
+            String origin = String.valueOf(content.length());
+            content = compressToTarget(system, script, "第 " + nextNo + " 集正文", content, epTarget,
+                    "第 " + nextNo + " 集");
+            String warn = "AI 写超了（原 " + origin + " 字 > 目标 " + epTarget + " 字），已自动压缩到 "
+                    + content.length() + " 字";
             note = note.isBlank() ? warn : note + "；" + warn;
         }
         return new AiNextEpisodeResult(nextNo, title, summary, content, llm.source(), note, outline.isEmpty() ? null : outline.segments());
@@ -443,6 +471,33 @@ public class ScriptAiService {
         } catch (RuntimeException ignore) {
             // 纯日志用途，绝不影响主流程
         }
+    }
+
+    /**
+     * 写超时的**压缩重写**（一次调用）：保留人物/冲突/关键事件/结尾钩子，把长文压回目标以内。
+     *
+     * <p>为什么不直接裁字：叙事文本硬截会把结尾的钩子剪掉（反而更糟）。
+     * 实测模型对「不超过 N 字」的遵循度有限（目标 1500 字会写到 2800+），所以只在这时多花一次调用。
+     * **压缩失败就保留原稿**（宁可长，不丢内容），并把实情写进 note。
+     */
+    private String compressToTarget(String system, Script script, String task, String draft,
+                                    int target, String what) {
+        String user = "下面这段【" + task + "】约 " + draft.length() + " 字，超出了用户设定的 " + target
+                + " 字目标。请**在不丢关键内容与结尾的前提下压缩**到 " + target + " 字以内（约 "
+                + Math.max(1, (int) (target * 0.95)) + " 字）：合并重复、删去修饰与次要描写，"
+                + "但必须保留全部人物、核心冲突、关键事件与结尾钩子。\n"
+                + "只输出 JSON：{\"value\":\"<压缩后的完整内容>\"}\n\n【待压缩内容】\n" + draft;
+        try {
+            LlmJson res = callJson(system, user, script.title(), what + "压缩");
+            String out = pickText(res, "value", what + "压缩");
+            if (!out.isBlank() && out.length() < draft.length()) {
+                log.info("{} 写超（{} 字 > 目标 {} 字），已压缩到 {} 字", what, draft.length(), target, out.length());
+                return out;
+            }
+        } catch (RuntimeException e) {
+            log.warn("{} 压缩失败，保留原稿 {} 字：{}", what, draft.length(), e.getMessage());
+        }
+        return draft;
     }
 
     private static String keysOf(JsonNode node) {

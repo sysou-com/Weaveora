@@ -30,6 +30,8 @@ const props = defineProps<{
   disabled?: boolean
   /** 每页行数：新建页 15，详情抽屉 25 */
   pageRows?: number
+  /** 【B】该要素已存过的提纲段数（>0 时弹窗会给「重新生成提纲」开关） */
+  storedOutlineCount?: number
 }>()
 
 const emit = defineEmits<{ 'update:modelValue': [value: string] }>()
@@ -64,7 +66,7 @@ function ask(mode: 'from_title' | 'from_content'): void {
 }
 
 /** 用户在弹窗里确认字数 → 真正发起生成 */
-async function run(targetChars: number): Promise<void> {
+async function run(targetChars: number, refreshOutline: boolean): Promise<void> {
   lengthShow.value = false
   target.value = targetChars
   rememberFieldTarget(targetChars)
@@ -77,6 +79,7 @@ async function run(targetChars: number): Promise<void> {
           mode,
           currentValue: props.modelValue,
           targetChars,
+          refreshOutline,
         })
       : await aiScriptFieldPreview({
           title: props.title,
@@ -176,6 +179,7 @@ function onApply(): void {
       v-model:show="lengthShow"
       :value="target"
       :subject="label"
+      :has-stored-outline="(storedOutlineCount ?? 0) > 0"
       @confirm="run"
     />
   </section>

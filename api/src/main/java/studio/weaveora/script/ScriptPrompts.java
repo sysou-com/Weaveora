@@ -193,6 +193,27 @@ public final class ScriptPrompts {
 
     // ---------------------------------------------------------------- 提纲
 
+    /**
+     * 【B】复用判定：已存提纲**段数与本次计划一致**且用户未要求刷新 → 复用同一份提纲。
+     *
+     * <p>为什么要判段数：段数由目标字数算出（500→1 段…8000→4 段），
+     * 用户把目标从 4000 改成 8000 时旧提纲（2 段）与新的 4 段对不上，必须重生成。
+     */
+    public static boolean canReuseOutline(Outline stored, PassPlan plan, boolean refresh) {
+        return !refresh && stored != null && !stored.isEmpty()
+                && stored.segments().size() == plan.passes();
+    }
+
+    /**
+     * 本段提示词里的「严格不超过」数字。
+     *
+     * <p>为什么不直接用 {@link #MAX_SEGMENT_CHARS}：实测模型会无视高于目标很多的封顶
+     * （目标 1500 字却写了 3361）；把封顶与目标挂钩（≈目标×1.3、上下限夹到 [800, 2600]）后遵循度明显提升。
+     */
+    public static int segmentCeiling(int perPass) {
+        return Math.min(MAX_SEGMENT_CHARS, Math.max(800, (int) Math.ceil(perPass * 1.3)));
+    }
+
     /** 提纲：每段一行文本（「第K段：标题 —— 要点1；要点2」），便于前端直接展示。 */
     public record Outline(List<String> segments) {
 
@@ -233,10 +254,10 @@ public final class ScriptPrompts {
         return sb.toString();
     }
 
-    /** 提纲请求的 user：下一集版。 */
+    /** 提纲请求的 user：下一集版（目标字数由用户设定，与要素同一套分段机制）。 */
     public static String outlineUserForEpisode(Script s, List<ScriptEpisode> episodes, int nextNo,
-                                               String titleHint, String instruction) {
-        PassPlan plan = planFor(EPISODE_MIN_CHARS);
+                                               String titleHint, String instruction, int targetChars) {
+        PassPlan plan = planFor(targetChars);
         StringBuilder sb = new StringBuilder();
         sb.append(context(s, episodes, null, false).text());
         sb.append("\n【写作目标】第 ").append(nextNo).append(" 集正文\n");
@@ -285,8 +306,8 @@ public final class ScriptPrompts {
     /** 下一集（**一段一段**，按提纲写）。 */
     public static String episodeUser(Script s, List<ScriptEpisode> episodes, int nextNo,
                                      String titleHint, String instruction, int pass, String soFar,
-                                     Outline outline) {
-        PassPlan plan = planFor(EPISODE_MIN_CHARS);
+                                     Outline outline, int targetChars) {
+        PassPlan plan = planFor(targetChars);
         StringBuilder sb = new StringBuilder();
         sb.append(context(s, episodes, null, true).text());
         sb.append("\n【本集编号】第 ").append(nextNo).append(" 集\n");
@@ -297,13 +318,21 @@ public final class ScriptPrompts {
             sb.append("【用户对下一集的额外要求】").append(instruction.trim()).append('\n');
         }
         // 本节拍的角色（与提纲并行：提纲说「写什么」，角色说「本段的功能」）
-        if (pass <= 1) {
+        if (plan.passes() == 1) {
+            // 单段成集：不能再只让它「起」——否则它会按一整集写而大幅超字（实测目标 1500 字写了 3361）
+            sb.append("【本段功能】本集**只写这一段**：起→承转→合一次写完，**必须在字数上限内收束**并留钩子。\n");
+        } else if (pass <= 1) {
             sb.append("【本段功能】起：引入本集场景与人物、抛出本集的核心冲突。\n");
         } else if (pass == 2) {
             sb.append("【本段功能】承／转：承接前文推进冲突、制造转折。\n");
         } else {
             sb.append("【本段功能】合：解决或升级冲突，并在结尾留下钩子。\n");
         }
+        sb.append("【本集总量】本集目标总共约 ").append(plan.target()).append(" 字，会被拆成 ")
+                .append(plan.passes()).append(" 段依次生成；")
+                .append(plan.passes() == 1
+                        ? "**本集只有这一段，请在本段内完成整集**（起承转合 + 结尾钩子）。\n"
+                        : "**你只写当前这一段，不要在本段把整集收尾**（除非本段任务写的是收束段）。\n");
         sb.append(segmentsBlock(outline));
         sb.append('\n').append(passInstruction(pass, soFar, "本集正文", plan, outline));
         return sb.toString();
@@ -320,7 +349,8 @@ public final class ScriptPrompts {
             sb.append("（提纲缺失，请自行合理推进）。\n");
         }
         sb.append("长度：约 ").append(plan.perPass()).append(" 字，**严格不超过 ")
-                .append(MAX_SEGMENT_CHARS).append(" 字**（超出会被接口截断）。\n");
+                .append(segmentCeiling(plan.perPass()))
+                .append(" 字**（超出会被接口截断；写不下就精简场景/要点，不要超字）。\n");
         if (pass > 1 && soFar != null && !soFar.isBlank()) {
             sb.append("【已有前文（**勿重复**，只用于衔接）】\n")
                     .append(clip(tail(soFar, 1400), 1400)).append('\n')

@@ -2,9 +2,12 @@
 import { NButton, NInput, NModal } from 'naive-ui'
 import { ref, watch } from 'vue'
 
+import ScriptLengthField from './ScriptLengthField.vue'
+import { rememberedEpisodeTarget } from '@/utils/script'
+
 /**
- * 「开始下一集」弹层：先问**是否需要 AI 润色**（用户原话）。
- * - 要润色：AI 先读「精简的故事」，再结合剧本要素生成本集内容（可再手改）
+ * 「开始下一集」弹层：先问**是否需要 AI 润色**（用户原话），并设定**本集目标字数**（用户 2026-09-17 追加）。
+ * - 要润色：AI 先读「精简的故事」，再结合要素与提纲生成本集
  * - 不要：直接给空文本框，自己写
  */
 const props = defineProps<{
@@ -15,11 +18,12 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   'update:show': [value: boolean]
-  choose: [payload: { polished: boolean; titleHint: string; instruction: string }]
+  choose: [payload: { polished: boolean; titleHint: string; instruction: string; targetChars: number }]
 }>()
 
 const titleHint = ref('')
 const instruction = ref('')
+const targetChars = ref(rememberedEpisodeTarget())
 
 watch(
   () => props.show,
@@ -27,6 +31,7 @@ watch(
     if (v) {
       titleHint.value = ''
       instruction.value = ''
+      targetChars.value = rememberedEpisodeTarget()
     }
   },
 )
@@ -42,15 +47,15 @@ watch(
   >
     <p class="lead text-secondary">
       要不要让 AI 润色这一集？AI 会先读**不断更新的「精简的故事」**，再结合剧本要素生成符合下一集剧情的内容。
-      <br />长文分段生成（拼到 4000+ 字）约需 1–2 分钟，请勿关闭页面。
+      <br />长文分段生成，请勿关闭页面。
     </p>
 
     <div class="options">
-      <button type="button" class="opt" :disabled="busy" @click="emit('choose', { polished: true, titleHint, instruction })">
+      <button type="button" class="opt" :disabled="busy" @click="emit('choose', { polished: true, titleHint, instruction, targetChars })">
         <span class="opt-name">要 AI 润色</span>
         <span class="opt-desc">按精简故事与要素生成完整一集，之后仍可自由修改</span>
       </button>
-      <button type="button" class="opt plain" :disabled="busy" @click="emit('choose', { polished: false, titleHint, instruction })">
+      <button type="button" class="opt plain" :disabled="busy" @click="emit('choose', { polished: false, titleHint, instruction, targetChars })">
         <span class="opt-name">我自己写</span>
         <span class="opt-desc">打开空白文本，直接手写这一集</span>
       </button>
@@ -67,12 +72,16 @@ watch(
         :maxlength="2000"
         placeholder="例如：本集要交代父辈的秘密，结尾留一个悬念"
       />
+      <div class="len-block">
+        <p class="lbl len-lbl">本集目标字数（仅「要 AI 润色」时生效）</p>
+        <ScriptLengthField v-model="targetChars" label="本集字数" />
+      </div>
     </div>
 
     <template #footer>
       <div class="foot">
         <NButton quaternary :disabled="busy" @click="emit('update:show', false)">取消</NButton>
-        <span v-if="busy" class="text-secondary busy">生成中，请稍候（1–2 分钟）…</span>
+        <span v-if="busy" class="text-secondary busy">生成中，请稍候（1–3 分钟）…</span>
       </div>
     </template>
   </NModal>
@@ -94,6 +103,8 @@ watch(
 .opt-desc { font-size: 12px; color: var(--wv-text-3); line-height: 1.6; }
 .extra { display: flex; flex-direction: column; gap: 6px; margin-top: 18px; }
 .lbl { font-size: 12px; color: var(--wv-text-3); margin-top: 6px; }
+.len-block { margin-top: 14px; padding: 14px 16px 4px; border-radius: var(--wv-radius-s); background: var(--wv-surface-sunken); border: 1px solid var(--wv-line); }
+.len-lbl { margin: 0 0 10px; font-size: 12px; }
 .foot { display: flex; align-items: center; gap: 12px; }
 .busy { margin-left: auto; font-size: 12px; }
 @media (max-width: 560px) {

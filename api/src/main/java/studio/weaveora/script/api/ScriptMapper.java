@@ -22,13 +22,38 @@ public final class ScriptMapper {
                 s.characters(), s.story(), s.conflict(), s.plotStructure(),
                 s.language(), s.stageDirections(), s.condensedStory(),
                 s.status(), s.shareStatus(), episodeCount, charCount,
+                outlineMap(s.outlines()),
                 s.createdAt(), s.updatedAt());
     }
 
     public static ScriptEpisodeResponse toEpisode(ScriptEpisode e) {
         return new ScriptEpisodeResponse(
                 e.id(), e.episodeNo(), e.title(), e.content(), e.summary(),
-                e.aiPolished(), e.createdAt(), e.updatedAt());
+                e.aiPolished(), outlineList(e.outline()), e.createdAt(), e.updatedAt());
+    }
+
+    /** JsonNode 数组 → List<String>（空/非数组 → 空列表）。 */
+    public static List<String> outlineList(com.fasterxml.jackson.databind.JsonNode n) {
+        List<String> out = new ArrayList<>();
+        if (n == null || !n.isArray()) return out;
+        for (var item : n) {
+            String v = item.asText("");
+            if (!v.isBlank()) out.add(v);
+        }
+        return out;
+    }
+
+    /** {key: [段…]} → Map<String,List<String>>（只保留非空数组）。 */
+    public static java.util.Map<String, List<String>> outlineMap(com.fasterxml.jackson.databind.JsonNode n) {
+        java.util.Map<String, List<String>> out = new java.util.LinkedHashMap<>();
+        if (n == null || !n.isObject()) return out;
+        var it = n.fields();
+        while (it.hasNext()) {
+            var e = it.next();
+            List<String> segs = outlineList(e.getValue());
+            if (!segs.isEmpty()) out.put(e.getKey(), segs);
+        }
+        return out;
     }
 
     public static ScriptChangeResponse toChange(ScriptChange c) {

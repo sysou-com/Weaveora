@@ -1,12 +1,16 @@
 package studio.weaveora.script.domain;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.Id;
 import jakarta.persistence.Index;
 import jakarta.persistence.Table;
 import org.hibernate.annotations.CreationTimestamp;
+import org.hibernate.annotations.JdbcTypeCode;
 import org.hibernate.annotations.UuidGenerator;
+import org.hibernate.type.SqlTypes;
 
 import java.time.OffsetDateTime;
 import java.util.UUID;
@@ -64,6 +68,11 @@ public class Script {
 
     @Column(name = "condensed_story", nullable = false)
     private String condensedStory = "";
+
+    /** 各要素的分段写作提纲：{@code {"characters":["1. …"], "story":[…]}}（V18）。 */
+    @JdbcTypeCode(SqlTypes.JSON)
+    @Column(nullable = false)
+    private JsonNode outlines = JsonNodeFactory.instance.objectNode();
 
     @Column(nullable = false)
     private String status = "draft";        // draft | writing | completed
@@ -130,6 +139,26 @@ public class Script {
         this.updatedAt = OffsetDateTime.now();
     }
 
+    /** 写入某要素的分段提纲（V18：供「AI 更新」复用同一份提纲）。 */
+    public void putOutline(String fieldKey, JsonNode segments) {
+        if (fieldKey == null || fieldKey.isBlank()) return;
+        if (segments == null || !segments.isArray() || segments.isEmpty()) return;
+        com.fasterxml.jackson.databind.node.ObjectNode obj = this.outlines instanceof
+                com.fasterxml.jackson.databind.node.ObjectNode o
+                ? (com.fasterxml.jackson.databind.node.ObjectNode) o.deepCopy()
+                : JsonNodeFactory.instance.objectNode();
+        obj.set(fieldKey, segments);
+        this.outlines = obj;
+        this.updatedAt = OffsetDateTime.now();
+    }
+
+    /** 某要素已存的提纲（无则空数组）。 */
+    public JsonNode outlineOf(String fieldKey) {
+        if (fieldKey == null || outlines == null) return JsonNodeFactory.instance.arrayNode();
+        JsonNode n = outlines.path(fieldKey);
+        return n.isArray() ? n : JsonNodeFactory.instance.arrayNode();
+    }
+
     public void setStatus(String status) {
         this.status = status;
         this.updatedAt = OffsetDateTime.now();
@@ -167,6 +196,7 @@ public class Script {
     public String language() { return language; }
     public String stageDirections() { return stageDirections; }
     public String condensedStory() { return condensedStory; }
+    public JsonNode outlines() { return outlines; }
     public String status() { return status; }
     public String shareStatus() { return shareStatus; }
     public OffsetDateTime sharedAt() { return sharedAt; }
