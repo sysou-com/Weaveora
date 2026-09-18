@@ -61,16 +61,14 @@ public class JobService {
     private static final List<String> TERMINAL = List.of("succeeded", "failed", "cancelled");
 
     /** 画面比例 → SDXL/视频 标准尺寸（64 对齐；16:9/9:16 兼顾竖屏） */
-    private static final java.util.Map<String, int[]> ASPECT_DIMS = java.util.Map.of(
-            "1:1", new int[]{1024, 1024},
-            "3:2", new int[]{1152, 768},
-            "2:3", new int[]{768, 1152},
-            "16:9", new int[]{1280, 704},
-            "9:16", new int[]{704, 1280});
-
-    private static int[] dimsFor(String aspect) {
-        int[] d = ASPECT_DIMS.get(aspect == null ? "1:1" : aspect);
-        return d == null ? new int[]{1024, 1024} : d;
+    /**
+     * 出图尺寸 = 画幅基础尺寸 × 「图片分辨率」档（长边像素，引擎配置里的**全局**设置）。
+     *
+     * <p>2026-09-18：从写死的 ASPECT_DIMS 改为可配（1280 默认 / 1920 / 2560）；
+     * 计算与单测在 {@link studio.weaveora.job.ImageDims}（默认档完全复现历史 16:9 → 1280×704）。
+     */
+    private static int[] dimsFor(String aspect, Integer imageMaxSide) {
+        return studio.weaveora.job.ImageDims.of(aspect, imageMaxSide);
     }
 
     /** 风格注入：模板前缀+原文+后缀；负面词与原文合并（优先模板）。 */
@@ -270,6 +268,8 @@ public class JobService {
     public List<JobView> create(UUID userId, UUID workspaceId, UUID projectId, CreateJobRequest req) {
         guard.requireMember(userId, workspaceId);
         ProjectSnapshot project = projects.require(userId, workspaceId, projectId);
+        // 图片分辨率档（全局）：关键帧/定妆照/参考图都按它出图
+        int imgMaxSide = engineSettings.imageMaxSide(userId);
         if (req.kind() == null || !List.of("still", "clip", "voice", "bgm", "portrait", "lipsync", "talk").contains(req.kind())) {
             throw new BizException(ErrorCode.VALIDATION, "kind 必须为 still|clip|voice|bgm|portrait|lipsync|talk");
         }
@@ -353,7 +353,7 @@ public class JobService {
                         String raw = kf.path("positive_prompt").asText(shot.path("positive_prompt").asText(""));
                         // ★ 逐帧位置：把帧号传进去，applyLayoutRegions 才能取 keyframes[fi].layout
                         ObjectNode payload = videoShotPayload("still", plan, shot, req.revisionId(), shotId,
-                                revisionNo, raw, seed, project, style, refs, fi);
+                                revisionNo, raw, seed, project, style, refs, fi, imgMaxSide);
                         payload.put("keyframe_index", fi);
                         payload.put("keyframe_count", frames.size());
                         payload.put("frame_label", frameLabel(kf, fi, frames.size()));
@@ -369,7 +369,8 @@ public class JobService {
                 RefCtx refs = resolveRefs(plan, shot, userId, workspaceId, projectId, req.revisionId(),
                         frames.isEmpty() ? -1 : 0);
                 ObjectNode payload = videoShotPayload(req.kind(), plan, shot, req.revisionId(), shotId,
-                        revisionNo, shot.path("positive_prompt").asText(""), seed, project, style, refs, -1);
+                        revisionNo, shot.path("positive_prompt").asText(""), seed, project, style, refs, -1,
+                        imgMaxSide);
                 if ("clip".equals(req.kind())) {
                     // motion 帧数：可显式指定（范围校验）
                     if (req.frames() != null) {
@@ -509,8 +510,8 @@ public class JobService {
                         params != null && params.isObject()
                                 ? (com.fasterxml.jackson.databind.node.ObjectNode) params.deepCopy()
                                 : mapper().createObjectNode();
-                // 画面比例决定生成尺寸（LLM 常给 1024×1024，覆盖为项目比例）
-                int[] dd = dimsFor(project.aspectRatio());
+                // 画面比例决定生成尺寸（LLM 常给 1024×1024，覆盖为项目比例）；长边由「图片分辨率」档决定
+                int[] dd = dimsFor(project.aspectRatio(), imgMaxSide);
                 pnode.put("width", dd[0]).put("height", dd[1]);
                 payload.put("aspect_ratio", project.aspectRatio());
                 payload.set("params", pnode);
@@ -2545,7 +2546,7 @@ public class JobService {
         // ★ P14：定妆照也要符合设定年代（清代的人物不能穿着现代元素）
         applySetting(payload, plan);
         payload.put("aspect_ratio", project.aspectRatio());
-        int[] dd = dimsFor(project.aspectRatio());
+        int[] dd = dimsFor(project.aspectRatio(), engineSettings.imageMaxSide(userId));
         payload.set("params", mapper().createObjectNode().put("width", dd[0]).put("height", dd[1]));
         payload.put("seed", randomSeed());
         com.fasterxml.jackson.databind.node.ArrayNode keysNode = payload.putArray("referenceKeys");
@@ -2678,7 +2679,7 @@ public class JobService {
     /** 视频镜头 payload 公共构造（含 P3 的 revision_no/prompt_md5；正词可传关键帧词）。 */
     private ObjectNode videoShotPayload(String kind, JsonNode plan, JsonNode shot, UUID revisionId, UUID shotId,
                                         int revisionNo, String positiveRaw, long seed, ProjectSnapshot project,
-                                        StyleTemplate style, RefCtx refs, int keyframeIndex) {
+                                        StyleTemplate style, RefCtx refs, int keyframeIndex, int imgMaxSide) {
         ObjectNode payload = mapper().createObjectNode();
         payload.put("kind", kind);
         payload.put("mode", "video");
@@ -2720,7 +2721,7 @@ public class JobService {
             aspect = plan.path("aspect_ratio").asText("16:9");
         }
         payload.put("aspect_ratio", aspect);
-        int[] dd = dimsFor(aspect);
+        int[] dd = dimsFor(aspect, imgMaxSide);
         payload.set("params", mapper().createObjectNode().put("width", dd[0]).put("height", dd[1]));
         attachRefs(payload, refs);
         // ★ 位置优先（2026-09-16）：把「每个主体在画面里的位置」写进 referenceRegions，

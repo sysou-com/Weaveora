@@ -48,6 +48,13 @@ NAME = os.environ.get("WEAVEORA_WORKER_NAME", "stub-worker")
 WORKSPACE = os.environ.get("WEAVEORA_WORKER_WORKSPACE")  # None = 节点池
 MODE = os.environ.get("WEAVEORA_WORKER_MODE", "stub")  # stub|comfy
 
+# ★ S1（2026-09-18）：出图任务是否**保留已加载的模型**。
+#   1（默认）= 保留 → 连续出图不用反复重载（实测出图 7 分钟里大半是卸载+重载）；
+#   0 = 旧行为（每次出图前把模型让出去，为 44G 的视频任务保显存）。
+#   视频任务不受此开关影响（它们始终先让出）。
+IMAGE_KEEP_LOADED = (os.environ.get("WEAVEORA_IMAGE_KEEP_LOADED", "1") or "1").strip().lower() \
+    not in ("0", "false", "no", "off")
+
 # P13 护栏：stub 模式已废弃，但历史上它会被注册成「GPU worker」并抢走 gpu 路由的
 # 配音/配乐任务 —— 而跑它的机器（如 VPS）既没有 TTS 也没有 ACE-Step，只能走 http 兜底
 # → 任务瞬间全部失败（实测：9 个 voice + 15 个 bgm 全挂，只有本机 comfy worker 抢到的成功）。
@@ -551,8 +558,16 @@ def execute_job(job):
             else:
                 # 文生图：配了「本机 ComfyUI 工作流」（engine=comfy + 工作流 JSON）就走工作流出图，
                 # 否则用 worker 自带的 SDXL/IP-Adapter 代码路径（builtin）。
-                # 先让出资源：出图栈要 ~28-31G（Qwen-Image 20.4 + VL 7.9 + VAE/LoRA），别让 TTS 占着
-                _yield_resources(need_vram_gb=31.0, label="still")
+                #
+                # ★ S1（2026-09-18 用户实测：出图 7 分钟里大半是“卸载 + 重载模型”）：
+                #   原来这里固定 need_vram_gb=31（那是**出图栈峰值**口径），可正在用的出图模型本身就占 ~22G
+                #   → 可用显存永远 < 31 → **每次出图都把模型卸载**，下一条再重新加载。
+                #   现在默认**保留已加载的出图模型**（need=0 → 跳过 /free）；视频任务仍照旧先让出（那是 44G 口径）。
+                #   回退：环境变量 WEAVEORA_IMAGE_KEEP_LOADED=0 即恢复旧行为。
+                if IMAGE_KEEP_LOADED:
+                    _yield_resources(need_vram_gb=0.0, label="still(keep_loaded)")
+                else:
+                    _yield_resources(need_vram_gb=31.0, label="still")
                 if engine.image_workflow_ready():
                     print("[worker] 文生图走工作流：%s" % engine.IMAGE_TXT2IMG_WF, flush=True)
                     outs = engine.generate_via_workflow("weaveora-stub-worker", payload,

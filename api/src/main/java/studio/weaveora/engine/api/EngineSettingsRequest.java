@@ -18,6 +18,8 @@ public record EngineSettingsRequest(
         Integer gpuServerPort,
         /** GPU 服务器「最大支持分辨率」：480p/720p/1080p/auto；null=不改 */
         String gpuMaxResolution,
+        /** **图片分辨率**（出图长边像素）：1280（默认）/1920/2560…；null=不改 */
+        Integer imageMaxResolution,
         /** P12：全局参数（画质等），键须在模型 schema 里存在；null=不改 */
         com.fasterxml.jackson.databind.JsonNode imageParams,
         com.fasterxml.jackson.databind.JsonNode videoParams,

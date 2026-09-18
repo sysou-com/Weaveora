@@ -34,6 +34,13 @@ IMAGE_IMG2IMG_WF = os.environ.get("WEAVEORA_IMAGE_IMG2IMG_WORKFLOW", "").strip()
 # ★ 参考图**锚定**档（Qwen-Image-Edit 这类：把参考图编码进 conditioning，而不是“以它为底重画”）。
 #   与 img2img 的区别：Edit 用 EmptySD3LatentImage + TextEncodeQwenImageEditPlus(image1/image2) → denoise 保持 1.0。
 IMAGE_EDIT_WF = os.environ.get("WEAVEORA_IMAGE_EDIT_WORKFLOW", "").strip()
+# ★ P1 防复发（2026-09-18 用户实测事故）：Edit 通路是「参考图锚定」的唯一正确姿势（denoise 必须 1.0）。
+#   若 edit 工作流为空，关键帧会**静默降级**成 img2img（槽位少 + denoise 0.65）→ 把定妆照半重绘成
+#   「不像的定妆照」（用户报的正是这个）。所以：环境变量为空时回落到本机标准路径。
+if not IMAGE_EDIT_WF:
+    _default_edit_wf = "/opt/weaveora/workflows/qwen_image_edit_api.json"
+    if os.path.exists(_default_edit_wf):
+        IMAGE_EDIT_WF = _default_edit_wf
 IMAGE_MODEL = os.environ.get("WEAVEORA_IMAGE_MODEL", "").strip()
 IMAGE_STEPS = int(os.environ.get("WEAVEORA_IMAGE_STEPS", "0") or 0)
 IMAGE_DENOISE = float(os.environ.get("WEAVEORA_IMAGE_DENOISE", "0.65") or 0.65)
@@ -100,19 +107,27 @@ def _wf_of_class(graph, class_type):
 
 def _wf_inject_size(graph, width, height):
     """把目标尺寸写进工作流：Empty*LatentImage（txt2img）与 ImageScale/ImageResize（Edit 档：
-    官方结构是**把参考图缩放到目标尺寸 → VAEEncode → 当采样起点**）。"""
-    for ct in ("EmptySD3LatentImage", "EmptyLatentImage"):
-        for _nid, n in _wf_of_class(graph, ct):
-            if "width" in n.get("inputs", {}):
-                n["inputs"]["width"], n["inputs"]["height"] = int(width), int(height)
-                return True
-    for ct in ("ImageScale", "ImageResize", "ImageScaleBy"):
+    官方结构是**把参考图缩放到目标尺寸 → VAEEncode → 当采样起点**）。
+
+    ★ 2026-09-18 修正：以前命中第一个节点就 return —— Edit/img2img 工作流里同时存在多个尺寸节点时，
+    只有一部分被改写（img2img 可能一个都没命中）→ 出图尺寸**继承参考图尺寸**
+    （用户事故：关键帧变成 2560×1440 的定妆照尺寸）。现在**遍历所有尺寸节点**都写，
+    并返回写入个数（0 = 尺寸由底图决定，调用侧需自行缩放底图）。
+    """
+    n_hit = 0
+    for ct in ("EmptySD3LatentImage", "EmptyLatentImage", "ImageScale", "ImageResize"):
         for _nid, n in _wf_of_class(graph, ct):
             ins = n.get("inputs", {})
             if "width" in ins and "height" in ins:
                 ins["width"], ins["height"] = int(width), int(height)
-                return True
-    return False
+                n_hit += 1
+    if n_hit == 0:
+        for _nid, n in _wf_of_class(graph, "ImageScaleBy"):
+            ins = n.get("inputs", {})
+            print("[comfy] WARN 工作流只靠 ImageScaleBy(scale_by=%s) 控制尺寸：无法按目标 %dx%d 精确注入"
+                  % (ins.get("scale_by"), width, height), flush=True)
+            break
+    return n_hit
 
 
 def _wf_inject_text(graph, positive, negative):
@@ -421,6 +436,17 @@ def generate_via_workflow(client_id, payload, progress_fn=None, on_tick=None):
     elif ref_names and is_i2i:
         denoise = (params.get("denoise") if isinstance(params.get("denoise"), (int, float))
                    else IMAGE_DENOISE)
+    # ★ P1 防复发（2026-09-18 用户实测事故）：多主体参考图却没走 Edit 通路 = **静默降级**，
+    #   会把定妆照半重绘成「不像的定妆照」（img2img + denoise 0.65 + 槽位不足丢参考图）。
+    _img_notes = []
+    if len(ref_names) >= 2 and mode != "edit":
+        _degraded = ("出图降级：参考图 %d 张但没有 Edit 通路（editWorkflow=%s）→ 已降级为 %s；"
+                     "denoise 已强制 1.0（否则等于把参考图半重绘），并可能因槽位不足丢参考图。"
+                     "请到「生成引擎配置 → GPU 服务器」检查图片工作流（editWorkflow）。"
+                     % (len(ref_names), IMAGE_EDIT_WF or "未配置", mode))
+        print("[comfy] ⚠️ " + _degraded, flush=True)
+        denoise = 1.0
+        _img_notes.append(_degraded)
     _wf_inject_sampler(graph, seed, steps, cfg, denoise)
     if ref_names:
         if not _wf_set_image(graph, ref_names):
@@ -460,9 +486,10 @@ def generate_via_workflow(client_id, payload, progress_fn=None, on_tick=None):
             print("[comfy] 位置改由提示词描述（路线A）：%d 个主体（区域条件关闭，需开启设 WEAVEORA_IMAGE_AREA_COND=1）"
                   % len(pairs), flush=True)
     _wf_save_prefix(graph, prefix)
-    print("[comfy] 工作流出图：%s(%s) size=%dx%d steps=%s cfg=%s denoise=%s refs=%s"
+    print("[comfy] 工作流出图：%s(%s) size=%dx%d steps=%s cfg=%s denoise=%s refs=%s%s"
           % (os.path.basename(path), mode, width, height, steps or "-", cfg if cfg is not None else "-",
-             denoise, ",".join(ref_names) or "-"), flush=True)
+             denoise, ",".join(ref_names) or "-",
+             ("  ⚠️降级" if _img_notes else "")), flush=True)
     saved, COMFY = COMFY, _image_comfy()
     try:
         pid = _post_prompt({"prompt": graph, "client_id": client_id}, client_id)
@@ -472,6 +499,12 @@ def generate_via_workflow(client_id, payload, progress_fn=None, on_tick=None):
         outs = _download_outputs(rec, prefix)
         if not outs:
             raise ComfyError("工作流出图无输出（%s）" % os.path.basename(path))
+        # 降级提示随资产上报（前端资产卡 ⚠ 可见），不只藏在日志里
+        if _img_notes:
+            _note_txt = "；".join(_img_notes)
+            for _o in outs:
+                if isinstance(_o, dict):
+                    _o["notes"] = ((_o.get("notes") + "；") if _o.get("notes") else "") + _note_txt
         return outs
     finally:
         COMFY = saved
@@ -1118,9 +1151,58 @@ MOTION_DEFAULT_LONG_SIDE = int(os.environ.get("WEAVEORA_MOTION_LONG_SIDE", "832"
 # ★ Wan2.2 I2V-A14B 的**原生节奏 = 16fps**（ComfyUI 官方模板 CreateVideo fps=16）。
 #   踩过的坑（2026-09-15 线上）：按项目 fps(30) 生成同样帧数 → 运动被 1.875× 加速
 #   （用户反馈「像开了倍速」），而且时长变成 帧数/30（5s 的镜头只出 4.13s）。
-#   正确做法：**按 16fps 决定帧数**（= 时长 × 16），先按 16fps 出片（速度/时长都对），
-#   再插值到项目 fps（ffmpeg minterpolate，失败则退化为补帧）。
+#   正确做法：**按 16fps 决定帧数**（= 时长 × 16），先按 16fps 出片（速度/时长都对）；
+#   再按【整数倍 → RIFE / 非整数倍 → 不插帧并提示】处理帧率（见下方 2026-09-18 口径）。
 MOTION_NATIVE_FPS = float(os.environ.get("WEAVEORA_MOTION_NATIVE_FPS", "16") or 16)
+
+# ★ 插帧口径（用户 2026-09-18 定）：
+#   · 目标 fps 是原生 16fps 的**整数倍**（32/48…）→ 用 ComfyUI 自带的 RIFE 节点插帧
+#     （FrameInterpolationModelLoader + FrameInterpolate，multiplier 为整数 2–16）
+#   · **非整数倍**（如 24 = 1.5×）→ **不插帧**，直接按原生 fps 出片，并在资产 notes 里提示「未插帧」
+#   · ffmpeg minterpolate(mci) **全面禁用**：分数倍下要交替合成半帧 → 重影/几何扭曲/节奏不均，
+#     用户实测的「多余/奇怪动作」来源之一。
+MOTION_INTERP_MODEL = os.environ.get("WEAVEORA_MOTION_INTERP_MODEL", "rife_v4.26.safetensors") or ""
+_INTERP_MODEL_CACHE = {"at": 0.0, "opts": None}
+
+
+def _interp_model_available(timeout=15, ttl=300):
+    """RIFE 权重是否就位（查 ComfyUI 的 FrameInterpolationModelLoader options，带 5 分钟缓存）。"""
+    import time as _t
+    now = _t.time()
+    cached = _INTERP_MODEL_CACHE.get("opts")
+    if cached is not None and now - float(_INTERP_MODEL_CACHE.get("at") or 0) < ttl:
+        return MOTION_INTERP_MODEL in cached
+    try:
+        _, body = _comfy("GET", "/object_info/FrameInterpolationModelLoader", timeout=timeout)
+        node = (json.loads(body.decode()) or {}).get("FrameInterpolationModelLoader") or {}
+        req = ((node.get("input") or {}).get("required") or {}).get("model_name")
+        opts = ((req[1] or {}).get("options") if isinstance(req, list) and len(req) > 1 else None) or []
+        _INTERP_MODEL_CACHE.update({"at": now, "opts": opts})
+        return MOTION_INTERP_MODEL in opts
+    except Exception as e:
+        print("[comfy] WARN 查询插帧模型失败（本次按不可用处理）：%s" % e, flush=True)
+        return False
+
+
+def _motion_interp_plan(out_fps, native_fps=None):
+    """插帧决策 → (multiplier, note)。
+
+    multiplier>=2 → RIFE 插帧倍数（整数倍的帧率）；1 → 原样输出；0 → 不插帧（note 为给用户看的提示）。
+    """
+    native = float(native_fps or MOTION_NATIVE_FPS)
+    try:
+        out = float(out_fps or 0)
+    except (TypeError, ValueError):
+        out = 0.0
+    if out <= 0 or native <= 0 or abs(out - native) < 0.01:
+        return 1, None
+    ratio = out / native
+    n = int(round(ratio))
+    if 2 <= n <= 16 and abs(ratio - n) < 0.01:
+        return n, None
+    return 0, ("未插帧：目标 %gfps 不是原生 %gfps 的整数倍（%.2f×），已按原生 %gfps 输出"
+               "（时长与速度不变、无插值伪影；要插帧请把成片帧率设为 %d 或 %d）"
+               % (out, native, ratio, native, int(native * 2), int(native * 3)))
 
 
 def _motion_resolution(params, width, height):
@@ -1388,7 +1470,7 @@ def _motion_graph_frames(payload, params):
 
 
 def _motion_graph(client_id, payload, positive, negative, first_frame_name, prefix,
-                  last_frame_name=None):
+                  last_frame_name=None, interp_mult=0):
     """构造图生视频 prompt。
 
     双专家（默认，Wan2.2 I2V-A14B 高/低噪声）或单专家（params.model 显式给了单文件时走旧路径）。
@@ -1454,8 +1536,21 @@ def _motion_graph(client_id, payload, positive, negative, first_frame_name, pref
 
     nodes["dec"] = {"class_type": "VAEDecode",
                     "inputs": {"samples": tail, "vae": ["vae", 0]}}
-    nodes["save"] = {"class_type": "SaveImage",
-                     "inputs": {"images": ["dec", 0], "filename_prefix": prefix}}
+    # ★ RIFE 插帧（只做**整数倍**）：ComfyUI 0.34 自带 FrameInterpolationModelLoader +
+    #   FrameInterpolate（multiplier 为整数 2–16，表达不了 1.5× 这种分数倍）。
+    #   非整数倍由 generate_motion 直接按原生 fps 出片并在 notes 里提示「未插帧」。
+    if int(interp_mult or 0) >= 2:
+        nodes["interp_model"] = {"class_type": "FrameInterpolationModelLoader",
+                                 "inputs": {"model_name": MOTION_INTERP_MODEL}}
+        nodes["interp"] = {"class_type": "FrameInterpolate",
+                           "inputs": {"interp_model": ["interp_model", 0],
+                                      "images": ["dec", 0],
+                                      "multiplier": int(interp_mult)}}
+        nodes["save"] = {"class_type": "SaveImage",
+                         "inputs": {"images": ["interp", 0], "filename_prefix": prefix}}
+    else:
+        nodes["save"] = {"class_type": "SaveImage",
+                         "inputs": {"images": ["dec", 0], "filename_prefix": prefix}}
 
     lora_txt = "hi=%s(%s) lo=%s(%s)" % (plan["lora_high"],
                                         "—" if not plan["lora_high"] else a["lora_high_name"][:28],
@@ -1470,6 +1565,8 @@ def _motion_graph(client_id, payload, positive, negative, first_frame_name, pref
           % (shape, plan["preset"], plan["steps"], plan["switch"], plan["cfg_high"],
              plan["cfg_low"], plan["shift"], width, height, frames, lora_txt,
              sampler, scheduler, a["weight_dtype"]), flush=True)
+    if int(interp_mult or 0) >= 2:
+        print("[comfy] motion 插帧：RIFE ×%d（%s）" % (int(interp_mult), MOTION_INTERP_MODEL), flush=True)
     return {"prompt": nodes, "client_id": client_id}
 
 
@@ -1504,12 +1601,14 @@ def _vram_note(tag):
 
 
 def _retime_to_fps(mp4, src_fps, dst_fps, target_frames=None):
-    """把 mp4 从 src_fps 重定时到 dst_fps（**保持时长与速度**）。
+    """把 mp4 重定时到 dst_fps（**保持时长与速度**）。
 
-    为什么：A14B 按原生 16fps 生成（速度正确），而项目成片是 30fps。
-    直接改容器 fps 会把时长缩短、速度变快；所以要**插值补帧**：
-      · 优先 ffmpeg `minterpolate=fps=N:mi_mode=mci`（运动补偿插值，画面顺滑）
-      · 失败/无此滤镜 → 退化为 `-r N`（重复帧，时长速度仍正确，只是略顿）
+    为什么：A14B 按原生 16fps 生成（速度正确），而项目成片可能是 24/30fps。
+    ★ 2026-09-18 用户口径：**全面禁用 ffmpeg minterpolate**（分数倍 mci 会出重影/几何扭曲/节奏不均，
+    是用户实测「多余/奇怪动作」的来源之一）。插帧改由 **RIFE（整数倍）** 在 ComfyUI 图内完成；
+    非整数倍则直接按原生 fps 出片并给用户提示。所以本函数现在只负责：
+      · src == dst：只补/截帧做到帧精确（正常路径）
+      · src ≠ dst（历史调用路径）：**告警并按原生 fps 原样输出**，不插值
 
     target_frames：目标总帧数（= round(镜头时长 × dst_fps)）。给了就把它**做成帧精确**：
       短了用 tpad 克隆尾帧补齐、长了截断。
@@ -1523,6 +1622,12 @@ def _retime_to_fps(mp4, src_fps, dst_fps, target_frames=None):
     except (TypeError, ValueError):
         return mp4
     need_retime = dst_fps > 0 and abs(dst_fps - src_fps) >= 0.01
+    # ★ 2026-09-18：禁用 minterpolate。被要求变帧率时一律按原生输出（只补/截帧），并向日志明说。
+    if need_retime:
+        print("[comfy] WARN 已禁用 minterpolate：请求 %g→%gfps，按原生 %gfps 输出（未插帧）"
+              % (src_fps, dst_fps, src_fps), flush=True)
+        dst_fps = src_fps
+        need_retime = False
     try:
         tf = int(target_frames) if target_frames else 0
     except (TypeError, ValueError):
@@ -1538,7 +1643,8 @@ def _retime_to_fps(mp4, src_fps, dst_fps, target_frames=None):
         dst = os.path.join(d, "out.mp4")
         with open(src, "wb") as fh:
             fh.write(mp4)
-        base = "minterpolate=fps=%g:mi_mode=mci" % dst_fps if need_retime else "null"
+        # 插值已全面禁用（2026-09-18）→ 只做补/截帧，绝不用 minterpolate
+        base = "null"
         attempts = []
         if need_retime:
             attempts.append((base, "运动补偿插值"))
@@ -1676,6 +1782,14 @@ def generate_motion(client_id, payload, progress_fn=None):
     #   且 5s 镜头只剩 4.13s。
     out_fps = int(payload.get("fps") or 16)
     fps = MOTION_NATIVE_FPS
+    # ★ 插帧决策（用户 2026-09-18 口径）：整数倍 → RIFE 插帧；非整数倍 → **不插帧** + 提示
+    interp_mult, interp_note = _motion_interp_plan(out_fps, fps)
+    if interp_mult >= 2 and not _interp_model_available():
+        interp_mult, interp_note = 0, (
+            "未插帧：RIFE 权重不可用（%s 不在 ComfyUI 的 frame_interpolation 目录），已按原生 %gfps 输出"
+            % (MOTION_INTERP_MODEL, fps))
+    if interp_note:
+        print("[comfy] motion %s" % interp_note, flush=True)
     _mp = _motion_params(payload)
     # motion 固定 768×768（Comfy 原生 Wan2.2 方形档位；8GB fp8），关键帧缩放后上传保证一致
     mw = int(_mp.get("width", 768))
@@ -1812,7 +1926,7 @@ def generate_motion(client_id, payload, progress_fn=None):
             tail_name = None
     _vram_note("motion 前")
     prompt = _motion_graph(client_id, payload, positive, negative, name, prefix,
-                           last_frame_name=tail_name)
+                           last_frame_name=tail_name, interp_mult=interp_mult)
     st, resp = _comfy("POST", "/prompt", payload=prompt)
     pid = json.loads(resp.decode()).get("prompt_id")
     if not pid:
@@ -1837,23 +1951,29 @@ def generate_motion(client_id, payload, progress_fn=None):
             frames.append(fb)
     if not frames:
         raise ComfyError("motion 无输出帧（prefix=%s）" % prefix)
+    # 帧的时间基：
+    #   · RIFE 插帧后帧数已×N → 直接按**目标 fps** 封装（不再二次重定时、更不插值）
+    #   · 未插帧（非整数倍 / RIFE 不可用）→ 按**原生 fps** 封装（时长与速度不变）
+    _enc_fps = float(out_fps) if interp_mult >= 2 else float(fps)
     out_dir = tempfile.mkdtemp(prefix="wv_mot_")
     try:
-        mp4 = _encode_frames_mp4(frames, fps, out_dir)   # fps = 原生 16（速度/时长正确）
+        mp4 = _encode_frames_mp4(frames, _enc_fps, out_dir)
     finally:
         import shutil as _sh
         _sh.rmtree(out_dir, ignore_errors=True)
-    # 再补齐到项目 fps（16 → 30）：保持时长与速度，只是补帧；并做成**帧精确**
-    # （否则 81 帧@16 → 149 帧 = 4.97s，播放器按整秒显示成「4 秒」）
+    # 只做**帧精确**（不足补 / 超出截）：src == dst 传入，绝不插值
+    # （否则 81 帧@16 → 4.97s，播放器按整秒显示成「4 秒」）
     _target = 0
     try:
-        _target = int(round(float(payload.get("duration_sec") or 0) * out_fps))
+        _target = int(round(float(payload.get("duration_sec") or 0) * _enc_fps))
     except (TypeError, ValueError):
         _target = 0
-    mp4 = _retime_to_fps(mp4, fps, out_fps, target_frames=_target)
-    print("[comfy] motion 出片：%d 帧 @%gfps ≈ %.2fs → 输出 %gfps（目标 %d 帧 = %.2fs）"
-          % (len(frames), fps, len(frames) / max(1.0, fps), out_fps, _target,
-             _target / max(1.0, float(out_fps))), flush=True)
+    mp4 = _retime_to_fps(mp4, _enc_fps, _enc_fps, target_frames=_target)
+    _how = ("（RIFE 插帧 ×%d）" % interp_mult) if interp_mult >= 2 else (
+        ("（未插帧：原生 %gfps）" % fps) if interp_note else "")
+    print("[comfy] motion 出片：%d 帧 @%gfps ≈ %.2fs → 输出 %gfps%s（目标 %d 帧 = %.2fs）"
+          % (len(frames), _enc_fps, len(frames) / max(1.0, _enc_fps), _enc_fps, _how,
+             _target, _target / max(1.0, _enc_fps)), flush=True)
     # 上报**真实**产出规格：原先直接把 payload 里「请求的」width/height 当结果上报，
     # 于是资产库里记的是 1280×704，而实际文件是 Wan 真正出图桶（本例 832×464）——
     # 2026-09-13 排查时让人误以为「对口型把分辨率改小了」。
@@ -1873,6 +1993,11 @@ def generate_motion(client_id, payload, progress_fn=None):
         print("[comfy] motion 人脸检测：%s 帧可检出（%s）"
               % (frames, "全部帧有人脸" if face else ("无人脸" if fr[0] == 0 else "部分帧无人脸")),
               flush=True)
+    # 插帧口径（RIFE / 未插帧）与显存取舍一起随资产上报：前端资产卡上能看见（⚠ 提示）
+    _nlist = list(_notes) if isinstance(_notes, (list, tuple)) else ([_notes] if _notes else [])
+    if interp_note:
+        _nlist.append(interp_note)
+    _notes = "；".join([x for x in _nlist if x])
     if progress_fn:
         progress_fn(100, "done")
     return [{"bytes": mp4, "mime": "video/mp4", "width": int(w), "height": int(h),

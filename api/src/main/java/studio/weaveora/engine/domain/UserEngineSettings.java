@@ -60,6 +60,16 @@ public class UserEngineSettings {
     @Column(name = "gpu_max_resolution")
     private String gpuMaxResolution;
 
+    /**
+     * 图片出图长边像素（图片分辨率档）：1280（默认，16:9→1280×704）/ 1920 / 2560。
+     *
+     * <p>与 {@link #gpuMaxResolution}（视频出片上限）**分开**：出图（Qwen-Image）与出视频
+     * （Wan2.2 I2V）是两条独立链路，性价比拐点完全不同（2026-09-18 用户口径）。
+     * null = 默认 1280（与历史行为一致，不改变存量项目）。
+     */
+    @Column(name = "image_max_resolution")
+    private Integer imageMaxResolution;
+
     // P12：模型 input schema 缓存（展示「调用说明」+ 归一化参数映射给 worker）
     @org.hibernate.annotations.JdbcTypeCode(org.hibernate.type.SqlTypes.JSON)
     @Column(name = "image_model_schema")
@@ -183,6 +193,10 @@ public class UserEngineSettings {
     public String gpuMaxResolution() { return gpuMaxResolution; }
 
     public void setGpuMaxResolution(String v) { this.gpuMaxResolution = blankToNull(v); }
+
+    public Integer imageMaxResolution() { return imageMaxResolution; }
+
+    public void setImageMaxResolution(Integer v) { this.imageMaxResolution = v; }
 
     public Integer gpuServerPort() { return gpuServerPort; }
     public void setGpuServerPort(Integer v) { this.gpuServerPort = v; }

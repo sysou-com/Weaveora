@@ -547,6 +547,8 @@ export interface EngineSettings {
   gpuServerPort: number | null
   /** GPU 服务器最大支持分辨率：480p/720p/1080p/auto（motion 出片上限；机器能力，换卡就改） */
   gpuMaxResolution: string | null
+  /** **图片分辨率**（出图长边像素）：1280/1920/2560 —— 全局生效于关键帧/定妆照/参考图 */
+  imageMaxResolution: number | null
   /** P12：模型调用参数说明（拉取缓存） */
   imageModelSchema: ModelSchema | null
   videoModelSchema: ModelSchema | null
@@ -685,6 +687,8 @@ export interface EngineSettingsInput {
   gpuServerUrl?: string | null
   gpuServerPort?: number | null
   gpuMaxResolution?: string | null
+  /** **图片分辨率**（出图长边像素）：1280（默认）/1920/2560；null=不改 */
+  imageMaxResolution?: number | null
   /** P12：全局参数（画质等），键须在模型 schema 里存在 */
   imageParams?: Record<string, unknown> | null
   videoParams?: Record<string, unknown> | null

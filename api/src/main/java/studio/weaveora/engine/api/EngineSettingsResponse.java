@@ -18,6 +18,8 @@ public record EngineSettingsResponse(
         Integer gpuServerPort,
         /** GPU 服务器「最大支持分辨率」：480p/720p/1080p/auto —— motion 出片上限（机器能力，换卡就改这里） */
         String gpuMaxResolution,
+        /** **图片分辨率**（出图长边像素）：1280（默认，16:9→1280×704）/1920/2560 —— 全局生效于关键帧/定妆照/参考图 */
+        Integer imageMaxResolution,
         /** P12：模型调用参数说明（拉取缓存）：{provider,model,version,params[],mapping,notes[]} */
         com.fasterxml.jackson.databind.JsonNode imageModelSchema,
         com.fasterxml.jackson.databind.JsonNode videoModelSchema,

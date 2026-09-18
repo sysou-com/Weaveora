@@ -35,6 +35,8 @@ const gpuServerPort = ref<number | null>(null)
 // GPU 服务器「最大支持分辨率」——motion 出片上限（实测：720p 在 48G 卡上要 10 分钟+还容易超时，
 // 480p 只要 27~50s）。这是机器能力，换卡就改这里。
 const gpuMaxResolution = ref<string>('480p')
+/** **图片分辨率**（出图长边像素）：全局生效于关键帧/定妆照/参考图（与视频分辨率分开） */
+const imageMaxResolution = ref<number>(1280)
 const gpuMaxResOptions = [
   { label: '480p（长边 ≤832，A14B 推荐）', value: '480p' },
   { label: '720p（1280×704，慢 5~10 倍）', value: '720p' },
@@ -159,12 +161,63 @@ const MOTION_KEYS = [
   'lora_high', 'lora_low', 'lora_high_name', 'lora_low_name', 'shift',
   'sampler_name', 'scheduler', 'model_high', 'model_low', 'mode', 'dual',
   'width', 'height', 'frames', 'fps',
+  'presetSnapshots',   // ★ 档位参数记忆（每个 preset 存一份自己的参数快照）
 ]
 const motionPresetOptions = ['draft', 'balanced', 'motion', 'hero', 'full'].map((v) => ({ label: v, value: v }))
+
+// ★ 档位参数记忆（2026-09-18 用户口径）：“调整档位时把当前档参数保存下来，下次切回去时用它自动填充覆盖”。
+//   存在 video_params.presetSnapshots 里（随引擎配置入库 → 跨设备/手机端也有效）。
+//   键与后端 MOTION_KEYS 对齐（preset 本身不存）。
+const MOTION_SNAP_KEYS = [
+  'steps', 'switch_step', 'cfg', 'cfg_high', 'cfg_low',
+  'lora_high', 'lora_low', 'lora_high_name', 'lora_low_name', 'shift',
+  'sampler_name', 'scheduler', 'model_high', 'model_low', 'mode', 'dual',
+  'resolution', 'frames', 'fps', 'width', 'height',
+]
+const lastPreset = ref<string>('')
+function presetSnapshots(): Record<string, Record<string, unknown>> {
+  const v = videoParams.value.presetSnapshots
+  return v && typeof v === 'object' ? (v as Record<string, Record<string, unknown>>) : {}
+}
+
+/** 切档：先把“当前档”的参数存进快照，若目标档有快照则**覆盖填充**。 */
+function onPresetChange(nextRaw: string | null): void {
+  const next = nextRaw ?? ''
+  const prev = lastPreset.value
+  const snaps = { ...presetSnapshots() }
+  if (prev && prev !== next) {
+    const snap: Record<string, unknown> = {}
+    for (const k of MOTION_SNAP_KEYS) {
+      if (videoParams.value[k] !== undefined) snap[k] = videoParams.value[k]
+    }
+    snaps[prev] = snap
+  }
+  const target = next ? snaps[next] : undefined
+  const merged: Record<string, unknown> = { ...(videoParams.value ?? {}), presetSnapshots: snaps }
+  if (next) merged.preset = next
+  else delete merged.preset
+  if (target) {
+    for (const [k, v] of Object.entries(target)) merged[k] = v
+    message.info(`已切到「${next}」档：用你上次保存的参数填充（${Object.keys(target).length} 项）`, { duration: 3500 })
+  } else if (next) {
+    message.info(`已切到「${next}」档：该档还没存过参数（保留当前值）`, { duration: 3500 })
+  }
+  videoParams.value = merged
+  lastPreset.value = next
+  motionJson.value = JSON.stringify(pickMotion(merged))
+}
 // 分辨率：A14B 的甜点是 480p（快 5~10 倍、不会把 48G 卡跑到换入换出）；720p = 原分辨率（很慢）
 const motionResOptions = [
   { label: '480p（推荐：长边 832）', value: '480p' },
   { label: '720p（原分辨率，很慢）', value: '720p' },
+]
+// ★ 图片分辨率（出图长边像素，2026-09-18）：全局生效于**所有出图**（关键帧/定妆照/参考图）。
+//   与视频分辨率分开：出图（Qwen-Image）与出视频（Wan2.2 I2V）是两条独立链路，性价比拐点完全不同。
+//   尺寸 = 画幅基础尺寸等比放大到该长边（16:9 → 1280×704 / 1920×1056 / 2560×1408），32 对齐。
+const imageResOptions = [
+  { label: '1280（16:9 → 1280×704，默认）', value: 1280 },
+  { label: '1920（16:9 → 1920×1056）', value: 1920 },
+  { label: '2560（16:9 → 2560×1408，≈2K）', value: 2560 },
 ]
 const motionJson = ref('')
 
@@ -230,6 +283,7 @@ function applySettings(s: EngineSettings): void {
   videoSchema.value = s.videoModelSchema ?? null
   imageParams.value = (s.imageParams ?? {}) as Record<string, unknown>
   videoParams.value = (s.videoParams ?? {}) as Record<string, unknown>
+  lastPreset.value = String((videoParams.value.preset as string) ?? '')
   imageCloudModel.value = s.imageCloudModel ?? ''
   videoCloudModel.value = s.videoCloudModel ?? ''
 }
@@ -262,6 +316,7 @@ async function load(): Promise<void> {
     gpuServerUrl.value = s.gpuServerUrl ?? ''
     gpuServerPort.value = s.gpuServerPort
     gpuMaxResolution.value = s.gpuMaxResolution || '480p'
+    imageMaxResolution.value = s.imageMaxResolution ?? 1280
     const sv = s.services ?? {}
     svcTtsUrl.value = sv.tts?.url ?? ''
     svcMusicEngine.value = sv.music?.engine ?? 'comfy'
@@ -311,6 +366,7 @@ async function save(): Promise<void> {
       gpuServerUrl: gpuServerUrl.value || null,
       gpuServerPort: gpuServerPort.value,
       gpuMaxResolution: gpuMaxResolution.value,
+      imageMaxResolution: imageMaxResolution.value,
       imageParams: imageParams.value,
       videoParams: videoParams.value,
       gatewayRefsMax: gatewayRefsMax.value,
@@ -535,13 +591,18 @@ onMounted(load)
           <NFormItem label="端口">
             <NInputNumber v-model:value="gpuServerPort" :min="1" :max="65535" placeholder="8188" style="width: 130px" />
           </NFormItem>
-          <NFormItem label="最大支持分辨率" style="width: 300px">
+          <NFormItem label="视频分辨率" style="width: 300px">
             <NSelect v-model:value="gpuMaxResolution" :options="gpuMaxResOptions" size="small" />
+          </NFormItem>
+          <NFormItem label="图片分辨率" style="width: 300px">
+            <NSelect v-model:value="imageMaxResolution" :options="imageResOptions" size="small" />
           </NFormItem>
         </div>
         <p class="hint text-secondary" style="margin: -4px 0 10px">
-          最大支持分辨率决定 <b>motion 出片上限</b>（换 GPU 卡就改这里）：实测 48G 卡上
-          <b>720p/48 帧要 10 分钟以上且易超时</b>，<b>480p 只要 27~50 秒</b>；A14B 的甜点也是 480p 级。
+          <b>视频分辨率</b>决定 motion 出片上限（换 GPU 卡就改这里）：实测 48G 卡上
+          <b>720p/48 帧要 10 分钟以上且易超时</b>，<b>480p 只要 27~50 秒</b>；A14B 的甜点也是 480p 级。<br>
+          <b>图片分辨率</b>决定所有出图（关键帧 / 定妆照 / 参考图）的长边像素，**全局生效**：
+          越高越清晰（关键帧细节会带进视频底图），代价是出图更慢、更占显存。
         </p>
 
         <!-- 自托管 motion 档位（Wan2.2 I2V-A14B 双专家）
@@ -552,7 +613,8 @@ onMounted(load)
         <p class="hint text-secondary" style="margin-bottom: 10px">
           <b>自托管 motion 档位</b>（Wan2.2 I2V-A14B 双专家）：高噪声专家负责大幅运动，
           <b>默认不蒸馏（lora_high=0）</b>；动态靠 steps / switch / cfg 调。
-          保存后随任务下发（无需重启 worker）。留空 = 用 worker 默认档 <code>balanced</code>。
+          保存后随任务下发（无需重启 worker）。留空 = 用 worker 默认档 <code>balanced</code>。<br>
+          <b>切档会记忆参数</b>：切换时自动把当前档的参数存储，下次切回该档就用它自动填充覆盖（存在引擎配置里，手机端也生效）。
         </p>
         <div class="row" style="flex-wrap: wrap; gap: 8px">
           <NFormItem label="档位 preset" style="width: 200px">
@@ -562,7 +624,7 @@ onMounted(load)
               size="small"
               clearable
               placeholder="balanced"
-              @update:value="(v: string | null) => mSet('preset', v)"
+              @update:value="(v: string | null) => onPresetChange(v)"
             />
           </NFormItem>
           <NFormItem label="步数 steps" style="width: 150px">

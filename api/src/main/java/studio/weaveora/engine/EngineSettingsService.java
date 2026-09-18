@@ -79,8 +79,9 @@ public class EngineSettingsService {
         //   0 = 不改（用工作流 JSON 自带值）。Qwen-Image-Edit 官方 Qwen 口径 = steps 40 / cfg 4.0。
         out.set("image", merge(cur, "image", mapper.createObjectNode()
                 .put("engine", "builtin").put("comfyUrl", gpu)
-                .put("workflow", "").put("img2imgWorkflow", "").put("editWorkflow", "").put("model", "")
-                .put("steps", 0).put("cfg", 0).put("denoise", 0.65)));
+                .put("workflow", defaultImageWorkflow()).put("img2imgWorkflow", defaultImageImg2imgWorkflow())
+                .put("editWorkflow", defaultImageEditWorkflow()).put("model", "")
+                .put("steps", 40).put("cfg", 4.0).put("denoise", 1.0)));
         // ★ motion：自托管图生视频（Wan2.2 I2V-A14B 双专家）的**档位**随任务下发。
         //   为什么必须走这里：clip 的 payload.params 在 JobService.videoShotPayload() 里只塞了
         //   {width,height}，preset/steps/lora_*/cfg_* 若不靠这条链路下发就永远到不了 worker ——
@@ -95,7 +96,10 @@ public class EngineSettingsService {
             "preset", "steps", "switch", "switch_step", "cfg", "cfg_high", "cfg_low",
             "lora_high", "lora_low", "lora_high_name", "lora_low_name", "shift",
             "sampler_name", "scheduler", "model_high", "model_low",
-            "mode", "dual", "width", "height", "frames", "fps", "resolution");
+            "mode", "dual", "width", "height", "frames", "fps", "resolution",
+            // ★ 档位参数记忆（2026-09-18）：UI 切换 preset 时把每个档的参数快照存在这里；
+            //   它本身只是元数据（worker 会忽略），但必须过白名单才能存取。
+            "preset_snapshots");
 
     /**
      * 视频引擎是自托管（GPU）时，sanitize 之后仍要保住 motion 档位键。
@@ -215,6 +219,43 @@ public class EngineSettingsService {
         return servicesWithDefaults(load(userId));
     }
 
+    /**
+     * 出图长边像素（**图片分辨率**档，2026-09-18 用户口径）：未配 → 1280（历史行为）。
+     *
+     * <p>与 {@code gpuMaxResolution}（视频出片上限）分开：出图与出视频是两条独立链路。
+     */
+    @Transactional(readOnly = true)
+    public int imageMaxSide(UUID userId) {
+        return studio.weaveora.job.ImageDims.normalize(load(userId).imageMaxResolution());
+    }
+
+    // ---- 出图工作流的服务端默认值（P1 防复发：2026-09-18 事故 ----
+    //   保存页会把空字段写成 null，一旦 editWorkflow 为空，关键帧就从 Edit 通路**静默降级**到
+    //   img2img（单槽 + denoise 0.65）→ 把定妆照半重绘成"不像的定妆照"。
+    //   所以：null 时必须回落到**具体默认路径**，不再依赖 worker 环境变量（worker 侧也有同样兜底）。
+    private String defaultImageWorkflow() {
+        return imageWfOr(env("WEAVEORA_DEFAULT_IMAGE_WF"), "/opt/weaveora/workflows/qwen_image_txt2img_film_api.json");
+    }
+
+    private String defaultImageImg2imgWorkflow() {
+        return imageWfOr(env("WEAVEORA_DEFAULT_IMAGE_IMG2IMG_WF"),
+                "/opt/weaveora/workflows/qwen_image_img2img_api.json");
+    }
+
+    private String defaultImageEditWorkflow() {
+        return imageWfOr(env("WEAVEORA_DEFAULT_IMAGE_EDIT_WF"),
+                "/opt/weaveora/workflows/qwen_image_edit_api.json");
+    }
+
+    private static String env(String k) {
+        String v = System.getenv(k);
+        return v == null ? "" : v.trim();
+    }
+
+    private static String imageWfOr(String configured, String fallback) {
+        return configured == null || configured.isBlank() ? fallback : configured;
+    }
+
     @Transactional(readOnly = true)
     public UserEngineSettings load(UUID userId) {
         return repo.findByUserId(userId).orElseGet(() -> UserEngineSettings.defaults(userId));
@@ -276,6 +317,7 @@ public class EngineSettingsService {
                 AesGcm.mask(imgKey), s.imageCloudUsername(), pwdSet,
                 s.videoCloudModel(), AesGcm.mask(vidKey),
                 s.gpuServerUrl(), s.gpuServerPort(), s.gpuMaxResolution(),
+                s.imageMaxResolution(),
                 fresh(true) ? s.imageModelSchema() : null,
                 fresh(false) ? s.videoModelSchema() : null,
                 s.imageParams(), s.videoParams(),
@@ -613,6 +655,7 @@ public class EngineSettingsService {
         if (req.gpuServerUrl() != null) s.setGpuServerUrl(req.gpuServerUrl());
         if (req.gpuServerPort() != null) s.setGpuServerPort(req.gpuServerPort());
         if (req.gpuMaxResolution() != null) s.setGpuMaxResolution(req.gpuMaxResolution());
+        if (req.imageMaxResolution() != null) s.setImageMaxResolution(req.imageMaxResolution());
         if (req.gatewayRefsMax() != null) s.setGatewayRefsMax(req.gatewayRefsMax() >= 0 ? req.gatewayRefsMax() : null);
         if (req.gatewaySample() != null) s.setGatewaySample(req.gatewaySample().isBlank() ? null : req.gatewaySample());
         // 服务地址（配音/配乐、对口型、转写、人脸）：整块替换；空串字段在 worker 侧会回退默认值
