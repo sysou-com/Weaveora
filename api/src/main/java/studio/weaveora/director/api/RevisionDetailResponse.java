@@ -15,6 +15,8 @@ public record RevisionDetailResponse(
         boolean approved,
         JsonNode plan,
         List<ShotView> shots,
-        OffsetDateTime createdAt
+        OffsetDateTime createdAt,
+        /** 「只提示不拦」的中文提示（场景切换过密 / 一镜内换场景）；空列表 = 无需提示 */
+        List<String> notices
 ) {
 }

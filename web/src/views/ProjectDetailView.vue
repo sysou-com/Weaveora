@@ -1689,6 +1689,12 @@ const engineStatus = useQuery({
 })
 const engineNotice = computed(() => engineStatus.data.value?.notice ?? '')
 
+/**
+ * 场景切换提示（**只提示不拦**，用户 2026-09-17 口径）：后端在方案产出时就已算好。
+ * 两类：① 一镜内换场景（带明确转场用语才算，浪花/尖叫同画面共存不误报）；② 切换偏密 / 单镜过短。
+ */
+const planNotices = computed(() => detail.data.value?.notices ?? [])
+
 /** 改 fps → 立刻重算并回写「模型上限(s)」（用户 2026-09-17：两者要同步；**反向不做**，秒变了不改帧率） */
 watch(
   () => (draft.value as { edit_plan?: { fps?: number } } | null)?.edit_plan?.fps,
@@ -3950,6 +3956,19 @@ const shotTotal = computed(() => {
       </div>
     </NAlert>
 
+    <!-- 场景切换提示：**只提示不拦**（用户口径：动作密不算问题，换场景过多才提示） -->
+    <NAlert
+      v-if="planNotices.length"
+      type="warning"
+      :bordered="false"
+      class="plan-notice"
+      data-testid="plan-notice"
+    >
+      <div class="pn-row">
+        <span v-for="(n, i) in planNotices" :key="i" class="pn-line">{{ n }}</span>
+      </div>
+    </NAlert>
+
     <!-- 加载中骨架 -->
     <template v-if="project.isPending.value || briefs.isPending.value">
       <div class="skel-row">
@@ -5351,6 +5370,10 @@ const shotTotal = computed(() => {
 /* 引擎不在线提示条（黄色、仅提示不拦）：见模板 data-testid="engine-offline-notice" */
 .engine-offline { margin-bottom: 4px; }
 .eo-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; line-height: 1.7; }
+/* 场景切换提示条（黄色、仅提示不拦）：见模板 data-testid="plan-notice" */
+.plan-notice { margin-bottom: 4px; }
+.pn-row { display: flex; flex-direction: column; gap: 4px; line-height: 1.7; }
+.pn-line { font-size: 13px; }
 .back {
   display: inline-flex;
   align-items: center;

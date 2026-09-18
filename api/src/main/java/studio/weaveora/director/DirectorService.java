@@ -26,6 +26,7 @@ import studio.weaveora.director.plan.AspectPixels;
 import studio.weaveora.billing.QuotaService;
 import studio.weaveora.infra.obs.Metrics;
 import studio.weaveora.director.plan.DirectorPlanValidator;
+import studio.weaveora.director.plan.SceneSwitchNotices;
 import studio.weaveora.infra.llm.DirectorLlm;
 import studio.weaveora.infra.llm.LlmRequest;
 import studio.weaveora.project.api.ProjectContextPort;
@@ -145,8 +146,14 @@ public class DirectorService {
             syncShots(rev.id(), plan);
         }
         context.markDirecting(workspaceId, projectId);
-        log.info("director generate project={} revision={} source={}", projectId, revisionNo, llm.source());
-        return new GenerateResponse(rev.id(), revisionNo, llm.source(), "directing", plan);
+        List<String> notices = SceneSwitchNotices.of(plan);
+        if (!notices.isEmpty()) {
+            // 只提示不拦（用户口径）：场景切换过密/一镜内换场景 —— 记录到日志便于排查，不打回生成。
+            log.info("plan notices project={} revision={}: {}", projectId, revisionNo, String.join(" / ", notices));
+        }
+        log.info("director generate project={} revision={} source={} shots={}", projectId, revisionNo,
+                llm.source(), plan.path("shots").size());
+        return new GenerateResponse(rev.id(), revisionNo, llm.source(), "directing", plan, notices);
     }
 
     /**
@@ -1077,7 +1084,8 @@ public class DirectorService {
                 ? shots.findByRevisionIdOrderByShotNo(r.id()).stream().map(this::toShotView).toList()
                 : List.of();
         return new RevisionDetailResponse(r.id(), r.briefId(), r.revisionNo(), r.source(),
-                r.id().equals(approvedId), r.schemaJson(), shotViews, r.createdAt());
+                r.id().equals(approvedId), r.schemaJson(), shotViews, r.createdAt(),
+                SceneSwitchNotices.of(r.schemaJson()));
     }
 
     private ShotView toShotView(ShotDraft s) {

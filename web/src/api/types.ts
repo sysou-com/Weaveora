@@ -387,6 +387,8 @@ export interface GenerateResult {
   source: 'llm' | 'stub'
   projectStatus: string
   plan: DirectorPlan
+  /** 「只提示不拦」的中文提示（场景切换过密 / 一镜内换场景）；空 = 无需提示 */
+  notices?: string[]
 }
 
 /** revision 列表项 */
@@ -426,6 +428,8 @@ export interface RevisionDetail {
   plan: DirectorPlan
   shots: ShotRecord[]
   createdAt: string
+  /** 「只提示不拦」的中文提示（场景切换过密 / 一镜内换场景）；空 = 无需提示 */
+  notices?: string[]
 }
 
 /** 资产（AssetResponse） */

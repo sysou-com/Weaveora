@@ -2,6 +2,7 @@ package studio.weaveora.director.api;
 
 import com.fasterxml.jackson.databind.JsonNode;
 
+import java.util.List;
 import java.util.UUID;
 
 /** generate 成功响应（完整 DirectorPlan + 版本标识）。 */
@@ -10,6 +11,8 @@ public record GenerateResponse(
         int revisionNo,
         String source,          // llm | stub
         String projectStatus,   // §20.1：directing
-        JsonNode plan
+        JsonNode plan,
+        /** 「只提示不拦」的中文提示（场景切换过密 / 一镜内换场景）；空列表 = 无需提示 */
+        List<String> notices
 ) {
 }
