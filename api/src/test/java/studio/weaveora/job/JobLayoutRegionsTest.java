@@ -191,6 +191,79 @@ class JobLayoutRegionsTest {
         assertFalse(pos.contains("Reference mapping"), pos);
     }
 
+    // ---------- ★ 2026-09-18：motion(clip) 不推位置框（用「以关键帧为构图基准」代替） ----------
+
+    /**
+     * clip：不写框/坐标/槽位名、不下发 referenceRegions，但要保留身份 + 档案 + 构图基准 + 身高比例 + 动作方向。
+     *
+     * <p>为什么（用户实测第 4 镜）：关键帧已经把构图定死，再推 {@code 框 0.30x0.98 / y=0.02} 会让模型
+     * 在首帧上「重新推拉/放大」——警幻被放成 y=0.02 后「从远处走上来」越走越高；而 motion 真正需要的
+     * 是动作/朝向/方向/镜头运动。
+     */
+    @Test
+    void motionClipDropsBoxesButKeepsIdentityProfilesAndCompositionAnchor() {
+        ObjectNode p = payload("电影感镜头：宝玉回身望向警幻");
+        JsonNode plan = json("""
+                {"subjects":[{"name":"宝玉","kind":"person","gender":"male","height":"165"},
+                             {"name":"警幻","kind":"person","gender":"female","height":"162"}]}
+                """);
+        JsonNode shot = json("""
+                {"layout":[{"subject":"宝玉","x":0.38,"y":0.02,"w":0.30,"h":0.98},
+                           {"subject":"警幻","x":0.05,"y":0.02,"w":0.32,"h":0.98}]}
+                """);
+        JobService.applyLayoutRegions(p, plan, shot, -1, refs("宝玉", "警幻"), true);
+        String pos = p.path("positive_prompt").asText();
+
+        // ① 不下发位置框（worker 视频通路本来也不读）
+        assertNull(p.get("referenceRegions"));
+        // ② 正词里不得出现框/坐标/方位或槽位名
+        assertFalse(pos.contains("框 0.30x0.98"), pos);
+        assertFalse(pos.contains("x="), pos);
+        assertFalse(pos.contains("Picture 1"), "视频通路不送参考图，不该出现槽位名: " + pos);
+        assertFalse(pos.contains("位置以本清单为准"), pos);
+        // ③ 身份与档案保留（性别/身高是「同框比例」的判据）
+        assertTrue(pos.contains("宝玉[性别 男 male；身高 165]"), pos);
+        assertTrue(pos.contains("警幻[性别 女 female；身高 162]"), pos);
+        // ④ 构图以关键帧为准 + 同框身高比例
+        assertTrue(pos.contains("【以关键帧为构图基准】"), pos);
+        assertTrue(pos.contains("同框身高比例按档案：宝玉 165、警幻 162"), pos);
+        // ⑤ 只表现动作/朝向/方向/镜头运动，禁止再放大/推近/越来越高
+        assertTrue(pos.contains("只需表现动作、朝向、方向与镜头运动"), pos);
+        assertTrue(pos.contains("不得改变人物之间的相对大小与身高比例"), pos);
+        assertFalse(pos.contains("Reference mapping"), "中文镜不得中英混杂: " + pos);
+    }
+
+    /** 同一镜同一框：still 保留框 + referenceRegions，clip 全部拿掉（避免“一处改动顺手改坏关键帧”）。 */
+    @Test
+    void sameShotKeepsBoxesForStillButNotForMotion() {
+        JsonNode shot = json("{\"layout\":[{\"subject\":\"宝玉\",\"x\":0.38,\"y\":0.02,\"w\":0.30,\"h\":0.98}]}");
+        ObjectNode still = payload("cinematic still of a figure");
+        ObjectNode clip = payload("cinematic still of a figure");
+        JobService.applyLayoutRegions(still, json("{}"), shot, -1, refs("宝玉"));
+        JobService.applyLayoutRegions(clip, json("{}"), shot, -1, refs("宝玉"), true);
+
+        assertTrue(still.path("positive_prompt").asText().contains("box 0.30x0.98"), still.path("positive_prompt").asText());
+        assertTrue(still.path("positive_prompt").asText().contains("positions and box sizes given here always win"));
+        assertEquals(1, still.get("referenceRegions").size());
+
+        assertFalse(clip.path("positive_prompt").asText().contains("box 0.30x0.98"));
+        assertTrue(clip.path("positive_prompt").asText().contains("[Keyframe is authoritative for composition]"),
+                clip.path("positive_prompt").asText());
+        assertNull(clip.get("referenceRegions"));
+    }
+
+    /** 没填身高（或只有一个主体）时不得编造身高句，但构图基准句照写。 */
+    @Test
+    void motionOmitsHeightLineWhenProfilesLackHeights() {
+        ObjectNode p = payload("电影感镜头：宝玉独自立于庭中");
+        JsonNode shot = json("{\"layout\":[{\"subject\":\"宝玉\",\"x\":0.38,\"y\":0.02,\"w\":0.30,\"h\":0.98}]}");
+        JobService.applyLayoutRegions(p, json("{}"), shot, -1, refs("宝玉"), true);
+        String pos = p.path("positive_prompt").asText();
+        assertFalse(pos.contains("同框身高比例"), pos);
+        assertTrue(pos.contains("【以关键帧为构图基准】"), pos);
+        assertTrue(pos.contains("宝玉"), pos);
+    }
+
     // ---------- 边界 ----------
 
     @Test

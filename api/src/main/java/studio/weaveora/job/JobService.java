@@ -2732,7 +2732,9 @@ public class JobService {
         //     ③ shots[].lipsync_targets = {subject:{x,y}}（预览图点选，只有点 → 给默认框）
         //   与参考图顺序（refs.subjects()）严格对齐，没位置的填 null。
         //   同时把「Picture N = 谁・属性・位置」写进正词（用户要求：positive_prompt 必须点名主体，且要带人物档案）。
-        applyLayoutRegions(payload, plan, shot, keyframeIndex, refs);
+        // ★ 2026-09-18 用户裁定：**motion(clip) 不推位置框**（关键帧已把构图定死；clip 需要的是动作/方向/镜头运动）。
+        //   详见 applyLayoutRegions(..., motion=true) 的注释。
+        applyLayoutRegions(payload, plan, shot, keyframeIndex, refs, "clip".equals(kind));
         return payload;
     }
 
@@ -2759,6 +2761,29 @@ public class JobService {
      */
     static void applyLayoutRegions(ObjectNode payload, JsonNode plan, JsonNode shot, int keyframeIndex,
                                    RefCtx refs) {
+        applyLayoutRegions(payload, plan, shot, keyframeIndex, refs, false);
+    }
+
+    /**
+     * 同上，{@code motion=true} 表示这是 **clip（图生视频）** 任务。
+     *
+     * <p>★ 2026-09-18 用户裁定（第 4 镜「警幻越走越高」+ 关键帧构图被框大小带跑）：
+     * clip 通路**不下发位置框、也不把框坐标写进正词**，改用「以关键帧为构图基准」的约束句。理由：
+     * <ol>
+     *   <li>worker 的**视频通路根本不读** {@code referenceRegions}（它只出现在 still 路径：
+     *       {@code comfy_client.generate_via_workflow / generate}；motion 用 {@code payload.keyframeKey} 当首帧，
+     *       见 {@code clip 任务缺少 keyframeKey}）→ 对 clip 是**死数据**；</li>
+     *   <li>真正会进 motion 正词的是那段位置清单，而它是**静态构图指令**（{@code 框 w×h} = 远近/特写，
+     *       {@code y} = 前后景）。首帧已经把构图定死，再喂一遍等于让模型在首帧上**重新推拉/放大**：
+     *       实测把警幻的框设成 y=0.02 / h=0.98 后，她「从远处走上来」越走越高；</li>
+     *   <li>motion 真正需要的是**动作、朝向、方向、镜头运动**——那部分本来就在镜正词里
+     *       （clip 另有 {@code Action:} 行，见 {@code videoShotPayload}）。</li>
+     * </ol>
+     * 注意：这里只拿掉「框/坐标」，**人物档案（性别/年龄/身高/体态/外貌）与身份约束照写** ——
+     * 档案里的身高正是「同框比例」的判据（见下方 motion 语句里的同框身高比例）。
+     */
+    static void applyLayoutRegions(ObjectNode payload, JsonNode plan, JsonNode shot, int keyframeIndex,
+                                   RefCtx refs, boolean motion) {
         if (refs == null || refs.subjects() == null || refs.subjects().isEmpty()) {
             return;
         }
@@ -2852,7 +2877,12 @@ public class JobService {
                 }
             }
         }
-        if (!pos.isEmpty()) {
+        if (!pos.isEmpty() && motion) {
+            // clip：不写 referenceRegions（worker 视频通路不读它），改用文字口径约束构图。
+            log.info("refs: motion(clip) 不推位置框（视频通路不读 referenceRegions）：{} 个主体 → 改以「关键帧为构图基准」约束",
+                    pos.size());
+        }
+        if (!pos.isEmpty() && !motion) {
             com.fasterxml.jackson.databind.node.ArrayNode regions = payload.putArray("referenceRegions");
             for (String subject : refs.subjects()) {
                 double[] p = (subject == null) ? null : pos.get(subject);
@@ -2881,6 +2911,8 @@ public class JobService {
         // 即使一个位置都没设，也照写「imageN = 主体名」—— 这是「positive_prompt 必须点名主体」
         // 的后端兜底（不依赖 LLM 听话）。无 subject 名的风格参考图不点名（否则凭空造角色）。
         StringBuilder sb = new StringBuilder();
+        // motion 专用：收集档案里的身高原话，用于「同框身高比例」约束（不解析单位，按用户填的写法直接用）。
+        java.util.List<String> heights = new java.util.ArrayList<>();
         for (int i = 0; i < refs.subjects().size(); i++) {
             String name = refs.subjects().get(i);
             if (name == null || name.isBlank()) {
@@ -2894,7 +2926,12 @@ public class JobService {
             //   拼成 `Picture 1: <|vision_start|>…`（见节点源码 _get_qwen_prompt_embeds），
             //   官方 2511 模板/社区写法也都是 `Picture 1` / `Picture 2`；我们之前只写 `image1`，
             //   模型未必能把两者对上 → 多主体时张冠李戴。现在两种名字并列写，怎么读都不歧义。
-            sb.append("Picture ").append(i + 1).append(" (image").append(i + 1).append(") = ").append(name);
+            // ★ motion(clip)：视频通路不送参考图（只有首帧）→ **不写 Picture/image 槽位名**，避免指向不存在的图。
+            if (motion) {
+                sb.append(name);
+            } else {
+                sb.append("Picture ").append(i + 1).append(" (image").append(i + 1).append(") = ").append(name);
+            }
             // ★ P14（2026-09-16 用户实测「宝玉被当女性」）：把该主体的人物档案直接写进正词。
             //   定妆照只约束长相，性别/年龄/体态必须用文字说清 —— 否则视觉模型只能猜。
             studio.weaveora.director.plan.PlanSubjects.Traits tr =
@@ -2902,7 +2939,11 @@ public class JobService {
             if (tr != null && !tr.isEmpty()) {
                 sb.append('[').append(tr.describe(zh)).append(']');
             }
-            if (p != null) {
+            if (motion && tr != null && tr.height() != null && !tr.height().isBlank()) {
+                heights.add(name + " " + tr.height().trim());
+            }
+            // motion：不写方位/坐标/框 —— 位置以关键帧为准（见方法注释）。
+            if (p != null && !motion) {
                 sb.append(zh ? "（" : " (")
                   .append(zh ? posHintZh(p[0], p[1]) : posHint(p[0], p[1]))
                   .append(zh ? "，x=" : ", x=").append(fmt2(p[0]))
@@ -2917,7 +2958,40 @@ public class JobService {
             //   「宝玉在前景中央…可卿在宝玉右侧…警幻居后景」，而用户在「位置总控」里设的框是
             //   x=0.24 / x=0.06 / x=0.65 —— 两套方位**直接矛盾**，模型只能猜，于是左右/前后乱。
             //   现在明确：描述给出动作与氛围，位置/大小以本清单为最终裁定。
-            String add = zh
+            String heightLine = heights.size() >= 2
+                    ? (zh ? "同框身高比例按档案：" + String.join("、", heights) + "（同一平面时头顶大致齐平）；"
+                          : "keep the on-screen height ratio from the profiles: " + String.join(", ", heights)
+                            + " (heads roughly level when on the same plane); ")
+                    : "";
+            String add;
+            if (motion) {
+                // ★ motion(clip)：身份 + 档案 + 「以关键帧为构图基准」；不含任何框/坐标。
+                add = zh
+                        ? "\n主体与人物设定（本镜按关键帧里出现的角色，顺序与系统内部一致）：" + sb
+                          + "。方括号里是该主体的人物设定（性别/年龄/体态/外貌），**必须严格遵守**："
+                          + "不得把男性画成女性（或反之），不得画成与年龄不符的样貌；"
+                          + "方括号里没写性别的主体，请严格以其在关键帧里的面貌为准。"
+                          + "【以关键帧为构图基准】本镜从已生成的关键帧首帧开始运动：画面构图、每个角色在画面中的位置"
+                          + "与相对大小一律以关键帧为准。" + heightLine
+                          + "只需表现动作、朝向、方向与镜头运动（前后景纵深、左右移动、走位、转身、推拉摇移）；"
+                          + "禁止重新设计构图、禁止重新安排站位、禁止把某个角色单独放大或推近，"
+                          + "禁止让他/她越走越近、越走越大、越走越高；近大远小只能来自透视与镜头运动，"
+                          + "不得改变人物之间的相对大小与身高比例。"
+                        : "\nSubjects & profiles (in keyframe order; internal order matches): " + sb
+                          + ". The bracketed facts are each subject's fixed profile (gender/age/build/look) —"
+                          + " obey them strictly: never render a male character as female or vice versa, and never"
+                          + " change their age; for a subject without a stated gender, follow how they appear in the"
+                          + " keyframe. [Keyframe is authoritative for composition] This shot starts from an already"
+                          + " generated keyframe: the framing and each character's position and relative size are"
+                          + " fixed by it. " + heightLine
+                          + "Express only action, facing, direction and camera movement (depth/foreground,"
+                          + " left-right motion, blocking, turns, push/pull/pan/tilt); do NOT redesign the composition,"
+                          + " do NOT re-stage anyone, do NOT scale or push in on an individual character, and never let"
+                          + " a character grow closer, larger or taller as the shot progresses; apparent size changes"
+                          + " may come only from perspective and camera movement, and the characters' relative size and"
+                          + " height ratio must stay fixed.";
+            } else {
+                add = zh
                     ? "\n参考图与主体对应（按送入顺序）：" + sb
                       + "。请严格按这个对应关系：每个角色只用自己的参考图，并放在括号里给的位置与相对大小上"
                       + "（归一化画面坐标，原点在左上；y 越小越靠上，框越大越靠近镜头）；角色之间保持明显分开。"
@@ -2934,8 +3008,13 @@ public class JobService {
                       + " [Authoritative placement] The action/mood description above is for story context only;"
                       + " if any spatial wording in it (foreground/background, left/right, near/far) conflicts with"
                       + " this list, the positions and box sizes given here always win.";
+            }
             payload.put("positive_prompt", cur + add);
-            log.info("refs: 参考图↔主体（含位置={}）已写入正词：{}", !pos.isEmpty(), sb);
+            if (motion) {
+                log.info("refs: motion(clip) 主体档案已写入正词（不含位置框；构图以关键帧为准）：{}", sb);
+            } else {
+                log.info("refs: 参考图↔主体（含位置={}）已写入正词：{}", !pos.isEmpty(), sb);
+            }
         }
     }
 
