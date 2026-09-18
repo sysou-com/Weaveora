@@ -1,6 +1,7 @@
 package studio.weaveora.asset.api;
 
 import jakarta.servlet.http.HttpServletRequest;
+import org.springframework.core.io.ByteArrayResource;
 import org.springframework.core.io.InputStreamResource;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
@@ -25,10 +26,17 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
-/** 资产端点：参考图上传/列表（项目维度）+ 下载。 */
+/** 资产端点：参考图上传/列表（项目维度）+ 下载 + 缩略图。 */
 @RestController
 @RequestMapping("/api/v1")
 public class AssetController {
+
+    /**
+     * 资产内容不可变（同一个 assetId 的字节永不改变），所以可以让浏览器永久缓存。
+     *
+     * <p>{@code private}：这是带鉴权的私有资源，不进共享缓存。
+     */
+    private static final String IMMUTABLE_CACHE = "private, max-age=31536000, immutable";
 
     private final AssetService assetService;
     private final studio.weaveora.asset.VoicePresetService voicePresetService;
@@ -216,8 +224,37 @@ public class AssetController {
         String name = d.asset().id() + "." + ext(d.contentType());
         return ResponseEntity.ok()
                 .header(HttpHeaders.CONTENT_DISPOSITION, "inline; filename=\"" + name + "\"")
+                // 资产内容不可变 → 下载也可以长缓存，避免「切走再切回来」重拉一遍几十 MB
+                .header(HttpHeaders.CACHE_CONTROL, IMMUTABLE_CACHE)
                 .contentType(MediaType.parseMediaType(d.contentType()))
                 .body(res);
+    }
+
+    /**
+     * 缩略图（§21：同前缀 {@code _thumb.webp}、最长边 512）。
+     *
+     * <p>与 {@link #download} 的分工很硬：<b>本端点只可能返回几百字节到几十 KB</b>。
+     * 生成不出来（类型不支持 / ffmpeg 失败 / 原件损坏）→ <b>404</b>，
+     * <b>绝不在这里回落原文件</b> —— 否则这个端点就失去了「永不返回大文件」这个唯一保证，
+     * 而前端也没法把「没缩略图」和「缩略图就是很大」区分开。回落到什么由前端决定。
+     *
+     * <p>缓存：资产不可变，所以 immutable 长缓存 + ETag。浏览器命中后连请求都不发，
+     * 这是「页面之间来回切很快」的主要来源。
+     */
+    @GetMapping("/assets/{assetId}/thumb")
+    public ResponseEntity<org.springframework.core.io.Resource> thumb(
+            HttpServletRequest request,
+            @RequestHeader(value = ProjectController.WORKSPACE_HEADER, required = false) String workspaceId,
+            @PathVariable UUID assetId) {
+        var t = assetService.getThumb(uid(request), ws(workspaceId), assetId);
+        if (t == null) {
+            throw new BizException(ErrorCode.NOT_FOUND, "该资产没有可用的缩略图");
+        }
+        return ResponseEntity.ok()
+                .header(HttpHeaders.CACHE_CONTROL, IMMUTABLE_CACHE)
+                .eTag("\"" + assetId + "-" + t.ext() + "\"")
+                .contentType(MediaType.parseMediaType(t.mime()))
+                .body(new ByteArrayResource(t.bytes()));
     }
 
     /** 批量删除所选资产（资产库勾选，删行+删文件） */

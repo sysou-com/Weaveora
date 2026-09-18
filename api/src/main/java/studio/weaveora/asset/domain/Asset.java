@@ -143,6 +143,15 @@ public class Asset {
     public void attachPromptSnapshot(com.fasterxml.jackson.databind.JsonNode snap) {
         this.promptSnapshot = snap;
     }
+
+    /**
+     * §21：回写缩略图 key（懒生成后落库，之后不再重跑 ffmpeg）。
+     *
+     * <p>资产本身不可变，缩略图只在「第一次被请求」时生成一次，所以这里只给一个单向的写入口。
+     */
+    public void attachThumbKey(String thumbKey) {
+        this.thumbKey = thumbKey;
+    }
     public boolean nsfw() { return nsfw; }
     public OffsetDateTime createdAt() { return createdAt; }
 }

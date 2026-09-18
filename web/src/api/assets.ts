@@ -226,6 +226,33 @@ export async function fetchAssetBlob(workspaceId: string, assetId: string): Prom
 }
 
 /**
+ * §21 缩略图：服务端懒生成（最长边 512 的 webp）后落库，几百字节到几十 KB。
+ *
+ * <p><b>列表/网格一律用这个，不要用 {@link fetchAssetBlob}</b> —— 原图约 0.84MB、原视频约 1.42MB，
+ * 一个项目实测能堆到 143 个产物（≈ 120MB），一次性拉完页面就卡死。
+ *
+ * <p>为什么返回 Blob 而不是直接用 <img src>：鉴权只有 {@code Authorization} 头
+ * （没有 cookie、也没有签名 URL），{@code <img src>} 带不了头，所以必须 fetch 成 blob。
+ *
+ * @return 拿不到返回 null：**404 表示服务端生成不出缩略图**（类型不支持 / ffmpeg 失败 / 原件损坏）。
+ *         注意它不会偷着回落成原文件，所以拿不到时由调用方决定怎么办（见 ProjectDetailView 的 loadPreview）。
+ */
+export async function fetchAssetThumb(workspaceId: string, assetId: string): Promise<Blob | null> {
+  const { accessToken } = loadTokens()
+  const resp = await fetch(`${API_BASE}/api/v1/assets/${assetId}/thumb`, {
+    headers: {
+      [WORKSPACE_HEADER]: workspaceId,
+      ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+    },
+  })
+  if (!resp.ok) {
+    if (resp.status === 401) onUnauthorized()
+    return null
+  }
+  return resp.blob()
+}
+
+/**
  * ★ 2026-09-16：把所选参考图**物化成真正的定妆照资产**（kind=portrait），返回新资产。
  *
  * 为什么不在前端只改方案指针（旧做法）：那样方案的「定妆照」其实是 kind=reference，

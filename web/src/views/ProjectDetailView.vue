@@ -26,7 +26,7 @@ import {
 import { createBrief, listBriefs } from '@/api/briefs'
 import { createJobs, getEngineStatus, listJobs, cancelJob, rerunJob, retryJobs, deleteJobs, JOB_STATE_LABEL } from '@/api/jobs'
 import { shareProject } from '@/api/market'
-import { listAssets, uploadReference, fetchAssetBlob, deleteAssets, uploadVoiceLine, useSampleAsLineVoice, deleteVoicePreset, auditionVoicePreset, assetAsPortrait, assetAsReference } from '@/api/assets'
+import { listAssets, uploadReference, fetchAssetBlob, fetchAssetThumb, deleteAssets, uploadVoiceLine, useSampleAsLineVoice, deleteVoicePreset, auditionVoicePreset, assetAsPortrait, assetAsReference } from '@/api/assets'
 import { createExport, fetchExportBlob, renderMaster, timecode } from '@/api/export'
 import { aiGenerateLines, aiGenerateMusic, extractSubjects, patchPlanInPlace, patchSubjectMeta, portraitPromptDefaults } from '@/api/director'
 import { getEngineSettings } from '@/api/engineSettings'
@@ -348,17 +348,17 @@ const facePickNewest = computed(() => {
 })
 const facePickMedia = computed(() => {
   const a = facePickNewest.value
-  return a ? (galUrls.value[a.id] ?? '') : ''
+  return a ? (galFull.value[a.id] ?? '') : ''
 })
 function openFacePicker(shotNo: number): void {
   facePickShotNo.value = shotNo
   facePickOpen.value = true
   const a = facePickNewest.value
-  // 缩略图只会在对应 Tab 被浏览时加载 → 这里补一次按需拉取（否则弹窗里是空白）
-  if (a && !galUrls.value[a.id]) {
-    void assetBlob(a.id).then((blob) => {
-      if (blob) galUrls.value[a.id] = URL.createObjectURL(blob)
-    })
+  // 人脸点选必须用**原文件**，不能用缩略图：
+  // ① 缩略图取的是 0.5s 处的帧，人脸可能已经动了 → 点出的坐标和实际驱动的帧对不上；
+  // ② 缩略图分辨率不够精细点选。这里按需拉整份（只在用户主动点开时发生）。
+  if (a && !galFull.value[a.id]) {
+    void ensureFull(a.id)
   }
 }
 /** 保存某说话人的点选坐标（归一化）；写入方案后立即就地方保存 */
@@ -564,7 +564,7 @@ function portraitsOf(name: string): Array<{ id: string; url?: string; width?: nu
   // 靠 snapshotKind 兜住），因此已生成的定妆图能被「选图」正确识别
   return (assets.data.value ?? [])
     .filter((a) => (a.kind === 'portrait' || a.snapshotKind === 'portrait') && a.subject === name)
-    .map((a) => ({ id: a.id, url: galUrls.value[a.id], width: a.width, height: a.height }))
+    .map((a) => ({ id: a.id, url: galPreview.value[a.id], width: a.width, height: a.height }))
 }
 /** 一键生成主体（LLM 抽取；已有主体保留，只补新的） */
 async function onExtractSubjects(): Promise<void> {
@@ -1202,15 +1202,14 @@ function subjectThumbByName(name: string): string {
 function subjectThumb(sub: PlanSubject): string {
   const id = sub.portraitAssetId
   if (!id) return ''
-  const cached = galUrls.value[id] ?? thumbUrls.value[id]
+  const cached = galPreview.value[id] ?? thumbUrls.value[id]
   if (cached) return cached
   // 定妆照可能是 kind=reference（把参考图直接设为定妆照）或旧数据 kind=still，
-  // 而缩略图只会在对应 Tab 被浏览时加载 → 这里补一次按需加载
+  // 而预览图只会在对应 Tab 被浏览时加载 → 这里补一次按需加载
   if (!loadTried.value.includes(id)) {
     loadTried.value = [...loadTried.value, id]
-    void assetBlob(id).then((blob) => {
-      if (blob) galUrls.value[id] = URL.createObjectURL(blob)
-    })
+    // 定妆照都是图：没有缩略图时会回落原图（否则主体表会误显示「未定妆」）
+    void loadPreview({ id })
   }
   return ''
 }
@@ -1665,8 +1664,9 @@ async function refreshThumbs(): Promise<void> {
   await Promise.all(
     picks.slice(0, 12).map(async (a) => {
       if (!thumbUrls.value[a.id]) {
-        const blob = await assetBlob(a.id)
-        if (blob) thumbUrls.value[a.id] = URL.createObjectURL(blob)
+        // §21：参考图卡片只用缩略图（以前拉的是整张原图，12 张 ≈ 10MB）
+        const url = await previewUrlOf(a.id, a.mime)
+        if (url) thumbUrls.value[a.id] = url
       }
       next[a.id] = thumbUrls.value[a.id]
     }),
@@ -1810,6 +1810,9 @@ function pickGalTab(t: AudioTab): void {
   galTab.value = t
   galTabPinned.value = true
   rememberTab(GAL_TAB_KEY, t)
+  // 切 Tab 会把卡片元素重建（<img> ↔ <video>），清掉自动播标志，
+  // 否则切回来时上次点过的那个视频会莫名地自己播起来
+  autoPlayId.value = ''
 }
 /**
  * 生成任务时自动切到对应 Tab（任务区 + **资产库**），否则用户看不到刚发起任务的进度与产物。
@@ -1897,12 +1900,30 @@ watch(outputAssets, (list) => {
   galTab.value = kindTab((newest as unknown as { kind: string }).kind)
   galTabPinned.value = true
 })
-const galUrls = ref<Record<string, string>>({})
+const galPreview = ref<Record<string, string>>({})
+/**
+ * 原文件 blob URL：**只在用户点开/播放/下载某一个资产时才填充**（见 ensureFull），
+ * 填充后卡片自动从「缩略图 + 播放按钮」切成真正的 <video>/<audio>/原图。
+ */
+const galFull = ref<Record<string, string>>({})
+/**
+ * 「点了播放、正在等原文件」的资产 id：原文件到位后卡片的 <video>/<audio> 带着 autoplay 挂上去，
+ * 于是用户**一次点击**就能看到画面（否则要先点▶再点原生播放键，两次）。
+ */
+const autoPlayId = ref('')
 /**
  * P13：取不到（404）的资产记下来，本次会话不再重试 ——
  * 否则一个已失效的 id 会在每次刷新时反复 404，既刷控制台又拖慢页面。
  */
 const missingAssets = ref<string[]>([])
+/**
+ * 服务端明确说「没有缩略图」（404）的资产。
+ *
+ * <p>与 missingAssets 分开记：「没有缩略图」不等于原件缺失，两者的回落策略也不同。
+ * 单列一个负缓存是为了让上面的循环不再对同一项重复发请求。
+ */
+const thumbMissing = ref<string[]>([])
+
 async function assetBlob(id: string): Promise<Blob | null> {
   if (missingAssets.value.includes(id)) return null
   const blob = await fetchAssetBlob(workspaceId.value, id)
@@ -1913,13 +1934,107 @@ async function assetBlob(id: string): Promise<Blob | null> {
   return blob
 }
 
+/** 缩略图 blob（带会话内负缓存）；服务端生成不出 → null。 */
+async function assetThumbBlob(id: string): Promise<Blob | null> {
+  if (thumbMissing.value.includes(id)) return null
+  const blob = await fetchAssetThumb(workspaceId.value, id)
+  if (!blob) {
+    thumbMissing.value = [...thumbMissing.value, id]
+  }
+  return blob
+}
+
+/**
+ * 按需拉**原文件**（幂等）—— 「先缩略图，用户真要看再拉原件」就落在这里。
+ *
+ * <p>原先的做法是进页面就把当前 Tab 每一项都拉成原文件：实测最大项目 143 个产物
+ * （27 图 + 59 视频 + 57 音频）≈ **120MB**，而且这些 blob 会一直挂在内存里。
+ */
+async function ensureFull(id: string): Promise<string> {
+  const cached = galFull.value[id]
+  if (cached) return cached
+  const blob = await assetBlob(id)
+  if (!blob) return ''
+  const url = URL.createObjectURL(blob)
+  galFull.value[id] = url
+  return url
+}
+
+/**
+ * 卡片上的播放按钮：到这一刻才去拉原文件。
+ *
+ * <p>这是「先缩略图、要看再拉」的开关 —— 列表阶段视频/音频一个字节都不下。
+ */
+async function openFullMedia(id: string): Promise<void> {
+  autoPlayId.value = id
+  const url = await ensureFull(id)
+  if (!url) {
+    autoPlayId.value = ''
+    message.error('原文件读取失败')
+  }
+}
+
+/**
+ * 下载原文件。
+ *
+ * <p>资产没有可以直接放到 href 上的 URL（鉴权在请求头上），所以先把原件拉成 blob 再触发下载。
+ * 这是用户**明确要文件**的动作，拉整份是应该的。
+ */
+async function downloadAsset(a: AssetRef): Promise<void> {
+  const url = galFull.value[a.id] ?? (await ensureFull(a.id))
+  if (!url) {
+    message.error('原文件读取失败')
+    return
+  }
+  const el = document.createElement('a')
+  el.href = url
+  el.download = `weaveora-${a.id.slice(0, 8)}.${assetExt(a)}`
+  document.body.appendChild(el)
+  el.click()
+  el.remove()
+}
+
+/**
+ * 列表预览图的 blob URL（资产库、参考图、定妆位共用）。
+ *
+ * <p>优先缩略图；服务端说没有缩略图（404）时：**图片**回落原图（否则卡片只剩空白），
+ * **视频/音频一律不回落** —— 为了一个网格格子去下整段视频，正是这里要避免的事；
+ * 它们在卡片上显示占位 + 播放按钮，等用户真点了再拉。
+ */
+async function previewUrlOf(id: string, mime?: string | null): Promise<string> {
+  const thumb = await assetThumbBlob(id)
+  if (thumb) return URL.createObjectURL(thumb)
+  const m = mime ?? ''
+  if (m.startsWith('video/') || m.startsWith('audio/')) return ''
+  const blob = await assetBlob(id)
+  return blob ? URL.createObjectURL(blob) : ''
+}
+
+/** 给资产库的一张卡片准备预览图。 */
+async function loadPreview(a: { id: string; mime?: string | null }): Promise<void> {
+  const url = await previewUrlOf(a.id, a.mime)
+  if (url) galPreview.value[a.id] = url
+}
+
 /**
  * P13：资产库只拉**当前 Tab 可见**的产物，并限并发 4。
  *
  * 以前对 outputAssets（全项目，动辄 170+ 项）一次性并发拉 blob：
  * ① 首屏很慢 ② 触发 nginx 站点级 limit_conn(20/IP) → 部分请求被打成 50x→404
  * （实测：控制台反复报某几个 assets/…/download 404，其实文件都在）
+ *
+ * ★ 2026-09-18：每项改拉**缩略图**（§21，几十 KB），不再是原图/原视频。
  */
+async function refreshGallery(): Promise<void> {
+  const todo = galleryForTab.value.filter((a) => !galPreview.value[a.id] && !missingAssets.value.includes(a.id))
+  let cursor = 0
+  const worker = async (): Promise<void> => {
+    while (cursor < todo.length) {
+      await loadPreview(todo[cursor++])
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(4, todo.length) }, () => worker()))
+}
 /**
  * 定位到当前 Tab 里最新的一条资产：滚到可视区并短暂高亮。
  * （生成完成后自动调用，省得用户自己在资产库里翻）
@@ -1939,21 +2054,26 @@ function focusNewestAsset(): void {
   message.info('资产库已刷新，并定位到最新产物')
 }
 
-async function refreshGallery(): Promise<void> {
-  const todo = galleryForTab.value.filter((a) => !galUrls.value[a.id] && !missingAssets.value.includes(a.id))
-  let cursor = 0
-  const worker = async (): Promise<void> => {
-    while (cursor < todo.length) {
-      const a = todo[cursor++]
-      const blob = await assetBlob(a.id)
-      if (blob) galUrls.value[a.id] = URL.createObjectURL(blob)
-    }
-  }
-  await Promise.all(Array.from({ length: Math.min(4, todo.length) }, () => worker()))
-}
 // 数据或 Tab 变化时再拉（切 Tab 才拉该 Tab 的图）
 watch(() => [outputAssets.value.map((a) => a.id).join(','), galTab.value].join('|'),
   () => { void refreshGallery() }, { immediate: true })
+
+/**
+ * 换项目：把上一个项目的预览/原件 blob 全部释放。
+ *
+ * <p>不释放的话，在这一个 SPA 会话里逐个项目逛下去，objectURL 是只增不减的 ——
+ * 一个大项目就能挂住上百合 blob（用户报的「后面页面之间会打不开」有一部分就是它）。
+ */
+watch(projectId, () => {
+  for (const id of Object.keys(galPreview.value)) URL.revokeObjectURL(galPreview.value[id])
+  for (const id of Object.keys(galFull.value)) URL.revokeObjectURL(galFull.value[id])
+  galPreview.value = {}
+  galFull.value = {}
+  thumbMissing.value = []
+  missingAssets.value = []
+  loadTried.value = []
+  autoPlayId.value = ''
+})
 
 // ---------- 资产库：管理态（勾选批量删除 / 单个删除） ----------
 const galManage = ref(false)
@@ -1980,9 +2100,13 @@ async function removeAssets(ids: string[]): Promise<void> {
   try {
     const r = await deleteAssets(workspaceId.value, projectId.value, ids)
     ids.forEach((id) => {
-      if (galUrls.value[id]) {
-        URL.revokeObjectURL(galUrls.value[id])
-        delete galUrls.value[id]
+      if (galPreview.value[id]) {
+        URL.revokeObjectURL(galPreview.value[id])
+        delete galPreview.value[id]
+      }
+      if (galFull.value[id]) {
+        URL.revokeObjectURL(galFull.value[id])
+        delete galFull.value[id]
       }
     })
     galSel.value = []
@@ -2027,8 +2151,9 @@ function firstFrame(e: Event): void {
 
 // 沉浸式预览（大图/大视频）
 const immersive = ref<{ url: string; mime: string } | null>(null)
-function openImmersive(id: string, mime: string): void {
-  const url = galUrls.value[id]
+async function openImmersive(id: string, mime: string): Promise<void> {
+  // 沉浸预览一定是**原文件**（缩略图放大就糊了）→ 这里才会真的去拉原件
+  const url = galFull.value[id] ?? (await ensureFull(id))
   if (!url) return
   immersive.value = { url, mime }
 }
@@ -4683,34 +4808,50 @@ const shotTotal = computed(() => {
               ×
             </button>
             <audio
-              v-if="isAudioAsset(a) && galUrls[a.id]"
-              :src="galUrls[a.id]"
+              v-if="isAudioAsset(a) && galFull[a.id]"
+              :src="galFull[a.id]"
               class="g-audio"
               controls
               preload="metadata"
+              :autoplay="autoPlayId === a.id"
             />
             <video
-              v-else-if="isVideoAsset(a) && galUrls[a.id]"
-              :src="galUrls[a.id]"
+              v-else-if="isVideoAsset(a) && galFull[a.id]"
+              :src="galFull[a.id]"
               class="g-video"
               controls
               muted
               playsinline
               preload="metadata"
+              :autoplay="autoPlayId === a.id"
               @loadedmetadata="firstFrame"
             />
-            <img v-else-if="galUrls[a.id]" :src="galUrls[a.id]" :alt="a.kind" loading="lazy" />
-            <div v-else class="g-loading">…</div>
+            <!-- 还没点开：只显示缩略图（几十 KB），不碰原文件 -->
+            <img v-else-if="galPreview[a.id]" :src="galPreview[a.id]" :alt="a.kind" loading="lazy"
+                 :class="{ 'g-wave': isAudioAsset(a) }" />
+            <div v-else class="g-loading">
+              {{ thumbMissing.includes(a.id) || missingAssets.includes(a.id) ? '无预览' : '…' }}
+            </div>
+            <!-- 视频/音频：点一下才去拉原文件（这就是「先缩略图、要看再拉」的开关） -->
+            <button
+              v-if="(isVideoAsset(a) || isAudioAsset(a)) && !galFull[a.id]"
+              type="button"
+              class="g-play"
+              title="加载原文件并播放"
+              :data-testid="`asset-play-${a.id}`"
+              @click.stop="openFullMedia(a.id)"
+            >▶</button>
             <div class="g-meta">
               <span class="g-kind font-mono">{{ a.kind }}<template v-if="galShotNo(a)"> · 第{{ galShotNo(a) }}镜</template><template v-if="a.width"> · {{ a.width }}×{{ a.height }}</template><template v-if="galRevNo(a.jobId)"> · v{{ galRevNo(a.jobId) }}</template></span>
               <!-- ★ 2026-09-16 夜：worker 的显存取舍说明（如“显存不够 → 分辨率自动降到 704x384”）要看得见 -->
               <span v-if="a.notes" class="g-note" :title="a.notes" data-testid="asset-note">⚠</span>
               <span class="g-actions">
-                <button v-if="galUrls[a.id]" type="button" class="g-max" title="沉浸预览/播放"
+                <button type="button" class="g-max" title="沉浸预览/播放（原文件）"
+                        :disabled="!galPreview[a.id] && !galFull[a.id]"
                         @click.stop="openImmersive(a.id, a.mime ?? '')">
                   ⤢
                 </button>
-                <a v-if="galUrls[a.id]" :href="galUrls[a.id]" :download="'weaveora-' + a.id.slice(0, 8) + '.' + assetExt(a)" title="下载">↓</a>
+                <button type="button" class="g-dl" title="下载原文件" @click.stop="downloadAsset(a)">↓</button>
                 <button
                   type="button"
                   class="g-ref"
@@ -5872,6 +6013,8 @@ const shotTotal = computed(() => {
   scroll-snap-align: start;
 }
 .g-item img { width: 100%; aspect-ratio: 1; object-fit: cover; display: block; }
+/* 音频缩略图是 512×128 的波形，不能用 cover（会被裁成中间一条） */
+.g-item img.g-wave { object-fit: contain; }
 .g-loading { width: 100%; aspect-ratio: 1; display: flex; align-items: center; justify-content: center; color: var(--wv-text-4); }
 .g-meta {
   display: flex; align-items: center; justify-content: space-between;
@@ -5882,6 +6025,25 @@ const shotTotal = computed(() => {
 /* 试听播放条的样式在 VideoPlanEditor.vue：本文件是 scoped，作用不到子组件内部 */
 .g-actions { display: inline-flex; align-items: center; gap: 8px; }
 .g-actions a { color: var(--wv-accent-text); text-decoration: none; font-size: 14px; line-height: 1; }
+/* 下载改成按钮：原文件要先带鉴权头拉成 blob，<a href> 带不了头 */
+.g-dl {
+  appearance: none; border: none; background: none; cursor: pointer;
+  color: var(--wv-accent-text); font-size: 14px; line-height: 1; padding: 0;
+}
+.g-dl:hover { opacity: .75; }
+/* 视频/音频卡片上的「加载原文件并播放」悬浮按钮（列表阶段不下原件） */
+.g-play {
+  position: absolute; inset: 0; margin: auto;
+  width: 44px; height: 44px; border-radius: 50%;
+  appearance: none; cursor: pointer;
+  border: 1px solid var(--wv-line-strong);
+  background: rgba(11, 11, 10, .62); color: var(--wv-text);
+  font-size: 14px; line-height: 1;
+  display: inline-flex; align-items: center; justify-content: center;
+  z-index: 1;
+}
+.g-play:hover { background: rgba(11, 11, 10, .84); border-color: var(--wv-accent); }
+.g-max:disabled { opacity: .4; cursor: default; }
 .g-ref {
   appearance: none; border: none; background: var(--wv-accent-soft);
   color: var(--wv-accent-text); font-size: 11px; border-radius: 6px;

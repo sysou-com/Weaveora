@@ -34,6 +34,8 @@ public class AssetService {
     private final StoragePort storage;
     private final WorkspaceGuard guard;
     private final ProjectContextPort projects;
+    /** §16.2：缩略图归属 asset 模块；懒生成 + 落库（见 getThumb）。 */
+    private final ThumbnailService thumbnails;
     /** P8：构造配音快照（prompt_snapshot）用 */
     private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(AssetService.class);
 
@@ -41,11 +43,12 @@ public class AssetService {
             new com.fasterxml.jackson.databind.ObjectMapper();
 
     public AssetService(AssetRepository assets, StoragePort storage, WorkspaceGuard guard,
-                        ProjectContextPort projects) {
+                        ProjectContextPort projects, ThumbnailService thumbnails) {
         this.assets = assets;
         this.storage = storage;
         this.guard = guard;
         this.projects = projects;
+        this.thumbnails = thumbnails;
     }
 
     @Transactional
@@ -268,6 +271,79 @@ public class AssetService {
             throw new BizException(ErrorCode.NOT_FOUND, "文件已不存在");
         }
         return new Download(a, obj.stream(), obj.contentType());
+    }
+
+    /**
+     * 缩略图（§21 规格：最长边 512 的 webp）。
+     *
+     * <p>三个刻意为之的设计，为的都是让「资产库列表」不再拖原图/原视频：
+     * <ol>
+     *   <li><b>懒生成 + 落库</b>：不做历史数据回填脚本 —— 第一次被请求时现做，写进
+     *       {@code assets.thumb_key}，之后只读存储。存量项目（实测最大 143 个资产）零迁移。</li>
+     *   <li><b>刻意不标 {@code @Transactional}</b>：生成要跑 ffmpeg（几百毫秒到数秒）。若把事务跨在上面，
+     *       几个并发缩略图请求就能占住 Hikari 连接池，拖垮同一台 2C/8G VPS 上的其它接口。
+     *       这里 repository 每次调用各自成事务，生成期间<b>不持有数据库连接</b>。</li>
+     *   <li><b>失败返回 null 而不抛</b>：控制器据此回 404，前端再决定回落。
+     *       缩略图是加速手段，它坏了不能让「读资产」跟着失败。</li>
+     * </ol>
+     */
+    public ThumbnailService.Thumb getThumb(UUID userId, UUID workspaceId, UUID assetId) {
+        guard.requireMember(userId, workspaceId);
+        Asset a = assets.findByIdAndWorkspaceId(assetId, workspaceId)
+                .orElseThrow(() -> new BizException(ErrorCode.NOT_FOUND, "资产不存在或不在本工作区"));
+        if (!ThumbnailService.supports(a.mime())) {
+            return null;               // 如导出 zip：没有缩略图可言
+        }
+        // 已经有了：直接读回（第二次起不再跑 ffmpeg）
+        String existing = a.thumbKey();
+        if (existing != null && !existing.isBlank()) {
+            var obj = storage.get(existing);
+            if (obj != null) {
+                try (InputStream in = obj.stream()) {
+                    ThumbnailService.Thumb cached = thumbnails.read(existing, in);
+                    if (cached != null) {
+                        return cached;
+                    }
+                } catch (IOException e) {
+                    log.warn("缩略图读回失败 {}: {}", existing, e.getMessage());
+                }
+            }
+            // key 在但文件没了（手工清盘等）→ 落到下面重新生成
+        }
+        var src = storage.get(a.storageKey());
+        if (src == null) {
+            return null;               // 原件都不在了，没什么可缩的
+        }
+        ThumbnailService.Thumb made;
+        try (InputStream in = src.stream()) {
+            made = thumbnails.generate(a.mime(), in);
+        } catch (IOException | RuntimeException e) {
+            log.warn("缩略图生成异常 asset={}: {}", assetId, e.getMessage());
+            return null;
+        }
+        if (made == null) {
+            return null;
+        }
+        persistThumbKey(a, made);
+        return made;
+    }
+
+    /**
+     * 缩略图落盘 + key 写回库。失败只记日志：本次照样把图返回给用户，大不了下次再生成一遍。
+     *
+     * <p>并发下两个请求可能同时生成同一资产 —— 内容一致，且 key 由 storageKey 决定也是同一个，
+     * 重复写是幂等的，因此不做加锁（也不值得为它引入分布式锁）。
+     */
+    private void persistThumbKey(Asset a, ThumbnailService.Thumb thumb) {
+        try {
+            String key = ThumbnailService.thumbKeyFor(a.storageKey(), thumb.ext());
+            storage.put(key, new java.io.ByteArrayInputStream(thumb.bytes()),
+                    thumb.bytes().length, thumb.mime());
+            a.attachThumbKey(key);
+            assets.save(a);
+        } catch (RuntimeException e) {
+            log.warn("缩略图落库失败 asset={}: {}", a.id(), e.getMessage());
+        }
     }
 
     /** 删除资产（资产库勾选：still/clip/参考图均可删）：删行 + 删存储文件（thumb 一并）。 */

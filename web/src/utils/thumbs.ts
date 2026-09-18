@@ -1,4 +1,4 @@
-import { fetchAssetBlob, listAssets } from '@/api/assets'
+import { fetchAssetBlob, fetchAssetThumb, listAssets } from '@/api/assets'
 import { fetchMarketPreview } from '@/api/market'
 
 /**
@@ -51,7 +51,9 @@ export async function ownThumb(
   if (!assetId) return null
   const hit = blobCache.get(assetId)
   if (hit && isFresh(hit.ts)) return { url: hit.url, mime }
-  const blob = await fetchAssetBlob(ws, assetId)
+  // §21：项目卡片只要一张小预览 —— 优先缩略图（几十 KB），服务端没有才回落整张原图
+  // （以前这里直接拉整张原图：1280×704 的 png ≈ 2MB，项目列表一屏就是几十 MB）
+  const blob = (await fetchAssetThumb(ws, assetId)) ?? (await fetchAssetBlob(ws, assetId))
   if (!blob) return null
   const url = URL.createObjectURL(blob)
   blobCache.set(assetId, { ts: Date.now(), url })
