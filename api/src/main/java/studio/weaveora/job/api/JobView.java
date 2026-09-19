@@ -20,6 +20,10 @@ public record JobView(
         String errorMessage,
         UUID modelPresetId,
         JsonNode payload,
-        OffsetDateTime createdAt
+        OffsetDateTime createdAt,
+        /** 真正开始跑的时刻（queued 时为 null）—— 前端用 startedAt→now / finishedAt 算「已耗时」 */
+        OffsetDateTime startedAt,
+        /** 终态时刻（succeeded/failed/cancelled），未结束为 null */
+        OffsetDateTime finishedAt
 ) {
 }

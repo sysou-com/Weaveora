@@ -176,7 +176,11 @@ const MOTION_SNAP_KEYS = [
 ]
 const lastPreset = ref<string>('')
 function presetSnapshots(): Record<string, Record<string, unknown>> {
-  const v = videoParams.value.presetSnapshots
+  // ★ 2026-09-20 修：后端白名单会把键名归一成 snake_case（EngineSettingsService.snake()）→ 真正落库的是
+  //   `preset_snapshots`；旧代码只读 camel `presetSnapshots` ⇒ 永远读不到（切回旧档总是提示「该档还没存过参数」）。
+  //   两个名字都认，写回时统一用 snake。
+  const src = videoParams.value
+  const v = src.preset_snapshots ?? src.presetSnapshots
   return v && typeof v === 'object' ? (v as Record<string, Record<string, unknown>>) : {}
 }
 
@@ -193,7 +197,8 @@ function onPresetChange(nextRaw: string | null): void {
     snaps[prev] = snap
   }
   const target = next ? snaps[next] : undefined
-  const merged: Record<string, unknown> = { ...(videoParams.value ?? {}), presetSnapshots: snaps }
+  const merged: Record<string, unknown> = { ...(videoParams.value ?? {}), preset_snapshots: snaps }
+  delete merged.presetSnapshots   // 统一用后端认识的 snake 键，避免两份并存
   if (next) merged.preset = next
   else delete merged.preset
   if (target) {
@@ -214,10 +219,15 @@ const motionResOptions = [
 // ★ 图片分辨率（出图长边像素，2026-09-18）：全局生效于**所有出图**（关键帧/定妆照/参考图）。
 //   与视频分辨率分开：出图（Qwen-Image）与出视频（Wan2.2 I2V）是两条独立链路，性价比拐点完全不同。
 //   尺寸 = 画幅基础尺寸等比放大到该长边（16:9 → 1280×704 / 1920×1056 / 2560×1408），32 对齐。
+// ★ 2026-09-20 新增 1392 档：官方工作预算就是 ~1MP（ComfyUI 文档「缩到 one million pixels」）；
+//   实测同 prompt/同参考/同 seed：2560×1408→561s、1664×928→350s、1392×752→305s，且 2K 那档会出
+//   上下纯黑带（3.6MP 是官方预算的 3.4 倍）。1392 档 16:9 实际出 1408×768（1.08MP）。
 const imageResOptions = [
   { label: '1280（16:9 → 1280×704，默认）', value: 1280 },
+  { label: '1392（≈1MP：16:9 → 1408×768）', value: 1392 },
+  { label: '1664（16:9 → 1664×928，Qwen 官方训练桶，推荐）', value: 1664 },
   { label: '1920（16:9 → 1920×1056）', value: 1920 },
-  { label: '2560（16:9 → 2560×1408，≈2K）', value: 2560 },
+  { label: '2560（16:9 → 2560×1408，≈2K，慢且易出黑边）', value: 2560 },
 ]
 const motionJson = ref('')
 

@@ -7,7 +7,6 @@ import MusicTimeline from '@/components/director/MusicTimeline.vue'
 import NarrationTimeline from '@/components/director/NarrationTimeline.vue'
 import ShotCard from '@/components/director/ShotCard.vue'
 import type { LayoutBox } from '@/components/director/ShotLayoutEditor.vue'
-import VoiceBindingsTable from '@/components/director/VoiceBindingsTable.vue'
 import type { DirectorShot, ShotRecord, VideoPlan } from '@/api/types'
 import { MUSIC_MOOD_PRESETS, VOICE_PRESETS, moodOptions } from '@/utils/audio'
 import { planSubjectNames } from '@/utils/plan'
@@ -23,7 +22,8 @@ const props = defineProps<{
   previewBusy?: boolean
   /** 【P13 口径】本机 GPU 车道的「模型上限(s)」无效（上限由显存决定）→ 置灰并给提示 */
   modelCapDisabled?: boolean
-  modelCapHint?: string
+  /** 本机车道**实际生效**的上限（秒，由显存帧数换算）—— 直接显示在框里，不再另给一行提示 */
+  modelCapEffective?: number | null
   /** 试听播放条（父级持有 URL，这里按 slot 把它靠到对应按钮下一行） */
   audioPreview?: {
     url: string
@@ -104,64 +104,6 @@ function onShotUpdate(shot: DirectorShot): void {
   if (i >= 0) props.plan.shots[i] = shot
 }
 
-/** P9：音色库操作（录音色 / 重录 / 删除都在父级做 API 调用） */
-
-const editingId = ref('')
-const editingName = ref('')
-
-function startRename(p: { id: string; name: string }): void {
-  editingId.value = p.id
-  editingName.value = p.name
-}
-
-function commitRename(): void {
-  const p = clonePresets.value.find((x) => x.id === editingId.value)
-  const nm = editingName.value.trim()
-  if (p && nm) p.name = nm
-  editingId.value = ''
-  emit('update:plan')
-}
-
-/** P12：当前“配音音色”下拉选中的是不是一个克隆音色（决定重录/改名/删除是否可用） */
-const selectedPreset = computed(() => {
-  const v = props.plan.audio?.voice ?? ''
-  if (!v.startsWith('clone:')) return undefined
-  const id = v.slice('clone:'.length)
-  return clonePresets.value.find((p) => p.id === id)
-})
-
-function rerecordSelected(): void {
-  const p = selectedPreset.value
-  if (p) emit('cloneVoice', { mode: 'preset', replaceId: p.id, name: p.name })
-}
-
-function renameSelected(): void {
-  const p = selectedPreset.value
-  if (p) startRename(p)
-}
-
-function deleteSelected(): void {
-  const p = selectedPreset.value
-  if (p) emit('removePreset', p.id)
-}
-
-/** 该音色被多少处引用（绑定 + 分镜行内覆盖），删除前提示用 */
-function presetUsage(id: string): { subjects: string[]; lines: number } {
-  const v = `clone:${id}`
-  const subjects: string[] = []
-  for (const b of props.plan.audio?.voiceBindings ?? []) {
-    if (b.voice === v) subjects.push(b.subject || '(未命名角色)')
-  }
-  let lines = 0
-  for (const sh of props.plan.shots ?? []) {
-    for (const l of sh.narrations ?? []) {
-      if ((l.voice ?? '') === v) lines++
-    }
-  }
-  return { subjects, lines }
-}
-
-/** 音色选项 = 内置 7 个 + 本项目已录的克隆音色（clone:<id>） */
 const clonePresets = computed(() => props.plan.audio?.voicePresets ?? [])
 const voiceChoices = computed(() => [
   ...VOICE_PRESETS.map((v) => ({ label: v, value: v })),
@@ -352,6 +294,16 @@ function setEraNotes(v: string): void {
     <section class="block">
       <p class="block-label font-mono">编辑设定 edit_plan</p>
       <template v-if="props.plan.edit_plan">
+      <!--
+        ★ 2026-09-19（用户要求，两条）：
+        ① 「字幕」开关从第 1 行第 3 格**挪到本栏最后** —— 它比输入框矮一截，夹在
+           fps/默认转场 后面会把这行的基线顶歪，看着不齐。
+        ② 6 个输入框排成整齐的 2×3（原先「模型上限」在第二组，4 个挤一格会折出一个半行）：
+           第1行 fps / 默认转场 / 模型上限(s)   第2行 呼吸余量(s) / 时长模式 / 超长策略   最后 字幕
+        ③ 去掉「本机 GPU 上限由显存决定 ≈ x.xx s（此值对本机车道无效）」那句行内提示 ——
+           它和框里那个数（如 7.56）并列出现，用户看两个数当然懵。
+           改为：本机车道时**框里直接显示真正生效的那个上限**（由显存帧数换算），只有一个数。
+      -->
       <div class="grid3">
         <label class="row">
           <span class="key">fps</span>
@@ -363,29 +315,29 @@ function setEraNotes(v: string): void {
             <option v-for="t in transitions" :key="t.value" :value="t.value">{{ t.label }}</option>
           </select>
         </label>
-        <label class="row switch-row">
-          <span class="key">字幕</span>
-          <NSwitch v-model:value="props.plan.edit_plan.subtitle" size="small" :disabled="disabled" />
-        </label>
-      </div>
-      <!--
-        P13：视频模型单次输出上限与呼吸余量 —— 「按配音校准时长」用它决定镜头该多长、要不要切段。
-        不同模型不一样（i2v 常见 5s，部分 15s+），所以做成项目级设定。
-      -->
-      <div class="grid3">
+        <!--
+          P13：视频模型单次输出上限与呼吸余量 —— 「按配音校准时长」用它决定镜头该多长、要不要切段。
+          不同模型不一样（i2v 常见 5s，部分 15s+），所以做成项目级设定。
+          本机（本地）GPU 车道下这个值不生效：上限由显存能放多少帧决定 → 直接显示那个值（只读）。
+        -->
         <label class="row">
-          <span class="key" title="你所选视频模型单次能输出的最长秒数；超出就自动切段生成">模型上限(s)</span>
+          <span class="key" :title="modelCapDisabled
+            ? '本机（本地 GPU）车道：单次输出上限由显存能容纳的帧数决定，这里显示的就是实际生效值'
+            : '你所选视频模型单次能输出的最长秒数；超出就自动切段生成'">模型上限(s)</span>
           <NInputNumber
-            :value="props.plan.edit_plan.video_model_max_sec ?? 5"
+            :value="modelCapDisabled
+              ? (modelCapEffective ?? undefined)
+              : (props.plan.edit_plan.video_model_max_sec ?? 5)"
             size="small"
             :min="1"
             :max="60"
             :step="1"
             :disabled="disabled || !!modelCapDisabled"
-            @update:value="(v: number | null) => props.plan.edit_plan && (props.plan.edit_plan.video_model_max_sec = v ?? 5)"
+            @update:value="(v: number | null) => !modelCapDisabled && props.plan.edit_plan && (props.plan.edit_plan.video_model_max_sec = v ?? 5)"
           />
-          <em v-if="modelCapDisabled" class="cap-hint text-secondary">{{ modelCapHint }}</em>
         </label>
+      </div>
+      <div class="grid3">
         <label class="row">
           <span class="key" title="镜头尾部留白，避免配音贴着画面切走">呼吸余量(s)</span>
           <NInputNumber
@@ -427,6 +379,13 @@ function setEraNotes(v: string): void {
             <option value="overflow">配音溢出下一镜（不额外花钱）</option>
             <option value="segment">切段生成（每多一段多一次调用）</option>
           </select>
+        </label>
+      </div>
+      <!-- ③ 2026-09-19（用户要求）：字幕开关放本栏**最后**（原来夹在第 1 行第三个，矮一截把基线顶歪） -->
+      <div class="grid3">
+        <label class="row switch-row">
+          <span class="key" title="是否把台词烧成字幕">字幕</span>
+          <NSwitch v-model:value="props.plan.edit_plan.subtitle" size="small" :disabled="disabled" />
         </label>
       </div>
       </template>
@@ -488,145 +447,7 @@ function setEraNotes(v: string): void {
 
     <!-- P12：声音相关全部收进一张卡片，顺序=音色 → 绑定 → 配音 → 配乐 -->
     <section class="block audio-card" data-testid="audio-card">
-      <p class="block-label font-mono">声音（音色 / 角色音色绑定 / 配音 / 配乐）</p>
-
-      <div class="sub-block">
-        <p class="sub-label">① 配音音色</p>
-        <div class="voice-row">
-          <span class="key">配音音色 voice（预设 / 克隆音色 / 参考音频路径）</span>
-          <NSelect
-            v-model:value="props.plan.audio.voice"
-            :options="voiceChoices"
-            size="small"
-            filterable
-            tag
-            :disabled="disabled"
-            placeholder="中文女"
-          />
-          <NButton
-            size="tiny"
-            secondary
-            :loading="previewBusy"
-            :disabled="!!disabled"
-            data-testid="btn-preview-voice"
-            title="用当前音色念一句试听"
-            @click="emit('previewVoice', undefined)"
-          >
-            音色试听
-          </NButton>
-          <NButton
-            size="tiny"
-            quaternary
-            :disabled="!!disabled || !selectedPreset"
-            :data-testid="`preset-rerecord-selected`"
-            title="重新录一段替换当前克隆音色"
-            @click="rerecordSelected"
-          >
-            重录
-          </NButton>
-          <NButton
-            size="tiny"
-            quaternary
-            :disabled="!!disabled || !selectedPreset"
-            @click="renameSelected"
-          >
-            改名
-          </NButton>
-          <NButton
-            size="tiny"
-            quaternary
-            type="error"
-            :disabled="!!disabled || !selectedPreset"
-            :data-testid="`preset-delete-selected`"
-            @click="deleteSelected"
-          >
-            删除
-          </NButton>
-        </div>
-        <!-- P12：音色试听的播放器就在「音色试听」按钮下一行 -->
-        <div v-if="props.audioPreview && props.audioPreview.slot === 'voice'" class="voice-preview inline" data-testid="audio-preview-voice">
-          <span class="font-mono vp-label">🎙 试听 · {{ props.audioPreview.label }}</span>
-          <audio :src="props.audioPreview.url" class="vp-audio" controls autoplay preload="auto" />
-          <NButton size="tiny" quaternary @click="emit('closePreview')">关闭</NButton>
-        </div>
-        <p v-if="!selectedPreset" class="hint-line text-secondary">
-          上面选一个「克隆」音色后，重录 / 改名 / 删除才可用
-        </p>
-        <div class="vc-entry">
-          <NButton
-            size="tiny"
-            secondary
-            :disabled="!!disabled"
-            data-testid="btn-clone-voice"
-            title="录一段声音或上传样本，处理成可复用的音色"
-            @click="emit('cloneVoice', { mode: 'preset' })"
-          >
-            🎙 克隆音色（录音 / 上传样本）
-          </NButton>
-          <span class="text-secondary" style="font-size: 12px">
-            录好的音色会出现在上面的下拉里（标「克隆」）
-          </span>
-        </div>
-        <!-- P9 音色库：重录 / 改名 / 删除（录多了可以删，也能重录换掉） -->
-        <div v-if="clonePresets.length" class="vc-lib" data-testid="voice-preset-list">
-          <div v-for="p in clonePresets" :key="p.id" class="vc-lib-row">
-            <span class="vc-lib-dot">🎙</span>
-            <template v-if="editingId === p.id">
-              <NInput
-                v-model:value="editingName"
-                size="tiny"
-                style="max-width: 160px"
-                @keyup.enter="commitRename"
-              />
-              <NButton size="tiny" type="primary" @click="commitRename">保存</NButton>
-              <NButton size="tiny" quaternary @click="editingId = ''">取消</NButton>
-            </template>
-            <template v-else>
-              <span class="vc-lib-name">{{ p.name }}</span>
-              <span class="text-secondary font-mono vc-lib-meta">
-                {{ Number(p.durationSec ?? 0).toFixed(1) }}s
-                <template v-if="presetUsage(p.id).subjects.length">
-                  · 用于 {{ presetUsage(p.id).subjects.join('、') }}
-                </template>
-                <template v-if="presetUsage(p.id).lines">
-                  · {{ presetUsage(p.id).lines }} 行
-                </template>
-              </span>
-              <NButton
-                size="tiny"
-                quaternary
-                :disabled="!!disabled"
-                :data-testid="`preset-rerecord-${p.id}`"
-                title="重新录一段替换这个音色"
-                @click="emit('cloneVoice', { mode: 'preset', replaceId: p.id, name: p.name })"
-              >
-                重录
-              </NButton>
-              <NButton size="tiny" quaternary :disabled="!!disabled" @click="startRename(p)">改名</NButton>
-              <NButton
-                size="tiny"
-                quaternary
-                type="error"
-                :disabled="!!disabled"
-                :data-testid="`preset-delete-${p.id}`"
-                @click="emit('removePreset', p.id)"
-              >
-                删除
-              </NButton>
-            </template>
-          </div>
-        </div>
-      </div>
-
-      <div class="sub-block">
-        <p class="sub-label">② 角色音色绑定（按说话人自动关联）</p>
-        <VoiceBindingsTable
-          :plan="props.plan"
-          :disabled="disabled"
-          :voices="voiceChoices"
-          :known-subjects="knownSubjects"
-        />
-      </div>
+      <p class="block-label font-mono">声音（配音 / 配乐）</p>
 
       <div class="sub-block">
         <p class="sub-label">③ 配音（逐镜旁白 / 台词，可拖拽定位、一镜多段）</p>

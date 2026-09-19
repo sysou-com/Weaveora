@@ -2543,8 +2543,18 @@ public class JobService {
         }
         payload.put("positive_prompt", positivePrompt);
         payload.put("negative_prompt", negativePrompt);
-        // ★ P14：定妆照也要符合设定年代（清代的人物不能穿着现代元素）
-        applySetting(payload, plan);
+        // ★ 2026-09-19（用户裁定）：**有参考图时不再拼【设定年代/世界观】块**。
+        //   为什么：这段块要求「服装、发式、道具、**建筑与环境**都必须符合该年代」并带「雾霭 / 黑水 / 缥缈冷光」
+        //   这类**场景意象**，与定妆照模板里的「纯色背景、正面半身」直接冲突 →
+        //   实测同一主体：正词 164 字（无年代块）→「白底 + 人物占画面大」；505 字（含年代块）→「非白底 + 人物变小」。
+        //   后果会传导到关键帧：该主体的参考脸只有 114px（同方案另两人 272 / 299），
+        //   多主体同框时它是最先被牺牲的那个。
+        //   当初加它的场景是「**无参考图**生成定妆照」（没有身份锚，用世界观撑风格）→ 所以零参考时保留。
+        //   「别出现现代元素」不靠这段：定妆照负词里已有「现代服装/现代建筑/手机/电线/现代交通工具」。
+        //   注：分镜（still/clip）路径不受影响，仍然照拼（见本文件另两个 applySetting 调用点）。
+        if (keys.isEmpty()) {
+            applySetting(payload, plan);
+        }
         payload.put("aspect_ratio", project.aspectRatio());
         int[] dd = dimsFor(project.aspectRatio(), engineSettings.imageMaxSide(userId));
         payload.set("params", mapper().createObjectNode().put("width", dd[0]).put("height", dd[1]));
@@ -3128,7 +3138,7 @@ public class JobService {
     private JobView toView(GenerationJob j) {
         return new JobView(j.id(), j.projectId(), j.revisionId(), j.shotId(), j.kind(), j.state(),
                 j.progress(), j.stage(), j.cancelRequested(), j.errorCode(), j.errorMessage(),
-                j.modelPresetId(), j.payload(), j.createdAt());
+                j.modelPresetId(), j.payload(), j.createdAt(), j.startedAt(), j.finishedAt());
     }
 
     private Map<String, Object> workerJobView(GenerationJob j) {

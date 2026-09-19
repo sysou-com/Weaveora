@@ -39,9 +39,12 @@ import RevisionRail from '@/components/director/RevisionRail.vue'
 import ShotPickerDialog from '@/components/director/ShotPickerDialog.vue'
 import LipsyncFacePickerDialog from '@/components/director/LipsyncFacePickerDialog.vue'
 import VoiceCloneDialog from '@/components/director/VoiceCloneDialog.vue'
+import VoiceBindingsTable from '@/components/director/VoiceBindingsTable.vue'
+import VoicePickerBar from '@/components/director/VoicePickerBar.vue'
 import VideoPlanEditor from '@/components/director/VideoPlanEditor.vue'
 import { useAuthStore } from '@/stores/auth'
 import { aspectNote, modeLabel } from '@/utils/format'
+import { VOICE_PRESETS } from '@/utils/audio'
 import {
   SOURCE_LABEL,
   autoLayoutShot,
@@ -566,6 +569,99 @@ function portraitsOf(name: string): Array<{ id: string; url?: string; width?: nu
     .filter((a) => (a.kind === 'portrait' || a.snapshotKind === 'portrait') && a.subject === name)
     .map((a) => ({ id: a.id, url: galUrls.value[a.id], width: a.width, height: a.height }))
 }
+/**
+ * 2026-09-19（用户要求 ⑤）：查出「生成了新的定妆照但还没绑定」的主体。
+ *
+ * 为什么要提示：定妆照是**所有后续任务的唯一身份锚**（关键帧/对口型都靠它）。
+ * 用户重出了一版却忘了绑 → 后面还在用旧版 → 出来“不像”，而界面上完全看不出来
+ * （本次实测为此绕了很久）。所以发起任何用到定妆照的任务前，先弹框摆明事实。
+ */
+function unboundNewerPortraits(): Array<{ name: string; boundAt: string; newerAt: string; assetId: string }> {
+  const out: Array<{ name: string; boundAt: string; newerAt: string; assetId: string }> = []
+  const all = assets.data.value ?? []
+  for (const sub of planSubjects()) {
+    const bound = sub.portraitAssetId ?? ''
+    const list = all
+      .filter((a) => (a.kind === 'portrait' || a.snapshotKind === 'portrait') && a.subject === sub.name)
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+    if (!list.length) continue
+    const newest = list[0]
+    if (newest.id === bound) continue          // 已绑定的就是最新的 → 没问题
+    const boundAt = list.find((a) => a.id === bound)?.createdAt ?? ''
+    out.push({ name: sub.name, boundAt, newerAt: newest.createdAt, assetId: newest.id })
+  }
+  return out
+}
+
+/**
+ * ⑤ 的弹框（★ 2026-09-19 用户实测纠正）：原来用 `window.confirm`，只有两个按钮，
+ *   而“确定”被我定成“用旧版继续生成” → **弹框里根本没有地方能绑定**，用户点确定后下一次又弹，
+ *   变成死循环（用户原话：“点了确定也没有真的绑定，再点生成关键帧还是提示要绑定”）。
+ * 现在改成三选一，而且第一项**真的会绑定**：
+ *   「绑定最新版并生成」= 对列出的每个主体 patchSubjectMeta（就地生效，不另存版本）+ 同步本地 → 继续生成
+ *   「仍用当前绑定生成」= 不绑，继续
+ *   「取消」= 本次不生成
+ */
+const pendingUnbound = ref<Array<{ name: string; boundAt: string; newerAt: string; assetId: string }> | null>(null)
+let unboundResolve: ((v: 'bind' | 'keep' | 'cancel') => void) | null = null
+
+function warnUnboundPortraits(): Promise<'bind' | 'keep' | 'cancel'> {
+  const list = unboundNewerPortraits()
+  if (!list.length) return Promise.resolve('keep')
+  pendingUnbound.value = list
+  return new Promise((resolve) => {
+    unboundResolve = resolve
+  })
+}
+
+/** 把上面列出的主体全部改绑到最新那版（就地生效；失败返回 false 由调用方中止生成） */
+async function bindPortraitsToNewest(
+  items: Array<{ name: string; assetId: string }>,
+): Promise<boolean> {
+  const revId = genRevisionId()
+  if (!revId || !items.length) return false
+  try {
+    await patchSubjectMeta(
+      workspaceId.value,
+      projectId.value,
+      revId,
+      items.map((x) => ({
+        name: x.name,
+        portraitAssetId: x.assetId,
+        portraitVersion: (planSubjects().find((s) => s.name === x.name)?.portraitVersion ?? 0) + 1,
+      })),
+    )
+    // 本地同步：不重拉也能立刻按新锚定图生成
+    setPlanSubjects(
+      planSubjects().map((s) => {
+        const hit = items.find((i) => i.name === s.name)
+        return hit ? { ...s, portraitAssetId: hit.assetId, portraitVersion: (s.portraitVersion ?? 0) + 1 } : s
+      }),
+    )
+    return true
+  } catch (e) {
+    message.error(`绑定定妆照失败：${e instanceof Error ? e.message : '未知错误'}（本次已中止）`)
+    return false
+  }
+}
+
+/** 弹框按钮 → 落实选择（先把 items 取出来，因为关闭弹框会把 pendingUnbound 清掉） */
+async function onUnboundPortraitAction(v: 'bind' | 'keep' | 'cancel'): Promise<void> {
+  const items = pendingUnbound.value ?? []
+  pendingUnbound.value = null
+  const resolve = unboundResolve
+  unboundResolve = null
+  if (v === 'bind') {
+    const ok = await bindPortraitsToNewest(items)
+    if (!ok) {
+      resolve?.('cancel')
+      return
+    }
+    message.success(`已绑定最新定妆照：${items.map((x) => x.name).join('、')}`)
+  }
+  resolve?.(v)
+}
+
 /** 一键生成主体（LLM 抽取；已有主体保留，只补新的） */
 async function onExtractSubjects(): Promise<void> {
   const revId = genRevisionId()
@@ -613,6 +709,21 @@ function onSubjectAction(key: string, name: string): void {
   else if (key === 'alias') openAlias(name)
   else if (key === 'useRef') useRefAsPortrait(name)
 }
+
+/* ================= ③④ 音色（2026-09-19 用户要求）================= */
+// ③ 配音音色选择条从「声音」卡搬到「参考图」下方（VoicePickerBar，不再显示录好的音色列表）
+// ④ 角色音色绑定紧跟在「配音音色」下方（两件事都是声音 → 放一起；用户 2026-09-19 纠正：
+//    最初放到「剧情主体 → 操作 ▾」里不对，应挪到配音音色这边）
+/** 音色下拉选项 = 内置 7 个 + 本项目克隆音色（给绑定表用） */
+const voiceChoicesAll = computed(() => {
+  const presets = (draft.value as VideoPlan | null)?.audio?.voicePresets ?? []
+  return [
+    ...VOICE_PRESETS.map((v) => ({ label: v, value: v })),
+    ...presets.map((p) => ({ label: `🎙 ${p.name}（克隆）`, value: `clone:${p.id}` })),
+  ]
+})
+/** 绑定表里可选的角色名 = 剧情主体 */
+const knownSubjectsAll = computed(() => planSubjects().map((s) => s.name))
 
 /* ================= P14 主体设定（人物档案）================= */
 /**
@@ -763,7 +874,7 @@ async function loadPortraitPrompt(): Promise<void> {
     const sub = planSubjects().find((x) => x.name === name)
     const kind = sub?.kind ?? 'person'
     const tail = kind === 'person'
-      ? `${name} 正面半身、中性表情、纯色背景、全身服装与配饰清晰可辨、柔和均匀布光、写实电影质感；严格保持参考图的人物特征（五官/发型/服装/年龄感）。只画这一个角色，不要文字、不要边框、不要多人物。`
+      ? `${name} 正面半身、中性表情、纯白色背景（纯白 #FFFFFF）、全身服装与配饰清晰可辨、柔和均匀布光、写实电影质感；严格保持参考图的人物特征（五官/发型/服装/年龄感）。只画这一个角色，不要文字、不要边框、不要多人物、不要任何环境/场景元素。`
       : `${name} 标准设定图：主体居中、纯色背景、均匀布光、细节清晰；严格保持参考图的外形/材质/颜色。不要文字、不要边框。`
     portraitPositive.value = `标准角色设定图：${tail}`
     portraitNegative.value = 'text, watermark, logo, subtitle, multiple people, deformed face, extra limbs, lowres, blurry, 3d render, cgi'
@@ -793,7 +904,7 @@ async function confirmPortrait(): Promise<void> {
   portraitBusy.value = true
   try {
     const pickedIds = [...portraitRefIds.value]
-    const created = await createJobs(workspaceId.value, projectId.value, {
+    const created = await createJobsLive(workspaceId.value, projectId.value, {
       revisionId: revId,
       kind: 'portrait',
       subject: name,
@@ -817,7 +928,12 @@ async function confirmPortrait(): Promise<void> {
     for (const r of sub?.refs ?? []) used.add(r.assetId)
     for (const id of used) setRefChecked(id, false)
     syncReferenceAssets()
-    message.success(`「${name}」定妆图已生成（用过的参考图已自动取消勾选）—— 用「操作 ▾ → 把最新定妆照设为锚定图」`)
+    // ★ 2026-09-19（用户裁定）：**不做自动绑定**。
+    //   为什么：新生成的定妆照可能**不可用**（脸不对 / 底色不对 / 假人感），
+    //   必须由用户先看一眼再决定要不要当锚定图 —— 自动绑反而会把“错的那版”结成锚。
+    //   真正的保险在另一端：**发起用到定妆照的任务时**若发现“有更新的一版没绑”，
+    //   由 warnUnboundPortraits() 弹框提示（见 startGeneration）。
+    message.success(`「${name}」定妆图已生成（用过的参考图已自动取消勾选）—— 满意后在主体「操作 ▾」里设为锚定图；起关键帧时会提醒未绑定`)
   } catch (e) {
     message.error(e instanceof Error ? e.message : '生成定妆图失败')
   } finally {
@@ -1149,8 +1265,24 @@ function toggleRefChecked(id: string, on: boolean): void {
  *
  * 点击图片 = 切「勾选」（不再“再点一下就移出”——以前那样用户分不清“加入”和“取消”）；
  * **移出**只留右上角 × 按钮；缩略图**不再变暗**（取消勾选只靠复选框本身表达）。
+ *
+ * ★ 2026-09-19 修复（用户报「参考图还是不能勾选」）：**不在选择集里的图，点它必须先加入再勾选**。
+ *   旧实现只调 toggleRefChecked → 只改 refUnchecked，而 refUnchecked 是“已加入但未勾”的集合，
+ *   对压根不在 refSelected 里的 id 完全无效 → 复选框（v-if=refSelected.includes）永远不出现，
+ *   用户看到的就是「点了没反应、勾不上」；而 tile 的 :title 却写着「点击加入并勾选」—— 声明与实现不一致。
  */
 function toggleRefTile(id: string): void {
+  if (!refSelected.value.includes(id)) {
+    if (refSelected.value.length >= MAX_REFS) {
+      message.warning(`参考图最多 ${MAX_REFS} 张`)
+      return
+    }
+    // 格子里未加入的都是 kind=reference（非 reference 的素材要走资产库的「参考」复制一份）
+    refSelected.value = [...refSelected.value, id]
+    refUnchecked.value = refUnchecked.value.filter((x) => x !== id) // 新加入 = 已勾选
+    syncReferenceAssets()
+    return
+  }
   toggleRefChecked(id, refUnchecked.value.includes(id))
 }
 
@@ -1704,12 +1836,17 @@ watch(
   },
 )
 
-/** 【P13 口径】本机 GPU 车道：单次上限由显存决定，「模型上限(s)」无效 → 置灰 + 提示实际值 */const gpuMotionLane = computed(() => (motionLimits.data.value?.engine ?? 'gpu') !== 'cloud')
-const modelCapHint = computed(() => {
+/** 【P13 口径】本机 GPU 车道：单次上限由显存决定，「模型上限(s)」那个值对该车道无效 → 置灰。
+ *  ★ 2026-09-19（用户要求）：不再另外给一行文字提示（“本机 GPU 上限由显存决定 ≈ 5.04s（此值对本机车道无效）”）——
+ *  它和框里原有的 7.56 并列出现，两个数只会让人懵。改为：本机车道就把框里**换成真正生效的那个数**，只有一个数。 */
+const gpuMotionLane = computed(() => (motionLimits.data.value?.engine ?? 'gpu') !== 'cloud')
+const modelCapEffective = computed<number | null>(() => {
   const v = motionLimits.data.value
-  if (!v) return '本机 GPU 上限由显存决定（此值对本机车道无效）'
+  if (!v) return null
   const fps = Math.max(1, Number(v.fps) || 30)
-  return `本机 GPU 上限由显存决定 ≈ ${(Number(v.gpuMaxFrames) / fps).toFixed(2)}s（此值对本机车道无效）`
+  const n = Number(v.gpuMaxFrames)
+  if (!Number.isFinite(n) || n <= 0) return null
+  return Number((n / fps).toFixed(2))
 })
 
 /** 当前图片模型一次能收几张参考图（来自模型 schema 的 mapping.refsMax；未知则 0=不提示） */
@@ -1959,8 +2096,10 @@ watch(() => [outputAssets.value.map((a) => a.id).join(','), galTab.value].join('
 const galManage = ref(false)
 const galSel = ref<string[]>([])
 const galBusy = ref(false)
+// 2026-09-19（用户要求 ②）：全选必须按当前 Tab 过滤
+// （原来用 outputAssets 全量 → 在「关键帧」Tab 点全选会把视频/配音也选上）
 const galAllSelected = computed(
-  () => outputAssets.value.length > 0 && galSel.value.length === outputAssets.value.length)
+  () => galleryForTab.value.length > 0 && galSel.value.length === galleryForTab.value.length)
 function toggleGalManage(): void {
   galManage.value = !galManage.value
   galSel.value = []
@@ -1971,7 +2110,7 @@ function toggleGalSel(id: string): void {
     : [...galSel.value, id]
 }
 function toggleGalAll(): void {
-  galSel.value = galAllSelected.value ? [] : outputAssets.value.map((a) => a.id)
+  galSel.value = galAllSelected.value ? [] : galleryForTab.value.map((a) => a.id)
 }
 async function removeAssets(ids: string[]): Promise<void> {
   if (!ids.length) return
@@ -2301,6 +2440,31 @@ const freshActiveCount = computed(() => {
   }).length
 })
 
+// ---------- 任务「已耗时」（2026-09-19 用户诉求：让用时直观可见）----------
+// 口径：startedAt → finishedAt/now = **真正消耗算力的时间**；排队时间单独标注（不把排队算成生成耗时）。
+// ⚠️ 必须声明在下面那个 { immediate: true } 的 watch 之前：immediate 回调在 setup 期间就执行，
+//    否则赋值 elapsedTimer 会撞 TDZ（ReferenceError: Cannot access before initialization）。
+const nowTick = ref(Date.now())
+let elapsedTimer: ReturnType<typeof setInterval> | undefined
+function fmtDur(ms: number): string {
+  const s = Math.max(0, Math.round(ms / 1000))
+  if (s < 60) return `${s}秒`
+  const m = Math.floor(s / 60)
+  const r = s % 60
+  if (m < 60) return r ? `${m}分${r}秒` : `${m}分`
+  return `${Math.floor(m / 60)}小时${m % 60}分`
+}
+function jobElapsed(j: JobRecord): string {
+  const start = j.startedAt ? Date.parse(j.startedAt) : NaN
+  if (j.state === 'queued' || Number.isNaN(start)) {
+    const c = j.createdAt ? Date.parse(j.createdAt) : NaN
+    return Number.isNaN(c) ? '' : `排队 ${fmtDur(nowTick.value - c)}`
+  }
+  const end = j.finishedAt ? Date.parse(j.finishedAt) : nowTick.value
+  const d = end - start
+  return d > 0 ? `${j.state === 'running' ? '已耗时' : '耗时'} ${fmtDur(d)}` : ''
+}
+
 // 有进行中任务时 3s 轮询（避免查询配置自引用）
 let jobsTimer: ReturnType<typeof setInterval> | undefined
 watch(
@@ -2308,11 +2472,32 @@ watch(
   (n) => {
     if (n > 0 && !jobsTimer) {
       jobsTimer = setInterval(() => {
-        void jobs.refetch()
+        // 2026-09-19（用户要求 ①）：任务**一完成就刷新资产库**
+        // （原来只在“所有活跃任务都结束”时才刷 → 一个个完成时资产库一直不更新）
+        const activeIds = (list?: JobRecord[]) =>
+          new Set((list ?? [])
+            .filter((j) => j.state === 'queued' || j.state === 'running')
+            .map((j) => j.id))
+        const before = activeIds(jobs.data.value)
+        void jobs.refetch().then(() => {
+          const after = activeIds(jobs.data.value)
+          if ([...before].some((id) => !after.has(id))) {
+            void queryClient.invalidateQueries({ queryKey: ['assets'] })
+            void refreshGallery()
+          }
+        })
       }, 5000)
+      // 「已耗时」每秒走一次，让 running 任务的计时看起来是活的（轮询 5s 太慢）
+      elapsedTimer = setInterval(() => {
+        nowTick.value = Date.now()
+      }, 1000)
     } else if (n === 0 && jobsTimer) {
       clearInterval(jobsTimer)
       jobsTimer = undefined
+      if (elapsedTimer) {
+        clearInterval(elapsedTimer)
+        elapsedTimer = undefined
+      }
       // 任务全部结束后资产已落库 → 刷新资产库，并**定位到当前 Tab 最新的一条**方便查看
       void (async () => {
         await queryClient.invalidateQueries({ queryKey: ['assets'] })
@@ -2395,6 +2580,16 @@ const jobsForTab = computed(() =>
   jobTab.value === 'all' ? latestJobs.value : latestJobs.value.filter((j) => kindTab(j.kind) === jobTab.value),
 )
 
+// 2026-09-19（用户要求 ②）：切 Tab 时重置分页与勾选 —— 否则「查看更多」展开的行数、
+// 以及失败任务的勾选会跨 Tab 残留（在「配音」Tab 选中的失败任务会带到「关键帧」Tab）。
+watch(jobTab, () => {
+  jobLimit.value = LIST_PAGE
+  jobSel.value = []
+})
+watch(galTab, () => {
+  galSel.value = []
+})
+
 // 默认 Tab：没记录过就用「最新一条任务」那一类（最近有更新的一类）
 watch(
   () => latestJobs.value,
@@ -2407,11 +2602,29 @@ watch(
   },
 )
 
+/**
+ * 2026-09-19（用户要求 ①）：「任务一发起就要实时出现在对应 Tab」。
+ *
+ * 为什么之前不行：建完任务**没有失效 jobs 查询** → 页面上的任务列表还是旧的；
+ * 而驱动轮询的 `freshActiveCount` 又是由这个列表算出来的 → 列表里看不到新任务就**永远不会启动 5s 轮询**
+ * → 表现就是「点了生成，任务半天不出现」。所以建任务后必须**立刻**失效并拉一次。
+ */
+async function createJobsLive(ws: string, pid: string, input: unknown) {
+  const created = await createJobs(ws, pid, input as never)
+  void queryClient.invalidateQueries({ queryKey: ['jobs'] })
+  return created
+}
+
 async function startGeneration(shotNos?: number[] | null): Promise<void> {
   const revId = genRevisionId()
   if (!revId) return
   // P5：先过主体闸门（镜文本没点名主体 → 弹框让用户勾选，避免“全部注入/没参考图”）
   if (!preflightCast()) return
+  // ⑤ 2026-09-19（用户实测纠正）：有“生成了新版但没绑”的定妆照 → 先弹框，
+  //   并在框里提供**真能绑定**的选项（三选一）。必须放在 preflightFaceSize 之前 ——
+  //   换了定妆照会改变“脸占画幅高”的判定，先绑再判才是对的。
+  const _unboundAct = await warnUnboundPortraits()
+  if (_unboundAct === 'cancel') return
   // ★ 2026-09-16 夜（用户要求“做 a”）：生成**前**拦“脸会过小”的组合。
   //   为什么必须在生成前：事后告警等于白烧 GPU（用户原话：生成后再告警没意义，浪费了生图资源/时间）。
   if (!preflightFaceSize(shotNos)) return
@@ -2427,7 +2640,7 @@ async function doStartGeneration(shotNos: number[] | null | undefined, revId: st
   genBusy.value = true
   try {
     const isVideo = draft.value?.mode === 'video'
-    const created = await createJobs(workspaceId.value, projectId.value, {
+    const created = await createJobsLive(workspaceId.value, projectId.value, {
       revisionId: revId,
       kind: 'still',
       count: isVideo ? undefined : imgCount.value,
@@ -2718,7 +2931,7 @@ async function startVoice(shotNos?: number[] | null): Promise<void> {
   // 若它没清掉 dirty，handleSave 会在已确认稿上**另存 vN+1**（未确认）→ 反而要求重新确认。
   genBusy.value = true
   try {
-    const created = await createJobs(workspaceId.value, projectId.value, {
+    const created = await createJobsLive(workspaceId.value, projectId.value, {
       revisionId: revId,
       kind: 'voice',
       ...(shotNos && shotNos.length ? { shotNos } : {}),
@@ -2843,7 +3056,7 @@ async function previewVoice(shotNo?: number): Promise<void> {
   const rec = (detail.data.value?.shots ?? []).find((r) => r.shotNo === target.shot_no)
   previewBusy.value = true
   try {
-    const created = await createJobs(workspaceId.value, projectId.value, {
+    const created = await createJobsLive(workspaceId.value, projectId.value, {
       revisionId: revId,
       kind: 'voice',
       preview: true,
@@ -2887,7 +3100,7 @@ async function genVoiceLine(shotNo: number, lineIndex: number): Promise<void> {
   const rec = (detail.data.value?.shots ?? []).find((r) => r.shotNo === shotNo)
   previewBusy.value = true
   try {
-    const created = await createJobs(workspaceId.value, projectId.value, {
+    const created = await createJobsLive(workspaceId.value, projectId.value, {
       revisionId: revId,
       kind: 'voice',
       lineIndex,
@@ -2917,7 +3130,7 @@ async function previewVoiceLine(shotNo: number, lineIndex: number): Promise<void
   const rec = (detail.data.value?.shots ?? []).find((r) => r.shotNo === shotNo)
   previewBusy.value = true
   try {
-    const created = await createJobs(workspaceId.value, projectId.value, {
+    const created = await createJobsLive(workspaceId.value, projectId.value, {
       revisionId: revId,
       kind: 'voice',
       lineIndex,
@@ -2980,7 +3193,7 @@ async function previewBgm(): Promise<void> {
   if (dirty.value && !(await savePlanInPlace())) return
   previewBusy.value = true
   try {
-    const created = await createJobs(workspaceId.value, projectId.value, {
+    const created = await createJobsLive(workspaceId.value, projectId.value, {
       revisionId: revId,
       kind: 'bgm',
       preview: true,
@@ -3021,7 +3234,7 @@ async function startBgm(): Promise<void> {
   // 同上：禁止再兜 handleSave（会在已确认稿上另存未确认版本，导致又要重新确认）
   genBusy.value = true
   try {
-    const created = await createJobs(workspaceId.value, projectId.value, { revisionId: revId, kind: 'bgm' })
+    const created = await createJobsLive(workspaceId.value, projectId.value, { revisionId: revId, kind: 'bgm' })
     await queryClient.invalidateQueries({ queryKey: ['jobs'] })
     message.success(`已创建 ${created.length} 个配乐任务（按 music_mood）`)
   } catch (e) {
@@ -3036,13 +3249,16 @@ async function startBgm(): Promise<void> {
 async function startLipsync(shotNos?: number[] | null): Promise<void> {
   const revId = genRevisionId()
   if (!revId) return
+  // ⑤ 2026-09-19（用户要求）：对口型也吃定妆照（底片体检 + 身份）—— 同样先解决“有更新的没绑”
+  const _unboundAct2 = await warnUnboundPortraits()
+  if (_unboundAct2 === 'cancel') return
   focusJobTab('lipsync')
   if (dirty.value && !(await savePlanInPlace())) return
   // 同上：禁止再兜 handleSave —— 那会在已确认稿上另存 vN+1（未确认），
   // 于是“对口型按钮总是提示保存/要求确认方案”。
   genBusy.value = true
   try {
-    const created = await createJobs(workspaceId.value, projectId.value, {
+    const created = await createJobsLive(workspaceId.value, projectId.value, {
       revisionId: revId,
       kind: 'lipsync',
       ...(shotNos && shotNos.length ? { shotNos } : {}),
@@ -3096,7 +3312,7 @@ async function startMotion(frames?: number, shotNos?: number[] | null): Promise<
   if (dirty.value && !(await handleSave())) return
   genBusy.value = true
   try {
-    const created = await createJobs(workspaceId.value, projectId.value, {
+    const created = await createJobsLive(workspaceId.value, projectId.value, {
       revisionId: revId,
       kind: 'clip',
       ...(frames ? { frames } : {}),
@@ -4123,12 +4339,12 @@ const shotTotal = computed(() => {
             <p class="ref-group-title font-mono">
               参考图：
               <span class="text-secondary" style="letter-spacing: 0">
-                （<b>只作生成/指定定妆照的依据，不参与出图锚定</b>）
+                （共 {{ refLibrary.length }} 张 · <b>只作生成/指定定妆照的依据，不参与出图锚定</b>）
               </span>
             </p>
             <div v-if="refLibrary.length" class="refs-grid">
               <div
-                v-for="a in refLibrary.slice(0, 8)"
+                v-for="a in refLibrary"
                 :key="a.id"
                 :class="['ref-thumb', { sel: refSelected.includes(a.id) && !refUnchecked.includes(a.id) }]"
                 :title="refSelected.includes(a.id)
@@ -4168,6 +4384,29 @@ const shotTotal = computed(() => {
               本方案已绑定 {{ refSelected.length }} 张 —— 超出的会被自动丢弃（多主体镜头建议改用
               支持多图的模型，如 bytedance/seedream-4 / google/nano-banana：image_input）。
             </p>
+
+            <!-- ③ 2026-09-19（用户要求）：配音音色直接放在参考图下方（不再放「声音」卡里，也不再显示录好的音色列表） -->
+            <VoicePickerBar
+              v-if="draft"
+              :plan="draft as VideoPlan"
+              :preview-busy="previewBusy"
+              :audio-preview="audioPreview"
+              @preview-voice="previewVoice"
+              @clone-voice="openCloneDialog"
+              @remove-preset="removeClonePreset"
+              @close-preview="closeAudioPreview"
+            />
+
+            <!-- ④ 2026-09-19（用户纠正）：角色音色绑定紧跟在「配音音色」下方（不该放主体操作菜单） -->
+            <div class="sub-block" style="margin-top: 10px">
+              <p class="ref-group-title font-mono">角色音色绑定：</p>
+              <VoiceBindingsTable
+                v-if="draft"
+                :plan="draft as VideoPlan"
+                :voices="voiceChoicesAll"
+                :known-subjects="knownSubjectsAll"
+              />
+            </div>
           </div>
 
           <!--
@@ -4375,7 +4614,7 @@ const shotTotal = computed(() => {
                   :records="detail.data.value?.shots ?? []"
                   :disabled="!canEdit"
                   :model-cap-disabled="gpuMotionLane"
-                  :model-cap-hint="modelCapHint"
+                  :model-cap-effective="modelCapEffective"
                   :busy-shot="shotBusy"
                   :preview-busy="previewBusy"
                   :audio-preview="audioPreview"
@@ -4576,6 +4815,14 @@ const shotTotal = computed(() => {
             <span :class="['job-state', j.state]">
               {{ JOB_STATE_LABEL[j.state] ?? j.state }}{{ j.state === 'running' && j.stage ? ' · ' + j.stage : '' }}
             </span>
+            <span
+              v-if="jobElapsed(j)"
+              class="job-elapsed font-mono"
+              data-testid="job-elapsed"
+              :title="j.state === 'queued'
+                ? '排队中（还没开始消耗算力）'
+                : '从开始执行到结束/现在的实际耗时（不含排队）'"
+            >{{ jobElapsed(j) }}</span>
             <div class="job-bar"><span class="job-fill" :style="{ width: j.progress + '%' }" /></div>
             <span class="job-pct font-mono">{{ j.progress }}%</span>
             <NButton
@@ -4612,13 +4859,13 @@ const shotTotal = computed(() => {
             </template>
           </div>
           <button
-            v-if="(jobs.data.value ?? []).length > jobLimit"
+            v-if="jobsForTab.length > jobLimit"
             type="button"
             class="op panel-more"
             data-testid="btn-more-jobs"
             @click="showMoreJobs"
           >
-            查看更多（余 {{ (jobs.data.value ?? []).length - jobLimit }} 条）
+            查看更多（余 {{ jobsForTab.length - jobLimit }} 条）
           </button>
         </div>
         <p v-else-if="detApproved" class="job-empty text-secondary">
@@ -5139,6 +5386,45 @@ const shotTotal = computed(() => {
       />
 
       <!-- P9：克隆配音弹窗（放在页面级，方案区与分镜共用同一个） -->
+      <!--
+        ⑤’ 2026-09-19（用户实测纠正）：有更新的定妆照没绑时，弹框。
+        三选一 —— 第一项**真的会绑定**（patchSubjectMeta 就地生效），不再出现“点了确定没绑、下次又弹”。
+        关闭 / ESC / 点遮罩 = 取消（本次不生成）。
+      -->
+      <NModal
+        :show="!!pendingUnbound"
+        preset="card"
+        title="有更新的定妆照还没绑定"
+        style="max-width: 640px"
+        data-testid="unbound-portrait-modal"
+        @update:show="(v: boolean) => { if (!v) void onUnboundPortraitAction('cancel') }"
+      >
+        <p style="margin: 0 0 10px">以下主体生成了更新的定妆照，但当前绑定的还是旧版：</p>
+        <ul style="margin: 0 0 12px; padding-left: 18px; line-height: 1.9">
+          <li v-for="x in pendingUnbound ?? []" :key="x.name">
+            <b>{{ x.name }}</b>：新版 {{ shortTime(x.newerAt) }} ｜ 当前绑定
+            {{ x.boundAt ? shortTime(x.boundAt) : '（未绑定）' }}
+          </li>
+        </ul>
+        <p class="text-secondary" style="margin: 0 0 14px; font-size: 13px">
+          定妆照是所有后续任务的唯一身份锚。用旧版继续画，出来会“不像”，而界面上看不出来。
+        </p>
+        <div style="display: flex; gap: 10px; justify-content: flex-end; flex-wrap: wrap">
+          <NButton quaternary @click="onUnboundPortraitAction('keep')">仍用当前绑定生成</NButton>
+          <NButton
+            type="primary"
+            secondary
+            data-testid="unbound-bind-and-go"
+            @click="onUnboundPortraitAction('bind')"
+          >
+            绑定最新版并生成
+          </NButton>
+        </div>
+        <p class="text-secondary" style="margin: 10px 0 0; font-size: 12px; text-align: right">
+          关闭本弹框 = 本次不生成
+        </p>
+      </NModal>
+
       <VoiceCloneDialog
         v-model:show="cloneOpen"
         :mode="cloneCtx.mode"
@@ -5600,6 +5886,10 @@ const shotTotal = computed(() => {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(64px, 1fr));
   gap: 6px;
+  /* 2026-09-19：用户口径「参考图任何时候可以勾选」—— 去掉原来的 slice(0,8) 硬上限，
+     改成「全部渲染 + 超出高度可滚动」，避免图一多就静默选不到。 */
+  max-height: 340px;
+  overflow-y: auto;
 }
 .ref-thumb {
   position: relative;
@@ -5827,6 +6117,7 @@ const shotTotal = computed(() => {
 .job-state.failed { color: var(--wv-danger); }
 .job-state.cancelled { color: var(--wv-text-4); }
 .job-state.succeeded { color: var(--wv-success); }
+.job-elapsed { font-size: 12px; color: var(--wv-text-2); flex: none; white-space: nowrap; }
 .job-bar {
   flex: 1; height: 5px; border-radius: 999px;
   background: var(--wv-line);

@@ -30,6 +30,16 @@ class ImageDimsTest {
         }
         assertThat(ImageDims.of("9:16", 2560)).containsExactly(1408, 2560);
         assertThat(ImageDims.of("1:1", 2560)).containsExactly(2048, 2048);
+        // ★ 2026-09-20 新增 1392 档（官方 ~1MP 工作预算；16:9 实际落 1408×768 = 1.08MP）
+        assertThat(ImageDims.of("16:9", 1392)).containsExactly(1408, 768);
+        assertThat(ImageDims.of("9:16", 1392)).containsExactly(768, 1408);
+        assertThat(ImageDims.of("3:2", 1392)).containsExactly(1248, 832);
+        assertThat(ImageDims.of("1:1", 1392)).containsExactly(1120, 1120);
+        // ★ 2026-09-20 新增 1664 档：16:9 正好落在 Qwen 官方训练桶 1664×928（1.54MP）
+        assertThat(ImageDims.of("16:9", 1664)).containsExactly(1664, 928);
+        assertThat(ImageDims.of("9:16", 1664)).containsExactly(928, 1664);
+        assertThat(ImageDims.of("3:2", 1664)).containsExactly(1504, 992);
+        assertThat(ImageDims.of("1:1", 1664)).containsExactly(1344, 1344);
     }
 
     @Test

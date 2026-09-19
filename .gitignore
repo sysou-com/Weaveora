@@ -35,3 +35,7 @@ application-local.yml
 *.stackdump
 g1ctx.json
 .tmp_patch_*.py
+
+# ---- Windows 保留设备名/空占位产生的垃圾（git 无法索引 nul）----
+/nul
+/可用

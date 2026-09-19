@@ -50,6 +50,26 @@ IMAGE_DENOISE = float(os.environ.get("WEAVEORA_IMAGE_DENOISE", "0.65") or 0.65)
 #   steps 40 / cfg 4.0（Comfy 模板默认同值），而 cfg 直接决定**提示词遵从度**，
 #   是"出图效果不好"时第一个该调的旋钮，必须能从配置页下发。
 IMAGE_CFG = float(os.environ.get("WEAVEORA_IMAGE_CFG", "0") or 0)
+# ★ 2026-09-19：图片/关键帧的 **LoRA（提速用）**，留空 = 不挂（保持原行为）。
+#   背景：2K/40 步一张关键帧 435~476s（7~8 分钟）——用户点名“渲染速度”是主要问题之一。
+#   Qwen-Image-Edit-2511 有官方蒸馏 LoRA（lightx2v/Qwen-Image-Edit-2511-Lightning，Apache-2.0，810MB）：
+#   官方 ComfyUI 模板把 4step LoRA 当**标配**，并且 **CFG=4.0（不是 1.0）**、LoRA 强度 1.0
+#   → 所以负词/风格不会被吹掉，只是把采样步数从 40 降到 4。
+#   生效优先级：payload.params.lora > 环境变量 > 引擎配置下发。
+IMAGE_LORA = os.environ.get("WEAVEORA_IMAGE_LORA", "").strip()
+IMAGE_LORA_STRENGTH = float(os.environ.get("WEAVEORA_IMAGE_LORA_STRENGTH", "1.0") or 1.0)
+# 挂 LoRA 时的**默认步数**：蒸馏 LoRA 是按「4 步 + cfg 4.0」训的，拿 40 步去跑它
+# 既慢又不是它的工作点 → 有 LoRA 且调用方没显式给 steps 时，Edit 通路默认用这个值。
+IMAGE_LORA_STEPS = int(os.environ.get("WEAVEORA_IMAGE_LORA_STEPS", "4") or 4)
+# 挂 LoRA 时的**默认 cfg**。
+#   ★ 2026-09-19 实测（同 seed / 同参考图，只改 cfg）：
+#     cfg 4.0 + 4步LoRA → **坏图**（大片红色色块 + 扫描线状条纹 + 糊脸；亮度 +49%）
+#     cfg 2.0 + 4步LoRA → 也不干净
+#     cfg 1.5 + 4步LoRA → 干净、写实、细节在（高频占比与 40 步持平）
+#     cfg 1.0 + 4步LoRA → 干净，但 **负词完全失效**（cfg=1 无 uncond 分支）
+#   所以取 1.5：蒸馏模型的工作点附近，同时保留部分负词权重（cfg-1=0.5）。
+#   注意：负词里如果还写着「真人肖像」这类“禁止画真实人脸”的词，在这个 cfg 下依然会把脸推向非写实 → 必须删。
+IMAGE_LORA_CFG = float(os.environ.get("WEAVEORA_IMAGE_LORA_CFG", "1.5") or 1.5)
 # ★ 区域条件（位置优先）开关：默认关闭。
 #   原因（2026-09-16 实测两轮）：Qwen-Image-Edit 的 conditioning（TextEncodeQwenImageEditPlus 带参考图
 #   latent）被 ConditioningSetAreaPercentage 包裹再用 ConditioningCombine 合并后，KSampler 必报
@@ -206,6 +226,39 @@ def _wf_inject_model(graph, model):
                 n["inputs"][key] = model
                 hit = True
     return hit
+
+
+def _wf_inject_lora(graph, name, strength=1.0):
+    """给主模型挂 LoRA（提速用）。
+
+    做法：在 UNETLoader 后面插一个 LoraLoaderModelOnly，并把**所有**指向该 loader 的
+    `model` 引用改指向 LoRA 节点。
+    为什么用 LoraLoaderModelOnly（不是 LoraLoader）：Qwen-Image 的 Lightning LoRA 只训了 **DiT**，
+    文本编码器（Qwen2.5-VL）不挂 LoRA；用 LoraLoader 反而会因缺 clip 权重报错。
+    """
+    if not (name or "").strip():
+        return False
+    loaders = _wf_of_class(graph, "UNETLoader") or _wf_of_class(graph, "CheckpointLoaderSimple")
+    if not loaders:
+        return False
+    lid, node = loaders[0]
+    ct = str(node.get("class_type") or "")
+    key = "unet_name" if ct == "UNETLoader" else "ckpt_name"
+    if key not in (node.get("inputs") or {}):
+        return False
+    lora_id = "lora_main"
+    graph[lora_id] = {"class_type": "LoraLoaderModelOnly",
+                      "inputs": {"model": [lid, 0], "lora_name": name.strip(),
+                                 "strength_model": float(strength)}}
+    # 改写引用：必须用 list(graph.items()) 快照并跳过 LoRA 自己，
+    # 否则会把它自己的 model 引用也改掉 → 自引用死循环。
+    for _nid, n in list(graph.items()):
+        if _nid == lora_id:
+            continue
+        for k, v in (n.get("inputs") or {}).items():
+            if k == "model" and isinstance(v, list) and len(v) >= 2 and str(v[0]) == str(lid):
+                n["inputs"][k] = [lora_id, 0]
+    return True
 
 
 def _wf_prune_unused_images(graph, used):
@@ -424,10 +477,27 @@ def generate_via_workflow(client_id, payload, progress_fn=None, on_tick=None):
                        "front facing ID photo, 3d render, cgi"
     _wf_inject_text(graph, positive, negative)
     _wf_inject_model(graph, IMAGE_MODEL)
+    # LoRA（提速）：params.lora 优先（用于同镜同 seed 的 A/B 对照，不必重启 worker）> 环境变量/引擎配置
+    _lora = params.get("lora") if isinstance(params.get("lora"), str) else ""
+    _lora = (_lora or "").strip() or IMAGE_LORA
+    _lora_s = (params.get("lora_strength") if isinstance(params.get("lora_strength"), (int, float))
+               else IMAGE_LORA_STRENGTH)
+    # ★ 只在 **Edit 通路（Qwen-Image-Edit-2511）** 挂 LoRA：
+    #   蒸馏 LoRA 与基座严格绑定，挂到 txt2img 的 Qwen-Image 基座上会权重不匹配（报错或出鬼图）；
+    #   而关键帧/定妆照（带参考图的那些）走的正是 edit 通路 —— 也正是 7~8 分钟那一批。
+    lora_on = bool(_lora) and mode == "edit" and _wf_inject_lora(graph, _lora, _lora_s)
+    log_line = ("挂 LoRA %s @%.2f" % (_lora, float(_lora_s))) if lora_on else ""
     _wf_inject_size(graph, width, height)
     steps = IMAGE_STEPS or (params.get("steps") if isinstance(params.get("steps"), (int, float)) else 0)
+    # 有 LoRA 且调用方没显式指定步数 → 用 LoRA 的工作点（默认 4），否则 40 步跑蒸馏模型白浪费时间
+    if lora_on and not isinstance(params.get("steps"), (int, float)) and IMAGE_LORA_STEPS > 0:
+        steps = IMAGE_LORA_STEPS
     # cfg 优先级：引擎配置页（IMAGE_CFG）> payload.params.cfg > 工作流 JSON 自带值
     cfg = IMAGE_CFG if IMAGE_CFG > 0 else (params.get("cfg") if isinstance(params.get("cfg"), (int, float)) else None)
+    # 有 LoRA 且调用方没显式指定 cfg → 用 LoRA 的工作点（默认 1.5）；
+    #   拿引擎配置里的 40 步/cfg4.0 去跑 4 步蒸馏模型会直接出坏图（已实测）。
+    if lora_on and not isinstance(params.get("cfg"), (int, float)) and IMAGE_LORA_CFG > 0:
+        cfg = IMAGE_LORA_CFG
     is_i2i = _wf_latent_is_img2img(graph)
     denoise = 1.0
     if mode == "edit":
@@ -483,12 +553,22 @@ def generate_via_workflow(client_id, payload, progress_fn=None, on_tick=None):
         if IMAGE_AREA_COND:
             _wf_apply_areas(graph, mode, pairs)
         else:
-            print("[comfy] 位置改由提示词描述（路线A）：%d 个主体（区域条件关闭，需开启设 WEAVEORA_IMAGE_AREA_COND=1）"
+            # ★ 2026-09-19 定性（查过 ComfyUI 源码，不再只写“需开启”）：
+            #   `ConditioningSetAreaPercentage` 对 Qwen-Image **架构上无效** ——
+            #   `comfy/model_base.py` 全文只有 hiDreamO1 一个类读 `area`；Qwen-Image 的文本走
+            #   `txt_in` **拼进序列**（joint attention），根本没有“文本该在哪块生效”的 cross-attn 掩码。
+            #   所以开 WEAVEORA_IMAGE_AREA_COND=1 不是“启用功能”，而是“触发 KSampler 的
+            #   IndexError: tuple index out of range”（2026-09-16 实测两轮）。
+            #   位置要真生效只能走**图像**（采样起点/构图底图 + denoise<1），见后续路线 C。
+            print("[comfy] 位置只写进提示词（路线A）：%d 个主体。注意：区域条件（ConditioningSetArea*）"
+                  "对 Qwen-Image 本就不被模型消费（只有 HiDream 读 area），开启只会让 KSampler 报"
+                  "IndexError，所以位置目前只是“文字暗示”：模型不认归一化数字，实测设 x=0.05 落到 x=0.40。"
                   % len(pairs), flush=True)
     _wf_save_prefix(graph, prefix)
-    print("[comfy] 工作流出图：%s(%s) size=%dx%d steps=%s cfg=%s denoise=%s refs=%s%s"
+    print("[comfy] 工作流出图：%s(%s) size=%dx%d steps=%s cfg=%s denoise=%s refs=%s%s%s"
           % (os.path.basename(path), mode, width, height, steps or "-", cfg if cfg is not None else "-",
              denoise, ",".join(ref_names) or "-",
+             ("  " + log_line if log_line else ""),
              ("  ⚠️降级" if _img_notes else "")), flush=True)
     saved, COMFY = COMFY, _image_comfy()
     try:
@@ -1074,12 +1154,13 @@ def _post_prompt(prompt, client_id):
 #     ⇒ 默认 high=0.0（只给低噪声专家蒸馏）、low=1.0（换 LoRA 家族时强度约定会变，见下）。
 #
 #   档位（payload["params"]["preset"]；每一项都能用显式键覆盖）：
-#     draft    4 步  switch 2   最快，动态最弱（只看构图）
+#     draft    4 步  switch 2   最快，动态最弱（只看构图）——官方加速档骨架
 #     balanced 6 步  switch 3   默认生产档
 #     motion   8 步  switch 4   动态优先
-#     hero     6 步  switch 3   抬高 cfg_high=3.5（关键镜；高噪声 LoRA 在所有档位都是 0）
-#     full    24 步  switch 12  完全不蒸馏（画质上限，配合 sageattention）
-#   切分口径：高/低噪声按总步数折半（4→2、6→3、8→4），与官方/社区一致。
+#     hero    20 步  switch 10  ★官方质量档（ComfyUI 官方模板口径）：不蒸馏 + cfg 3.5
+#     full    40 步  switch 36  ★官方原厂档（Wan 仓库 wan_i2v_A14B.py）：不蒸馏 + cfg 3.5
+#   切分口径：高/低噪声按总步数折半（4→2、6→3、8→4、20→10），与官方/社区一致；
+#   full 例外：官方 `boundary=0.900` 按**时间步**切专家 → 步序近似 0.9×40 = 36。
 #
 #   显式覆盖键：steps / switch_step / cfg_high / cfg_low / cfg / lora_high / lora_low /
 #               lora_high_name / lora_low_name / shift / sampler_name / scheduler /
@@ -1106,8 +1187,14 @@ MOTION_PRESETS = {
     "draft":    {"steps": 4,  "switch": 2,  "cfg_high": 1.0, "cfg_low": 1.0, "lora_high": 0.0, "lora_low": 1.0, "shift": 5.0},
     "balanced": {"steps": 6,  "switch": 3,  "cfg_high": 1.0, "cfg_low": 1.0, "lora_high": 0.0, "lora_low": 1.0, "shift": 5.0},
     "motion":   {"steps": 8,  "switch": 4,  "cfg_high": 1.5, "cfg_low": 1.0, "lora_high": 0.0, "lora_low": 1.0, "shift": 5.0},
-    "hero":     {"steps": 6,  "switch": 3,  "cfg_high": 3.5, "cfg_low": 1.0, "lora_high": 0.0, "lora_low": 1.0, "shift": 5.0},
-    "full":     {"steps": 24, "switch": 12, "cfg_high": 3.5, "cfg_low": 3.5, "lora_high": 0.0, "lora_low": 0.0, "shift": 5.0},
+    # ★ 2026-09-20 对齐官方（两个官方工作点，均**不蒸馏**；要蒸馏档用 draft/balanced/motion）：
+    #   hero = ComfyUI 官方模板 `video_wan2_2_14B_i2v.json` 的**质量档**：steps 20 / switch 10 / cfg 3.5
+    #          （该模板 MarkdownNote 同时给出官方耗时：4090D 24G @640×640，无 LoRA ≈536s / 挂 4 步 LoRA ≈97s）
+    #   full = Wan 官方仓库 `wan/configs/wan_i2v_A14B.py` 的**原厂推理默认**：
+    #          sample_steps 40 / sample_shift 5.0 / sample_guide_scale (3.5, 3.5) / boundary 0.900 → switch 36
+    #   旧值（hero 6 步挂低噪蒸馏 / full 24 步）已弃用：hero 那套实测「冲」，见 docs/notes/出图管线-经验与坑.md。
+    "hero":     {"steps": 20, "switch": 10, "cfg_high": 3.5, "cfg_low": 3.5, "lora_high": 0.0, "lora_low": 0.0, "shift": 5.0},
+    "full":     {"steps": 40, "switch": 36, "cfg_high": 3.5, "cfg_low": 3.5, "lora_high": 0.0, "lora_low": 0.0, "shift": 5.0},
 }
 # 给高噪声专家挂 LoRA 的显存风险阈值：超过它就在日志里点名提醒（48G 实测 0.6 也 OOM）
 MOTION_LORA_HIGH_WARN = 0.0
@@ -2929,7 +3016,7 @@ def apply_services(svc):
     # 只要换一个 JSON，不用改 worker、不用重启；参数注入靠 class_type/标题约定（见 generate_via_workflow）。
     img = g("image")
     if isinstance(img, dict):
-        global IMAGE_ENGINE, IMAGE_COMFY, IMAGE_TXT2IMG_WF, IMAGE_IMG2IMG_WF, IMAGE_EDIT_WF, IMAGE_MODEL, IMAGE_STEPS, IMAGE_DENOISE, IMAGE_CFG
+        global IMAGE_ENGINE, IMAGE_COMFY, IMAGE_TXT2IMG_WF, IMAGE_IMG2IMG_WF, IMAGE_EDIT_WF, IMAGE_MODEL, IMAGE_STEPS, IMAGE_DENOISE, IMAGE_CFG, IMAGE_LORA, IMAGE_LORA_STRENGTH, IMAGE_LORA_CFG
         eng = img.get("engine")
         if isinstance(eng, str) and eng.strip():
             IMAGE_ENGINE = eng.strip().lower()
@@ -2957,9 +3044,19 @@ def apply_services(svc):
         cg = img.get("cfg")
         if isinstance(cg, (int, float)) and float(cg) > 0:
             IMAGE_CFG = float(cg)
-        print("[comfy] 文生图配置（引擎配置下发）：engine=%s workflow=%s img2img=%s edit=%s model=%s steps=%s cfg=%s denoise=%s"
+        lo = img.get("lora")
+        if isinstance(lo, str) and lo.strip():
+            IMAGE_LORA = lo.strip()
+        ls = img.get("loraStrength") or img.get("lora_strength")
+        if isinstance(ls, (int, float)) and float(ls) > 0:
+            IMAGE_LORA_STRENGTH = float(ls)
+        lc = img.get("loraCfg") or img.get("lora_cfg")
+        if isinstance(lc, (int, float)) and float(lc) > 0:
+            IMAGE_LORA_CFG = float(lc)
+        print("[comfy] 文生图配置（引擎配置下发）：engine=%s workflow=%s img2img=%s edit=%s model=%s steps=%s cfg=%s denoise=%s lora=%s@%s"
               % (IMAGE_ENGINE, IMAGE_TXT2IMG_WF or "-", IMAGE_IMG2IMG_WF or "-", IMAGE_EDIT_WF or "-",
-                 IMAGE_MODEL or "-", IMAGE_STEPS or "-", IMAGE_CFG or "-", IMAGE_DENOISE), flush=True)
+                 IMAGE_MODEL or "-", IMAGE_STEPS or "-", IMAGE_CFG or "-", IMAGE_DENOISE,
+                 IMAGE_LORA or "-", IMAGE_LORA_STRENGTH))
     node = g("face", "latentsyncDir")
     if isinstance(node, str) and node.strip():
         LATENTSYNC_DIR = node.strip()

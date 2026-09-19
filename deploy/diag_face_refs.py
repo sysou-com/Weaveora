@@ -8,8 +8,9 @@
   ② 给 --target 时，用目标图的 embedding 与结果图比对（best = 余弦相似度，
      ≥0.5 基本可认作同一人，<0.3 基本不是同一张脸）。
 
-在 VPS 上跑（py3.6 兼容：不用 text=True）：
-  python3 diag_face_refs.py http://180.127.11.167:31058 \
+在 VPS 上跑（py3.6 兼容：不用 text=True）。
+⚠️ 网关端口每次平台重开都可能变（2026-09-19 = 12476），以平台「生成引擎配置→GPU服务器地址+端口」为准：
+  python3 diag_face_refs.py http://180.127.11.167:12476 \
       --target /opt/weaveora/data/storage/.../portrait/cf25253c....jpg \
       /opt/weaveora/data/storage/.../portrait/08d7fb46....png \
       /opt/weaveora/data/storage/.../0a000003-.../10541d55....png
