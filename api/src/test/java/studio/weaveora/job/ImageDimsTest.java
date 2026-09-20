@@ -40,6 +40,10 @@ class ImageDimsTest {
         assertThat(ImageDims.of("9:16", 1664)).containsExactly(928, 1664);
         assertThat(ImageDims.of("3:2", 1664)).containsExactly(1504, 992);
         assertThat(ImageDims.of("1:1", 1664)).containsExactly(1344, 1344);
+        // ★ 2026-09-20 下拉改成「实际尺寸」口径：1408 档 → 1408×768（与旧 1392 档出图完全一致）
+        assertThat(ImageDims.of("16:9", 1408)).containsExactly(1408, 768);
+        assertThat(ImageDims.of("9:16", 1408)).containsExactly(768, 1408);
+        assertThat(ImageDims.of("1:1", 1408)).containsExactly(1120, 1120);
     }
 
     @Test
