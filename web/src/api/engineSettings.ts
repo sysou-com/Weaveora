@@ -1,5 +1,5 @@
 import { request } from './client'
-import type { EngineSettings, EngineSettingsInput } from './types'
+import type { EngineSettings, EngineSettingsInput, GpuAddressSyncInput, GpuAddressSyncResult } from './types'
 
 /** GET /api/v1/me/engine-settings —— 当前用户生成引擎配置（密钥仅打码值） */
 export async function getEngineSettings(): Promise<EngineSettings> {
@@ -10,6 +10,18 @@ export async function getEngineSettings(): Promise<EngineSettings> {
 export async function saveEngineSettings(input: EngineSettingsInput): Promise<EngineSettings> {
   return request<EngineSettings>('/api/v1/me/engine-settings', {
     method: 'PUT',
+    body: input,
+  })
+}
+
+/**
+ * 一键同步 GPU 地址：把「所有指向旧 GPU 机器的 IP:端口」换成新值（含 services 里显式填过的 URL）。
+ *
+ * 返回替换清单 + 「仍是 IP 字面量」的改漏清单，以及同步后的完整配置（前端可直接刷新表单）。
+ */
+export async function syncGpuAddress(input: GpuAddressSyncInput): Promise<GpuAddressSyncResult> {
+  return request<GpuAddressSyncResult>('/api/v1/me/engine-settings/sync-address', {
+    method: 'POST',
     body: input,
   })
 }

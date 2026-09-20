@@ -8,12 +8,16 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import studio.weaveora.engine.api.EngineSettingsRequest;
 import studio.weaveora.engine.api.EngineSettingsResponse;
+import studio.weaveora.engine.api.GpuAddressSyncRequest;
+import studio.weaveora.engine.api.GpuAddressSyncResponse;
 import studio.weaveora.engine.domain.UserEngineSettings;
 import studio.weaveora.engine.domain.UserEngineSettingsRepository;
 import studio.weaveora.infra.crypto.AesGcm;
 import studio.weaveora.shared.api.BizException;
 import studio.weaveora.shared.api.ErrorCode;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
@@ -689,4 +693,190 @@ public class EngineSettingsService {
         repo.save(cur);
         return toResponse(userId);
     }
+
+    // ------------------------------------------------------- GPU 地址一键同步（2026-09-21）
+
+    /** URL 形态：`scheme://host[:port][/path…]`。只认这三段，普通文本/文件路径不会被误伤。 */
+    private static final java.util.regex.Pattern SYNC_URL = java.util.regex.Pattern.compile(
+            "^(?<scheme>[a-zA-Z][a-zA-Z0-9+.\\-]*)://(?<host>[^/:\\s]+)(?::(?<port>\\d{1,5}))?(?<rest>/\\S*)?$");
+
+    /** IPv4 字面量：用于「改漏」检查（云 API 是域名 → 不动；还剩 IP 的多半还是 GPU 盒/旧实例）。 */
+    private static final java.util.regex.Pattern IPV4 = java.util.regex.Pattern.compile(
+            "^\\d{1,3}(?:\\.\\d{1,3}){3}$");
+
+    /** 本机回环（`127.0.0.1` / `localhost`）在配置里是「worker 本机」的合法写法，不算改漏。 */
+    static boolean isLoopback(String host) {
+        if (host == null || host.isBlank()) {
+            return false;
+        }
+        String h = host.toLowerCase();
+        return "localhost".equals(h) || "0.0.0.0".equals(h) || "::1".equals(h) || h.startsWith("127.");
+    }
+
+    /** 从 `http://1.2.3.4:8001`（或裸 host、裸 host:port）里取出 host；取不到返回 null。 */
+    static String hostOf(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return null;
+        }
+        String v = raw.trim();
+        java.util.regex.Matcher m = SYNC_URL.matcher(v);
+        if (m.matches()) {
+            return m.group("host");
+        }
+        int scheme = v.indexOf("://");
+        if (scheme > 0) {
+            v = v.substring(scheme + 3);
+        }
+        int slash = v.indexOf('/');
+        if (slash >= 0) {
+            v = v.substring(0, slash);
+        }
+        int colon = v.lastIndexOf(':');
+        if (colon > 0 && v.substring(colon + 1).matches("\\d+")) {
+            v = v.substring(0, colon);
+        }
+        return v.isBlank() ? null : v;
+    }
+
+    /**
+     * 递归改写「host == oldHost」的 URL → `scheme://newHost:newPort + 原路径`。
+     *
+     * <p>只改命中旧主机的值：**云 API（域名）与其它机器的地址原样保留**，避免误伤。
+     * 路径必须保留 —— services 里靠路径区分服务（`/audio`、`/bgm`、`/talk`）。
+     * 端口统一改成 newPort：本部署是「单端口网关（edge proxy）」模型，同一主机的不同端口
+     * 都是历次换机留下的旧值（实测同一个库里同时存在 21282 与 27458），必须一起收口。
+     */
+    static ObjectNode rewriteAddresses(com.fasterxml.jackson.databind.ObjectMapper mapper, JsonNode in,
+                                       String oldHost, String newHost, int newPort,
+                                       List<GpuAddressSyncResponse.Change> changes, List<String> leftovers) {
+        ObjectNode out = mapper.createObjectNode();
+        rewriteInto(mapper, in, out, "services", oldHost, newHost, newPort, changes, leftovers);
+        return out;
+    }
+
+    private static void rewriteInto(com.fasterxml.jackson.databind.ObjectMapper mapper, JsonNode in, ObjectNode out,
+                                    String path, String oldHost, String newHost, int newPort,
+                                    List<GpuAddressSyncResponse.Change> changes, List<String> leftovers) {
+        in.fields().forEachRemaining(e -> {
+            String key = e.getKey();
+            String p = path.isEmpty() ? key : path + "." + key;
+            JsonNode v = e.getValue();
+            if (v == null || v.isNull()) {
+                out.set(key, out.nullNode());
+            } else if (v.isObject()) {
+                ObjectNode child = mapper.createObjectNode();
+                out.set(key, child);
+                rewriteInto(mapper, v, child, p, oldHost, newHost, newPort, changes, leftovers);
+            } else if (v.isArray()) {
+                ArrayNode arr = mapper.createArrayNode();
+                int idx = 0;
+                for (JsonNode item : v) {
+                    String ip = p + "[" + (idx++) + "]";
+                    if (item.isObject()) {
+                        ObjectNode child = mapper.createObjectNode();
+                        arr.add(child);
+                        rewriteInto(mapper, item, child, ip, oldHost, newHost, newPort, changes, leftovers);
+                    } else if (item.isTextual()) {
+                        arr.add(rewriteOne(item.asText(), ip, oldHost, newHost, newPort, changes, leftovers));
+                    } else {
+                        arr.add(item.deepCopy());
+                    }
+                }
+                out.set(key, arr);
+            } else if (v.isTextual()) {
+                out.put(key, rewriteOne(v.asText(), p, oldHost, newHost, newPort, changes, leftovers));
+            } else {
+                out.set(key, v.deepCopy());
+            }
+        });
+    }
+
+    private static String rewriteOne(String s, String path, String oldHost, String newHost, int newPort,
+                                     List<GpuAddressSyncResponse.Change> changes, List<String> leftovers) {
+        java.util.regex.Matcher m = SYNC_URL.matcher(s);
+        if (!m.matches()) {
+            return s;   // 文件路径 / 模型名 / 普通文本：不动
+        }
+        String host = m.group("host");
+        if (host.equalsIgnoreCase(oldHost)) {
+            String after = m.group("scheme") + "://" + newHost + ":" + newPort
+                    + (m.group("rest") == null ? "" : m.group("rest"));
+            if (!after.equals(s)) {
+                changes.add(new GpuAddressSyncResponse.Change(path, s, after));
+            }
+            return after;
+        }
+        if (IPV4.matcher(host).matches() && !isLoopback(host)) {
+            leftovers.add(path + " = " + s);
+        }
+        return s;
+    }
+
+    /**
+     * 一键同步 GPU 地址：把「所有指向旧 GPU 机器的 IP:端口」一次换成新值。
+     *
+     * <p>改写范围 = `gpuServerUrl` + `services` 里 host 命中旧主机的每一个 URL（保留路径）。
+     * 返回替换清单 + 「仍是 IP 字面量」的改漏清单，供页面直接展示。
+     *
+     * <p>为什么必须一次性改全：2026-09-21 事故里只改了「端口」字段（IP 没改），
+     * 而 services 里的显式 URL 根本不跟随该字段 → 出图/参考图上传打到死地址（四次任务全失败），
+     * 偏偏 worker 日志打的是另一个变量（COMFY ← services.lipsync.comfyUrl）看起来「地址已经对了」。
+     */
+    @Transactional
+    public GpuAddressSyncResponse syncGpuAddress(UUID userId, GpuAddressSyncRequest req) {
+        if (req == null || req.host() == null || req.host().isBlank()) {
+            throw new BizException(ErrorCode.VALIDATION, "请填写新的 GPU 主机 / IP");
+        }
+        Integer port = req.port();
+        if (port == null || port < 1 || port > 65535) {
+            throw new BizException(ErrorCode.VALIDATION, "端口需在 1–65535 之间");
+        }
+        String raw = req.host().trim();
+        String scheme = "http";
+        java.util.regex.Matcher m = SYNC_URL.matcher(raw);
+        String newHost;
+        if (m.matches()) {
+            scheme = m.group("scheme");
+            newHost = m.group("host");
+        } else {
+            newHost = hostOf(raw);
+        }
+        if (newHost == null || newHost.isBlank()) {
+            throw new BizException(ErrorCode.VALIDATION, "无法解析新主机：" + raw);
+        }
+
+        UserEngineSettings s = repo.findByUserId(userId).orElseGet(() -> UserEngineSettings.defaults(userId));
+        String oldHost = (req.oldHost() != null && !req.oldHost().isBlank())
+                ? hostOf(req.oldHost()) : hostOf(s.gpuServerUrl());
+        if (oldHost == null || oldHost.isBlank()) {
+            throw new BizException(ErrorCode.VALIDATION,
+                    "当前配置里没有可识别的旧 GPU 地址（gpuServerUrl 为空）——请先填好旧地址，或在请求里显式传 oldHost");
+        }
+
+        List<GpuAddressSyncResponse.Change> changes = new ArrayList<>();
+        List<String> leftovers = new ArrayList<>();
+        JsonNode cur = s.services();
+        if (cur != null && cur.isObject()) {
+            s.setServices(rewriteAddresses(mapper, cur, oldHost, newHost, port, changes, leftovers));
+        }
+        String beforeUrl = s.gpuServerUrl();
+        Integer beforePort = s.gpuServerPort();
+        String newUrl = scheme + "://" + newHost;
+        s.setGpuServerUrl(newUrl);
+        s.setGpuServerPort(port);
+        if (beforeUrl == null || !newUrl.equalsIgnoreCase(beforeUrl.trim())) {
+            changes.add(new GpuAddressSyncResponse.Change("gpuServerUrl", str(beforeUrl), newUrl));
+        }
+        if (beforePort == null || !beforePort.equals(port)) {
+            changes.add(new GpuAddressSyncResponse.Change("gpuServerPort",
+                    beforePort == null ? "(空)" : String.valueOf(beforePort), String.valueOf(port)));
+        }
+        repo.save(s);
+        log.info("engine address synced user={} {} -> {}:{} fields={} leftovers={}",
+                userId, oldHost, newHost, port, changes.size(), leftovers.size());
+        // 回读：以库里最终值为准（平台配置页有「保存后回写旧快照」的前科，不能只信内存）
+        repo.findByUserId(userId).orElse(s);
+        return new GpuAddressSyncResponse(oldHost, newHost, port, changes, leftovers, toResponse(userId));
+    }
 }
+

@@ -1,11 +1,11 @@
 <script setup lang="ts">
-import { ArrowLeft, Save } from 'lucide-vue-next'
-import { NAlert, NButton, NDivider, NForm, NFormItem, NIcon, NInput, NInputNumber, NRadio, NRadioGroup, NSelect, useMessage } from 'naive-ui'
+import { ArrowLeft, RefreshCw, Save } from 'lucide-vue-next'
+import { NAlert, NButton, NDivider, NForm, NFormItem, NIcon, NInput, NInputNumber, NModal, NRadio, NRadioGroup, NSelect, useMessage } from 'naive-ui'
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 
-import { getEngineSettings, refreshModelPreset, saveEngineSettings } from '@/api/engineSettings'
-import type { EngineKind, EngineSettings, ModelPreset, ModelSchema } from '@/api/types'
+import { getEngineSettings, refreshModelPreset, saveEngineSettings, syncGpuAddress } from '@/api/engineSettings'
+import type { EngineKind, EngineSettings, GpuAddressSyncResult, ModelPreset, ModelSchema } from '@/api/types'
 import ModelSchemaPanel from '@/components/engine/ModelSchemaPanel.vue'
 
 const router = useRouter()
@@ -422,6 +422,92 @@ async function save(): Promise<void> {
   }
 }
 
+// ── 一键同步 GPU 地址（2026-09-21 事故后加）────────────────────────────────────
+// 为什么需要：GPU 盒换实例后 IP **和** 端口都会变，而 services 里**显式填过**的 URL 不会跟随
+// 「GPU 服务器地址」字段 —— 只改端口就是漏改，症状是出图/参考图上传报
+// `urlopen error [Errno 111] Connection refused`（worker 日志还会打另一个变量，看着「地址已经对了」）。
+const syncOpen = ref(false)
+const syncHost = ref('')
+const syncPort = ref<number | null>(null)
+const syncing = ref(false)
+const syncResult = ref<GpuAddressSyncResult | null>(null)
+
+/** 从 `http://1.2.3.4:27458` / `1.2.3.4` 里取 host（与后端 hostOf 同口径，只用于预览）。 */
+function hostOfUrl(v: string | null | undefined): string {
+  const s = (v ?? '').trim()
+  if (!s) return ''
+  const m = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\/([^/:\s]+)/.exec(s)
+  if (m) return m[1]
+  const hostPort = s.split('/')[0]
+  const i = hostPort.lastIndexOf(':')
+  return i > 0 && /^\d+$/.test(hostPort.slice(i + 1)) ? hostPort.slice(0, i) : hostPort
+}
+
+/** 旧主机 = 当前「GPU 服务器地址」里的 host（后端缺省也用它）。 */
+const syncOldHost = computed(() => hostOfUrl(gpuServerUrl.value))
+
+/** 会被后端改写的候选字段（与后端遍历范围一致：只扫 URL 字符串，不动工作流路径/模型名）。 */
+const syncTargets = computed(() =>
+  [
+    { field: 'gpuServerUrl', label: 'GPU 服务器地址', value: gpuServerUrl.value },
+    { field: 'services.image.comfyUrl', label: '出图 ComfyUI（关键帧 / 定妆照）', value: svcImageComfy.value },
+    { field: 'services.lipsync.comfyUrl', label: '对口型 ComfyUI', value: svcLipsyncComfy.value },
+    { field: 'services.music.url', label: '配乐服务', value: svcMusicUrl.value },
+    { field: 'services.talk.url', label: '整脸口型服务', value: svcTalkUrl.value },
+    { field: 'services.tts.url', label: '配音 TTS 服务', value: svcTtsUrl.value },
+    { field: 'services.transcribe.url', label: '转写服务', value: svcTranscribeUrl.value },
+    { field: 'services.face.url', label: '人脸服务', value: svcFaceUrl.value },
+  ].filter((t) => !!t.value),
+)
+
+/** 会被替换的（host 命中旧地址） */
+const syncPreview = computed(() => syncTargets.value.filter((t) => hostOfUrl(t.value) === syncOldHost.value))
+/** 不会被替换的（云 API 域名 / 另一台机器）—— 弹框里列出来，由用户自己判断要不要改 */
+const syncOthers = computed(() => syncTargets.value.filter((t) => hostOfUrl(t.value) !== syncOldHost.value))
+
+/** 预览「改成什么」（与后端同规则：保留 scheme 与路径，端口统一成新端口）。 */
+function previewAfter(before: string): string {
+  if (!syncHost.value.trim() || !syncPort.value) return '（填好新 IP / 端口后显示）'
+  return before.replace(
+    /^([a-zA-Z][a-zA-Z0-9+.-]*:\/\/)[^/:\s]+(?::\d{1,5})?/,
+    `$1${hostOfUrl(syncHost.value) || syncHost.value.trim()}:${syncPort.value}`,
+  )
+}
+
+function openSync(): void {
+  syncResult.value = null
+  syncHost.value = ''
+  syncPort.value = gpuServerPort.value ?? null
+  syncOpen.value = true
+}
+
+async function doSync(): Promise<void> {
+  const host = syncHost.value.trim()
+  if (!host) {
+    message.warning('请填写新的 GPU 主机 / IP')
+    return
+  }
+  if (!syncPort.value) {
+    message.warning('请填写新的端口')
+    return
+  }
+  syncing.value = true
+  try {
+    const r = await syncGpuAddress({ host, port: syncPort.value, oldHost: syncOldHost.value || null })
+    syncResult.value = r
+    await load()   // 用库里最终值刷新表单（后端已回读）
+    if (r.leftovers.length) {
+      message.warning(`已替换 ${r.changes.length} 处，但仍有 ${r.leftovers.length} 处指向别的 IP，请核对`)
+    } else {
+      message.success(`已同步 ${r.changes.length} 处：${r.oldHost} → ${r.newHost}:${r.newPort}`)
+    }
+  } catch (e) {
+    message.error(e instanceof Error ? e.message : '同步失败')
+  } finally {
+    syncing.value = false
+  }
+}
+
 onMounted(load)
 </script>
 
@@ -606,6 +692,16 @@ onMounted(load)
           <NFormItem label="图片分辨率" style="width: 300px">
             <NSelect v-model:value="imageMaxResolution" :options="imageResOptions" size="small" />
           </NFormItem>
+        </div>
+        <div class="sync-bar">
+          <NButton size="small" secondary data-testid="sync-gpu-address" @click="openSync">
+            <template #icon><NIcon><RefreshCw :size="14" /></NIcon></template>
+            一键同步 IP / 端口
+          </NButton>
+          <span class="hint text-secondary" style="margin: 0">
+            换实例后 <b>IP 与端口都会变</b>：这里一次把上面的 GPU 服务器地址 + 下面「服务地址」里所有
+            <b>已显式填过</b>的 URL 全换掉，并列出替换清单与改漏清单。
+          </span>
         </div>
         <p class="hint text-secondary" style="margin: -4px 0 10px">
           <b>视频分辨率</b>决定 motion 出片上限（换 GPU 卡就改这里）：实测 48G 卡上
@@ -807,6 +903,80 @@ onMounted(load)
           保存配置
         </NButton>
       </div>
+
+      <!-- 一键同步 GPU 地址：换实例后 IP/端口会变，而 services 里显式填过的 URL 不会跟随，
+           只改一个字段必然漏改（2026-09-21 事故）。这里先把所有候选 URL 列出来预览，再一次性换掉。 -->
+      <NModal v-model:show="syncOpen" preset="card" style="max-width: 660px" title="一键同步 GPU 地址（IP + 端口）">
+        <p class="hint text-secondary" style="margin-top: 0">
+          填入<b>新的</b> IP / 主机与端口。确认后会把指向
+          <code>{{ syncOldHost || '（未识别到旧地址）' }}</code> 的 URL 全部换成
+          <code>{{ hostOfUrl(syncHost) || '&lt;新IP&gt;' }}:{{ syncPort ?? '&lt;新端口&gt;' }}</code>
+          （路径保留，如 <code>/audio</code>、<code>/talk</code>、<code>/bgm</code>）。
+          <br>云 API（域名）与其它机器的地址不受影响，并会单独列出来供你判断。
+        </p>
+        <div class="row">
+          <NFormItem label="新 IP / 主机" class="grow">
+            <NInput v-model:value="syncHost" placeholder="如 180.127.11.169（可带 http://）" />
+          </NFormItem>
+          <NFormItem label="新端口" style="width: 160px">
+            <NInputNumber v-model:value="syncPort" :min="1" :max="65535" placeholder="27458" style="width: 130px" />
+          </NFormItem>
+        </div>
+        <NAlert v-if="!syncOldHost" type="warning" :bordered="false" style="margin-bottom: 10px">
+          当前「GPU 服务器地址」为空，无法识别旧地址 —— 请先在上面填好当前（旧）地址再同步，
+          或手工逐项改「服务地址」。
+        </NAlert>
+        <template v-else>
+          <p class="hint"><b>将替换 {{ syncPreview.length }} 处</b></p>
+          <ul class="sync-list">
+            <li v-for="t in syncPreview" :key="t.field">
+              <span class="text-secondary">{{ t.label }}</span><br>
+              <code>{{ t.value }}</code> → <code>{{ previewAfter(t.value) }}</code>
+            </li>
+          </ul>
+          <p v-if="syncOthers.length" class="hint">
+            ⚠ 另有 {{ syncOthers.length }} 处不是旧主机（<b>不会被改</b>，请确认是否也要改）：
+            <span v-for="t in syncOthers" :key="'o-' + t.field"><br>· {{ t.label }}：<code>{{ t.value }}</code></span>
+          </p>
+        </template>
+        <NAlert
+          v-if="syncResult"
+          :type="syncResult.leftovers.length ? 'warning' : 'success'"
+          :bordered="false"
+          style="margin-top: 10px"
+          data-testid="sync-result"
+        >
+          <b>已完成 {{ syncResult.changes.length }} 处</b>（{{ syncResult.oldHost }} → {{ syncResult.newHost }}:{{ syncResult.newPort }}）
+          <div v-for="c in syncResult.changes" :key="'c-' + c.field" style="margin-top: 6px">
+            <code>{{ c.field }}</code><br>
+            <code>{{ c.before }}</code> → <code>{{ c.after }}</code>
+          </div>
+          <div v-if="syncResult.leftovers.length" style="margin-top: 8px">
+            ⚠ 仍指向 IP、可能改漏：<br>
+            <div v-for="l in syncResult.leftovers" :key="l"><code>{{ l }}</code></div>
+          </div>
+        </NAlert>
+        <template #footer>
+          <div class="sync-footer">
+            <span class="hint text-secondary" style="margin: 0">
+              VPS 上 worker 的 <code>weaveora-gpu-worker.env</code> 是回退值，需一并改（见 <code>deploy/RESTART.md</code> §〇）
+            </span>
+            <div>
+              <NButton size="small" @click="syncOpen = false">关闭</NButton>
+              <NButton
+                size="small"
+                type="primary"
+                :loading="syncing"
+                :disabled="!syncOldHost || !syncHost.trim() || !syncPort"
+                data-testid="sync-gpu-confirm"
+                @click="doSync"
+              >
+                确认同步
+              </NButton>
+            </div>
+          </div>
+        </template>
+      </NModal>
     </NForm>
   </div>
 </template>
@@ -883,6 +1053,34 @@ onMounted(load)
 .actions {
   display: flex;
   justify-content: flex-end;
+}
+.sync-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin: 0 0 12px;
+}
+.sync-list {
+  margin: 6px 0 10px;
+  padding-left: 18px;
+  font-size: 12.5px;
+  line-height: 1.9;
+  max-height: 240px;
+  overflow: auto;
+}
+.sync-list code {
+  font-family: var(--wv-font-mono);
+  background: var(--wv-surface-raised);
+  padding: 0 4px;
+  border-radius: 4px;
+  word-break: break-all;
+}
+.sync-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
 }
 @media (max-width: 640px) {
   .row {

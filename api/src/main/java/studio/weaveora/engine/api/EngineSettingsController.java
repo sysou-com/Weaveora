@@ -37,6 +37,19 @@ public class EngineSettingsController {
         return service.update(uid(request), body);
     }
 
+    /**
+     * 一键同步 GPU 地址：把「所有指向旧 GPU 机器的 IP:端口」换成新值。
+     *
+     * <p>为什么要有这个端点：换 GPU 实例后 IP/端口都会变，而 services 里**显式填过**的 URL
+     * 不会跟随「GPU 服务器地址」字段（只改端口字段时出图链路仍打旧地址 → Connection refused）。
+     * 返回替换清单 + 改漏清单，让用户不用自己逐个核对。
+     */
+    @org.springframework.web.bind.annotation.PostMapping("/sync-address")
+    public GpuAddressSyncResponse syncAddress(HttpServletRequest request,
+                                              @RequestBody GpuAddressSyncRequest body) {
+        return service.syncGpuAddress(uid(request), body);
+    }
+
     /** P12：主动刷新模型调用参数说明（配/换模型后拉取；也可手动点「刷新参数说明」）。 */
     @org.springframework.web.bind.annotation.PostMapping("/refresh-models")
     public EngineSettingsResponse refresh(HttpServletRequest request,

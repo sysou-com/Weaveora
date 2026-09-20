@@ -579,6 +579,32 @@ export interface EngineSettings {
   services?: ServiceEndpoints | null
 }
 
+/**
+ * 一键同步 GPU 地址（POST /me/engine-settings/sync-address）：换 GPU 实例后把旧 IP:端口全量换掉。
+ *
+ * 为什么需要：`services` 里**显式填过**的 URL 不会跟随「GPU 服务器地址」字段，
+ * 只改端口会漏掉它们（2026-09-21：出图/参考图上传打到死地址 → Connection refused）。
+ */
+export interface GpuAddressSyncInput {
+  /** 新主机 / IP；允许 http://1.2.3.4、1.2.3.4、1.2.3.4:27458 三种写法 */
+  host: string
+  /** 新端口（1–65535） */
+  port: number
+  /** 可选：要被替换掉的旧主机；缺省 = 当前 gpuServerUrl 的 host */
+  oldHost?: string | null
+}
+
+/** 同步结果：替换清单 + 改漏检查 + 同步后的完整配置 */
+export interface GpuAddressSyncResult {
+  oldHost: string | null
+  newHost: string
+  newPort: number
+  changes: { field: string; before: string; after: string }[]
+  /** 仍是 IP 字面量、既不是新主机也不是回环的 URL（= 可能改漏的地方） */
+  leftovers: string[]
+  settings: EngineSettings
+}
+
 /** 服务地址：配音/配乐、对口型、转写、人脸（见后端 V15__engine_services.sql） */
 export interface ServiceEndpoints {
   /** 配音（CosyVoice 等 TTS 服务） */
