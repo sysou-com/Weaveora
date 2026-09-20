@@ -2943,22 +2943,24 @@ public class JobService {
                 sb.append("Picture ").append(i + 1).append(" (image").append(i + 1).append(") = ").append(name);
             }
             // ★ P14（2026-09-16 用户实测「宝玉被当女性」）：把该主体的人物档案直接写进正词。
-            //   定妆照只约束长相，性别/年龄/体态必须用文字说清 —— 否则视觉模型只能猜。
+            //   ★ 2026-09-21 简化：绑了定妆照时只写**性别/年龄**（describeRef）——
+            //   身高/体态/性格/外貌·服饰是“文字版外观断言”，会与参考图抢话语权（用户实测“可卿变丰腴、
+            //   衣服变粉红纱衣”就是它们被采纳），而外貌/服饰/体态本来就由定妆照决定。
             studio.weaveora.director.plan.PlanSubjects.Traits tr =
                     studio.weaveora.director.plan.PlanSubjects.traitsOf(plan, name);
             if (tr != null && !tr.isEmpty()) {
-                sb.append('[').append(tr.describe(zh)).append(']');
+                sb.append('[').append(tr.describeRef(zh)).append(']');
             }
             if (motion && tr != null && tr.height() != null && !tr.height().isBlank()) {
                 heights.add(name + " " + tr.height().trim());
             }
             // motion：不写方位/坐标/框 —— 位置以关键帧为准（见方法注释）。
             if (p != null && !motion) {
-                sb.append(zh ? "（" : " (")
-                  .append(zh ? posHintZh(p[0], p[1]) : posHint(p[0], p[1]))
-                  .append(zh ? "，x=" : ", x=").append(fmt2(p[0]))
-                  .append(zh ? "，y=" : ", y=").append(fmt2(p[1]))
-                  .append(zh ? "，框 " : ", box ").append(fmt2(p[2])).append("x").append(fmt2(p[3]))
+                // ★ 2026-09-21 简化：只留**自然语言方位**，删掉 x=/y=/框 数字。
+                //   为什么：模型不认归一化数字（实测设 x=0.05 落到 x=0.40），且 2511 有“几何推理 / 会画辅助
+                //   构造线”的倾向 → 写“框 0.30x0.98”有被画出来的风险；数字还会与剧情句里的方位词打架。
+                //   方位词由 posHintZh 从同一份 region 推出，站位信息不丢。
+                sb.append(zh ? "（" : " (").append(zh ? posHintZh(p[0], p[1]) : posHint(p[0], p[1]))
                   .append(zh ? "）" : ")");
             }
         }
@@ -2978,9 +2980,9 @@ public class JobService {
                 // ★ motion(clip)：身份 + 档案 + 「以关键帧为构图基准」；不含任何框/坐标。
                 add = zh
                         ? "\n主体与人物设定（本镜按关键帧里出现的角色，顺序与系统内部一致）：" + sb
-                          + "。方括号里是该主体的人物设定（性别/年龄/体态/外貌），**必须严格遵守**："
+                          + "。方括号里是该主体的人物设定（性别/年龄），**必须严格遵守**："
                           + "不得把男性画成女性（或反之），不得画成与年龄不符的样貌；"
-                          + "方括号里没写性别的主体，请严格以其在关键帧里的面貌为准。"
+                          + "面容/发型/服饰/体态一律以各自参考图（定妆照）为准，不得按文字更改。"
                           + "【以关键帧为构图基准】本镜从已生成的关键帧首帧开始运动：画面构图、每个角色在画面中的位置"
                           + "与相对大小一律以关键帧为准。" + heightLine
                           + "只需表现动作、朝向、方向与镜头运动（前后景纵深、左右移动、走位、转身、推拉摇移）；"
@@ -2988,10 +2990,11 @@ public class JobService {
                           + "禁止让他/她越走越近、越走越大、越走越高；近大远小只能来自透视与镜头运动，"
                           + "不得改变人物之间的相对大小与身高比例。"
                         : "\nSubjects & profiles (in keyframe order; internal order matches): " + sb
-                          + ". The bracketed facts are each subject's fixed profile (gender/age/build/look) —"
-                          + " obey them strictly: never render a male character as female or vice versa, and never"
-                          + " change their age; for a subject without a stated gender, follow how they appear in the"
-                          + " keyframe. [Keyframe is authoritative for composition] This shot starts from an already"
+                          + ". The bracketed facts are each subject's hard constraints (gender/age) — obey them"
+                          + " strictly: never render a male character as female or vice versa, and never change their"
+                          + " age; face/hair/costume/build always follow each subject's own reference (portrait) image and"
+                          + " must not be altered by text."
+                          + " [Keyframe is authoritative for composition] This shot starts from an already"
                           + " generated keyframe: the framing and each character's position and relative size are"
                           + " fixed by it. " + heightLine
                           + "Express only action, facing, direction and camera movement (depth/foreground,"
@@ -3002,22 +3005,18 @@ public class JobService {
                           + " height ratio must stay fixed.";
             } else {
                 add = zh
-                    ? "\n参考图与主体对应（按送入顺序）：" + sb
-                      + "。请严格按这个对应关系：每个角色只用自己的参考图，并放在括号里给的位置与相对大小上"
-                      + "（归一化画面坐标，原点在左上；y 越小越靠上，框越大越靠近镜头）；角色之间保持明显分开。"
-                      + "方括号里是该主体的人物设定（性别/年龄/体态/外貌），**必须严格遵守**：不得把男性画成女性（或反之），"
-                      + "不得画成与年龄不符的样貌；方括号里没写性别的主体，请严格以其参考图（Picture N）的面貌为准。"
-                      + "【位置以本清单为准】上面的动作/氛围描述仅供理解剧情，其中任何方位词（前后景、左右、远近）"
-                      + "若与本清单不一致，一律以本清单给出的位置与框大小为准。"
+                    ? "\n参考图映射（按送入顺序）：" + sb
+                      + "。每个角色只用自己的参考图；面容、发型、服饰、体态一律以该参考图为准，"
+                      + "不得按文字更改；角色之间保持明显区分，禁止互换或混用身份。"
+                      + "方括号里的性别/年龄为硬约束（不得把男性画成女性或反之、不得改变年龄）。"
+                      + "括号里的方位词是硬性站位要求：剧情描述中的方位若与此冲突，以本清单为准。"
                     : "\nReference mapping (in input order): " + sb
-                      + ". Follow it strictly: each character uses only its own reference image and is placed at"
-                      + " the given position and relative size (normalized frame coordinates, origin top-left;"
-                      + " smaller y = higher in frame, larger box = closer to camera); keep them clearly apart."
-                      + " The bracketed facts are each subject's fixed profile (gender/age/build/look) — obey them"
-                      + " strictly: never render a male character as female or vice versa, and never change their age."
-                      + " [Authoritative placement] The action/mood description above is for story context only;"
-                      + " if any spatial wording in it (foreground/background, left/right, near/far) conflicts with"
-                      + " this list, the positions and box sizes given here always win.";
+                      + ". Each character uses only its own reference image; face/hair/costume/build always follow"
+                      + " that reference and must not be altered by the text; keep subjects clearly distinct and never"
+                      + " blend or swap their identities. The bracketed gender/age are hard constraints: never"
+                      + " render a male character as female or vice versa, and never change the age. The direction"
+                      + " word in parentheses is the authoritative placement: if the story text conflicts with it,"
+                      + " this list wins.";
             }
             payload.put("positive_prompt", cur + add);
             if (motion) {
