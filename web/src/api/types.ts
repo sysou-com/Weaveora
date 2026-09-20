@@ -491,6 +491,10 @@ export interface JobRecord {
   errorCode: string | null
   errorMessage: string | null
   createdAt: string
+  /** 真正开始跑的时刻（排队中为 null）—— 用来算「已耗时」，不含排队时间 */
+  startedAt: string | null
+  /** 终态时刻（succeeded/failed/cancelled），未结束为 null */
+  finishedAt: string | null
   payload?: {
     shot_no?: number
     revisionId?: string

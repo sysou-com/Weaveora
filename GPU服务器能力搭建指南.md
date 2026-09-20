@@ -302,15 +302,25 @@ UNETLoader(wan2.2_i2v_low_noise_14B_fp8_scaled)  + LoRA(low)
   → VAEDecode → CreateVideo(fps=16 原生) → SaveVideo
 ```
 
-档位预设（`worker/comfy_client.py`）：
+档位预设（`worker/comfy_client.py`；★ hero/full = 2026-09-20 对齐官方口径后改定）：
 
-| preset | steps | switch | cfg_high | cfg_low | lora_high | lora_low | shift |
-|---|---|---|---|---|---|---|---|
-| draft | 4 | 2 | 1.0 | 1.0 | 0.0 | 1.0 | 5.0 |
-| balanced | 6 | 3 | 1.0 | 1.0 | 0.0 | 1.0 | 5.0 |
-| motion | 8 | 4 | 1.5 | 1.0 | 0.0 | 1.0 | 5.0 |
-| hero | 6 | 3 | 3.5 | 1.0 | 0.0 | 1.0 | 5.0 |
-| full | 24 | 12 | 3.5 | 3.5 | 0.0 | 0.0 | 5.0 |
+| preset | steps | switch | cfg_high | cfg_low | lora_high | lora_low | shift | 口径 / 来源 |
+|---|---|---|---|---|---|---|---|---|
+| draft | 4 | 2 | 1.0 | 1.0 | 0.0 | 1.0 | 5.0 | 官方**加速档**骨架（只留低噪蒸馏） |
+| balanced | 6 | 3 | 1.0 | 1.0 | 0.0 | 1.0 | 5.0 | 生产默认 |
+| motion | 8 | 4 | 1.5 | 1.0 | 0.0 | 1.0 | 5.0 | 动态优先 |
+| **hero** | **20** | **10** | **3.5** | **3.5** | **0.0** | **0.0** | **5.0** | **官方质量档**：ComfyUI 模板 `video_wan2_2_14B_i2v.json`（不蒸馏） |
+| **full** | **40** | **36** | **3.5** | **3.5** | **0.0** | **0.0** | **5.0** | **官方原厂档**：`wan/configs/wan_i2v_A14B.py`（不蒸馏） |
+
+**官方口径（2026-09-20 实抓一手源）**：
+- Wan 仓库 `wan/configs/wan_i2v_A14B.py`：`sample_shift=5.0`、`sample_steps=40`、`boundary=0.900`、`sample_guide_scale=(3.5, 3.5)`（低噪/高噪）
+  → 我们按**步序**切专家（官方 `boundary` 按**时间步**，非同一语义）⇒ full 的 switch ≈ 0.9×40 = **36**。
+- ComfyUI 模板 `video_wan2_2_14B_i2v.json`：质量档 `steps 20 / switch 10 / cfg 3.5 / 不挂 LoRA / shift 5.0 / euler+simple`；
+  加速档 `steps 4 / switch 2 / cfg 1.0 / **高噪+低噪两个专家都挂 4 步蒸馏 LoRA@1.0** / shift 5.0`。
+  模板自带耗时表（RTX4090D 24G @640×640/81 帧）：fp8_scaled **≈536s / 513s**；fp8_scaled + 4steps LoRA **≈97s / 71s**。
+- ⚠ 盒子差异：官方加速档给**高噪声专家**也挂 LoRA，而我们在 48G 上实测会 OOM（fp8 权重需再 dequant 一份 ≈28GiB）
+  ⇒ 生产一律 `lora_high=0`；要复现官方加速档只能换 Comfy 官方 repack 的 `wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors` 并先做显存验证。
+- ⚠ 我们盘上的蒸馏 LoRA 是 **260412 rank64 fp16（2026-04-20，720p 重训版）**，比模板引用的 `..._4steps_lora_v1_*` 新一代 ⇒ **强度约定可能不同，勿直接照搬 1.0**。
 
 **显存**：双专家 fp8 + umt5 ≈ **峰值 42 GB** → 与 talk/LatentSync/TTS **必须串行**（worker 会在 clip 前调 TTS `/unload` 让显存）。
 

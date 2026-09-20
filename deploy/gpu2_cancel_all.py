@@ -28,7 +28,7 @@ for j in live:
         print("  取消失败 %s: %s" % (j.get('id'), str(e)[:100]))
 
 # ③ 中断 ComfyUI（清队列）
-GW = 'http://180.127.11.167:14858'
+GW = 'http://180.127.11.167:12476'   # 端口每次平台重开都可能变（2026-09-19 = 12476）
 for _ in range(2):
     try:
         req = urllib.request.Request(GW + '/interrupt', method='POST')

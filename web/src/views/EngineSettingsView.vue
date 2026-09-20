@@ -176,7 +176,11 @@ const MOTION_SNAP_KEYS = [
 ]
 const lastPreset = ref<string>('')
 function presetSnapshots(): Record<string, Record<string, unknown>> {
-  const v = videoParams.value.presetSnapshots
+  // ★ 2026-09-20 修：后端白名单会把键名归一成 snake_case（EngineSettingsService.snake()）→ 真正落库的是
+  //   `preset_snapshots`；旧代码只读 camel `presetSnapshots` ⇒ 永远读不到（切回旧档总是提示「该档还没存过参数」）。
+  //   两个名字都认，写回时统一用 snake。
+  const src = videoParams.value
+  const v = src.preset_snapshots ?? src.presetSnapshots
   return v && typeof v === 'object' ? (v as Record<string, Record<string, unknown>>) : {}
 }
 
@@ -193,7 +197,8 @@ function onPresetChange(nextRaw: string | null): void {
     snaps[prev] = snap
   }
   const target = next ? snaps[next] : undefined
-  const merged: Record<string, unknown> = { ...(videoParams.value ?? {}), presetSnapshots: snaps }
+  const merged: Record<string, unknown> = { ...(videoParams.value ?? {}), preset_snapshots: snaps }
+  delete merged.presetSnapshots   // 统一用后端认识的 snake 键，避免两份并存
   if (next) merged.preset = next
   else delete merged.preset
   if (target) {
@@ -211,13 +216,17 @@ const motionResOptions = [
   { label: '480p（推荐：长边 832）', value: '480p' },
   { label: '720p（原分辨率，很慢）', value: '720p' },
 ]
-// ★ 图片分辨率（出图长边像素，2026-09-18）：全局生效于**所有出图**（关键帧/定妆照/参考图）。
+// ★ 图片分辨率（档位值 = 以 16:9 历史基准 1280×704 为 1× 的**长边目标**，后端 32 对齐后落成实际尺寸）。
 //   与视频分辨率分开：出图（Qwen-Image）与出视频（Wan2.2 I2V）是两条独立链路，性价比拐点完全不同。
-//   尺寸 = 画幅基础尺寸等比放大到该长边（16:9 → 1280×704 / 1920×1056 / 2560×1408），32 对齐。
+// ★ 2026-09-20：用户要求下拉直接给「实际出图分辨率」两档（实测同 prompt/同参考/同 seed，40步·cfg4）：
+//   1408×768（1.08MP，≈官方 ~1MP 预算）→ 305s、0 黑边；1664×928（1.54MP，= Qwen 官方 16:9 训练桶）→ 350s、0 黑边；
+//   2560×1408（3.60MP，官方预算的 3.4 倍）→ 561~570s 且会出上下纯黑带（301/303 行）。
 const imageResOptions = [
-  { label: '1280（16:9 → 1280×704，默认）', value: 1280 },
-  { label: '1920（16:9 → 1920×1056）', value: 1920 },
-  { label: '2560（16:9 → 2560×1408，≈2K）', value: 2560 },
+  { label: '1280×704（16:9 · 默认）', value: 1280 },
+  { label: '1408×768（16:9 · ≈1MP 官方工作预算）', value: 1408 },
+  { label: '1664×928（16:9 · Qwen 官方训练桶）', value: 1664 },
+  { label: '1920×1056（16:9）', value: 1920 },
+  { label: '2560×1408（16:9 · ≈2K，慢且易出黑边）', value: 2560 },
 ]
 const motionJson = ref('')
 
@@ -601,8 +610,8 @@ onMounted(load)
         <p class="hint text-secondary" style="margin: -4px 0 10px">
           <b>视频分辨率</b>决定 motion 出片上限（换 GPU 卡就改这里）：实测 48G 卡上
           <b>720p/48 帧要 10 分钟以上且易超时</b>，<b>480p 只要 27~50 秒</b>；A14B 的甜点也是 480p 级。<br>
-          <b>图片分辨率</b>决定所有出图（关键帧 / 定妆照 / 参考图）的长边像素，**全局生效**：
-          越高越清晰（关键帧细节会带进视频底图），代价是出图更慢、更占显存。
+          <b>图片分辨率</b>决定所有出图（关键帧 / 定妆照 / 参考图）的尺寸，**全局生效**
+          （档位按 16:9 口径标注实际出图尺寸；其它画幅按同比例 32 对齐缩放）。越高越清晰（关键帧细节会带进视频底图），代价是出图更慢、更占显存。
         </p>
 
         <!-- 自托管 motion 档位（Wan2.2 I2V-A14B 双专家）

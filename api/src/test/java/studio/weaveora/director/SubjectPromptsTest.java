@@ -21,7 +21,11 @@ class SubjectPromptsTest {
         String zh = SubjectPrompts.portraitPrompt("宝玉", "person", 0);
         assertTrue(zh.contains("宝玉"), zh);
         assertTrue(zh.contains("标准角色设定图"), zh);
-        assertTrue(zh.contains("纯色背景"), zh);
+        // 2026-09-19（用户要求）：底色统一为**纯白色** —— 原为“纯色背景”，模型可自选暗色/暖色底，
+        //   各版定妆照底色不一致 → 作参考时把关键帧的色调带偏（实测白底版归一化后脸宽 157px，
+        //   带环境氛围版只剩 61px）。所以断言改成白底，并把“不要环境/场景元素”也纳入契约。
+        assertTrue(zh.contains("纯白色背景"), zh);
+        assertTrue(zh.contains("不要任何环境"), zh);
         // 必须显式禁止多人物/文字/边框 —— 定妆照会被当锚定图，画面里多一个人就整体串脸
         assertTrue(zh.contains("不要多人物"), zh);
         assertTrue(zh.contains("不要文字"), zh);

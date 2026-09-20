@@ -142,6 +142,27 @@ public final class PlanSubjects {
             return String.join(zh ? "；" : "; ", parts);
         }
 
+        /**
+         * 「参考图模式」的一行式描述（绑定了定妆照的镜头用）：**只保留性别 + 年龄**。
+         *
+         * <p>为什么砍掉身高/体态/性格/外貌·服饰（2026-09-21 用户实测口径）：这几个字段是**文字版外观断言**，
+         * 会与参考图（Picture N）抢话语权 —— 用户实测到的「可卿体态变丰腴、衣服被改成粉红纱衣」就是它们
+         * 被采纳的结果；而 1664/1MP 档下文本占比更高（实测从 3% 升到 4.6%），越容易压过参考图。
+         * 外貌/服饰/体态本来就该由定妆照决定；性格对画面无意义；身高另有 motion 的「身高比例」行单独使用
+         * （见 JobService 的 heightLine，直接读 {@link #height()} 而不经本方法）。
+         */
+        public String describeRef(boolean zh) {
+            List<String> parts = new ArrayList<>();
+            String gz = genderZh();
+            if (!gz.isEmpty()) {
+                parts.add(zh ? "性别 " + gz + " " + genderEn() : "gender " + genderEn() + " (" + gz + ")");
+            }
+            if (!blank(age)) {
+                parts.add((zh ? "年龄 " : "age ") + age.trim());
+            }
+            return String.join(zh ? "；" : "; ", parts);
+        }
+
         /** 极简摘要（列表 UI / 日志用），如「男·17·清瘦」。 */
         public String shortLabel() {
             List<String> parts = new ArrayList<>();

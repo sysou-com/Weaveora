@@ -108,7 +108,7 @@ def run_one(gateway, wf_path, tag, prompt, negative, seed, width, height, steps,
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--gateway", default="http://180.127.11.167:31058")
+    ap.add_argument("--gateway", default="http://180.127.11.167:12476")
     ap.add_argument("--workflow", default=WORKFLOW_DEFAULT)
     ap.add_argument("--prompt", required=True)
     ap.add_argument("--negative", default="text, watermark, logo, subtitle, lowres, blurry, "
