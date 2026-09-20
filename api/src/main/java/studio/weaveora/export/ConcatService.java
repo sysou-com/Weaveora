@@ -52,13 +52,49 @@ public class ConcatService {
     private static final long FFMPEG_TIMEOUT_SEC = 1200;
     /** 转场叠化时长（秒）。 */
     private static final double CROSSFADE_SEC = 0.4;
+    /** 成片画布配置的格式："宽x高"（x / X / × 均可）。 */
+    private static final Pattern CANVAS_RE = Pattern.compile("^(\\d{2,5})\\s*[xX×]\\s*(\\d{2,5})$");
 
-    /** 成片画布：按项目画幅（修复竖屏 9:16 被压成横屏）。高基准 720（横） / 1280（竖）。 */
-    private static int[] canvasFor(String aspect) {
+    /**
+     * 成片画布：按项目画幅（修复竖屏 9:16 被压成横屏）。
+     *
+     * <p>★ 2026-09-21 由**硬编码常量**改为**可配置**（默认值 = 原常量，行为完全不变）：
+     * {@code weaveora.render.canvas.wide} / {@code .portrait} / {@code .square}，形如 {@code 1280x720}
+     * （env 写法 {@code WEAVEORA_RENDER_CANVAS_WIDE=1280x704}）。配置非法 → 回退默认并 WARN，
+     * <b>绝不因为写错配置把成片打挂</b>。
+     *
+     * <p>改之前先想清楚：{@code encodeSegment} 用
+     * {@code scale=cw:ch:force_original_aspect_ratio=increase,crop=cw:ch}（= cover + 居中裁切），
+     * 所以**改小高度 = 裁掉上下内容**（16:9 源 1280x720 → 1280x704 就是上下各裁 8px）。
+     * 另外：改它只影响**之后**渲染出的 master —— 已渲染的成品是独立文件（对象键是随机 UUID），
+     * 既不会被覆盖、也不会被重新编码。
+     */
+    private int[] canvasFor(String aspect) {
         String a = aspect == null ? "" : aspect.trim();
-        if (a.startsWith("9:16")) return new int[]{720, 1280};
-        if (a.startsWith("1:1")) return new int[]{720, 720};
-        return new int[]{1280, 720};
+        if (a.startsWith("9:16")) return parseCanvas(canvasPortrait, 720, 1280);
+        if (a.startsWith("1:1")) return parseCanvas(canvasSquare, 720, 720);
+        return parseCanvas(canvasWide, 1280, 720);
+    }
+
+    /** 解析 "1280x720"；空/非法/越界 → 回退默认值并 WARN（成片不能因配置写错而失败）。 */
+    private int[] parseCanvas(String spec, int defaultW, int defaultH) {
+        String s = spec == null ? "" : spec.trim();
+        Matcher m = CANVAS_RE.matcher(s);
+        if (m.matches()) {
+            try {
+                int w = Integer.parseInt(m.group(1));
+                int h = Integer.parseInt(m.group(2));
+                if (w >= 64 && h >= 64 && w <= 8192 && h <= 8192) {
+                    return new int[]{w, h};
+                }
+            } catch (NumberFormatException ignore) {
+                // 落到下面的告警 + 默认值
+            }
+        }
+        if (!s.isEmpty()) {
+            log.warn("成片画布配置非法（'{}'）→ 回退 {}x{}", s, defaultW, defaultH);
+        }
+        return new int[]{defaultW, defaultH};
     }
 
     private final AssetService assets;
@@ -70,13 +106,20 @@ public class ConcatService {
     private final PlanReader planReader;
     private final String ffmpeg;
     private final String subtitleFont;
+    /** 成片画布（可配置；默认值 = 历史常量）。见 {@link #canvasFor}。 */
+    private final String canvasWide;
+    private final String canvasPortrait;
+    private final String canvasSquare;
 
     public ConcatService(AssetService assets, AssetRepository assetRepo,
                          studio.weaveora.asset.AudioAssetLookup audioLookup,
                          StoragePort storage,
                          ProjectContextPort projects, WorkspaceGuard guard, PlanReader planReader,
                          @Value("${weaveora.ffmpeg:ffmpeg}") String ffmpeg,
-                         @Value("${weaveora.subtitle-font:}") String subtitleFont) {
+                         @Value("${weaveora.subtitle-font:}") String subtitleFont,
+                         @Value("${weaveora.render.canvas.wide:1280x720}") String canvasWide,
+                         @Value("${weaveora.render.canvas.portrait:720x1280}") String canvasPortrait,
+                         @Value("${weaveora.render.canvas.square:720x720}") String canvasSquare) {
         this.assets = assets;
         this.assetRepo = assetRepo;
         this.audioLookup = audioLookup;
@@ -86,6 +129,9 @@ public class ConcatService {
         this.planReader = planReader;
         this.ffmpeg = ffmpeg;
         this.subtitleFont = subtitleFont == null ? "" : subtitleFont;
+        this.canvasWide = canvasWide;
+        this.canvasPortrait = canvasPortrait;
+        this.canvasSquare = canvasSquare;
     }
 
     @Transactional

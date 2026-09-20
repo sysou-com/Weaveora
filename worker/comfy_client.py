@@ -70,6 +70,23 @@ IMAGE_LORA_STEPS = int(os.environ.get("WEAVEORA_IMAGE_LORA_STEPS", "4") or 4)
 #   所以取 1.5：蒸馏模型的工作点附近，同时保留部分负词权重（cfg-1=0.5）。
 #   注意：负词里如果还写着「真人肖像」这类“禁止画真实人脸”的词，在这个 cfg 下依然会把脸推向非写实 → 必须删。
 IMAGE_LORA_CFG = float(os.environ.get("WEAVEORA_IMAGE_LORA_CFG", "1.5") or 1.5)
+# ★ 2026-09-21：出图后**自动放大**（SeedVR2 —— ComfyUI 0.34 核心原生节点，无需自定义节点）。
+#   动机（实测，同图同 seed）：I2V 只吃 480p（长边 832）→ 首帧会被下采样；**源越锐、降采样后越锐**：
+#     1664×928 原生 → 下采样到 832 的高频能量 3.15
+#     先 SeedVR2 放 2×（3328×1856）再降采样 → 4.39（**+40%**）；耗时 ~20s、显存 ~5G、
+#     内容保真（降回原尺寸平均绝对差 3.4/255）、无黑边、不改构图与身份。
+#   对比“原生出 2560×1408”：561s/张 + 43% 概率上下黑边 + 超官方预算 3.4× 的漂移 ⇒ 便宜得多。
+#   生效范围：只作用于**出图**（still / portrait）；不碰出片（clip）/对口型/配乐。
+#   失败策略：任何异常都**保留原图**并把原因写进资产 notes（绝不因此让出图失败）。
+#   开关：WEAVEORA_IMAGE_UPSCALE=seedvr2（留空=关）｜倍数 WEAVEORA_IMAGE_UPSCALE_SCALE（默认 2）
+#         长边上限 WEAVEORA_IMAGE_UPSCALE_MAX（默认 4096）｜步数 WEAVEORA_IMAGE_UPSCALE_STEPS（默认 1）
+IMAGE_UPSCALE = os.environ.get("WEAVEORA_IMAGE_UPSCALE", "").strip().lower()
+IMAGE_UPSCALE_SCALE = float(os.environ.get("WEAVEORA_IMAGE_UPSCALE_SCALE", "2") or 2)
+IMAGE_UPSCALE_MAX = int(os.environ.get("WEAVEORA_IMAGE_UPSCALE_MAX", "4096") or 4096)
+IMAGE_UPSCALE_STEPS = int(os.environ.get("WEAVEORA_IMAGE_UPSCALE_STEPS", "1") or 1)
+IMAGE_UPSCALE_TIMEOUT = int(os.environ.get("WEAVEORA_IMAGE_UPSCALE_TIMEOUT", "600") or 600)
+SEEDVR2_MODEL = os.environ.get("WEAVEORA_SEEDVR2_MODEL", "seedvr2_3b_fp8_e4m3fn.safetensors")
+SEEDVR2_VAE = os.environ.get("WEAVEORA_SEEDVR2_VAE", "ema_vae_fp16.safetensors")
 # ★ 区域条件（位置优先）开关：默认关闭。
 #   原因（2026-09-16 实测两轮）：Qwen-Image-Edit 的 conditioning（TextEncodeQwenImageEditPlus 带参考图
 #   latent）被 ConditioningSetAreaPercentage 包裹再用 ConditioningCombine 合并后，KSampler 必报
@@ -579,6 +596,8 @@ def generate_via_workflow(client_id, payload, progress_fn=None, on_tick=None):
         outs = _download_outputs(rec, prefix)
         if not outs:
             raise ComfyError("工作流出图无输出（%s）" % os.path.basename(path))
+        # ★ 2026-09-21 出图后放大（默认关；WEAVEORA_IMAGE_UPSCALE=seedvr2 开启）：只作用于出图
+        outs = _maybe_upscale_outputs(outs)
         # 降级提示随资产上报（前端资产卡 ⚠ 可见），不只藏在日志里
         if _img_notes:
             _note_txt = "；".join(_img_notes)
@@ -893,6 +912,84 @@ def _rect_mask_png(width, height, region):
 def _upload_image(data, filename, ctype="image/png"):
     _, body = _comfy("POST", "/upload/image", files={"image": (filename, data, ctype)})
     return json.loads(body.decode()).get("name")
+
+
+def _png_dims(data):
+    """只读 PNG 头的宽高（不依赖 PIL）。非 PNG / 太短 → None。"""
+    try:
+        if len(data) < 24 or data[:8] != b"\x89PNG\r\n\x1a\n":
+            return None
+        w, h = struct.unpack(">II", data[16:24])
+        return int(w), int(h) if w > 0 else None
+    except Exception:
+        return None
+
+
+def _seedvr2_graph(src_name, tw, th, steps):
+    """SeedVR2 放大图（节点签名实测自 ComfyUI 0.34 的 /object_info）。"""
+    return {
+        "1": {"class_type": "UNETLoader", "inputs": {"unet_name": SEEDVR2_MODEL, "weight_dtype": "default"}},
+        "3": {"class_type": "VAELoader", "inputs": {"vae_name": SEEDVR2_VAE}},
+        "12": {"class_type": "LoadImage", "inputs": {"image": src_name}},
+        "13": {"class_type": "ImageScale", "inputs": {"image": ["12", 0], "upscale_method": "lanczos",
+                                                    "width": int(tw), "height": int(th), "crop": "disabled"}},
+        "14": {"class_type": "SeedVR2Preprocess", "inputs": {"resized_images": ["13", 0]}},
+        "15": {"class_type": "VAEEncode", "inputs": {"pixels": ["14", 0], "vae": ["3", 0]}},
+        "16": {"class_type": "SeedVR2Conditioning",
+               "inputs": {"model": ["1", 0], "vae_conditioning": ["15", 0]}},
+        "9": {"class_type": "KSampler", "inputs": {"model": ["1", 0], "positive": ["16", 0],
+                                                   "negative": ["16", 1], "latent_image": ["15", 0],
+                                                   "seed": 1234, "steps": int(steps), "cfg": 1.0,
+                                                   "sampler_name": "euler", "scheduler": "simple",
+                                                   "denoise": 1.0}},
+        "10": {"class_type": "VAEDecode", "inputs": {"samples": ["9", 0], "vae": ["3", 0]}},
+        "17": {"class_type": "SeedVR2PostProcessing",
+               "inputs": {"images": ["10", 0], "original_resized_images": ["14", 0],
+                          "color_correction_method": "lab"}},
+        "11": {"class_type": "SaveImage", "inputs": {"images": ["17", 0], "filename_prefix": "weaveora_up"}},
+    }
+
+
+def _seedvr2_upscale(data):
+    """把出图字节交给 SeedVR2 放大；成功返回 (新字节, 说明)。失败抛异常，由调用方兜底保原图。"""
+    dims = _png_dims(data)
+    if not dims:
+        raise RuntimeError("不是可识别的 PNG，跳过放大")
+    w, h = dims
+    k = IMAGE_UPSCALE_SCALE if IMAGE_UPSCALE_SCALE > 1 else 2.0
+    tw, th = int(round(w * k)), int(round(h * k))
+    if max(tw, th) > IMAGE_UPSCALE_MAX:      # 只降不升：超上限时按上限等比缩
+        f = IMAGE_UPSCALE_MAX / float(max(tw, th))
+        tw, th = int(round(tw * f)), int(round(th * f))
+    src = _upload_image(data, "wv_up_%d.png" % int(time.time() * 1000))
+    if not src:
+        raise RuntimeError("上传到 ComfyUI 失败")
+    nc = "weaveora-upscale"
+    pid = _post_prompt({"prompt": _seedvr2_graph(src, tw, th, IMAGE_UPSCALE_STEPS), "client_id": nc}, nc)
+    rec = _poll_history(nc, pid, timeout=IMAGE_UPSCALE_TIMEOUT)
+    outs = _download_outputs(rec, "weaveora_up")
+    if not outs:
+        raise RuntimeError("SeedVR2 放大无输出")
+    return outs[0]["bytes"], "已 SeedVR2 放大 %d×%d → %d×%d" % (w, h, tw, th)
+
+
+def _maybe_upscale_outputs(outs):
+    """出图后的统一放大入口（开关关闭/失败 → 原样返回，绝不影响出图成功）。"""
+    if not outs or IMAGE_UPSCALE in ("", "0", "off", "none", "false"):
+        return outs
+    for o in outs:
+        try:
+            t0 = time.time()
+            nb, note = _seedvr2_upscale(o["bytes"])
+            if nb and len(nb) > len(o["bytes"]):
+                d0, d1 = _png_dims(o["bytes"]), _png_dims(nb)
+                o["bytes"] = nb
+                o["notes"] = ((o.get("notes") + "；") if o.get("notes") else "") + note
+                print("[comfy] 出图放大：%s → %s  %.0fs（%s）"
+                      % (d0, d1, time.time() - t0, IMAGE_UPSCALE), flush=True)
+        except Exception as e:
+            print("[comfy] WARN 出图放大失败（保留原图）：%s" % str(e)[:200], flush=True)
+    return outs
 
 
 def _sampler_options(kind, fallback):
