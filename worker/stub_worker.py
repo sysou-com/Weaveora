@@ -575,7 +575,10 @@ def execute_job(job):
                 else:
                     outs = engine.generate("weaveora-stub-worker", payload,
                                            progress_fn=_prog(jid))
-                media = [(o["bytes"], "image/png", width, height, None) for o in outs]
+                # ★ 2026-09-21（§5-3）：尺寸优先用**产物真实尺寸**（放大后），退回 params ——
+                #   以前写死 params 尺寸，导致放大到 3328×1856 后 DB 里仍记 1664×928。
+                media = [(o["bytes"], "image/png",
+                          o.get("width") or width, o.get("height") or height, None) for o in outs]
             return _complete(jid, payload, media)
         except Exception as e:
             _req("POST", "/internal/jobs/%s/fail" % jid, {"code": "COMFY_ERROR", "message": str(e)[:500]})

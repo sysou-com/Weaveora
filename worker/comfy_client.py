@@ -973,9 +973,27 @@ def _seedvr2_upscale(data):
     return outs[0]["bytes"], "已 SeedVR2 放大 %d×%d → %d×%d" % (w, h, tw, th)
 
 
+def _annotate_dims(outs):
+    """★ 2026-09-21（§5-3）：把**实际字节**的宽高写回条目（`o["width"]`/`o["height"]`）。
+
+    为什么：stub_worker 以前只用 payload 的 params 尺寸上报 complete —— 放大成功后 DB 里
+    仍是放大前的 1664×928（磁盘文件其实 3328×1856），资产卡显示的数字与成片不符。
+    `_download_outputs` 返回的条目本来只有 filename/bytes/subfolder，没有尺寸，所以这里补。
+    读不出尺寸的（mp4/webp，非 PNG）保持原样不动。
+    """
+    for o in outs or []:
+        d = _png_dims(o.get("bytes") or b"")
+        if d:
+            o["width"], o["height"] = d
+    return outs
+
+
 def _maybe_upscale_outputs(outs):
     """出图后的统一放大入口（开关关闭/失败 → 原样返回，绝不影响出图成功）。"""
-    if not outs or IMAGE_UPSCALE in ("", "0", "off", "none", "false"):
+    if not outs:
+        return outs
+    _annotate_dims(outs)          # ★ §5-3：先按真实字节记尺寸（关掉放大时也要记）
+    if IMAGE_UPSCALE in ("", "0", "off", "none", "false"):
         return outs
     for o in outs:
         try:
@@ -984,6 +1002,8 @@ def _maybe_upscale_outputs(outs):
             if nb and len(nb) > len(o["bytes"]):
                 d0, d1 = _png_dims(o["bytes"]), _png_dims(nb)
                 o["bytes"] = nb
+                if d1:
+                    o["width"], o["height"] = d1    # ★ 放大后的尺寸才是落库/展示尺寸
                 o["notes"] = ((o.get("notes") + "；") if o.get("notes") else "") + note
                 print("[comfy] 出图放大：%s → %s  %.0fs（%s）"
                       % (d0, d1, time.time() - t0, IMAGE_UPSCALE), flush=True)
