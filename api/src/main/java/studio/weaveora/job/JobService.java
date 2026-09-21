@@ -2921,8 +2921,11 @@ public class JobService {
         // 即使一个位置都没设，也照写「imageN = 主体名」—— 这是「positive_prompt 必须点名主体」
         // 的后端兜底（不依赖 LLM 听话）。无 subject 名的风格参考图不点名（否则凭空造角色）。
         StringBuilder sb = new StringBuilder();
-        // motion 专用：收集档案里的身高原话，用于「同框身高比例」约束（不解析单位，按用户填的写法直接用）。
-        java.util.List<String> heights = new java.util.ArrayList<>();
+        // ★ 2026-09-22 产品决策：**删掉 motion 的「同框身高比例按档案…」行**（原在这里收集 heights）。
+        //   为什么删：它与同一段里的「构图/位置/相对大小一律以关键帧为准」**直接冲突** ——
+        //   模型一边被要求“以关键帧为准”，一边被要求“按档案身高把头顶拉齐”，只能**重设三人的身高与体型**，
+        //   用户实测第 4 镜“面部和体态都变了”（clip 通路）。档案身高仍保留在**定妆照**正词里（describe(true)）；
+        //   关键帧 / motion 只带性别·年龄（describeRef）+「以关键帧为准」。
         // ★ 2026-09-21：把「谁在第几号槽 + 横向中心」记下来，尾句要显式写「画面从左到右依次为…」——
         //   只在各自括号里写区间，模型仍可能忽略整体顺序（实测第 4 镜：宝玉跑到 x=0.39、第三人挤在 0.27）。
         java.util.List<String> orderItems = new java.util.ArrayList<>();
@@ -2956,9 +2959,6 @@ public class JobService {
             if (tr != null && !tr.isEmpty()) {
                 sb.append('[').append(tr.describeRef(zh)).append(']');
             }
-            if (motion && tr != null && tr.height() != null && !tr.height().isBlank()) {
-                heights.add(name + " " + tr.height().trim());
-            }
             // motion：不写方位/坐标/框 —— 位置以关键帧为准（见方法注释）。
             if (p != null && !motion) {
                 // ★ 2026-09-21 二次修正（用户实测第 4 镜「警幻和可卿的位置翻了 / 有人站错」）：
@@ -2973,16 +2973,11 @@ public class JobService {
             }
         }
         if (sb.length() > 0) {
-            // ★ 2026-09-16 加「位置以本清单为准」的覆盖句。
-            //   用户实测第 4 镜反复「位置错位」的真因就在这里：镜文案由 LLM 写成
-            //   「宝玉在前景中央…可卿在宝玉右侧…警幻居后景」，而用户在「位置总控」里设的框是
-            //   x=0.24 / x=0.06 / x=0.65 —— 两套方位**直接矛盾**，模型只能猜，于是左右/前后乱。
-            //   现在明确：描述给出动作与氛围，位置/大小以本清单为最终裁定。
-            String heightLine = heights.size() >= 2
-                    ? (zh ? "同框身高比例按档案：" + String.join("、", heights) + "（同一平面时头顶大致齐平）；"
-                          : "keep the on-screen height ratio from the profiles: " + String.join(", ", heights)
-                            + " (heads roughly level when on the same plane); ")
-                    : "";
+            // ★ 2026-09-16 曾加「位置以本清单为准」的覆盖句（当时的真因：镜文案「警幻居后景」与位置总控的框
+            //   x=0.06/0.24/0.65 直接矛盾，模型只能猜）。
+            // ★ 2026-09-21 产品决策变更：**方位以剧情句为准**，区域框降级为兑底、冲突只提示不纠偏
+            //   （见 PromptConflictDetector）；上句已被 add 里的新表述取代，此处留史以免重蹈。
+            // ★ 2026-09-22：原 `heightLine`（同框身高比例按档案）已删除 —— 与「以关键帧为准」冲突。
             // ★ 2026-09-21：再补一句「从左到右的显式顺序」。只在每个人自己的括号里写区间，
             //   模型仍可能把整体顺序搞乱（实测第 4 镜：宝玉落在 x=0.39 而非 0.17，两人挤在一起）。
             String orderLineZh = "";
@@ -3011,7 +3006,7 @@ public class JobService {
                           + "不得把男性画成女性（或反之），不得画成与年龄不符的样貌；"
                           + "面容/发型/服饰/体态一律以各自参考图（定妆照）为准，不得按文字更改。"
                           + "【以关键帧为构图基准】本镜从已生成的关键帧首帧开始运动：画面构图、每个角色在画面中的位置"
-                          + "与相对大小一律以关键帧为准。" + heightLine
+                          + "与相对大小一律以关键帧为准。"
                           + "只需表现动作、朝向、方向与镜头运动（前后景纵深、左右移动、走位、转身、推拉摇移）；"
                           + "禁止重新设计构图、禁止重新安排站位、禁止把某个角色单独放大或推近，"
                           + "禁止让他/她越走越近、越走越大、越走越高；近大远小只能来自透视与镜头运动，"
@@ -3023,7 +3018,7 @@ public class JobService {
                           + " must not be altered by text."
                           + " [Keyframe is authoritative for composition] This shot starts from an already"
                           + " generated keyframe: the framing and each character's position and relative size are"
-                          + " fixed by it. " + heightLine
+                          + " fixed by it. "
                           + "Express only action, facing, direction and camera movement (depth/foreground,"
                           + " left-right motion, blocking, turns, push/pull/pan/tilt); do NOT redesign the composition,"
                           + " do NOT re-stage anyone, do NOT scale or push in on an individual character, and never let"

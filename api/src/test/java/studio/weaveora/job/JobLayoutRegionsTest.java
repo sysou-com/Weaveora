@@ -231,12 +231,14 @@ class JobLayoutRegionsTest {
         assertFalse(pos.contains("x="), pos);
         assertFalse(pos.contains("Picture 1"), "视频通路不送参考图，不该出现槽位名: " + pos);
         assertFalse(pos.contains("位置以本清单为准"), pos);
-        // ③ 身份与档案保留（性别/年龄是硬约束；身高仍走「同框比例」行）
+        // ③ 身份与档案保留：只带 性别/年龄（硬约束）
         assertTrue(pos.contains("宝玉[性别 男 male]"), pos);
         assertTrue(pos.contains("警幻[性别 女 female]"), pos);
-        // ④ 构图以关键帧为准 + 同框身高比例
+        // ④ 构图以关键帧为准；**不再**写「同框身高比例按档案」
+        //    ★ 2026-09-22 产品决策：该行与「以关键帧为准」直接冲突，实测导致模型重设三人身高/体型
+        //    （用户报「clip 里面部和体态都变了」）⇒ 整行删除。
         assertTrue(pos.contains("【以关键帧为构图基准】"), pos);
-        assertTrue(pos.contains("同框身高比例按档案：宝玉 165、警幻 162"), pos);
+        assertFalse(pos.contains("同框身高比例"), "2026-09-22 起不再下发身高比例行: " + pos);
         // ⑤ 只表现动作/朝向/方向/镜头运动，禁止再放大/推近/越来越高
         assertTrue(pos.contains("只需表现动作、朝向、方向与镜头运动"), pos);
         assertTrue(pos.contains("不得改变人物之间的相对大小与身高比例"), pos);
@@ -266,7 +268,7 @@ class JobLayoutRegionsTest {
         assertNull(clip.get("referenceRegions"));
     }
 
-    /** 没填身高（或只有一个主体）时不得编造身高句，但构图基准句照写。 */
+    /** 身高比例行已整体移除（2026-09-22 产品决策）；本用例保留为**回归防线**：任何情况下都不得再出现。 */
     @Test
     void motionOmitsHeightLineWhenProfilesLackHeights() {
         ObjectNode p = payload("电影感镜头：宝玉独自立于庭中");
