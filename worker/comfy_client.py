@@ -1324,7 +1324,13 @@ MOTION_OVERRIDES = {}
 MOTION_SERVICE_KEYS = ("preset", "steps", "switch", "switch_step", "cfg", "cfg_high", "cfg_low",
                        "lora_high", "lora_low", "lora_high_name", "lora_low_name", "shift",
                        "sampler_name", "scheduler", "model_high", "model_low", "mode", "dual",
-                       "width", "height", "frames", "fps")
+                       "width", "height", "frames", "fps",
+                       # ★ 2026-09-22（用户报「视频分辨率 720p 不可用」）——`resolution` 之前**不在名单里**：
+                       #   引擎配置页把「GPU 服务器最大支持分辨率」写进 services.motion.resolution，
+                       #   到这里被 continue 掉 → _motion_resolution 只读得到 params.resolution
+                       #   （clip 的 payload.params 里没这个键）⇒ **永远回落 480p 桶**，而且不报错、日志无异常。
+                       #   教训：新增配置项必须同时改 API 与 worker 的接收白名单（见四段交接 §5-3）。
+                       "resolution")
 
 # 显存口径（A14B 双专家实测，GPU#2 48G，832×480）：
 #   · 33 帧 → 峰值 41.8 GiB；121 帧 → 峰值 47.3 GiB（线性拟合）
@@ -2000,10 +2006,14 @@ def generate_motion(client_id, payload, progress_fn=None):
     mh = int(_mp.get("height", 768))
     # 分辨率口径：默认压到 480p 桶（A14B 甜点 + 48G 卡不换入换出），显式 720p 才放开
     _w0, _h0 = mw, mh
+    # ★ 2026-09-22：记下「引擎配置请求的分辨率」，后面显存不够降分辨率时要能说清「你要求的 720p 没达成」。
+    _res_req = str(_mp.get("resolution") or "").strip().lower()
     mw, mh = _motion_resolution(_mp, mw, mh)
-    if (mw, mh) != (_w0, _h0):
-        print("[comfy] motion 分辨率 %dx%d → %dx%d（默认 480p 桶；要原分辨率请设 resolution=720p）"
-              % (_w0, _h0, mw, mh), flush=True)
+    # ★ 无论改没改都打一行（否则 720p 生效时日志里什么都没有 → 无法验收；见四段交接「排障只看日志三行」）
+    print("[comfy] motion 分辨率 %dx%d → %dx%d（请求 resolution=%s%s）"
+          % (_w0, _h0, mw, mh, _res_req or "未设",
+             "" if _res_req else " → 默认 480p 桶；要原分辨率请在「生成引擎配置 → GPU 服务器 → 视频分辨率」设 720p"),
+          flush=True)
     # 因显存做的取舍会汇成 notes 随资产上报（不只藏在日志里）
     _notes = []
     _res_shrunk = False
@@ -2085,7 +2095,10 @@ def generate_motion(client_id, payload, progress_fn=None):
             _frames = _new_frames
         # 把“因显存做的取舍”汇成一句 notes（前端在资产卡上看得见，不只藏在日志里）
         if _res_shrunk:
-            _notes.append("显存不够 → 分辨率自动降到 %dx%d（时长与速度不变，只略糊）" % (mw, mh))
+            _note = "显存不够 → 分辨率自动降到 %dx%d（时长与速度不变，只略糊）" % (mw, mh)
+            if _res_req:
+                _note += "；注意：引擎配置要求 resolution=%s **未达成**（本机显存只够这个尺寸）——建议降帧数或拆短镜头" % _res_req
+            _notes.append(_note)
         if _want_frames is not None and _frames != _want_frames:
             _notes.append("显存仍不够 → 帧数 %d→%d（实际约 %.2fs，动作会被压缩且尾部静止补齐；建议拆短镜头）"
                           % (_want_frames, _frames, _frames / max(1.0, MOTION_NATIVE_FPS)))
