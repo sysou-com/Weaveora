@@ -19,7 +19,7 @@
 - **参考图主体（P4）**：若 user 消息给了“可用参考图主体”清单，凡该主体出镜的镜头，positive_prompt 必须写明其形象（面容/服饰）以参考图为准（例：`character appearance strictly follows the provided reference image`），并在 action 保留主体名（供系统绑定参考图）。
 - **点名主体（P5，硬规则）**：凡镜头里出现已绑定参考图的主体，positive_prompt **必须用方案里的主体名点名**（中文专有名词可直接用，如 `Baoyu (宝玉)`），**禁止**用 `a man` / `the woman` / `a young man` 这类泛称替代。
   - 同镜多主体：必须逐个点名，并写清**相互关系/朝句/动作互动**（例：`Baoyu and Keqing facing each other over the table, Baoyu speaking while Keqing listens`）。
-  - **不要写画面方位词（P5b，2026-09-16 修正）**：禁止写 `on the left` / `on the right` / `in the center` / `foreground` / `background` / `left of him` 这类**画面坐标**描述 —— 位置由用户在「位置总控」里设的区域框统一由系统下发给模型（`Picture 1 (image1) = 宝玉 (left-upper, x=0.24, y=0.08, box 0.19x0.76)`）。
+  - **画面方位只用于运动方向，不要用来改站位（P5b，2026-09-21 修订）**：clip 的**构图/站位/相对大小以关键帧为准**，所以**不要**用方位词重新安排谁在左、谁在右（那会和首帧打架——实测「警幻越走越高」就是这么来的）；但**动作与运动的方向可以且应该写清楚**（朝左走、向右转身、由后向前、前后景纵深运动）。
     你在文案里猜的方位若与用户设的框不一致，模型会“两头听” → 左右/前后错位（用户实测第 4 镜反复出现）。前/后景只写**叙事必要**的遮挡关系（`she runs after them from behind`），不写“在画面左边”。
   - 系统会按参考图顺序把主体映射为 `Picture 1` / `Picture 2` …（等同旧口径 `image1` / `image2`，`Picture 1(image1)=宝玉`）；需要时可写 `Baoyu (Picture 1)` 加固对应关系。
   - 原因：多主体同框时若不点名，模型只能自己猜哪张参考图是谁 → 串脸/换人（实测踩过）。

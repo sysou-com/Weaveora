@@ -3033,31 +3033,49 @@ public class JobService {
             } else {
                 add = zh
                     ? "\n参考图映射（按送入顺序；Picture N 与 imageN 指同一张图）：" + sb
-                      + "。请严格按这个对应关系：每个角色只用自己的参考图，站位就是括号里的横向区间"
-                      + "（x 从左到右 0→1，占满画高 = 顶到画底）；" + orderLineZh
+                      + "。请严格按这个对应关系：**每个角色只用自己的参考图**（这是硬约束）；"
+                      + "而**画面方位（左右、前后、远近、遮挡、站位与相对大小）一律以剧情句为准**；"
+                      + "括号里的横向区间与下面这句顺序**仅仅兜底**（剧情句没写方位时才用）：" + orderLineZh
                       + "面容、发型、服饰、体态一律以各自参考图为准，不得按文字更改；"
                       + "不同 imageN 是**不同的人**：禁止互换面孔、发型与服饰，禁止把两位画成同一张脸、"
-                      + "禁止合并或省掉任何一位；角色之间保持明显区分、左右并列，不得重叠或交换位置。"
+                      + "禁止合并或省掉任何一位；角色之间必须互相区分。"
                       + "方括号里的性别/年龄为硬约束（不得把男性画成女性或反之、不得改变年龄）。"
-                      + "剧情句只提供动作与氛围：其方位描述若与本清单冲突，一律以本清单为准。"
+                      + "剧情句与上面这串兜底区间/顺序不一致时，**以剧情句为准**（系统已把该矛盾记成提示）。"
                     : "\nReference mapping (input order; Picture N and imageN are the same image): " + sb
                       + ". Follow this mapping strictly: each character uses only its own reference image, and its"
-                      + " placement is exactly the horizontal range given in parentheses (x runs 0→1 left to right;"
+                      + " placement is given in parentheses ONLY as a fallback (x runs 0→1 left to right;"
                       + " full height = reaching the bottom edge); " + orderLineEn
                       + "face/hair/costume/build always follow each subject's own reference image and must not be"
                       + " altered by the text; "
                       + "Different imageN are **different people**: never swap faces, hair or costume, never draw"
-                      + " two characters with the same face, and never merge or drop anyone; keep them clearly apart,"
-                      + " side by side, never overlapping and never trading places. The bracketed gender/age are hard"
-                      + " constraints (never render a male character as female or vice versa, never change the age)."
-                      + " The story text supplies only action and mood: where its directions conflict with this list,"
-                      + " this list wins.";
+                      + " two characters with the same face, and never merge or drop anyone; keep them clearly apart."
+                      + " The bracketed gender/age are hard constraints (never render a male character as female or"
+                      + " vice versa, never change the age). **Composition (left/right, depth, occlusion, blocking and"
+                      + " relative size) follows the story text**; where the story text disagrees with the fallback"
+                      + " ranges above, **the story text wins** (the system has logged that conflict).";
             }
             payload.put("positive_prompt", cur + add);
             if (motion) {
                 log.info("refs: motion(clip) 主体档案已写入正词（不含位置框；构图以关键帧为准）：{}", sb);
             } else {
                 log.info("refs: 参考图↔主体（含位置={}）已写入正词：{}", !pos.isEmpty(), sb);
+                // ★ 2026-09-21 产品决策（用户裁定）：**方位以剧情句为准**，区域框降级为兜底；
+                //   剧情句与区域框矛盾时**只提示、不纠偏**（撤销 2026-09-16 那条“一律以本清单为准”的强制覆盖）。
+                //   槽位取自 refs.subjects()（含**没设框**的主体），否则「谁在剧情里没点名」会漏检。
+                java.util.List<PromptConflictDetector.Slot> slots = new java.util.ArrayList<>();
+                for (String nm : refs.subjects()) {
+                    if (nm == null || nm.isBlank()) {
+                        continue;
+                    }
+                    slots.add(new PromptConflictDetector.Slot(nm, pos.get(nm)));
+                }
+                java.util.List<String> warns = PromptConflictDetector.detect(cur, slots);
+                if (!warns.isEmpty()) {
+                    com.fasterxml.jackson.databind.node.ArrayNode wa = payload.putArray("promptWarnings");
+                    warns.forEach(wa::add);
+                    log.warn("prompt 冲突提示（以剧情为准，不纠偏）shot_no={}：{}",
+                            shot.path("shot_no").asInt(), warns);
+                }
             }
         }
     }

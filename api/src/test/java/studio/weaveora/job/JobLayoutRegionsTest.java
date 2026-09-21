@@ -255,7 +255,7 @@ class JobLayoutRegionsTest {
         // ★ 2026-09-21 二次修正：正词写「横向区间 + 带位 + 是否占满画高」（仍不写 x=/y=/框）
         assertTrue(still.path("positive_prompt").asText().contains("Picture 1 (image1) = 宝玉 (position: x 0.38–0.68, middle band, full height)"), still.path("positive_prompt").asText());
         assertFalse(still.path("positive_prompt").asText().contains("x="), "不应再写归一化坐标（x= 形式）");
-        assertTrue(still.path("positive_prompt").asText().contains("this list wins"));
+        assertTrue(still.path("positive_prompt").asText().contains("the story text wins"));
         assertEquals(1, still.get("referenceRegions").size());
         assertEquals(0.30, still.get("referenceRegions").get(0).path("w").asDouble(), 1e-6);
 
@@ -290,28 +290,54 @@ class JobLayoutRegionsTest {
     }
 
     /**
-     * ★ 2026-09-16 新增：位置清单必须带「以本清单为准」的覆盖句。
+     * ★ 2026-09-21 产品决策变更：**方位以剧情句为准**，位置总控的区域框降级为兑底；
+     * 两者矛盾时**只提示、不纠偏**。
      *
-     * <p>为什么（用户实测第 4 镜反复“位置错位”）：镜文案由 LLM 写成「宝玉在前景中央…可卿在宝玉右侧…
-     * 警幻居后景」，而用户在「位置总控」里设的框是 x=0.24 / x=0.06 / x=0.65 —— 两套方位直接矛盾，
-     * 模型只能猜。现在明确告知：方位以区域清单为最终裁定。
+     * <p>本测试**取代** 2026-09-16 的 {@code positionListCarriesAuthoritativeOverrideClause}
+     * （那条断言「一律以本清单为准」的强制覆盖）。为什么推翻：同一镜（第 4 镜）的文案
+     * 「警幻居后景」与位置框 x=0.65 矛盾时，“以清单为准”会把用户的剧情意志改掉；
+     * 用户 2026-09-21 裁定：按剧情执行 + 把矛盾提示给用户看。
      */
     @Test
-    void positionListCarriesAuthoritativeOverrideClause() {
+    void storyTextWinsOverPositionList() {
         ObjectNode zh = payload("电影感关键帧：宝玉与可卿并肩而立，烛光摇曳");
         JsonNode shot = json("""
-                {"layout":[{"subject":"宝玉","x":0.24,"y":0.08,"w":0.19,"h":0.76},
+                {"shot_no":4,"layout":[{"subject":"宝玉","x":0.24,"y":0.08,"w":0.19,"h":0.76},
                            {"subject":"可卿","x":0.06,"y":0.06,"w":0.17,"h":0.78}]}
                 """);
         JobService.applyLayoutRegions(zh, json("{}"), shot, -1, refs("宝玉", "可卿"));
-        // ★ 2026-09-21 二次修正：覆盖句改为「剧情句的方位若与本清单冲突，以本清单为准」，不再提“框/坐标”
-        assertTrue(zh.path("positive_prompt").asText().contains("一律以本清单为准"),
-                zh.path("positive_prompt").asText());
+        String pos = zh.path("positive_prompt").asText();
+        assertTrue(pos.contains("以剧情句为准"), pos);
+        assertTrue(pos.contains("兜底"), pos);
+        assertFalse(pos.contains("一律以本清单为准"), pos);
+        // 两个主体都点名了、无纵深词、无左右断言 → 不应有冲突提示
+        assertTrue(zh.path("promptWarnings").isMissingNode(), zh.toString());
 
         ObjectNode en = payload("cinematic still of two figures standing together");
         JobService.applyLayoutRegions(en, json("{}"), shot, -1, refs("宝玉", "可卿"));
-        assertTrue(en.path("positive_prompt").asText().contains("this list wins"),
+        assertTrue(en.path("positive_prompt").asText().contains("the story text wins"),
                 en.path("positive_prompt").asText());
+    }
+
+    /**
+     * ★ 2026-09-21 新增：复刻第 4 镜的真实形态（警幻只在 image3 里、剧情句没点名）
+     * → payload 必须出现 {@code promptWarnings}（前端可展示）；**且不纠偏**：剧情原句原样保留。
+     */
+    @Test
+    void conflictIsReportedNotFixed() {
+        ObjectNode p = payload("电影感关键帧：宝玉回身问缘由，可卿在宝玉右侧，烛光摇曳");
+        JsonNode shot = json("""
+                {"shot_no":4,"layout":[{"subject":"宝玉","x":0.0,"y":0.0,"w":0.34,"h":1.0},
+                           {"subject":"可卿","x":0.34,"y":0.0,"w":0.33,"h":1.0},
+                           {"subject":"警幻","x":0.67,"y":0.0,"w":0.33,"h":1.0}]}
+                """);
+        JobService.applyLayoutRegions(p, json("{}"), shot, -1, refs("宝玉", "可卿", "警幻"));
+        JsonNode warns = p.path("promptWarnings");
+        assertTrue(warns.isArray() && warns.size() >= 1, p.toString());
+        assertTrue(warns.toString().contains("警幻"), warns.toString());
+        // 不纠偏：剧情原句仍在正词里（没有被改写或删除）
+        assertTrue(p.path("positive_prompt").asText().contains("可卿在宝玉右侧"),
+                p.path("positive_prompt").asText());
     }
 
     @Test

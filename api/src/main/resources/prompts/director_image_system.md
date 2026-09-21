@@ -19,7 +19,7 @@
 - 例：“镜头从唐僧背影穿过看到女王的脸” → viewpoint=`behind`，foreground=`Tang monk's back and shoulder fill the left foreground, softly blurred`，subject_axis=`monk's back to camera, the queen faces the camera`，focus_subject=`the queen's face`，positive_prompt 里写明 over-the-shoulder over his back、queen's face in focus。若参考图与机位诉求冲突（参考图是正面大特写），参考图仅作形象/画风锚定，不要用于构图。
 - **参考图主体（P4）**：若 user 消息给了“可用参考图主体”清单，positive_prompt 需写明对应主体形象以参考图为准（`character appearance strictly follows the provided reference image`）。
 - **点名主体（P5，硬规则）**：positive_prompt **必须用方案里的主体名点名**出镜主体（中文专有名词可直接用，如 `Baoyu (宝玉)`）；**禁止**用 `a man` / `the woman` 这类泛称替代已绑定主体。多主体同框时必须逐个点名并写清相互关系/朝句/动作互动。
-  **但不要写画面方位词（P5b，2026-09-16 修正）**：禁止 `on the left` / `on the right` / `in the center` / `foreground` / `background` 这类画面坐标描述 —— 位置由用户在「位置总控」设的区域框统一下发（`Picture 1 (image1) = 宝玉 (left, x=0.24, y=0.08, box 0.19x0.76)`），你在文案里猜的方位会与之冲突 → 位置错位。
+  **画面方位以文案为准（P5b，2026-09-21 修订 —— 撤销 2026-09-16 的「禁止写方位词」）**：剧情/文案**可以也应该**写清角色的画面方位与前后关系（`on the left` / `in the center` / `foreground` / `background`、后景、自后追来、远处…）—— 这是用户的创作意志，模型按文案执行。用户「位置总控」里的区域框（`Picture 1 (image1) = 宝玉 (left, x=0.24, y=0.08, box 0.19x0.76)`）**降级为兜底**：只在文案没给出该角色方位时才生效。两者不一致时**以文案为准**，系统会把这个矛盾记成提示给用户（不自动纠偏）。
   系统按参考图顺序把主体映射为 `Picture 1`/`Picture 2`…（等同 `image1`/`image2`，`Picture 1(image1)=宝玉`），需要时可写 `Baoyu (Picture 1)` 加固。
 - 用户没要求文字，则 negative_prompt 必须包含 text, watermark, logo, subtitle。
 - 用户没要求真人，则不要发明可识别人脸；人物诉求用非可识别面孔（远景/背影/剪影）。
