@@ -2923,6 +2923,11 @@ public class JobService {
         StringBuilder sb = new StringBuilder();
         // motion 专用：收集档案里的身高原话，用于「同框身高比例」约束（不解析单位，按用户填的写法直接用）。
         java.util.List<String> heights = new java.util.ArrayList<>();
+        // ★ 2026-09-21：把「谁在第几号槽 + 横向中心」记下来，尾句要显式写「画面从左到右依次为…」——
+        //   只在各自括号里写区间，模型仍可能忽略整体顺序（实测第 4 镜：宝玉跑到 x=0.39、第三人挤在 0.27）。
+        java.util.List<String> orderItems = new java.util.ArrayList<>();
+        java.util.List<Double> orderX = new java.util.ArrayList<>();
+        java.util.List<Integer> orderSlot = new java.util.ArrayList<>();
         for (int i = 0; i < refs.subjects().size(); i++) {
             String name = refs.subjects().get(i);
             if (name == null || name.isBlank()) {
@@ -2956,12 +2961,15 @@ public class JobService {
             }
             // motion：不写方位/坐标/框 —— 位置以关键帧为准（见方法注释）。
             if (p != null && !motion) {
-                // ★ 2026-09-21 简化：只留**自然语言方位**，删掉 x=/y=/框 数字。
-                //   为什么：模型不认归一化数字（实测设 x=0.05 落到 x=0.40），且 2511 有“几何推理 / 会画辅助
-                //   构造线”的倾向 → 写“框 0.30x0.98”有被画出来的风险；数字还会与剧情句里的方位词打架。
-                //   方位词由 posHintZh 从同一份 region 推出，站位信息不丢。
-                sb.append(zh ? "（" : " (").append(zh ? posHintZh(p[0], p[1]) : posHint(p[0], p[1]))
-                  .append(zh ? "）" : ")");
+                // ★ 2026-09-21 二次修正（用户实测第 4 镜「警幻和可卿的位置翻了 / 有人站错」）：
+                //   第一版简化只写**方位词**（posHintZh 只看 x/y，且丢掉 w/h）→ region x=0.34 的「可卿」
+                //   其实是**中间带**（0.34–0.67、占满画高），却被写成「上方」，与「左上/右上」并列时会被读成
+                //   “中间偏上”；三条竖带并列这个真正的硬约束完全丢了。
+                //   现在改用**横向区间 + 带位 + 是否占满画高**（仍不写「框 w×h」那种容易被画出来的形式）。
+                sb.append(zh ? bandHintZh(p[0], p[1], p[2], p[3]) : bandHint(p[0], p[1], p[2], p[3]));
+                orderItems.add(name);
+                orderX.add((p[0] + Math.min(1.0, p[0] + p[2])) / 2);
+                orderSlot.add(i + 1);
             }
         }
         if (sb.length() > 0) {
@@ -2975,6 +2983,25 @@ public class JobService {
                           : "keep the on-screen height ratio from the profiles: " + String.join(", ", heights)
                             + " (heads roughly level when on the same plane); ")
                     : "";
+            // ★ 2026-09-21：再补一句「从左到右的显式顺序」。只在每个人自己的括号里写区间，
+            //   模型仍可能把整体顺序搞乱（实测第 4 镜：宝玉落在 x=0.39 而非 0.17，两人挤在一起）。
+            String orderLineZh = "";
+            String orderLineEn = "";
+            if (orderItems.size() >= 2) {
+                java.util.List<Integer> idx = new java.util.ArrayList<>();
+                for (int k = 0; k < orderItems.size(); k++) {
+                    idx.add(k);
+                }
+                idx.sort(java.util.Comparator.comparingDouble(orderX::get));
+                java.util.List<String> zhL = new java.util.ArrayList<>();
+                java.util.List<String> enL = new java.util.ArrayList<>();
+                for (int k : idx) {
+                    zhL.add(orderItems.get(k) + "(image" + orderSlot.get(k) + ")");
+                    enL.add(orderItems.get(k) + " (image" + orderSlot.get(k) + ")");
+                }
+                orderLineZh = "画面从左到右依次为：" + String.join(" → ", zhL) + "；";
+                orderLineEn = "Left to right: " + String.join(" -> ", enL) + "; ";
+            }
             String add;
             if (motion) {
                 // ★ motion(clip)：身份 + 档案 + 「以关键帧为构图基准」；不含任何框/坐标。
@@ -3005,17 +3032,25 @@ public class JobService {
                           + " height ratio must stay fixed.";
             } else {
                 add = zh
-                    ? "\n参考图映射（按送入顺序）：" + sb
-                      + "。每个角色只用自己的参考图；面容、发型、服饰、体态一律以该参考图为准，"
-                      + "不得按文字更改；角色之间保持明显区分，禁止互换或混用身份。"
+                    ? "\n参考图映射（按送入顺序；Picture N 与 imageN 指同一张图）：" + sb
+                      + "。请严格按这个对应关系：每个角色只用自己的参考图，站位就是括号里的横向区间"
+                      + "（x 从左到右 0→1，占满画高 = 顶到画底）；" + orderLineZh
+                      + "面容、发型、服饰、体态一律以各自参考图为准，不得按文字更改；"
+                      + "不同 imageN 是**不同的人**：禁止互换面孔、发型与服饰，禁止把两位画成同一张脸、"
+                      + "禁止合并或省掉任何一位；角色之间保持明显区分、左右并列，不得重叠或交换位置。"
                       + "方括号里的性别/年龄为硬约束（不得把男性画成女性或反之、不得改变年龄）。"
-                      + "括号里的方位词是硬性站位要求：剧情描述中的方位若与此冲突，以本清单为准。"
-                    : "\nReference mapping (in input order): " + sb
-                      + ". Each character uses only its own reference image; face/hair/costume/build always follow"
-                      + " that reference and must not be altered by the text; keep subjects clearly distinct and never"
-                      + " blend or swap their identities. The bracketed gender/age are hard constraints: never"
-                      + " render a male character as female or vice versa, and never change the age. The direction"
-                      + " word in parentheses is the authoritative placement: if the story text conflicts with it,"
+                      + "剧情句只提供动作与氛围：其方位描述若与本清单冲突，一律以本清单为准。"
+                    : "\nReference mapping (input order; Picture N and imageN are the same image): " + sb
+                      + ". Follow this mapping strictly: each character uses only its own reference image, and its"
+                      + " placement is exactly the horizontal range given in parentheses (x runs 0→1 left to right;"
+                      + " full height = reaching the bottom edge); " + orderLineEn
+                      + "face/hair/costume/build always follow each subject's own reference image and must not be"
+                      + " altered by the text; "
+                      + "Different imageN are **different people**: never swap faces, hair or costume, never draw"
+                      + " two characters with the same face, and never merge or drop anyone; keep them clearly apart,"
+                      + " side by side, never overlapping and never trading places. The bracketed gender/age are hard"
+                      + " constraints (never render a male character as female or vice versa, never change the age)."
+                      + " The story text supplies only action and mood: where its directions conflict with this list,"
                       + " this list wins.";
             }
             payload.put("positive_prompt", cur + add);
@@ -3079,14 +3114,43 @@ public class JobService {
         return String.format(java.util.Locale.ROOT, "%.2f", v);
     }
 
-    /** 归一化坐标 → 方位词（左/中/右 + 上/中/下），让模型更容易听懂。 */
+    /** 归一化坐标 → 方位词（保留给非 still 通路/调试用；still 站位改用 {@link #bandHintZh}）。 */
     private static String posHint(double x, double y) {
         String h = x < 0.34 ? "left" : (x > 0.66 ? "right" : "center");
         String v = y < 0.34 ? "upper" : (y > 0.66 ? "lower" : "middle");
         return v + "-" + h;
     }
 
-    /** 同上，中文口径（提示词整套中文时保持一致，别中英混杂）。中文方位习惯「左上 / 右下」。 */
+    /**
+     * still 通路的站位描述：**横向区间 + 带位 + 是否占满画高**（2026-09-21 二次修正）。
+     *
+     * <p>为什么不能只用方位词：它只看 x/y、丢掉 w/h —— 用户「位置总控」里第 4 镜三个框是
+     * x 0.00–0.34 / 0.34–0.67 / 0.67–1.00、**都占满画高**，而 x=0.34 的「可卿」落在
+     * {@code x < 0.34} 边界之外 → 横向被判为空、只剩「上方」，与「左上/右上」并列时会被读成
+     * “中间偏上”，三条竖带并列的硬约束就丢了（实测人物互换/站错）。
+     */
+    static String bandHintZh(double x, double y, double w, double h) {
+        double x0 = x, x1 = Math.min(1.0, x + w), y0 = y, y1 = Math.min(1.0, y + h);
+        String band = bandNameZh((x0 + x1) / 2);
+        String vert = (y0 <= 0.02 && y1 >= 0.98) ? "占满画高"
+                : String.format(java.util.Locale.ROOT, "纵向 y %.2f–%.2f", y0, y1);
+        return String.format(java.util.Locale.ROOT, "（位置：x %.2f–%.2f 的%s，%s）", x0, x1, band, vert);
+    }
+
+    static String bandHint(double x, double y, double w, double h) {
+        double x0 = x, x1 = Math.min(1.0, x + w), y0 = y, y1 = Math.min(1.0, y + h);
+        double cx = (x0 + x1) / 2;
+        String band = cx < 0.34 ? "left band" : (cx > 0.66 ? "right band" : "middle band");
+        String vert = (y0 <= 0.02 && y1 >= 0.98) ? "full height"
+                : String.format(java.util.Locale.ROOT, "y %.2f–%.2f", y0, y1);
+        return String.format(java.util.Locale.ROOT, " (position: x %.2f–%.2f, %s, %s)", x0, x1, band, vert);
+    }
+
+    private static String bandNameZh(double cx) {
+        return cx < 0.34 ? "左带" : (cx > 0.66 ? "右带" : "中间带");
+    }
+
+    /** 同上，中文方位词（非 still 通路/调试保留）。 */
     private static String posHintZh(double x, double y) {
         String h = x < 0.34 ? "左" : (x > 0.66 ? "右" : "");
         String v = y < 0.34 ? "上" : (y > 0.66 ? "下" : "");

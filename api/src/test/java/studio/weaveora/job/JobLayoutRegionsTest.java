@@ -106,8 +106,10 @@ class JobLayoutRegionsTest {
         JobService.applyLayoutRegions(p, plan, shot, -1, refs("宝玉", "可卿"));
 
         String pos = p.path("positive_prompt").asText();
-        assertTrue(pos.contains("Picture 1 (image1) = 宝玉 (upper-center)"), pos);
-        assertTrue(pos.contains("Picture 2 (image2) = 可卿 (upper-left)"), pos);
+        assertTrue(pos.contains("Picture 1 (image1) = 宝玉 (position: x 0.62–0.92, right band, y 0.10–0.70)"), pos);
+        assertTrue(pos.contains("Picture 2 (image2) = 可卿 (position: x 0.10–0.35, left band, y 0.20–0.75)"), pos);
+        // ★ 2026-09-21：显式从左到右顺序（只写各自区间时模型仍可能搞乱顺序）
+        assertTrue(pos.contains("Left to right: 可卿 (image2) -> 宝玉 (image1)"), pos);
 
         JsonNode regions = p.get("referenceRegions");
         assertEquals(2, regions.size());
@@ -125,10 +127,10 @@ class JobLayoutRegionsTest {
                    "layout":[{"subject":"宝玉","x":0.05,"y":0.05,"w":0.30,"h":0.40}]}]}
                 """);
 
-        // 第 2 帧（index=1）有自己的 layout → 帧级优先（★ 2026-09-21 起正词只写方位词，不写 x/y/框）
+        // 第 2 帧（index=1）有自己的 layout → 帧级优先（★ 2026-09-21：站位用横向区间 + 带位，不再用会失真的方位词）
         JobService.applyLayoutRegions(p, json("{}"), shot, 1, refs("宝玉"));
         assertTrue(p.path("positive_prompt").asText()
-                .contains("Picture 1 (image1) = 宝玉 (upper-left)"),
+                .contains("Picture 1 (image1) = 宝玉 (position: x 0.05–0.35, left band, y 0.05–0.45)"),
                 p.path("positive_prompt").asText());
         assertEquals(0.05, p.get("referenceRegions").get(0).path("x").asDouble(), 1e-6);
 
@@ -136,7 +138,7 @@ class JobLayoutRegionsTest {
         ObjectNode p0 = payload("cinematic still of two figures");
         JobService.applyLayoutRegions(p0, json("{}"), shot, 0, refs("宝玉"));
         assertTrue(p0.path("positive_prompt").asText()
-                .contains("Picture 1 (image1) = 宝玉 (middle-center)"),
+                .contains("Picture 1 (image1) = 宝玉 (position: x 0.50–0.70, middle band, y 0.50–0.70)"),
                 p0.path("positive_prompt").asText());
         assertEquals(0.50, p0.get("referenceRegions").get(0).path("x").asDouble(), 1e-6);
     }
@@ -150,7 +152,7 @@ class JobLayoutRegionsTest {
                 """);
         JobService.applyLayoutRegions(p, plan, json("{}"), -1, refs("宝玉"));
         String pos = p.path("positive_prompt").asText();
-        assertTrue(pos.contains("Picture 1 (image1) = 宝玉 (upper-left)"), pos);
+        assertTrue(pos.contains("Picture 1 (image1) = 宝玉 (position: x 0.10–0.40, left band, y 0.20–0.70)"), pos);
         assertEquals(0.10, p.get("referenceRegions").get(0).path("x").asDouble(), 1e-6);
     }
 
@@ -165,8 +167,8 @@ class JobLayoutRegionsTest {
                 """);
         JobService.applyLayoutRegions(p, plan, json("{}"), -1, refs("宝玉", "可卿"));
         String pos = p.path("positive_prompt").asText();
-        assertTrue(pos.contains("Picture 1 (image1) = 宝玉 (upper-left)"), pos);
-        assertTrue(pos.contains("Picture 2 (image2) = 可卿 (upper-right)"), pos);
+        assertTrue(pos.contains("Picture 1 (image1) = 宝玉 (position: x 0.05–0.45, left band, y 0.05–0.95)"), pos);
+        assertTrue(pos.contains("Picture 2 (image2) = 可卿 (position: x 0.70–0.98, right band, y 0.10–0.90)"), pos);
         assertEquals(0.40, p.get("referenceRegions").get(0).path("w").asDouble(), 1e-6);
     }
 
@@ -175,9 +177,9 @@ class JobLayoutRegionsTest {
         ObjectNode p = payload("cinematic still of two figures");
         JsonNode shot = json("{\"lipsync_targets\":{\"宝玉\":{\"x\":0.30,\"y\":0.40}}}");
         JobService.applyLayoutRegions(p, json("{}"), shot, -1, refs("宝玉"));
-        // 点选只有坐标 → 以点为中心默认框 0.30×0.45 = x 0.15 / y 0.20（★ 2026-09-21：正词只写方位词，框值看 referenceRegions）
+        // 点选只有坐标 → 以点为中心默认框 0.30×0.45 = x 0.15 / y 0.20（★ 2026-09-21：站位写横向区间，框值看 referenceRegions）
         assertTrue(p.path("positive_prompt").asText()
-                .contains("Picture 1 (image1) = 宝玉 (upper-left)"),
+                .contains("Picture 1 (image1) = 宝玉 (position: x 0.15–0.45, left band, y 0.20–0.65)"),
                 p.path("positive_prompt").asText());
         assertEquals(0.15, p.get("referenceRegions").get(0).path("x").asDouble(), 1e-6);
         assertEquals(0.45, p.get("referenceRegions").get(0).path("h").asDouble(), 1e-6);
@@ -191,8 +193,11 @@ class JobLayoutRegionsTest {
         JsonNode shot = json("{\"layout\":[{\"subject\":\"宝玉\",\"x\":0.05,\"y\":0.1,\"w\":0.4,\"h\":0.8}]}");
         JobService.applyLayoutRegions(p, json("{}"), shot, -1, refs("宝玉"));
         String pos = p.path("positive_prompt").asText();
-        assertTrue(pos.contains("参考图映射（按送入顺序）"), pos);
-        assertTrue(pos.contains("Picture 1 (image1) = 宝玉（左上）"), pos);
+        assertTrue(pos.contains("参考图映射（按送入顺序"), pos);
+        assertTrue(pos.contains("Picture 1 (image1) = 宝玉（位置：x 0.05–0.45 的左带，纵向 y 0.10–0.90）"), pos);
+        assertTrue(pos.contains("不同 imageN 是**不同的人**"), pos);
+        // 单主体不写「从左到右」顺序句（≥ 2 个会写；见 perShotLayoutWinsOverPlanRegionAndFacePick）
+        assertFalse(pos.contains("画面从左到右依次为"), pos);
         assertFalse(pos.contains("Reference mapping"), pos);
     }
 
@@ -247,9 +252,9 @@ class JobLayoutRegionsTest {
         JobService.applyLayoutRegions(still, json("{}"), shot, -1, refs("宝玉"));
         JobService.applyLayoutRegions(clip, json("{}"), shot, -1, refs("宝玉"), true);
 
-        // ★ 2026-09-21 起：正词只写方位词，不再写 x=/y=/框（数字既不被模型正确消费，又有被画成“框”的风险）
-        assertTrue(still.path("positive_prompt").asText().contains("Picture 1 (image1) = 宝玉 (upper-center)"), still.path("positive_prompt").asText());
-        assertFalse(still.path("positive_prompt").asText().contains("x="), "不应再写归一化坐标");
+        // ★ 2026-09-21 二次修正：正词写「横向区间 + 带位 + 是否占满画高」（仍不写 x=/y=/框）
+        assertTrue(still.path("positive_prompt").asText().contains("Picture 1 (image1) = 宝玉 (position: x 0.38–0.68, middle band, full height)"), still.path("positive_prompt").asText());
+        assertFalse(still.path("positive_prompt").asText().contains("x="), "不应再写归一化坐标（x= 形式）");
         assertTrue(still.path("positive_prompt").asText().contains("this list wins"));
         assertEquals(1, still.get("referenceRegions").size());
         assertEquals(0.30, still.get("referenceRegions").get(0).path("w").asDouble(), 1e-6);
@@ -299,13 +304,13 @@ class JobLayoutRegionsTest {
                            {"subject":"可卿","x":0.06,"y":0.06,"w":0.17,"h":0.78}]}
                 """);
         JobService.applyLayoutRegions(zh, json("{}"), shot, -1, refs("宝玉", "可卿"));
-        // ★ 2026-09-21 简化：覆盖句改为「方位词为准」，不再提“框/坐标”
-        assertTrue(zh.path("positive_prompt").asText().contains("括号里的方位词是硬性站位要求"),
+        // ★ 2026-09-21 二次修正：覆盖句改为「剧情句的方位若与本清单冲突，以本清单为准」，不再提“框/坐标”
+        assertTrue(zh.path("positive_prompt").asText().contains("一律以本清单为准"),
                 zh.path("positive_prompt").asText());
 
         ObjectNode en = payload("cinematic still of two figures standing together");
         JobService.applyLayoutRegions(en, json("{}"), shot, -1, refs("宝玉", "可卿"));
-        assertTrue(en.path("positive_prompt").asText().contains("authoritative placement"),
+        assertTrue(en.path("positive_prompt").asText().contains("this list wins"),
                 en.path("positive_prompt").asText());
     }
 
