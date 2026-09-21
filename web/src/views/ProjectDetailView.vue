@@ -2048,6 +2048,8 @@ const galFull = ref<Record<string, string>>({})
  * 于是用户**一次点击**就能看到画面（否则要先点▶再点原生播放键，两次）。
  */
 const autoPlayId = ref('')
+/** 正在下原文件的资产 id（缩略图点击后的“加载中”凭证）；见 ensureFull 的说明 */
+const fullBusy = ref<string[]>([])
 /**
  * P13：取不到（404）的资产记下来，本次会话不再重试 ——
  * 否则一个已失效的 id 会在每次刷新时反复 404，既刷控制台又拖慢页面。
@@ -2090,11 +2092,19 @@ async function assetThumbBlob(id: string): Promise<Blob | null> {
 async function ensureFull(id: string): Promise<string> {
   const cached = galFull.value[id]
   if (cached) return cached
-  const blob = await assetBlob(id)
-  if (!blob) return ''
-  const url = URL.createObjectURL(blob)
-  galFull.value[id] = url
-  return url
+  // ★ 2026-09-21：原文件现在很重（出图放大后 3328×1856 ≈ 6.5MB，视频更大），
+  //   下载要几秒。以前这里没有任何“正在加载”的状态 → 用户点一下像没反应。
+  //   用 fullBusy 把所有“等原文件”的入口（沉浸预览 / 播放 / 人脸点选）统一变成可见的忙态。
+  if (!fullBusy.value.includes(id)) fullBusy.value = [...fullBusy.value, id]
+  try {
+    const blob = await assetBlob(id)
+    if (!blob) return ''
+    const url = URL.createObjectURL(blob)
+    galFull.value[id] = url
+    return url
+  } finally {
+    fullBusy.value = fullBusy.value.filter((x) => x !== id)
+  }
 }
 
 /**
@@ -2289,12 +2299,26 @@ function firstFrame(e: Event): void {
 }
 
 // 沉浸式预览（大图/大视频）
-const immersive = ref<{ url: string; mime: string } | null>(null)
+const immersive = ref<{ id: string; url: string; mime: string; loading: boolean } | null>(null)
 async function openImmersive(id: string, mime: string): Promise<void> {
-  // 沉浸预览一定是**原文件**（缩略图放大就糊了）→ 这里才会真的去拉原件
-  const url = galFull.value[id] ?? (await ensureFull(id))
-  if (!url) return
-  immersive.value = { url, mime }
+  // 沉浸预览必须是**原文件**（缩略图放大就糊了）。
+  // ★ 2026-09-21 用户反馈「点开图片要过好几秒才能看，也没有加载中的提示」——
+  //   旧写法是 `await ensureFull()` 完才弹浮层，于是那几秒完全是黑屏。
+  //   现在：**立刻**用内存里已有的缩略图打开浮层 + 「正在加载原图…」，原文件到位后原位替换。
+  const cached = galFull.value[id]
+  if (cached) {
+    immersive.value = { id, url: cached, mime, loading: false }
+    return
+  }
+  immersive.value = { id, url: galPreview.value[id] ?? '', mime, loading: true }
+  const url = await ensureFull(id)
+  if (!immersive.value || immersive.value.id !== id) return   // 用户已关闭/换了别的：不要抢回焦点
+  if (!url) {
+    immersive.value = null
+    message.error('原文件加载失败：可先看缩略图，或稍后重试')
+    return
+  }
+  immersive.value = { id, url, mime, loading: false }
 }
 async function setRefFromAsset(id: string): Promise<void> {
   if (refSelected.value.includes(id)) return
@@ -5084,19 +5108,21 @@ const shotTotal = computed(() => {
               v-if="(isVideoAsset(a) || isAudioAsset(a)) && !galFull[a.id]"
               type="button"
               class="g-play"
-              title="加载原文件并播放"
+              :title="fullBusy.includes(a.id) ? '正在加载原文件…' : '加载原文件并播放'"
+              :disabled="fullBusy.includes(a.id)"
               :data-testid="`asset-play-${a.id}`"
               @click.stop="openFullMedia(a.id)"
-            >▶</button>
+            >{{ fullBusy.includes(a.id) ? '…' : '▶' }}</button>
             <div class="g-meta">
               <span class="g-kind font-mono">{{ a.kind }}<template v-if="galShotNo(a)"> · 第{{ galShotNo(a) }}镜</template><template v-if="a.width"> · {{ a.width }}×{{ a.height }}</template><template v-if="galRevNo(a.jobId)"> · v{{ galRevNo(a.jobId) }}</template></span>
               <!-- ★ 2026-09-16 夜：worker 的显存取舍说明（如“显存不够 → 分辨率自动降到 704x384”）要看得见 -->
               <span v-if="a.notes" class="g-note" :title="a.notes" data-testid="asset-note">⚠</span>
               <span class="g-actions">
-                <button type="button" class="g-max" title="沉浸预览/播放（原文件）"
-                        :disabled="!galPreview[a.id] && !galFull[a.id]"
+                <button type="button" class="g-max"
+                        :title="fullBusy.includes(a.id) ? '正在加载原文件…' : '沉浸预览/播放（原文件）'"
+                        :disabled="(!galPreview[a.id] && !galFull[a.id]) || fullBusy.includes(a.id)"
                         @click.stop="openImmersive(a.id, a.mime ?? '')">
-                  ⤢
+                  {{ fullBusy.includes(a.id) ? '…' : '⤢' }}
                 </button>
                 <button type="button" class="g-dl" title="下载原文件" @click.stop="downloadAsset(a)">↓</button>
                 <button
@@ -5418,8 +5444,15 @@ const shotTotal = computed(() => {
       <div v-if="immersive" class="im-overlay" @click.self="immersive = null">
         <div class="im-card">
           <button type="button" class="op im-close" @click="immersive = null">×</button>
+          <!-- 原文件还在下：先用缩略图占位 + 明确提示，不让用户对着黑屏等（2026-09-21 用户反馈） -->
+          <div v-if="immersive.loading" class="im-wait" data-testid="immersive-loading">
+            <img v-if="immersive.url" :src="immersive.url" class="im-media im-img im-blur" alt="" />
+            <div class="im-wait-tip">
+              <span class="im-spin" aria-hidden="true"></span>正在加载原图…（放大后的原文件约几 MB）
+            </div>
+          </div>
           <video
-            v-if="immersive.mime.startsWith('video/')"
+            v-else-if="immersive.mime.startsWith('video/')"
             :src="immersive.url"
             class="im-media"
             controls
@@ -6475,6 +6508,20 @@ const shotTotal = computed(() => {
   background: #000;
 }
 .im-img { width: auto; }
+.im-wait { position: relative; display: flex; align-items: center; justify-content: center; }
+.im-blur { filter: blur(2px); opacity: 0.55; }
+.im-wait-tip {
+  position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 14px; border-radius: 999px;
+  background: rgba(8, 8, 7, 0.72); color: #f3f0e8; font-size: 13px; white-space: nowrap;
+}
+.im-spin {
+  width: 13px; height: 13px; border-radius: 50%;
+  border: 2px solid rgba(243, 240, 232, 0.3); border-top-color: #8fb9b4;
+  animation: im-spin 0.8s linear infinite;
+}
+@keyframes im-spin { to { transform: rotate(360deg); } }
 .im-close {
   position: absolute; top: -6px; right: -6px; z-index: 2; font-size: 15px;
 }
