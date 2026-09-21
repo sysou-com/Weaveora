@@ -50,6 +50,18 @@ public class EngineSettingsController {
         return service.syncGpuAddress(uid(request), body);
     }
 
+    /**
+     * worker 机器 env 的当前回退值（页面显示「worker 回退地址 = …」，对比与页面是否一致）。
+     *
+     * <p>为什么要暴露它：DB 是随任务下发的**生效值**，env 是 worker 未收到配置时的**回退值** ——
+     * 两个真源不一致时，页面看着改了、实际某条链路仍在打旧地址（2026-09-21 事故的隐患）。
+     */
+    @GetMapping("/worker-env")
+    public WorkerEnvStatusResponse workerEnv(HttpServletRequest request) {
+        uid(request);   // 仅鉴权：这东西是全局的，不需要按用户区分
+        return service.workerEnvStatus();
+    }
+
     /** P12：主动刷新模型调用参数说明（配/换模型后拉取；也可手动点「刷新参数说明」）。 */
     @org.springframework.web.bind.annotation.PostMapping("/refresh-models")
     public EngineSettingsResponse refresh(HttpServletRequest request,

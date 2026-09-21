@@ -31,15 +31,18 @@ public class EngineSettingsService {
 
     private final UserEngineSettingsRepository repo;
     private final ModelSchemaService schemaService;
+    private final WorkerEnvSyncService workerEnvSync;
     private final String storeKey;
     /** 语音/转写服务默认地址（weaveora.tts-url；worker 侧默认 :8091，此处含 ssh 隧道场景默认 :18091） */
     private final String defaultTtsUrl;
 
     public EngineSettingsService(UserEngineSettingsRepository repo, ModelSchemaService schemaService,
+                                 WorkerEnvSyncService workerEnvSync,
                                  @Value("${weaveora.store-key:}") String storeKey,
                                  @Value("${weaveora.tts-url:http://127.0.0.1:18091}") String ttsUrl) {
         this.repo = repo;
         this.schemaService = schemaService;
+        this.workerEnvSync = workerEnvSync;
         this.storeKey = storeKey;
         this.defaultTtsUrl = (ttsUrl == null || ttsUrl.isBlank()) ? "http://127.0.0.1:18091" : ttsUrl;
     }
@@ -874,9 +877,52 @@ public class EngineSettingsService {
         repo.save(s);
         log.info("engine address synced user={} {} -> {}:{} fields={} leftovers={}",
                 userId, oldHost, newHost, port, changes.size(), leftovers.size());
+        // 可选：同时同步 worker 机器的 env（回退值）并重启 worker —— 用户勾选才做（会重启服务）
+        GpuAddressSyncResponse.WorkerEnv envResult = Boolean.TRUE.equals(req.applyWorkerEnv())
+                ? syncWorkerEnv(newUrl + ":" + port) : null;
         // 回读：以库里最终值为准（平台配置页有「保存后回写旧快照」的前科，不能只信内存）
         repo.findByUserId(userId).orElse(s);
-        return new GpuAddressSyncResponse(oldHost, newHost, port, changes, leftovers, toResponse(userId));
+        return new GpuAddressSyncResponse(oldHost, newHost, port, changes, leftovers, envResult, toResponse(userId));
+    }
+
+    /**
+     * 同步 worker env（回退值）并重启 worker。
+     *
+     * <p>为什么必须重启：env 在 worker 进程启动时被读成模块常量（不像 DB 是随任务下发的）——
+     * 所以改完不重启 = 不生效。也因此必须守护栏：**有 queued/running 任务就不重启**，
+     * 宁可让用户等任务跑完再点一次（重启会打断在跑的生成）。
+     */
+    private GpuAddressSyncResponse.WorkerEnv syncWorkerEnv(String newBase) {
+        if (!workerEnvSync.available()) {
+            return new GpuAddressSyncResponse.WorkerEnv(false, true, false, List.of(), null, null, null,
+                    "本机没有可写的 worker env（" + workerEnvSync.filePath() + "）：数据库已改，env 需手工同步");
+        }
+        long busy = workerEnvSync.busyJobCount();
+        if (busy > 0) {
+            return new GpuAddressSyncResponse.WorkerEnv(true, true, false, List.of(), null, false,
+                    workerEnvSync.serviceState(),
+                    "有 " + busy + " 个 queued/running 任务，按纪律**没有**改 env、也没有重启 worker；等任务跑完再点一次同步");
+        }
+        WorkerEnvSyncService.ApplyResult ap = workerEnvSync.apply(newBase);
+        if (ap.changes().isEmpty()) {
+            return new GpuAddressSyncResponse.WorkerEnv(true, true, false, List.of(), null, false,
+                    workerEnvSync.serviceState(), "env 已是新地址（未改动，无需重启）");
+        }
+        boolean restarted = workerEnvSync.restart();
+        String state = workerEnvSync.serviceState();
+        String msg = restarted
+                ? "env 已改 " + ap.changes().size() + " 处并重启 worker（状态 " + state + "）"
+                : "env 已改 " + ap.changes().size() + " 处，但重启 worker 失败（状态 " + state + "）—— 请手工 systemctl restart " + workerEnvSync.serviceName();
+        return new GpuAddressSyncResponse.WorkerEnv(true, true, true, ap.changes(), ap.backupPath(),
+                restarted, state, msg);
+    }
+
+    /** worker env 的当前回退值（页面用来显示「worker 回退地址」，对比两边是否一致）。 */
+    public studio.weaveora.engine.api.WorkerEnvStatusResponse workerEnvStatus() {
+        return new studio.weaveora.engine.api.WorkerEnvStatusResponse(
+                workerEnvSync.available(), workerEnvSync.filePath(), workerEnvSync.serviceName(),
+                workerEnvSync.currentValues(),
+                workerEnvSync.available() ? workerEnvSync.serviceState() : "unknown");
     }
 }
 

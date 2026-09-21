@@ -32,13 +32,19 @@ curl -s -o /dev/null -w '%{http_code}\n' http://<公网IP:端口>/__edge/health 
 | 1 | 生产机 PG：`user_engine_settings.services` + `gpu_server_url`/`gpu_server_port` | 7 个服务：`tts` / `face` / `talk` / `image` / `music` / `lipsync` / `transcribe`（**随任务下发给 worker，这才是真正的生效处**） |
 | 2 | 生产机 `/etc/weaveora/weaveora-gpu-worker.env` | `WEAVEORA_COMFY_URL` / `TTS_URL` / `MUSIC_URL` / `FACE_URL` |
 
-> **位置 1 已有一键入口（2026-09-21 起）**：网页「生成引擎配置 → GPU 服务器」卡片里的
+> **位置 1、2 都已有一键入口（2026-09-21 起）**：网页「生成引擎配置 → GPU 服务器」卡片里的
 > **「一键同步 IP / 端口」**按钮（`POST /api/v1/me/engine-settings/sync-address`）。填入新 IP + 端口即可一次替换
 > `gpu_server_url` 与 `services` 里**所有 host 命中旧地址**的 URL（路径保留），并回显**替换清单**与
 > **改漏清单**（仍是 IP 字面量、既不是新主机也不是回环的 URL）。
+>
+> 弹框里还有一个默认勾选的 **「同时同步 worker 机器的 env」**：勾上时后端会按**白名单键**改写
+> `/etc/weaveora/weaveora-gpu-worker.env`（`COMFY/TTS/MUSIC/FACE/IMAGE_COMFY_URL`，其余行原样不动）、
+> 先留备份 `.bak.<ts>`、再 `systemctl restart weaveora-gpu-worker`；
+> **有 queued/running 任务时会拒绝改也拒绝重启**（env 是进程启动时读入的，改完必须重启才生效）——
+> 这种情况下页面会提示“等任务跑完再点一次”，或按下面的命令手改。
+>
 > 起因：只改「端口」字段时 `services` 里的显式 URL 不会跟随 → 出图/参考图上传打到死地址，
 > 报 `urlopen error [Errno 111] Connection refused`；且 worker 日志打的是另一个变量（COMFY），看着「地址已经对了」。
-> **位置 2 仍然要手改**（它是 worker 的回退值，网页管不到）。
 
 ```bash
 # 位置 1（先备份再改；把 OLD/NEW 换成实际值）

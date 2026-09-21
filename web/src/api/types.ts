@@ -592,9 +592,35 @@ export interface GpuAddressSyncInput {
   port: number
   /** 可选：要被替换掉的旧主机；缺省 = 当前 gpuServerUrl 的 host */
   oldHost?: string | null
+  /** 可选（默认 false）：同时改写 worker 机器上的 env 并重启 worker（有任务在跑会被拦住） */
+  applyWorkerEnv?: boolean
 }
 
-/** 同步结果：替换清单 + 改漏检查 + 同步后的完整配置 */
+/** worker env（回退值）的同步结果 */
+export interface WorkerEnvSyncInfo {
+  /** 本机 env 是否可用（不存在/不可写 = 只改了数据库） */
+  available: boolean
+  requested: boolean
+  /** 是否真的改写了文件 */
+  applied: boolean
+  changes: { field: string; before: string; after: string }[]
+  backupPath: string | null
+  restarted: boolean | null
+  serviceState: string | null
+  /** 人话说明：为什么没改 / 被什么挡住 / 结果如何 */
+  message: string
+}
+
+/** worker env 的当前回退值（页面用来对比“页面地址 vs worker 回退值”） */
+export interface WorkerEnvStatus {
+  available: boolean
+  file: string
+  service: string
+  values: Record<string, string>
+  serviceState: string
+}
+
+/** 同步结果：替换清单 + 改漏检查 + （可选）worker env 结果 + 同步后的完整配置 */
 export interface GpuAddressSyncResult {
   oldHost: string | null
   newHost: string
@@ -602,6 +628,8 @@ export interface GpuAddressSyncResult {
   changes: { field: string; before: string; after: string }[]
   /** 仍是 IP 字面量、既不是新主机也不是回环的 URL（= 可能改漏的地方） */
   leftovers: string[]
+  /** 勾选「同时同步 worker env」时的结果，未勾选为 null */
+  workerEnv: WorkerEnvSyncInfo | null
   settings: EngineSettings
 }
 

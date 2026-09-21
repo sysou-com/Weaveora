@@ -1,11 +1,11 @@
 <script setup lang="ts">
 import { ArrowLeft, RefreshCw, Save } from 'lucide-vue-next'
-import { NAlert, NButton, NDivider, NForm, NFormItem, NIcon, NInput, NInputNumber, NModal, NRadio, NRadioGroup, NSelect, useMessage } from 'naive-ui'
+import { NAlert, NButton, NCheckbox, NDivider, NForm, NFormItem, NIcon, NInput, NInputNumber, NModal, NRadio, NRadioGroup, NSelect, useMessage } from 'naive-ui'
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 
-import { getEngineSettings, refreshModelPreset, saveEngineSettings, syncGpuAddress } from '@/api/engineSettings'
-import type { EngineKind, EngineSettings, GpuAddressSyncResult, ModelPreset, ModelSchema } from '@/api/types'
+import { getEngineSettings, getWorkerEnvStatus, refreshModelPreset, saveEngineSettings, syncGpuAddress } from '@/api/engineSettings'
+import type { EngineKind, EngineSettings, GpuAddressSyncResult, ModelPreset, ModelSchema, WorkerEnvStatus } from '@/api/types'
 import ModelSchemaPanel from '@/components/engine/ModelSchemaPanel.vue'
 
 const router = useRouter()
@@ -431,6 +431,10 @@ const syncHost = ref('')
 const syncPort = ref<number | null>(null)
 const syncing = ref(false)
 const syncResult = ref<GpuAddressSyncResult | null>(null)
+/** 默认勾选：页面与 worker env 是两个真源，只改一边就是“改漏”（有任务的时会自动跳过重启） */
+const syncWorkerEnv = ref(true)
+/** worker env 的当前回退值：页面直接显示出来，和页面地址对比一眼看出两边是否一致 */
+const envStatus = ref<WorkerEnvStatus | null>(null)
 
 /** 从 `http://1.2.3.4:27458` / `1.2.3.4` 里取 host（与后端 hostOf 同口径，只用于预览）。 */
 function hostOfUrl(v: string | null | undefined): string {
@@ -481,6 +485,29 @@ function openSync(): void {
   syncOpen.value = true
 }
 
+/** 页面「应该」指向的网关地址（用于和 env 对比） */
+const envExpected = computed(() => {
+  const h = hostOfUrl(gpuServerUrl.value)
+  return h && gpuServerPort.value ? `${h}:${gpuServerPort.value}` : ''
+})
+/** env 里与页面地址不一致的键（非空 = 还有第二个真源没对齐） */
+const envMismatch = computed(() => {
+  const s = envStatus.value
+  const exp = envExpected.value
+  if (!s?.available || !exp) return [] as { key: string; value: string }[]
+  return Object.entries(s.values ?? {})
+    .filter(([, v]) => !String(v).includes(exp))
+    .map(([key, value]) => ({ key, value }))
+})
+
+async function loadEnvStatus(): Promise<void> {
+  try {
+    envStatus.value = await getWorkerEnvStatus()
+  } catch {
+    envStatus.value = null   // 拿不到就不显示（不阻塞主流程）
+  }
+}
+
 async function doSync(): Promise<void> {
   const host = syncHost.value.trim()
   if (!host) {
@@ -493,13 +520,22 @@ async function doSync(): Promise<void> {
   }
   syncing.value = true
   try {
-    const r = await syncGpuAddress({ host, port: syncPort.value, oldHost: syncOldHost.value || null })
+    const r = await syncGpuAddress({
+      host,
+      port: syncPort.value,
+      oldHost: syncOldHost.value || null,
+      applyWorkerEnv: syncWorkerEnv.value,
+    })
     syncResult.value = r
-    await load()   // 用库里最终值刷新表单（后端已回读）
+    await load()
+    await loadEnvStatus()
+    const envMsg = r.workerEnv ? `；worker env：${r.workerEnv.message}` : ''
     if (r.leftovers.length) {
-      message.warning(`已替换 ${r.changes.length} 处，但仍有 ${r.leftovers.length} 处指向别的 IP，请核对`)
+      message.warning(`已替换 ${r.changes.length} 处，但仍有 ${r.leftovers.length} 处指向别的 IP，请核对${envMsg}`)
+    } else if (r.workerEnv && (!r.workerEnv.applied || r.workerEnv.restarted === false)) {
+      message.warning(`已替换 ${r.changes.length} 处${envMsg}`)
     } else {
-      message.success(`已同步 ${r.changes.length} 处：${r.oldHost} → ${r.newHost}:${r.newPort}`)
+      message.success(`已同步 ${r.changes.length} 处${envMsg}`)
     }
   } catch (e) {
     message.error(e instanceof Error ? e.message : '同步失败')
@@ -509,6 +545,7 @@ async function doSync(): Promise<void> {
 }
 
 onMounted(load)
+onMounted(loadEnvStatus)
 </script>
 
 <template>
@@ -703,6 +740,20 @@ onMounted(load)
             <b>已显式填过</b>的 URL 全换掉，并列出替换清单与改漏清单。
           </span>
         </div>
+        <p v-if="envStatus" class="hint text-secondary env-line" style="margin: -4px 0 12px">
+          <b>worker 回退值</b>（<code>{{ envStatus.file }}</code> · 服务 <code>{{ envStatus.service }}</code> ·
+          {{ envStatus.serviceState }}）：
+          <template v-if="envStatus.available">
+            <code v-for="(v, k) in envStatus.values" :key="k">{{ v }}</code>
+            <span v-if="envMismatch.length" class="env-warn">
+              ⚠ 有 {{ envMismatch.length }} 项与上面的页面地址不一致 —— 点「一键同步 IP / 端口」可一并改掉
+            </span>
+            <span v-else>✓ 与页面地址一致</span>
+          </template>
+          <template v-else>
+            本机读不到这个文件 → 这些地址以页面为准（页面留空时会回退到 worker 本机默认值）
+          </template>
+        </p>
         <p class="hint text-secondary" style="margin: -4px 0 10px">
           <b>视频分辨率</b>决定 motion 出片上限（换 GPU 卡就改这里）：实测 48G 卡上
           <b>720p/48 帧要 10 分钟以上且易超时</b>，<b>480p 只要 27~50 秒</b>；A14B 的甜点也是 480p 级。<br>
@@ -922,6 +973,13 @@ onMounted(load)
             <NInputNumber v-model:value="syncPort" :min="1" :max="65535" placeholder="27458" style="width: 130px" />
           </NFormItem>
         </div>
+        <NCheckbox v-model:checked="syncWorkerEnv" style="margin-bottom: 10px">
+          同时同步 worker 机器的 env（<code>weaveora-gpu-worker.env</code>）并重启 worker
+          <span class="text-secondary">
+            —— 那是 worker 的<b>回退值</b>（DB 字段为空时才读）；env 在进程启动时读入，必须重启才生效，
+            所以有任务在跑时会自动跳过（只改数据库）。
+          </span>
+        </NCheckbox>
         <NAlert v-if="!syncOldHost" type="warning" :bordered="false" style="margin-bottom: 10px">
           当前「GPU 服务器地址」为空，无法识别旧地址 —— 请先在上面填好当前（旧）地址再同步，
           或手工逐项改「服务地址」。
@@ -950,6 +1008,15 @@ onMounted(load)
           <div v-for="c in syncResult.changes" :key="'c-' + c.field" style="margin-top: 6px">
             <code>{{ c.field }}</code><br>
             <code>{{ c.before }}</code> → <code>{{ c.after }}</code>
+          </div>
+          <div v-if="syncResult.workerEnv" style="margin-top: 8px">
+            <b>worker env：</b>{{ syncResult.workerEnv.message }}
+            <div v-for="c in syncResult.workerEnv.changes" :key="'e-' + c.field">
+              <code>{{ c.field }}</code>：<code>{{ c.before }}</code> → <code>{{ c.after }}</code>
+            </div>
+            <div v-if="syncResult.workerEnv.backupPath">
+              改前备份：<code>{{ syncResult.workerEnv.backupPath }}</code>
+            </div>
           </div>
           <div v-if="syncResult.leftovers.length" style="margin-top: 8px">
             ⚠ 仍指向 IP、可能改漏：<br>
@@ -1060,6 +1127,17 @@ onMounted(load)
   gap: 10px;
   flex-wrap: wrap;
   margin: 0 0 12px;
+}
+.env-line code {
+  font-family: var(--wv-font-mono);
+  background: var(--wv-surface-raised);
+  padding: 0 4px;
+  border-radius: 4px;
+  word-break: break-all;
+  margin-right: 6px;
+}
+.env-warn {
+  color: var(--wv-warning, #d03050);
 }
 .sync-list {
   margin: 6px 0 10px;
