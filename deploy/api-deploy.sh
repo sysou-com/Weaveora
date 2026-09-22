@@ -80,7 +80,10 @@ TS=$(date +%Y%m%d-%H%M%S)
 echo "== 3/5 备份 + 替换 + 重启（ts=$TS）=="
 "${SSH[@]}" "set -e
   cd '$REMOTE_DIR'
-  [ -x weaveora-api.jar ] && cp -f weaveora-api.jar 'weaveora-api.jar.bak.$TS'
+  # 备份判断必须用 -f（文件存在），**不能**用 -x（可执行）：线上 jar 是 0644、没有 x 位，
+  # 用 -x 时这一行恒假 → 静默不留备份，而第 5 步仍会打印一条指向不存在文件名的「回滚」命令。
+  # 实测后果：09-15 之后所有部署都没有 jar 回滚点（ls /opt/weaveora/api/*.bak.* 只到 09-14）。
+  [ -f weaveora-api.jar ] && cp -f weaveora-api.jar 'weaveora-api.jar.bak.$TS'
   mv -f weaveora-api.jar.new weaveora-api.jar
   # 只留最近 5 份旧包
   ls -dt weaveora-api.jar.bak.* 2>/dev/null | tail -n +6 | xargs -r rm -f
