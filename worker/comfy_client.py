@@ -2400,6 +2400,8 @@ LIPSYNC_SEAM_BLEND = int(float(os.environ.get("WEAVEORA_LIPSYNC_SEAM_BLEND", "4"
 LIPSYNC_PRE_UPSCALE = int(float(os.environ.get("WEAVEORA_LIPSYNC_PRE_UPSCALE", "0") or 0))
 LIPSYNC_PRE_UPSCALE_MODEL = os.environ.get("WEAVEORA_LIPSYNC_PRE_UPSCALE_MODEL",
                                           "realesr-general-x4v3.pth")
+# 放大方式：esrgan（AI 超分，会"抹平"AI 视频的颗粒 → 实测嘴部变糊斑）｜lanczos（传统重采样，保留锐利边缘）
+LIPSYNC_UPSCALE_MODE = os.environ.get("WEAVEORA_LIPSYNC_UPSCALE_MODE", "esrgan").strip().lower()
 # ★ 变体 2（2026-09-22 晚）：对口型**之后**再统一放大（0/1=关）。
 #   为什么要变：先放大再对口型时整帧是 AI 锐化纹理、只有「嘴部贴回区」是模型软输出
 #   ⇒ 用户反馈“嘴部马赛克完全遮挡了嘴”（贴回区与周围质感不一致，像一块糊斑）。
@@ -3427,6 +3429,37 @@ def _interp_video_on_box(client_id, vbytes, mult, target_fps):
     return outs[0]["bytes"]
 
 
+def _resample_video(vbytes, scale, tag="weaveora_rs"):
+    """纯 ffmpeg 重采样放大/缩小（lanczos），保留音轨；不占显存、秒级完成。
+
+    为什么需要这个分支：AI 超分（Real-ESRGAN）会把 AI 视频自带的颗粒"抹平" ⇒ 实测嘴部变糊斑
+    （见 docs/lipsync-setup.md §9.5）；传统 lanczos 重采样保留锐利边缘，给 LatentSync 的是一张
+    "更大但更硬"的脸。两种方式都保留原音轨与帧率。
+    """
+    import subprocess, tempfile, os as _os
+    d = tempfile.mkdtemp(prefix="wv_rs_")
+    try:
+        fin = _os.path.join(d, "in.mp4")
+        fout = _os.path.join(d, "out.mp4")
+        with open(fin, "wb") as fh:
+            fh.write(vbytes)
+        meta = _probe_video_meta(vbytes)
+        w, h = int(meta[0] or 0), int(meta[1] or 0)
+        if w <= 0 or h <= 0:
+            raise ComfyError("重采样放大：拿不到源分辨率")
+        tw, th = int(w * scale) // 2 * 2, int(h * scale) // 2 * 2
+        cmd = ["ffmpeg", "-v", "error", "-y", "-i", fin,
+               "-vf", "scale=%d:%d:flags=lanczos" % (tw, th),
+               "-c:v", "libx264", "-crf", "16", "-preset", "veryfast", "-pix_fmt", "yuv420p",
+               "-c:a", "copy", fout]
+        subprocess.run(cmd, check=True, timeout=900)
+        with open(fout, "rb") as fh:
+            return fh.read()
+    finally:
+        import shutil as _sh
+        _sh.rmtree(d, ignore_errors=True)
+
+
 def _upscale_video_on_box(client_id, vbytes, scale):
     """对口型**之前**把底片放大 `scale` 倍（A 方案：给 LatentSync 更大的脸）。
 
@@ -3443,6 +3476,8 @@ def _upscale_video_on_box(client_id, vbytes, scale):
     ★ 权重：`realesr-general-x4v3.pth`（官方 Real-ESRGAN 发布物，BSD-3，4.9MB，x4 后缩回一半）。
     实测（4090/47G，160 帧 832×464）：**72 秒**，无 OOM。
     """
+    if LIPSYNC_UPSCALE_MODE == "lanczos":
+        return _resample_video(vbytes, scale, "weaveora_preup")
     import uuid as _uuid
     vname = _upload_any(vbytes, "weaveora_preup_%s_in.mp4" % _uuid.uuid4().hex[:8], "video/mp4")
     if not vname:
