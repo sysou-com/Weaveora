@@ -111,6 +111,15 @@ public class DirectorService {
             // 追加在系统词末尾且标明最高优先级，才是真正能压过它的位置。
             system = system + PROMPT_LANG_ZH_OVERRIDE;
         }
+        // ★ 2026-09-22（用户要求「模板也进导演首次生成」）：把**官方口径的提示词模板**也随首次生成带给 LLM。
+        //   与「AI 生成/更新提示词」共用同一份模板文件（单一真源），不往 .md 里复制内容 ——
+        //   否则两处漂移（改了模板忘了改系统词）。video 模式：分镜正词=图生视频（运动+运镜）、
+        //   关键帧正词=出图；image 模式：均为出图正词。
+        String tplFirst = officialTemplateBlock("video".equals(mode) ? "shot" : "image", null);
+        if (!tplFirst.isEmpty()) {
+            system = system + tplFirst;
+        }
+        log.info("导演首次生成：模式={}、模板={}（语言={}）", mode, !tplFirst.isEmpty(), promptLang);
         String user = buildUserPrompt(brief, project, mode, prev);
         long t0 = System.nanoTime();
         JsonNode plan;
