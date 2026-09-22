@@ -41,6 +41,34 @@ import soundfile as sf
 # 供远端（worker 在 API 服务器、节点在 GPU 服务器）核对到底选了谁。
 _DEBUG_BOX = (os.environ.get("WEAVEORA_DEBUG_BOX", "") or "").lower() not in ("", "0", "false", "no")
 
+
+def _crop_box_to_frame_quad(box, affine_matrix):
+    """把「裁剪坐标系里的矩形」用仿射逆变换映射回**原帧坐标系**，返回 4 个角点（Nx2）。
+
+    ★ 2026-09-22 勘误：`ImageProcessor.affine_transform()` 返回的 `box` 恒为
+    `[0, 0, 裁剪宽, 裁剪高]`（`AlignRestore.align_warp_face` 把脸对齐到固定模板，
+    裁剪图左上角就是 (0,0)），它**与脸在原帧的哪个位置无关**。上段直接拿它当原帧坐标
+    画调试框 ⇒ 绿框永远贴在画面左上角（实测 x 0.000–0.505 / y 0.000–0.996，正好等于
+    裁剪尺寸）⇒ 任何「框住谁 / 框在不在嘴上」的目视判断都是错的，据此得出的
+    「贴回半幅 ⇒ 嘴部乱码」结论**已作废**（真正的贴回是 restore_img 的仿射逆变换 + 羽化掩码）。
+
+    `affine_matrix` 是「原帧 → 裁剪」的 2x3（kornia 约定；`restore_img` 正是用它的逆把脸
+    贴回原帧），所以把裁剪矩形四角乘上它的逆矩阵就得到原帧上的四边形 —— 对齐带旋转，
+    故返回 4 个点而不是 bbox。纯调试用，任何异常都不许影响业务：失败返回 None。
+    """
+    try:
+        m = affine_matrix
+        if hasattr(m, "detach"):
+            m = m.detach().to("cpu", torch.float32).numpy()
+        m = np.asarray(m, dtype=np.float64).reshape(2, 3)
+        inv = np.linalg.inv(np.vstack([m, np.array([0.0, 0.0, 1.0])]))
+        x1, y1, x2, y2 = [float(v) for v in box]
+        corners = np.array([[x1, y1, 1.0], [x2, y1, 1.0], [x2, y2, 1.0], [x1, y2, 1.0]])
+        return (corners @ inv.T)[:, :2]
+    except Exception as e:
+        print("[weaveora] 调试画框：坐标反算失败（本帧退回旧画法）: %s" % e, flush=True)
+        return None
+
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
 
@@ -248,12 +276,17 @@ class LipsyncPipeline(DiffusionPipeline):
         return combined_pixel_values
 
     @staticmethod
-    def _debug_mark(frame, box, driven, reason="", enabled=None):
+    def _debug_mark(frame, box, driven, reason="", enabled=None, affine_matrix=None):
         """Weaveora 调试画框（WEAVEORA_DEBUG_BOX=1 时生效）。
 
         为什么要它：worker 跑在 API 服务器、节点跑在 GPU 服务器，我们看不到节点日志，
-        “这一帧到底选了谁/有没有驱动”无法从远端确认。画上框+右上角色块后，产物自己就带答案：
-        左上角色块 绿=驱动该帧、红=不驱动（保留原帧）；框=实际锁定的那张脸。
+        “这一帧到底选了谁/有没有驱动”无法从远端确认。画上框+左上角色块后，产物自己就带答案：
+        左上角色块 绿=驱动该帧、红=不驱动（保留原帧）；框=**原帧坐标系里**实际锁定/回贴的那张脸。
+
+        ★ 2026-09-22 勘误（上段「贴回半幅」结论据此作废）：`box` 是**裁剪坐标系**的
+        `[0,0,裁剪宽,裁剪高]`（锚在裁剪图左上角，只编码裁剪尺寸），拿它当原帧坐标画框
+        = 绿框恒从画面左上角起画。要看脸到底在哪，必须用 `affine_matrix`（原帧→裁剪）的
+        逆矩阵把裁剪矩形映射回原帧（见 `_crop_box_to_frame_quad`）。
         """
         if enabled is None:
             enabled = _DEBUG_BOX
@@ -262,8 +295,13 @@ class LipsyncPipeline(DiffusionPipeline):
         f = np.ascontiguousarray(frame.copy())
         color = (0, 200, 0) if driven else (0, 0, 255)  # 绿=驱动，红=不驱动
         if box is not None:
-            x1, y1, x2, y2 = [int(v) for v in box]
-            cv2.rectangle(f, (max(0, x1), max(0, y1)), (max(1, x2), max(1, y2)), color, 2)
+            quad = _crop_box_to_frame_quad(box, affine_matrix) if affine_matrix is not None else None
+            if quad is not None:
+                cv2.polylines(f, [np.round(quad).astype(np.int32)], True, color, 2)
+            else:
+                # 无仿射矩阵（整段没检到脸 → box 是整帧）时退回旧画法，不影响判断
+                x1, y1, x2, y2 = [int(v) for v in box]
+                cv2.rectangle(f, (max(0, x1), max(0, y1)), (max(1, x2), max(1, y2)), color, 2)
         cv2.rectangle(f, (0, 0), (24, 24), color, -1)
         if not driven and reason:
             cv2.putText(f, reason[:12].encode("ascii", "ignore").decode(), (28, 18),
@@ -315,7 +353,8 @@ class LipsyncPipeline(DiffusionPipeline):
                 face, size=(height, width), interpolation=transforms.InterpolationMode.BICUBIC, antialias=True
             )
             out_frame = self.image_processor.restorer.restore_img(video_frames[index], face, affine_matrices[index])
-            out_frames.append(self._debug_mark(out_frame, boxes[index], True, "", self._debug_box))
+            out_frames.append(self._debug_mark(out_frame, boxes[index], True, "", self._debug_box,
+                                               affine_matrix=affine_matrices[index]))
         return np.stack(out_frames, axis=0)
 
     def loop_video(self, whisper_chunks: list, video_frames: np.ndarray):

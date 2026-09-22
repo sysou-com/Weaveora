@@ -1,0 +1,11 @@
+# =============================================================================
+# 行尾纪律（2026-09-22 新增）
+#
+# 本机是 Windows（core.autocrlf=true）⇒ 工作区默认是 CRLF。已实测踩坑：
+# `deploy/latentsync-node/*.sh` 被 tar/scp 送到 Linux 后，`bash apply.sh` 第一行就
+#   `set: pipefail\r: invalid option name`
+# 直接失败（补丁根本打不上）。所以：**凡是要在 Linux 上执行的文本，一律 LF**。
+# 注意：这不代表可以不用 pack.sh 的转换步骤（别人可能用别的 clone），两道保险都要在。
+# =============================================================================
+*.sh text eol=lf
+deploy/latentsync-node/** text eol=lf

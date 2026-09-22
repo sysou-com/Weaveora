@@ -1,0 +1,40 @@
+# =============================================================================
+# Weaveora API（生产机 / VPS）systemd unit —— **仓库里的唯一副本**
+#
+# 为什么进仓库（2026-09-22 五段遗留）：这份 unit 的修复（`NoNewPrivileges` /
+# `ProtectSystem=full` + `ReadWritePaths=/opt/weaveora/data /etc/weaveora`）此前
+# **只存在于 VPS 的 /etc/systemd/system/weaveora-api.service**，仓库里没有副本
+# ⇒ 换机/重建 systemd 就等于把修复丢掉（`grep -rn ReadWritePaths deploy/` 当时为空）。
+#
+# 安装 / 校对（在 VPS 上；改完必须 `systemctl daemon-reload`）：
+#   cp deploy/systemd/weaveora-api.service /etc/systemd/system/weaveora-api.service
+#   systemctl daemon-reload && systemctl restart weaveora-api
+#   systemctl is-active weaveora-api
+#   md5sum /etc/systemd/system/weaveora-api.service   # 2026-09-22 线上实测 0f945bfbee39d18c309298feeb4ce03f
+#
+# 关键点（改动前先想清楚，两个字段都踩过坑）：
+#   * `ReadWritePaths=/opt/weaveora/data /etc/weaveora`
+#     —— `ProtectSystem=full` 会把 /usr /boot /etc 挂成**只读**；不给 /etc/weaveora 放行的话
+#        API 自己写配置就会 `Read-only file system`（平台「生成引擎配置」保存失败）。
+#   * `EnvironmentFile=/etc/weaveora/weaveora-api.env`
+#     —— DB 口令 / JWT secret / Redis 口令都只在这里，**不进仓库**（Weaveora.md §0-9）。
+#   * `ExecStart` 的 java 走 `/opt/java21/current` 软链，别写死版本目录。
+# =============================================================================
+[Unit]
+Description=Weaveora API (ZhiYing)
+After=network.target postgresql.service redis.service
+Wants=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/weaveora/api
+EnvironmentFile=/etc/weaveora/weaveora-api.env
+ExecStart=/opt/java21/current/bin/java -Xmx1g -jar /opt/weaveora/api/weaveora-api.jar --spring.profiles.active=prod
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=full
+ReadWritePaths=/opt/weaveora/data /etc/weaveora
+
+[Install]
+WantedBy=multi-user.target

@@ -300,8 +300,39 @@ bash /tmp/latentsync-node/verify.sh http://127.0.0.1:8001                    # �
 一键核对（节点侧）：
 
 ```bash
-curl -s http://127.0.0.1:8001/weaveora/version     # 应有 version=2026-09-14.1 与 7 项能力
+curl -s http://127.0.0.1:8001/weaveora/version     # 应有 version=2026-09-22.1 与 8 项能力
 ```
+
+### 9.3 调试画框坐标系勘误（2026-09-22，补丁版本 `2026-09-22.1`）
+
+**事故**：2026-09-22 上一场次排「对口型嘴部乱码」时，拿调试绿框的 bbox 当「锁定/回贴区域」，
+量出 `x 0.000–0.505 / y 0.000–0.996`（正好是裁剪尺寸），于是推出「贴回半个画面 ⇒ 乱码」。
+**这个结论是错的**：`_debug_mark()` 收到的 `box` 来自 `ImageProcessor.affine_transform()`，
+恒为 `[0, 0, 裁剪宽, 裁剪高]` —— `AlignRestore.align_warp_face()` 把脸对齐到固定模板，
+裁剪图左上角就是 `(0,0)`，所以这个 box **只编码「裁剪图有多大」，与脸在原帧的哪个位置无关**。
+直接当原帧坐标画 → 绿框永远贴在画面左上角 ⇒ 「框住谁 / 框在不在嘴上」的目视判断全部无效。
+
+**修法**：`affine_matrix` 是「原帧 → 裁剪」的 2x3（`restore_img()` 正是用它的**逆**把脸贴回原帧），
+把裁剪矩形的四角乘上它的逆矩阵即可得到原帧上的四边形（带旋转，故画多边形而非 bbox）。
+新增模块级 `_crop_box_to_frame_quad(box, affine_matrix)`，只有它失败或拿不到矩阵时才退回旧画法；
+纯调试代码，任何异常都只打一行日志、不影响业务。
+
+| 文件 | 补丁 | 为什么 |
+|---|---|---|
+| `latentsync/pipelines/lipsync_pipeline.py` | 新增 `_crop_box_to_frame_quad()`；`_debug_mark(..., affine_matrix=None)` 用 `cv2.polylines` 画**原帧坐标**下的四边形；`restore_video()` 把 `affine_matrices[index]` 传进去 | 绿框此前恒锚在左上角（只反映裁剪尺寸），据此判「点选是否跑偏」无效 |
+| `nodes.py` | 版本 `2026-09-14.1 → 2026-09-22.1`；能力表加 `debug_box_frame_coords` | worker 只校验必需能力（多一项不破），但版本号便于远端核对线上到底跑的是哪版 |
+
+**离线自检**（不需要 GPU，不加载 diffusers）：
+
+```bash
+python deploy/latentsync-node/test_debug_box_quad.py          # GPU 盒上：/opt/weaveora/ComfyUI/venv/bin/python
+```
+
+覆盖：纯平移的已知答案、缩放+旋转的往返一致性（`max_err≈3e-14`）、torch `(1,2,3)` half 张量
+（线上实际传入的形态）、非法 box / 奇异矩阵返回 `None` 且不抛。
+
+> ⚠️ 复跑验收时的口径：绿框现在框的是**回贴区域**（整张脸的对齐裁剪），不是嘴；
+> 判「点选是否跑偏」看框有没有盖住目标那张脸即可。
 
 ---
 
