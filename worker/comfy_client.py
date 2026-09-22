@@ -2021,6 +2021,15 @@ def generate_motion(client_id, payload, progress_fn=None):
           flush=True)
     # 因显存做的取舍会汇成 notes 随资产上报（不只藏在日志里）
     _notes = []
+    # ★ 2026-09-22 问题 5：本镜需要对口型时，**图内不插帧** —— 把插帧让给对口型之后的步骤（默认关，见上方开关）。
+    #   为什么要成对地改：只把图内插帧去掉、而不在对口型后补回来 → 交付帧率降一半、
+    #   导出阶段会用 ffmpeg `fps=` **复制帧**拉齐 → 反而把顿挫做回来。所以两者必须同一个开关控。
+    if LIPSYNC_INTERP_AFTER and interp_mult >= 2 and bool(payload.get("lipSync")):
+        _notes.append("对口型镜：本段按原生 %gfps 生成，插帧（×%d → %dfps）放到对口型之后做"
+                      % (fps, int(interp_mult), int(out_fps)))
+        print("[comfy] motion 插帧延后：本镜需要对口型 → 先出原生 %gfps，对口型后再 RIFE ×%d 到 %dfps"
+              % (fps, int(interp_mult), int(out_fps)), flush=True)
+        interp_mult, interp_note = 1, None
     _res_shrunk = False
     _want_frames = None
     # P2：A14B 双专家实测峰值 ~42 GiB → 总显存不够就**快速失败并点名换机**
@@ -2372,6 +2381,12 @@ LIPSYNC_AUDIO_INPUT = os.environ.get("WEAVEORA_LIPSYNC_AUDIO_INPUT", "").strip()
 # LatentSync 的原生输出帧率（configs/unet/stage2_512.yaml: video_fps: 25）。
 # 组装成片时必须用这个值，不能用源片 fps —— 否则时长会按 25/源fps 缩短。
 LIPSYNC_FPS = int(os.environ.get("WEAVEORA_LIPSYNC_FPS", "0") or 0)
+# ★ 2026-09-22 问题 5（管线顺序）：对口型**必须吃未插帧的原生帧**，插帧放到对口型之后。
+#   为什么：RIFE 合成的中间帧在嘴部这类高频区是模糊/拖影的，再喂给 LatentSync → 嘴区叠加成「乱码」。
+#   正确顺序：运动（原生 16fps）→ 对口型 → RIFE 插到交付帧率。
+#   默认 **0=关**（保持现状：图内插帧→对口型），因为这一层要改两条通路，
+#   要先在真实镜头上验证过再开；开=1 时由 `_interp_video_on_box()` 在口型产物上补做插帧。
+LIPSYNC_INTERP_AFTER = (os.environ.get("WEAVEORA_LIPSYNC_INTERP_AFTER", "0") or "0").strip() == "1"
 LIPSYNC_NODE_CLASS = os.environ.get("WEAVEORA_LIPSYNC_NODE_CLASS", "LatentSyncNode").strip()
 # 人脸服务地址（生成引擎配置 → 服务地址 → 人脸）。空 = 用本机 insightface 子进程（原行为）。
 # 填了就走远端 HTTP（见 deploy/face/face_server.py），便于把脸算力集中到新 GPU 机器。
@@ -3327,6 +3342,40 @@ def _probe_video_meta(mp4_bytes):
     return w, h, dur_ms
 
 
+def _interp_video_on_box(client_id, vbytes, mult, target_fps):
+    """对口型**之后**做 RIFE 插帧（问题 5：把插帧从运动阶段挑到最后一步）。
+
+    为什么不能在 ffmpeg 里做：RIFE 是神经网络插帧，只有 GPU 机的 ComfyUI 节点能跑；
+    ffmpeg 的 minterpolate 已在 2026-09-18 被全面禁用（分数倍混合帧 → 重影/几何扭曲）。
+
+    图：LoadVideo → GetVideoComponents →（images/audio 分开）→ FrameInterpolate ×N
+        → CreateVideo(fps=交付帧率, audio=原音轨) → SaveVideo
+    ★ 必须把原音轨接回 CreateVideo，否则口型产物会丢配音。
+    """
+    import uuid as _uuid
+    vname = _upload_any(vbytes, "weaveora_interp_%s_in.mp4" % _uuid.uuid4().hex[:8], "video/mp4")
+    if not vname:
+        raise ComfyError("对口型后插帧：上传视频失败")
+    prefix = "weaveora_interp_" + _uuid.uuid4().hex[:6]
+    graph = {
+        "1": {"class_type": "LoadVideo", "inputs": {"file": vname}},
+        "2": {"class_type": "GetVideoComponents", "inputs": {"video": ["1", 0]}},
+        "3": {"class_type": "FrameInterpolationModelLoader", "inputs": {"model_name": MOTION_INTERP_MODEL}},
+        "4": {"class_type": "FrameInterpolate",
+              "inputs": {"interp_model": ["3", 0], "images": ["2", 0], "multiplier": int(mult)}},
+        "5": {"class_type": "CreateVideo",
+              "inputs": {"images": ["4", 0], "fps": float(target_fps), "audio": ["2", 2]}},
+        "6": {"class_type": "SaveVideo",
+              "inputs": {"video": ["5", 0], "filename_prefix": prefix, "format": "auto"}},
+    }
+    pid = _post_prompt({"prompt": graph, "client_id": client_id}, client_id)
+    rec = _poll_history(client_id, pid, timeout=LIPSYNC_TIMEOUT)
+    outs = _download_outputs(rec, prefix) or _download_outputs(rec, "weaveora")
+    if not outs:
+        raise ComfyError("对口型后插帧：无输出视频（prefix=%s）" % prefix)
+    return outs[0]["bytes"]
+
+
 def generate_lipsync(client_id, payload, progress_fn=None):
     """对口型（lipsync 任务）：画面 + 配音 → 嘴型对齐的视频。返回 [{bytes, mime}]。
 
@@ -3568,8 +3617,39 @@ def generate_lipsync(client_id, payload, progress_fn=None):
 
     if progress_fn:
         progress_fn(100, "done")
+    # ★ 2026-09-22 问题 5：口型产物上补做 RIFE 插帧（只在开关打开时）。
+    #   并把三个帧率写进日志与资产 notes —— 排查「口型乱码/时长不对」时这三个值必须是显式的：
+    #   源片 fps（对口型吃进去的）/ 生成节点 fps（LatentSyncNode 实际用的）/ 交付 fps（最终成片）。
+    #   注意：多人分支在上面已经把 tmp 目录清了 → 这里用**新建的**临时目录探针（不能复用 tmp）
+    _src_fps = 0.0
+    try:
+        _src_fps = float(_source_fps(out, tempfile.mkdtemp(prefix="wv_lipfps_"), "lip_out") or 0.0)
+    except Exception:
+        _src_fps = 0.0
+    _want_fps = int(payload.get("fps") or 0) or int(_src_fps or 0)
+    _mult = 0
+    if LIPSYNC_INTERP_AFTER and _src_fps > 0 and _want_fps > _src_fps:
+        try:
+            _mult, _n2 = _motion_interp_plan(_want_fps, _src_fps)
+        except Exception:
+            _mult = 0
+        if _mult >= 2:
+            try:
+                _b4 = len(out)
+                out = _interp_video_on_box(client_id, out, _mult, _want_fps)
+                print("[comfy] 对口型后插帧：RIFE ×%d → %dfps（%d→%d bytes）"
+                      % (_mult, _want_fps, _b4, len(out)), flush=True)
+            except Exception as e:
+                print("[comfy] WARN 对口型后插帧失败，按 %.2ffps 交付：%s" % (_src_fps, e), flush=True)
+                _mult = 0
+    _fps_note = "帧率：源片=%.2f｜LatentSync=%s｜交付=%s" % (
+        _src_fps or 0,
+        (_src_fps if LIPSYNC_FPS <= 0 else float(LIPSYNC_FPS)) or 0,
+        ("%.2f（RIFE ×%d）" % (_want_fps, _mult)) if _mult >= 2 else ("%.2f（未插帧）" % (_src_fps or 0)))
+    print("[comfy] 对口型 %s" % _fps_note, flush=True)
     w, h, dur = _probe_video_meta(out)
-    return [{"bytes": out, "mime": "video/mp4", "width": w, "height": h, "duration_ms": dur}]
+    return [{"bytes": out, "mime": "video/mp4", "width": w, "height": h, "duration_ms": dur,
+             "notes": _fps_note}]
 
 def _concat_voice(voice_keys):
     """把多段配音按顺序拼成一个 wav（用本机 ffmpeg；失败时退回第一段）。"""

@@ -79,7 +79,11 @@ echo "== 3/5 备份 + 原子改名 =="
 echo "== 4/5 重启 worker 服务 =="
 if [ -f "$WF_SRC" ]; then
   scp -i "$KEY" -q "$WF_SRC" "$HOST:$WF_DST.new"
-  echo "   工作流 JSON: $("${SSH[@]}" "mv -f $WF_DST.new $WF_DST && echo 已同步" || true)"
+  # ★ 2026-09-22（用户排查「口型乱码」时发现的缺口）：这个工作流 JSON 以前是**直接覆盖、无备份**——
+  #   只有 5 个 .py 进 FILES 数组、才有 .bak。结果 09-22 10:01 那次 worker 部署把线上
+  #   lipsync_workflow_api.json 覆盖掉后，**没有任何恢复路径**，事后无法证明改了什么。
+  #   现在与 .py 同口径：先 cp 出 <file>.bak.<ts>，再原子改名。
+  echo "   工作流 JSON: $("${SSH[@]}" "[ -f $WF_DST ] && cp -f $WF_DST $WF_DST.bak.$TS; mv -f $WF_DST.new $WF_DST && echo \"已同步（备份 $WF_DST.bak.$TS）\"" || true)"
 fi
 for svc in "$SVC" "weaveora-gpu-worker"; do
   if "${SSH[@]}" "systemctl list-unit-files 2>/dev/null | grep -q '^$svc'"; then
@@ -101,3 +105,4 @@ fi
 "${SSH[@]}" "journalctl -u $SVC -n 6 --no-pager | tail -5 | sed 's/^/   /'"
 echo
 echo "== 完成。回滚：ssh $HOST 'cd $DIR && for f in ${FILES[*]}; do [ -f \$f.bak.$TS ] && mv -f \$f.bak.$TS \$f; done && systemctl restart $SVC' =="
+echo "   工作流回滚：ssh $HOST 'cd $DIR && [ -f lipsync_workflow_api.json.bak.$TS ] && mv -f lipsync_workflow_api.json.bak.$TS lipsync_workflow_api.json && systemctl restart $SVC'"
