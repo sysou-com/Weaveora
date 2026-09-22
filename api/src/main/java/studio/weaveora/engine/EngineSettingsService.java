@@ -104,6 +104,10 @@ public class EngineSettingsService {
             "lora_high", "lora_low", "lora_high_name", "lora_low_name", "shift",
             "sampler_name", "scheduler", "model_high", "model_low",
             "mode", "dual", "width", "height", "frames", "fps", "resolution",
+            // ★ 2026-09-23：**出片引擎**（`wan22` = Wan2.2 I2V-A14B 双专家，480p/16fps；
+            //   `ltx25` = LTX-2.5 生产档，1280×704/24fps/一次过）。
+            //   必须与 worker 的 MOTION_SERVICE_KEYS 成对；漏一边 → 白名单静默丢弃 → 「UI 配了没效果」（四段坑 3）。
+            "engine",
             // ★ 档位参数记忆（2026-09-18）：UI 切换 preset 时把每个档的参数快照存在这里；
             //   它本身只是元数据（worker 会忽略），但必须过白名单才能存取。
             "preset_snapshots");

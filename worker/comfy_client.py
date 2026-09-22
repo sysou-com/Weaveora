@@ -1173,6 +1173,16 @@ def _download_outputs(rec, prefix="weaveora"):
     outs = []
     outputs = rec.get("outputs") or {}
     for node in outputs.values():
+        # ★ 2026-09-23：SaveVideo / SaveWEBM 之类把产物放在 videos/gifs 键下（LTX-2.5 走 SaveVideo 出 mp4）。
+        for vid in (node.get("videos") or []) + (node.get("gifs") or []):
+            fname = vid.get("filename", "")
+            if not fname.startswith(prefix):
+                continue
+            sub = vid.get("subfolder") or ""
+            typ = vid.get("type") or "output"
+            q = urllib.parse.urlencode({"filename": fname, "subfolder": sub, "type": typ})
+            _, body = _comfy("GET", "/view?" + q)
+            outs.append({"filename": fname, "bytes": body, "subfolder": sub})
         for img in (node.get("images") or []):
             fname = img.get("filename", "")
             if not fname.startswith(prefix):
@@ -1335,6 +1345,9 @@ MOTION_SERVICE_KEYS = ("preset", "steps", "switch", "switch_step", "cfg", "cfg_h
                        "lora_high", "lora_low", "lora_high_name", "lora_low_name", "shift",
                        "sampler_name", "scheduler", "model_high", "model_low", "mode", "dual",
                        "width", "height", "frames", "fps",
+                       # ★ 2026-09-23：出片引擎选择（wan22 = 现役 Wan2.2 I2V；ltx25 = LTX-2.5 生产档）。
+                       #   必须放进白名单，否则引擎配置页下发到 services.motion.engine 会被静默丢弃（四段坑 3）。
+                       "engine",
                        # ★ 2026-09-22（用户报「视频分辨率 720p 不可用」）——`resolution` 之前**不在名单里**：
                        #   引擎配置页把「GPU 服务器最大支持分辨率」写进 services.motion.resolution，
                        #   到这里被 continue 掉 → _motion_resolution 只读得到 params.resolution
@@ -1984,9 +1997,164 @@ def _motion_tick(progress_fn):
     return _tick
 
 
+# ===========================================================================
+# ★ 2026-09-23：**LTX-2.5 出片引擎**（Lightricks；官方「生产质量档」= distilled 两段式）
+#   为什么要：Wan2.2 I2V 是 2025-07 的模型，已一年；LTX-2.5（2026-09）原生 **1280×704 / 24fps /
+#   一次过出片**（自带音轨、不需要 RIFE 插帧、不需要 LatentSync 就已经有口型能力）。
+#   盒上实测（2026-09-23，官方样张 1280×704 / 5s）：**Prompt executed in 145.65s**，
+#   峰值显存 **44,662 MiB / 46,068 MiB**（97%，跑前必须先 /free 卸掉 ComfyUI 常驻缓存）。
+#   切引擎：环境变量 `WEAVEORA_MOTION_ENGINE=ltx25`（缺省 wan22，生产行为不变）；
+#   也可按镜覆盖：引擎配置页下发 `services.motion.engine=ltx25` → payload.params.engine。
+#   工作流文件：/opt/weaveora/workflows/ltx25_i2v_api.json（由官方模板摊平，见 deploy/flatten_comfy_template.py）
+# ===========================================================================
+MOTION_ENGINE = (os.environ.get("WEAVEORA_MOTION_ENGINE", "wan22") or "wan22").strip().lower()
+LTX25_WORKFLOW = os.environ.get("WEAVEORA_LTX25_WORKFLOW", "/opt/weaveora/workflows/ltx25_i2v_api.json")
+LTX25_KEEP_AUDIO = (os.environ.get("WEAVEORA_LTX25_KEEP_AUDIO", "0") or "0").strip() == "1"
+LTX25_NATIVE_FPS = float(os.environ.get("WEAVEORA_LTX25_NATIVE_FPS", "24") or 24)   # 工作流 PrimitiveInt(361)
+LTX25_MAX_SIDE = int(os.environ.get("WEAVEORA_LTX25_MAX_SIDE", "1280") or 1280)
+LTX25_FREE_GB = float(os.environ.get("WEAVEORA_LTX25_FREE_GB", "40") or 40)
+LTX25_TIMEOUT = float(os.environ.get("WEAVEORA_LTX25_TIMEOUT", "1800") or 1800)
+# ★ 2026-09-23：LTX-2.5 的**时间轴 ×2**（24fps → 48fps）开关。
+#   原理：官方 `ltx-2.5-latent-temporal-upscaler-x2-bf16` 在 latent 域把时间轴放大 2×
+#   （时长不变）→ 解码后帧数×2、音画仍同步。比 RIFE 插帧更原生（无插帧伪影）。
+#   用法：把下面这行设 1（并在引擎页把帧数按 24fps 口径填）→ 走 *_48fps 工作流。
+#   注意：解码阶段显存/耗时会上涨，且单卡只能串行跑（实测 5s/121 帧已占 44.7/46.1 GiB）。
+LTX25_FPS_X2 = (os.environ.get("WEAVEORA_LTX25_FPS_X2", "0") or "0").strip() == "1"
+LTX25_WORKFLOW_X2 = os.environ.get("WEAVEORA_LTX25_WORKFLOW_X2",
+                                   "/opt/weaveora/workflows/ltx25_i2v_48fps_api.json")
+
+
+def _strip_audio(mp4):
+    """LTX 出的 mp4 自带音轨；交付链（对口型/导出）用的是 TTS 音轨 → 默认剥掉，避免串轨。
+    要保留（做「环境声/氛围镜」）就设 WEAVEORA_LTX25_KEEP_AUDIO=1。"""
+    if LTX25_KEEP_AUDIO:
+        return mp4
+    import tempfile, subprocess as _sp, shutil as _sh
+    d = tempfile.mkdtemp(prefix="wv_ltx25_")
+    try:
+        src = os.path.join(d, "in.mp4"); dst = os.path.join(d, "out.mp4")
+        with open(src, "wb") as fh:
+            fh.write(mp4)
+        r = _sp.run([_ffmpeg_exe(), "-y", "-v", "error", "-i", src, "-c:v", "copy", "-an", dst],
+                    stdout=_sp.PIPE, stderr=_sp.PIPE)   # py3.6 兼容（capture_output 需 3.7+）
+        if r.returncode != 0 or not os.path.exists(dst):
+            print("[comfy] ltx25 剥音轨失败，保留原音轨：%s" % (r.stderr or b"")[-200:], flush=True)
+            return mp4
+        with open(dst, "rb") as fh:
+            return fh.read()
+    finally:
+        _sh.rmtree(d, ignore_errors=True)
+
+
+def _motion_ltx25(client_id, payload, progress_fn=None):
+    """LTX-2.5 出片：关键帧 + 运动正词 → 短视频（返回契约与 generate_motion 完全一致）。"""
+    import tempfile, uuid as _uuid
+    if progress_fn:
+        progress_fn(25, "loading_model")
+    key = payload.get("keyframeKey")
+    if not key:
+        raise ComfyError("clip 任务缺少 keyframeKey（先出关键帧）")
+    data, ctype = fetch_reference_bytes(key)
+    _p = _motion_params(payload)
+    positive = payload.get("positive_prompt", "") or ""
+    negative = payload.get("negative_prompt", "") or ""
+    out_fps = float(payload.get("fps") or MOTION_NATIVE_FPS)
+    # ---- 时长：优先 payload.duration_sec，否则用「请求帧数 ÷ 交付帧率」（与 Wan 通路同一口径）
+    try:
+        dur = float(payload.get("duration_sec") or 0)
+    except (TypeError, ValueError):
+        dur = 0.0
+    frames_req = 0
+    for _src in (_p.get("frames"), payload.get("frames")):
+        try:
+            frames_req = int(_src or 0)
+        except (TypeError, ValueError):
+            frames_req = 0
+        if frames_req:
+            break
+    if dur <= 0:
+        dur = (frames_req / out_fps) if (frames_req and out_fps > 0) else 5.0
+    dur = max(1.0, min(20.0, dur))
+    # ---- 分辨率：保持请求的画幅（方形/未给 → 16:9），长边压到 LTX25_MAX_SIDE，且 32 的倍数
+    try:
+        rw = int(_p.get("width") or 0); rh = int(_p.get("height") or 0)
+    except (TypeError, ValueError):
+        rw = rh = 0
+    if not rw or not rh or rw == rh:
+        rw, rh = 1280, 704
+    long_side = max(rw, rh)
+    if long_side > LTX25_MAX_SIDE:
+        k = LTX25_MAX_SIDE / float(long_side)
+        rw, rh = int(rw * k), int(rh * k)
+    w = max(256, rw // 32 * 32)
+    h = max(256, rh // 32 * 32)
+    seed = int(payload.get("seed") or 1)
+    prefix = "weaveora_ltx25_" + _uuid.uuid4().hex[:6]
+    # ★ 时间轴 ×2（24→48fps）开关：走 *_48fps 工作流（生成仍 24fps，解码前把 latent 时间轴放大 2×）
+    wf = LTX25_WORKFLOW_X2 if LTX25_FPS_X2 else LTX25_WORKFLOW
+    _deliver_fps = int(LTX25_NATIVE_FPS * 2) if LTX25_FPS_X2 else int(LTX25_NATIVE_FPS)
+    print("[comfy] ltx25 出片：%dx%d 时长 %.2fs（生成 %gfps → %d 帧；交付 %dfps%s）seed=%d workflow=%s"
+          % (w, h, dur, LTX25_NATIVE_FPS, int(round(dur * LTX25_NATIVE_FPS)) + 1,
+             _deliver_fps, "，时间轴 ×2" if LTX25_FPS_X2 else "", seed, wf),
+          flush=True)
+    # ---- 跑前腾显存：LTX 峰值 44.7G/46.1G，必须先把 ComfyUI 常驻缓存卸掉（实测过）
+    try:
+        _free_comfy_models(wait_gb=LTX25_FREE_GB)
+    except Exception as e:
+        print("[comfy] ltx25 /free 告警（继续）：%s" % e, flush=True)
+    try:
+        with open(wf, encoding="utf-8") as fh:
+            g = json.load(fh)
+    except Exception as e:
+        raise ComfyError("LTX-2.5 工作流不可读（%s）：%s" % (wf, e))
+    # ---- 注入：图 / 正负词 / 种子 / 时长 / 分辨率 / 输出前缀 / 首帧图上传
+    name = _upload_image(data, key.split("/")[-1] or "keyframe.png", ctype or "image/png")
+    g["395"]["inputs"]["image"] = name
+    g["376"]["inputs"]["value"] = positive
+    if negative:
+        g["373"]["inputs"]["text"] = negative
+    g["339"]["inputs"]["noise_seed"] = seed
+    g["338"]["inputs"]["noise_seed"] = (seed + 1) % (2 ** 63 - 1)
+    g["362"]["inputs"]["value"] = int(round(dur))          # Duration(秒)：length = D*24+1
+    g["361"]["inputs"]["value"] = int(LTX25_NATIVE_FPS)    # Frame Rate
+    g["372"]["inputs"]["value"] = w                         # Width（覆盖 ResolutionSelector 的接线）
+    g["360"]["inputs"]["value"] = h                         # Height
+    g["75"]["inputs"]["filename_prefix"] = prefix
+    pid = _post_prompt({"prompt": g, "client_id": client_id}, client_id)
+    rec = _poll_history(client_id, pid, poll=2.0, timeout=LTX25_TIMEOUT,
+                        on_tick=_motion_tick(progress_fn))
+    outs = _download_outputs(rec, prefix=prefix)
+    if not outs:
+        raise ComfyError("LTX-2.5 无输出（prefix=%s）" % prefix)
+    mp4 = _strip_audio(outs[0]["bytes"])
+    pw, ph, pdur = _probe_video_meta(mp4)
+    try:
+        fr = _face_probe(mp4)
+    except Exception:
+        fr = None
+    face = None if fr is None else (fr[0] == fr[1] and fr[1] > 0)
+    face_n = None if fr is None else "%d/%d" % (fr[0], fr[1])
+    notes = ("LTX-2.5 生产档（distilled 两段式；生成 %gfps%s；音轨%s）"
+             % (LTX25_NATIVE_FPS, "→ 时间轴×2 交付 %dfps" % _deliver_fps if LTX25_FPS_X2 else "",
+                "已保留" if LTX25_KEEP_AUDIO else "已剥离（交付用 TTS 音轨）"))
+    print("[comfy] ltx25 出片完成：%sx%s %s 帧 %.2fs" % (pw, ph,
+          int(round(float(pdur or 0) / 1000.0 * LTX25_NATIVE_FPS)), float(pdur or 0) / 1000.0), flush=True)
+    if progress_fn:
+        progress_fn(100, "done")
+    return [{"bytes": mp4, "mime": "video/mp4", "width": int(pw or w), "height": int(ph or h),
+             "duration_ms": pdur, "face_detected": face, "face_frames": face_n, "notes": notes}]
+
+
 def generate_motion(client_id, payload, progress_fn=None):
     """Wan2.2 i2v motion（关键帧→短视频 mp4）。返回 [{bytes,mime,width,height}]。"""
     import tempfile, uuid as _uuid
+    # ★ 2026-09-23：引擎分派。取值用 _motion_params()（= 引擎配置页下发的 services.motion ← payload.params 覆盖），
+    #   不要只看 payload.params —— 平台上「出片引擎」走的是 services.motion.engine → apply_services() → MOTION_OVERRIDES。
+    #   优先级：platform/payload 显式值 > 环境变量 WEAVEORA_MOTION_ENGINE > wan22。
+    _eng = str(_motion_params(payload).get("engine") or MOTION_ENGINE or "wan22").strip().lower()
+    if _eng in ("ltx25", "ltx-2.5", "ltx2.5", "ltx"):
+        print("[comfy] motion 引擎 = LTX-2.5（%s）" % LTX25_WORKFLOW, flush=True)
+        return _motion_ltx25(client_id, payload, progress_fn)
     if progress_fn:
         progress_fn(25, "loading_model")
     key = payload.get("keyframeKey")

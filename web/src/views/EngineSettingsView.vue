@@ -161,9 +161,17 @@ const MOTION_KEYS = [
   'lora_high', 'lora_low', 'lora_high_name', 'lora_low_name', 'shift',
   'sampler_name', 'scheduler', 'model_high', 'model_low', 'mode', 'dual',
   'width', 'height', 'frames', 'fps',
+  'engine',            // ★ 2026-09-23 出片引擎（wan22 / ltx25）—— 与后端 MOTION_KEYS + worker 白名单三处必须成对
   'presetSnapshots',   // ★ 档位参数记忆（每个 preset 存一份自己的参数快照）
 ]
 const motionPresetOptions = ['draft', 'balanced', 'motion', 'hero', 'full'].map((v) => ({ label: v, value: v }))
+// ★ 2026-09-23：出片引擎。这是「按项目/按用户切引擎」的 UI 入口（worker 端 WEAVEORA_MOTION_ENGINE 的等价物）。
+//   wan22 = 现役 Wan2.2 I2V-A14B 双专家（480p/16fps + RIFE）；
+//   ltx25 = LTX-2.5 生产档（1280×704/24fps/一次过，实测 145.65s @5s 镜，峰值显存 44.7/46.1 GiB）。
+const motionEngineOptions = [
+  { label: 'Wan2.2 I2V（480p·16fps，旧，默认）', value: 'wan22' },
+  { label: 'LTX-2.5（1280×704·24fps，新）', value: 'ltx25' },
+]
 
 // ★ 档位参数记忆（2026-09-18 用户口径）：“调整档位时把当前档参数保存下来，下次切回去时用它自动填充覆盖”。
 //   存在 video_params.presetSnapshots 里（随引擎配置入库 → 跨设备/手机端也有效）。
@@ -807,6 +815,14 @@ onMounted(loadEnvStatus)
             <NInputNumber :value="numOf(videoParams.lora_low)" size="small" :min="0" :max="1.5" :step="0.1"
                           placeholder="1.0" @update:value="(v: number | null) => mSet('lora_low', v)" />
           </NFormItem>
+          <NFormItem label="出片引擎" style="width: 290px">
+            <NSelect
+              :value="(videoParams.engine as string) ?? 'wan22'"
+              :options="motionEngineOptions"
+              size="small"
+              @update:value="(v: string | null) => mSet('engine', v ?? 'wan22')"
+            />
+          </NFormItem>
           <NFormItem label="分辨率" style="width: 230px">
             <NSelect
               :value="(videoParams.resolution as string) ?? '480p'"
@@ -819,6 +835,11 @@ onMounted(loadEnvStatus)
             <NInputNumber :value="numOf(videoParams.shift)" size="small" :min="0" :max="20" :step="0.5"
                           placeholder="5.0" @update:value="(v: number | null) => mSet('shift', v)" />
           </NFormItem>
+        </div>
+        <div style="margin: -4px 0 8px; color: #888; font-size: 12px; line-height: 1.5">
+          出片引擎选 <b>LTX-2.5</b> 时：下面的「档位 / steps / cfg / shift / LoRA」与「分辨率」<b>仅对 Wan2.2 生效</b>——
+          LTX-2.5 走自己的两段式（分辨率由画幅决定、长边上限 1280，单镜时长上限 20s，输出 24fps 且自带音轨）；
+          显存峰值 44.7/46.1 GiB，<b>同一时间只能跑一个 GPU 任务</b>。切换后按项目生效，无需改服务器配置。
         </div>
         <NFormItem label="高级：直接编辑 motion JSON（白名单键，逗号分隔的任一子集即可）">
           <NInput

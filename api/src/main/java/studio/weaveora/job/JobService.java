@@ -2632,25 +2632,39 @@ public class JobService {
         String route = engineSettings.resolveEngine(userId, kind);
         int hi = motionFramesMaxFor(route, plan, userId);
         int fps = Math.max(1, plan.path("edit_plan").path("fps").asInt(30));
-        return java.util.Map.of(
-                "engine", route,
-                "minFrames", motionFramesMin,
-                "maxFrames", hi,
-                "fps", fps,
-                "maxClipSec", Math.round(hi * 100.0 / Math.max(1, motionNativeFps)) / 100.0,
-                // 【2026-09-17 口径修正】帧上限→秒数**必须用原生 fps**（A14B=16）：
-                // 旧实现除以 edit_plan.fps(30) → 本机 121 帧算成 4.03s，而实际能出 121/16=7.56s；
-                // 偏小的值会让「按配音校准」把 5–7s 的正常镜头**多切一段**（多一次推理 + 接缝 + 补帧）。
-                // 用户 2026-09-17 询问后按原生口径统一（maxClipSecNative 保留同名值以兼容旧调用）。
-                "nativeFps", Math.max(1, motionNativeFps),
-                "maxClipSecNative", Math.round(hi * 100.0 / Math.max(1, motionNativeFps)) / 100.0,
-                "gpuMaxFrames", motionFramesMax,
-                "cloudMaxFrames", motionFramesMaxCloud,
-                "source", !"cloud".equals(route)
-                        ? "本机 GPU 显存（motion-frames-max）"
-                        : (plan.path("edit_plan").path("video_model_max_sec").asDouble(0) > 0
-                            ? "项目「模型上限」× 原生 " + Math.max(1, motionNativeFps) + "fps"
-                            : (hi < motionFramesMaxCloud ? "云模型 schema 的帧数上限" : "云配置 motion-frames-max-cloud")));
+        // ★ 2026-09-23：**原生帧率按出片引擎取**。
+        //   Wan2.2 I2V-A14B = 16fps；LTX-2.5 = 24fps（都是模型的原生节奏）。
+        //   为什么要按引擎：前端用 nativeFps 显示「原生 X fps」、且把「镜头时长 × X」当帧数需求；
+        //   写死 16 会让 LTX 镜头整体错 1.5 倍（表现：UI 说 5s、实际只出 3.3s）。
+        String mEng = "wan22";
+        try {
+            mEng = engineSettings.servicesOf(userId).path("motion").path("engine").asText("wan22").trim().toLowerCase();
+        } catch (RuntimeException ignore) {
+            // 读不到就按环境变量默认（单帧单引擎部署时即 env 里的那个）
+        }
+        boolean isLtx = mEng.startsWith("ltx");
+        String motionEngine = isLtx ? "ltx25" : "wan22";
+        int nativeFps = isLtx ? 24 : Math.max(1, motionNativeFps);
+        java.util.Map<String, Object> out = new java.util.LinkedHashMap<>();
+        out.put("engine", route);
+        out.put("minFrames", motionFramesMin);
+        out.put("maxFrames", hi);
+        out.put("fps", fps);
+        // 【2026-09-17 口径修正】帧上限→秒数**必须用原生 fps**：
+        // 旧实现除以 edit_plan.fps(30) → 本机 121 帧算成 4.03s，而实际能出 121/16=7.56s；
+        // 偏小的值会让「按配音校准」把 5–7s 的正常镜头**多切一段**（多一次推理 + 接缝 + 补帧）。
+        out.put("maxClipSec", Math.round(hi * 100.0 / nativeFps) / 100.0);
+        out.put("nativeFps", nativeFps);
+        out.put("maxClipSecNative", Math.round(hi * 100.0 / nativeFps) / 100.0);
+        out.put("motionEngine", motionEngine);
+        out.put("gpuMaxFrames", motionFramesMax);
+        out.put("cloudMaxFrames", motionFramesMaxCloud);
+        out.put("source", !"cloud".equals(route)
+                ? ("本机 GPU 显存（motion-frames-max，" + (isLtx ? "LTX-2.5" : "Wan2.2") + " 原生 " + nativeFps + "fps）")
+                : (plan.path("edit_plan").path("video_model_max_sec").asDouble(0) > 0
+                    ? "项目「模型上限」× 原生 " + nativeFps + "fps"
+                    : (hi < motionFramesMaxCloud ? "云模型 schema 的帧数上限" : "云配置 motion-frames-max-cloud")));
+        return out;
     }
 
     private String resolveVideoShotsPlaceholder() {
