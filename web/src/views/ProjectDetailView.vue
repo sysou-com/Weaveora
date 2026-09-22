@@ -254,6 +254,8 @@ const assets = useQuery({
   queryKey: computed(() => ['assets', workspaceId.value, projectId.value]),
   queryFn: () => listAssets(workspaceId.value, projectId.value),
   enabled: computed(() => workspaceId.value !== '' && projectId.value !== ''),
+  // ★ 2026-09-23：有任务在跑时也轮询资产（否则跑完的产物要手动刷新才看得见）
+  refetchInterval: () => _pollWhileActive(['jobs', workspaceId.value, projectId.value]),
 })
 const refAssets = computed(() => (assets.data.value ?? []).filter((a) => a.kind === 'reference'))
 
@@ -2050,6 +2052,35 @@ function assetTab(a: AssetRef): AudioTab {
 const galleryForTab = computed(() =>
   galTab.value === 'all' ? outputAssets.value : outputAssets.value.filter((a) => assetTab(a) === galTab.value),
 )
+/**
+ * 新产物到达 → 提示 + 自动切到对应分类 Tab。
+ *
+ * ★ 2026-09-23 用户实测：跑完的关键帧“在资产库看不到”——其实产物已落库，但资产库 Tab
+ *   存在 localStorage 里（默认停在「成片」），而列表又不自动刷新 ⇒ 新关键帧根本不在当前 Tab 里。
+ *   两者一起修：轮询（见 jobs/assets 的 refetchInterval）+ 到达时自动切 Tab 并明确告诉他去哪看。
+ */
+const _seenAssetIds = new Set<string>()
+let _assetDiffReady = false
+watch(outputAssets, (list) => {
+  const assets_ = list ?? []
+  if (!_assetDiffReady) {
+    if (!assets_.length) return
+    for (const a of assets_) _seenAssetIds.add(a.id)
+    _assetDiffReady = true
+    return
+  }
+  const fresh = assets_.filter((a) => !_seenAssetIds.has(a.id))
+  if (!fresh.length) return
+  for (const a of fresh) _seenAssetIds.add(a.id)
+  const t = assetTab(fresh[0])
+  if (t !== galTab.value) {
+    galTab.value = t
+    galTabPinned.value = true
+  }
+  const label = GAL_TABS.find((x) => x.key === t)?.label ?? t
+  const shot = fresh[0].shotNo
+  message.success(`新产物已生成：${label}${shot ? ` · 第${shot}镜` : ''}${fresh.length > 1 ? ` 等 ${fresh.length} 项` : ''}（已切到「${label}」分类）`)
+})
 // 默认 Tab：没记录过就用「最新一条产物」那一类
 watch(outputAssets, (list) => {
   if (galTabPinned.value) return
@@ -2474,10 +2505,24 @@ async function toggleShotLock(shotNo: number, locked: boolean): Promise<void> {
 }
 
 // ---------- W3 任务 ----------
+const _jobsKey = () => ['jobs', workspaceId.value, projectId.value] as const
+/**
+ * 有任务在跑时 5 秒轮询一次，否则关闭轮询。
+ *
+ * ★ 2026-09-23 用户实测两个症状，根因都是这里（此前**只有引擎状态那条在轮询**）：
+ *   ① 跑完的关键帧在「资产库」里看不到（其实产物已落库，只是页面缓存没重拉）；
+ *   ② 任务区一直挂着「生成中」几小时不消失（页面开着不动就停在旧快照）。
+ * 轮询只在**确有 queued/running** 时开启，空闲时不产生任何额外请求。
+ */
+function _pollWhileActive(jobKey: readonly unknown[]): number | false {
+  const list = (queryClient.getQueryData(jobKey) as JobRecord[] | undefined) ?? []
+  return list.some((j) => j.state === 'queued' || j.state === 'running') ? 5000 : false
+}
 const jobs = useQuery({
-  queryKey: computed(() => ['jobs', workspaceId.value, projectId.value]),
+  queryKey: computed(_jobsKey),
   queryFn: () => listJobs(workspaceId.value, projectId.value),
   enabled: computed(() => workspaceId.value !== '' && projectId.value !== ''),
+  refetchInterval: () => _pollWhileActive(_jobsKey()),
 })
 
 // ---------- P12 分镜封版 ----------
