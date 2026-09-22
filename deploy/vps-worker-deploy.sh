@@ -38,6 +38,11 @@ WF_DST="$DIR/lipsync_workflow_api.json"
 
 cd "$(dirname "$0")/../worker"
 
+# ★ 2026-09-22 修正：SSH 数组必须**在安全闸之前**定义 —— 原来它写在下面第 53 行，
+#   预检里的 `${SSH[@]}` 展开为空 → 整条 psql 命令被当成本地命令 → 预检**静默空转**
+#   （“有 running 就拦住”完全没生效，只会在日志里留一行 command not found）。
+SSH=(ssh -i "$KEY" -o BatchMode=yes -o ConnectTimeout=15 "$HOST")
+
 # ---- 安全闸（2026-09-16 补）：worker 是**单线程认领**，重启正在跑的任务会把它打断 ----
 # 与 deploy/gpu2_restart.sh 同口径：有 running 就拦住，除非 WEAVEORA_WORKER_FORCE=1。
 echo "== 0/5 预检：是否有正在跑的生成任务 =="
@@ -50,7 +55,6 @@ if [ -n "${RUNNING:-}" ] && [ "${RUNNING:-0}" != "0" ] && [ "${WEAVEORA_WORKER_F
   echo "!! 有 $RUNNING 个 running 任务，重启 worker 会打断它们。等它跑完，或用 WEAVEORA_WORKER_FORCE=1 强推。"
   exit 1
 fi
-SSH=(ssh -i "$KEY" -o BatchMode=yes -o ConnectTimeout=15 "$HOST")
 TS="$(date +%Y%m%d-%H%M%S)"
 
 echo "== 1/5 上传（.new）=="
