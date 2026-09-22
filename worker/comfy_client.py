@@ -2400,6 +2400,11 @@ LIPSYNC_SEAM_BLEND = int(float(os.environ.get("WEAVEORA_LIPSYNC_SEAM_BLEND", "4"
 LIPSYNC_PRE_UPSCALE = int(float(os.environ.get("WEAVEORA_LIPSYNC_PRE_UPSCALE", "0") or 0))
 LIPSYNC_PRE_UPSCALE_MODEL = os.environ.get("WEAVEORA_LIPSYNC_PRE_UPSCALE_MODEL",
                                           "realesr-general-x4v3.pth")
+# ★ 变体 2（2026-09-22 晚）：对口型**之后**再统一放大（0/1=关）。
+#   为什么要变：先放大再对口型时整帧是 AI 锐化纹理、只有「嘴部贴回区」是模型软输出
+#   ⇒ 用户反馈“嘴部马赛克完全遮挡了嘴”（贴回区与周围质感不一致，像一块糊斑）。
+#   放在后面：整帧走同一套纹理，嘴部不再特殊。代价：嘴部细节仍受 480p 底片限制。
+LIPSYNC_POST_UPSCALE = int(float(os.environ.get("WEAVEORA_LIPSYNC_POST_UPSCALE", "0") or 0))
 LIPSYNC_NODE_CLASS = os.environ.get("WEAVEORA_LIPSYNC_NODE_CLASS", "LatentSyncNode").strip()
 # 人脸服务地址（生成引擎配置 → 服务地址 → 人脸）。空 = 用本机 insightface 子进程（原行为）。
 # 填了就走远端 HTTP（见 deploy/face/face_server.py），便于把脸算力集中到新 GPU 机器。
@@ -3748,6 +3753,18 @@ def generate_lipsync(client_id, payload, progress_fn=None):
         (_src_fps if LIPSYNC_FPS <= 0 else float(LIPSYNC_FPS)) or 0,
         ("%.2f（RIFE ×%d）" % (_want_fps, _mult)) if _mult >= 2 else ("%.2f（未插帧）" % (_src_fps or 0)))
     print("[comfy] 对口型 %s" % _fps_note, flush=True)
+    # ★ 变体 2（2026-09-22 晚）：对口型后**统一放大** —— 整帧同一套纹理，
+    #   避免「只有嘴部贴回区是软输出、周围是 AI 锐化」⇒ 用户看到的“马赛克盖住嘴”。
+    if LIPSYNC_POST_UPSCALE >= 2 and not still_mode:
+        try:
+            import time as _t
+            _t0 = _t.time()
+            _b4 = len(out)
+            out = _upscale_video_on_box(client_id, out, LIPSYNC_POST_UPSCALE)
+            print("[comfy] 对口型后统一放大 ×%d：%.2f MB → %.2f MB，耗时 %.0fs（整帧同一纹理）"
+                  % (LIPSYNC_POST_UPSCALE, _b4 / 1048576.0, len(out) / 1048576.0, _t.time() - _t0), flush=True)
+        except Exception as _e:
+            print("[comfy] WARN 对口型后放大失败，按原分辨率交付：%s" % _e, flush=True)
     w, h, dur = _probe_video_meta(out)
     return [{"bytes": out, "mime": "video/mp4", "width": w, "height": h, "duration_ms": dur,
              "notes": _fps_note}]
