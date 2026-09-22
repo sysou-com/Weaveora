@@ -44,7 +44,13 @@ class OfficialPromptTemplateTest {
 
     @Test
     void templatesStateTheOfficialFormulas() {
+        // ★ 2026-09-22 根治：必须带上「字段↔模板对应」规则 —— 分镜级 positive_prompt 被
+        //   「出图」与「图生视频」两种用途共用；单帧镜必须按出图口径写（否则关键帧没有场景可依附，
+        //   用户实测：生成出两张并排的上身像、完全不体现剧情）。
         String motion = DirectorService.officialTemplateBlock("shot", null);
+        assertTrue(motion.contains("字段与模板的对应"), motion);
+        assertTrue(motion.contains("单帧镜"), "必须写明单帧镜按出图口径写: " + motion);
+        assertTrue(motion.contains("运镜镜"), motion);
         // 官方原话：图生视频公式 = 运动 + 运镜
         assertTrue(motion.contains("运动 + 运镜"), "图生视频模板必须写明官方公式: " + motion);
         assertTrue(motion.contains("固定镜头"), "官方要求：不想镜头变化就写「固定镜头」");

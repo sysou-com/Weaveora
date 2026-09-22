@@ -788,9 +788,32 @@ public class DirectorService {
         }
         return "\n\n================ 提示词模板（官方口径 · 用户已勾选「使用模板」） ================\n"
                 + "下面模板是**写法硬约束**，本次输出必须遵守；它们**不改变输出语言**（语言仍按 lang 决定）。\n"
+                + (shot ? FIELD_RULE_SHOT : FIELD_RULE_IMAGE)
                 + sb
                 + "\n================ 模板结束 ================";
     }
+
+    /**
+     * 分镜范围（shot）的字段↔模板对应规则（2026-09-22 根治的核心）。
+     *
+     * <p>为什么必须有：分镜级 {@code positive_prompt} 这个字段**被两种用途共用** —— 该镜出图（单帧镜）
+     * 与 该镜图生视频；所以必须按「该镜有没有关键帧序列」决定它按哪份模板写。
+     */
+    private static final String FIELD_RULE_SHOT = """
+            【字段与模板的对应（本次必须遵守）】
+            · 某镜**没有**关键帧序列（单帧镜）时：它的 `positive_prompt` 会被**直接当成出图正词**用，
+              因此必须按下方【出图正词】写 —— 含场景/环境、机位与景别、光线与色调、构图与相对位置，
+              可以带一句运镜；**不得**写成只有运动与运镜、没有场景的句子。
+            · 某镜**有 2–4 帧关键帧（运镜镜）**时：`positive_prompt` 按下方【图生视频正词】写（运动 + 运镜，
+              不重复外观/场景）；每一帧的 `keyframes[].positive_prompt` 按下方【出图正词】写（各自机位/构图）。
+            """;
+
+    /** 出图范围（image）的字段↔模板对应规则（只写出图正词，不涉图生视频口径）。 */
+    private static final String FIELD_RULE_IMAGE = """
+            【字段与模板的对应（本次必须遵守）】
+            · 本次输出的 `positive_prompt` 就是**出图正词**：必须按下方【出图正词】写 ——
+              含场景/环境、机位与景别、光线与色调、构图与相对位置；**不得**写成只有运动与运镜、没有场景的句子。
+            """;
 
     /** 读一个模板资源并带标题拼到 sb；title 为 null 表示本次不需要该模板。 */
     private static void appendTemplateResource(StringBuilder sb, String file, String title) {
@@ -923,12 +946,18 @@ public class DirectorService {
         //   勾选时把**官方口径模板**随请求带给 LLM（模板文件见 prompts/prompt_template_*.md）。
         //   默认开：useTemplate == null 也当作 true（旧客户端/未传字段时不下发变化）。
         if (useTemplate == null || useTemplate) {
-            String tpl = officialTemplateBlock(templateScope, frames);
+            // ★ 2026-09-22 根治：范围**由帧数决定**，不信前端传的值 ——
+            //   帧数 ≤1（单帧镜）⇒ 该镜的 positive_prompt 就是**出图正词**（JobService 单帧时用它出图），
+            //   必须按出图口径写（含场景/机位/光线/构图）。若这时按「运动+运镜」写，关键帧就没有场景可依附
+            //   （用户实测：两张并排的上身像、完全不体现剧情）。
+            //   帧数 >1（运镜镜）⇒ still 逐帧用自己的正词 ⇒ shot 级才是真正的图生视频正词。
+            String effScope = (frames == null || frames.size() <= 1) ? "image" : "shot";
+            String tpl = officialTemplateBlock(effScope, frames);
             if (!tpl.isEmpty()) {
                 system = system + tpl;
             }
-            log.info("rewrite-prompt：使用模板={}（scope={}、frames={}）", !tpl.isEmpty(), templateScope,
-                    frames == null ? 0 : frames.size());
+            log.info("rewrite-prompt：使用模板={}（scope 请求={} → 生效={}、frames={}）", !tpl.isEmpty(),
+                    templateScope, effScope, frames == null ? 0 : frames.size());
         } else {
             log.info("rewrite-prompt：用户取消勾选「使用模板」，本次不带官方模板");
         }

@@ -368,8 +368,16 @@ public class JobService {
                 // keyframes 存在（==1 帧）时按第 0 帧解析，让帧级 cast 同样生效
                 RefCtx refs = resolveRefs(plan, shot, userId, workspaceId, projectId, req.revisionId(),
                         frames.isEmpty() ? -1 : 0);
+                // ★ 2026-09-22 根治：still 的**正词来源改为「帧正词优先」**。
+                //   旧写法：只要帧数 ≤1 就一律回退到 shot 级正词 ⇒ ① 只有 1 帧时该帧的出图正词被**静默忽略**；
+                //   ② 单帧镜的 shot 级正词同时当「图生视频正词」用，一旦它被按「运动+运镜」口径重写
+                //   （不带场景/机位），关键帧出图就没有场景可依附 —— 用户实测「生成出两张并排的上身像、
+                //   完全不体现剧情」（2026-09-22，第 1/2 镜）。
+                String rawPrompt = frames.isEmpty()
+                        ? shot.path("positive_prompt").asText("")
+                        : frames.get(0).path("positive_prompt").asText(shot.path("positive_prompt").asText(""));
                 ObjectNode payload = videoShotPayload(req.kind(), plan, shot, req.revisionId(), shotId,
-                        revisionNo, shot.path("positive_prompt").asText(""), seed, project, style, refs, -1,
+                        revisionNo, rawPrompt, seed, project, style, refs, -1,
                         imgMaxSide);
                 if ("clip".equals(req.kind())) {
                     // motion 帧数：可显式指定（范围校验）
