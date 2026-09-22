@@ -85,7 +85,13 @@ Weaveora/
 
 ## 四、GPU 服务器重连协议（外网端口 / SSH 地址端口一变，或每次重连成功，必做）
 
-> 端口每次都变是**常态**，不是故障。HTTP 侧：`10558→21270→12476→15276`；SSH 侧：`10532→15216/14812→31012→12424→15224`。
+> 端口每次都变是**常态**，不是故障。历史串（仅供理解“会变”这件事，**不要拿来当当前值**）：HTTP 侧 `10558→21270→12476→15276→…`；SSH 侧 `10532→15216/14812→31012→12424→15224→…`。
+> ⛔ **纪律（2026-09-22 用户裁定）：GPU 地址/端口一律以「配置」为准，禁止写进文档当“当前值”。**
+> 每次要用就现场读这几处（顺序=优先级）：① DB `user_engine_settings.gpu_server_url`+`gpu_server_port`（平台配置页写的就是它）→ ② VPS `/etc/weaveora/weaveora-gpu-worker.env` 的 `WEAVEORA_COMFY_URL` → ③ 盒上 `/system_stats` 的 `argv[0]`（身份判据）。
+> 文档里只允许写**读取命令**，不允许写地址：
+> ```bash
+> ssh root@sysou.com "sudo -u postgres psql -d weaveora -At -c \"select gpu_server_url, gpu_server_port, gpu_max_resolution, image_max_resolution from user_engine_settings where gpu_server_url is not null;\""
+> ```
 > **同一镜像的 ED25519 主机键不变**（实测 `SHA256:WEeKFd90sfhAztcvbci9bH98kReJlkMNgvlkskxTnJA`）→ **不能拿它判“是不是同一台”**。
 > ⚠️ **`/root` 会随实例重置**：`authorized_keys` 与 root 密码**双双失效** → 每次换实例先重装公钥（`ssh-ed25519 AAAA…IJIAL8p/QXhatorBw/T5TOjmWl0aZW0Hh4IsRaM883ND gpu-server-20260913`）。
 > **模型/权重清单与镜像要点 = `docs/gpu-模型清单与镜像备份.md`**（含全部能力 → 文件 → 字节 → 系统盘/addDisk）；
