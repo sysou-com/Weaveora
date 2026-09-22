@@ -1258,6 +1258,7 @@ function syncReferenceAssets(): void {
 function toggleRefChecked(id: string, on: boolean): void {
   refUnchecked.value = on ? refUnchecked.value.filter((x) => x !== id) : [...new Set([...refUnchecked.value, id])]
   syncReferenceAssets()
+  void savePlanInPlace()   // ★ 2026-09-22：勾选状态也要落库（同 removeRefAsset）
 }
 
 /**
@@ -1281,6 +1282,7 @@ function toggleRefTile(id: string): void {
     refSelected.value = [...refSelected.value, id]
     refUnchecked.value = refUnchecked.value.filter((x) => x !== id) // 新加入 = 已勾选
     syncReferenceAssets()
+    void savePlanInPlace()   // ★ 2026-09-22：加入参考图也落库，否则刷新后丢
     return
   }
   toggleRefChecked(id, refUnchecked.value.includes(id))
@@ -1750,6 +1752,10 @@ async function removeRefAsset(id: string): Promise<void> {
     delete refRegions.value[id]
     pruneUnchecked()
     syncReferenceAssets()
+    // ★ 2026-09-22 修复「参考图删不掉」：只改 draft 而不落库 ⇒ 刷新后方案里的 referenceAssets
+    //   又把这张图带回来（用户看到的就是“删了又回来 / × 没反应”）。
+    //   同一批改动必须就地保存（与 saveSubjectMeta / onLipsyncBase 一致）。
+    if (!(await savePlanInPlace())) return
     if (isRefCopy) await queryClient.invalidateQueries({ queryKey: ['assets'] })
     message.success(isRefCopy ? '已删除参考图' : '已移出参考图列表（原图保留）')
   } catch (e) {
@@ -2391,11 +2397,13 @@ function onPickFile(e: Event): void {
 function pruneUnchecked(): void {
   refUnchecked.value = refUnchecked.value.filter((x) => refSelected.value.includes(x))
 }
-/** 勾选状态唯一入口（on=true 勾选参与，false 取消） */
-function setRefChecked(id: string, on: boolean): void {
+/** 勾选状态唯一入口（on=true 勾选参与，false 取消）—— ⚠️ 改动必须就地落库，否则刷新就回滚 */
+async function setRefChecked(id: string, on: boolean): Promise<void> {
   refUnchecked.value = on
     ? refUnchecked.value.filter((x) => x !== id)
     : [...new Set([...refUnchecked.value, id])]
+  syncReferenceAssets()
+  await savePlanInPlace()
 }
 
 /** 参考图格子的 × ：删除参考图（reference 副本才删资产；非 reference 只从列表移出，不碰原件） */

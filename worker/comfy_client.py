@@ -17,6 +17,11 @@ import urllib.parse
 import urllib.request
 import zlib
 
+try:
+    import numpy as np          # 段间缝合的时间淡入淡出（_splice）用；缺失时自动退回硬替换
+except Exception:
+    np = None
+
 API = os.environ.get("WEAVEORA_API_BASE", "http://localhost:8080").rstrip("/")
 TOKEN = os.environ.get("WEAVEORA_WORKER_TOKEN", "dev-worker-token")
 COMFY = os.environ.get("WEAVEORA_COMFY_URL", "http://127.0.0.1:8188").rstrip("/")
@@ -2387,6 +2392,14 @@ LIPSYNC_FPS = int(os.environ.get("WEAVEORA_LIPSYNC_FPS", "0") or 0)
 #   默认 **0=关**（保持现状：图内插帧→对口型），因为这一层要改两条通路，
 #   要先在真实镜头上验证过再开；开=1 时由 `_interp_video_on_box()` 在口型产物上补做插帧。
 LIPSYNC_INTERP_AFTER = (os.environ.get("WEAVEORA_LIPSYNC_INTERP_AFTER", "0") or "0").strip() == "1"
+# 段间缝合的淡入淡出帧数（0=关）。2026-09-22 用户实测「最后会啪的一下」；逐帧量化 =
+# 段尾（帧108）全局帧差 5.0×（同帧源片自身仅 1.02）—— 即段结束时从驱动画面硬切回原帧。
+LIPSYNC_SEAM_BLEND = int(float(os.environ.get("WEAVEORA_LIPSYNC_SEAM_BLEND", "4") or 4))
+# A 方案：对口型**之前**把底片放大 N 倍（0/1=关）。2026-09-22 用户实测「嘴部都是马赛克」⇒
+# 真因是 motion 出片只有 480p（脸 55–84px）而 LatentSync 已是最高 512 配置 ⇒ 给模型更大的脸。
+LIPSYNC_PRE_UPSCALE = int(float(os.environ.get("WEAVEORA_LIPSYNC_PRE_UPSCALE", "0") or 0))
+LIPSYNC_PRE_UPSCALE_MODEL = os.environ.get("WEAVEORA_LIPSYNC_PRE_UPSCALE_MODEL",
+                                          "realesr-general-x4v3.pth")
 LIPSYNC_NODE_CLASS = os.environ.get("WEAVEORA_LIPSYNC_NODE_CLASS", "LatentSyncNode").strip()
 # 人脸服务地址（生成引擎配置 → 服务地址 → 人脸）。空 = 用本机 insightface 子进程（原行为）。
 # 填了就走远端 HTTP（见 deploy/face/face_server.py），便于把脸算力集中到新 GPU 机器。
@@ -3087,11 +3100,16 @@ def _splice(source_bytes, seg_results, fps, tmp):
     为什么不用「切段→拼接」：LatentSync 是按**音频长度**出帧的，段内产出的帧数
     与切出来的帧数可能差一两帧；一旦用拼接，后面的每一段都会整体前/后移，音画就溧了。
     替换回原位则**总帧数与帧位置完全不变**，音轨也就能原封不动接上。
-    帧数不足时重复末帧（宁多不少），多了就截掉。
+
+    ★ 2026-09-22：段头/段尾加 **时间淡入淡出**（原来是 `frames[a:a+n] = pf[:n]` 硬替换）。
+    用户实测反馈「最后会啪的一下」；逐帧量化：段尾（帧108）全局帧差 = 同帧源片自身运动的 **5.0×**
+    （段首那记 8.1× 已被帧率修复消掉，剩下的就是段结束时从「驱动画面」硬切回「原帧」）。
+    只影响接缝处的几帧（面部区域以外本来就是同一张原帧），不动段内内容。
     """
     frames = _decode_frames(source_bytes, tmp, "src")
     if not frames:
         raise ComfyError("源片解码失败（0 帧）")
+    total_blended = 0
     for a, b, pf in seg_results:
         if not pf:
             continue
@@ -3101,8 +3119,36 @@ def _splice(source_bytes, seg_results, fps, tmp):
         # 不外推、不重复末帧 —— 因为 LatentSync 的产出帧数与切出来的帧数本来就可能不等
         # （产出长度由**音频**决定，见 loop_video），重复外推会把后面的画面“冻结”几帧。
         n = min(len(pf), max(0, b - a), len(frames) - a)
-        if n > 0:
-            frames[a:a + n] = pf[:n]
+        if n <= 0:
+            continue
+        k = max(0, min(LIPSYNC_SEAM_BLEND, n // 3))   # 段太短时自动减小，头尾不重叠
+        for i in range(n):
+            dst = a + i
+            if k <= 0:
+                frames[dst] = pf[i]
+                continue
+            w = 1.0
+            if i < k:
+                w = (i + 1) / (k + 1)
+            if i >= n - k:
+                w = min(w, (n - i) / (k + 1))
+            if w >= 1.0:
+                frames[dst] = pf[i]
+                continue
+            if np is None:
+                frames[dst] = pf[i]
+                continue
+            try:
+                frames[dst] = ((pf[i].astype(np.float32) * w)
+                               + (frames[dst].astype(np.float32) * (1.0 - w))).astype(np.uint8)
+                total_blended += 1
+            except Exception:
+                frames[dst] = pf[i]      # 尺寸不一致等异常：宁可硬替换也不报错
+    if LIPSYNC_SEAM_BLEND > 0:
+        print("[comfy] 段间缝合：头/尾各至多 %d 帧做时间淡入淡出，共混合 %d 帧（消除段尾“啪”一下）"
+              % (LIPSYNC_SEAM_BLEND, total_blended), flush=True)
+    elif seg_results:
+        print("[comfy] 段间缝合：硬替换（WEAVEORA_LIPSYNC_SEAM_BLEND=0，段边界可能有跳变）", flush=True)
     return _encode_frames(frames, fps, tmp, "spliced")
 
 
@@ -3364,7 +3410,7 @@ def _interp_video_on_box(client_id, vbytes, mult, target_fps):
         "4": {"class_type": "FrameInterpolate",
               "inputs": {"interp_model": ["3", 0], "images": ["2", 0], "multiplier": int(mult)}},
         "5": {"class_type": "CreateVideo",
-              "inputs": {"images": ["4", 0], "fps": float(target_fps), "audio": ["2", 2]}},
+              "inputs": {"images": ["4", 0], "fps": float(target_fps), "audio": ["2", 1]}},
         "6": {"class_type": "SaveVideo",
               "inputs": {"video": ["5", 0], "filename_prefix": prefix, "format": "auto"}},
     }
@@ -3373,6 +3419,49 @@ def _interp_video_on_box(client_id, vbytes, mult, target_fps):
     outs = _download_outputs(rec, prefix) or _download_outputs(rec, "weaveora")
     if not outs:
         raise ComfyError("对口型后插帧：无输出视频（prefix=%s）" % prefix)
+    return outs[0]["bytes"]
+
+
+def _upscale_video_on_box(client_id, vbytes, scale):
+    """对口型**之前**把底片放大 `scale` 倍（A 方案：给 LatentSync 更大的脸）。
+
+    为什么需要（2026-09-22 用户实测「嘴部都是马赛克」）：motion 阶段出片是 **480p**
+    （832×464，`video_params.resolution=480p`），本镜说话人只有 **55–84px** 的脸；
+    而 LatentSync 已经是官方最高的 **512×512** 配置（把脸对齐放大到 420×560）⇒ 嘴部几乎没有
+    真实像素支撑，只能糊出一块。放大 2× 后脸 → 110–168px，模型输入细节翻倍；
+    副产品：交付分辨率对齐定妆照（1664×928）。
+
+    图：LoadVideo → GetVideoComponents → UpscaleModelLoader → ImageUpscaleWithModel
+        → ImageScaleBy(1/scale) → CreateVideo(fps=源片, audio=原音轨) → SaveVideo
+    ★ GetVideoComponents 的输出序号是 **(images, audio, fps)** ⇒ 音频是 **1**，不是 2！
+      （原来插帧那条传的 ["2",2] 把 FLOAT 接到 AUDIO，会被 ComfyUI 判 prompt_outputs_failed_validation）
+    ★ 权重：`realesr-general-x4v3.pth`（官方 Real-ESRGAN 发布物，BSD-3，4.9MB，x4 后缩回一半）。
+    实测（4090/47G，160 帧 832×464）：**72 秒**，无 OOM。
+    """
+    import uuid as _uuid
+    vname = _upload_any(vbytes, "weaveora_preup_%s_in.mp4" % _uuid.uuid4().hex[:8], "video/mp4")
+    if not vname:
+        raise ComfyError("对口型前放大：上传视频失败")
+    prefix = "weaveora_preup_" + _uuid.uuid4().hex[:6]
+    keep = 1.0 / float(scale)
+    graph = {
+        "1": {"class_type": "LoadVideo", "inputs": {"file": vname}},
+        "2": {"class_type": "GetVideoComponents", "inputs": {"video": ["1", 0]}},
+        "3": {"class_type": "UpscaleModelLoader", "inputs": {"model_name": LIPSYNC_PRE_UPSCALE_MODEL}},
+        "4": {"class_type": "ImageUpscaleWithModel",
+              "inputs": {"upscale_model": ["3", 0], "image": ["2", 0]}},
+        "5": {"class_type": "ImageScaleBy",
+              "inputs": {"image": ["4", 0], "upscale_method": "lanczos", "scale_by": keep}},
+        "6": {"class_type": "CreateVideo",
+              "inputs": {"images": ["5", 0], "fps": ["2", 2], "audio": ["2", 1]}},
+        "7": {"class_type": "SaveVideo",
+              "inputs": {"video": ["6", 0], "filename_prefix": prefix, "format": "auto"}},
+    }
+    pid = _post_prompt({"prompt": graph, "client_id": client_id}, client_id)
+    rec = _poll_history(client_id, pid, timeout=LIPSYNC_TIMEOUT)
+    outs = _download_outputs(rec, prefix) or _download_outputs(rec, "weaveora")
+    if not outs:
+        raise ComfyError("对口型前放大：无输出视频（prefix=%s）" % prefix)
     return outs[0]["bytes"]
 
 
@@ -3418,6 +3507,18 @@ def generate_lipsync(client_id, payload, progress_fn=None):
     if still_mode:
         vdata = _still_to_video(vdata, adata, payload.get("duration_sec"))
         print("[comfy] lipsync 底片为静帧 → 已转成与配音等长的 mp4（等比缩放，不做 pad/裁切）", flush=True)
+    elif LIPSYNC_PRE_UPSCALE >= 2:
+        # ★ A 方案（2026-09-22）：motion 出片是 480p ⇒ 说话人脸只有 55–84px，LatentSync 贴回去就是马赛克。
+        #   先把底片放大再对口型（静帧底片本来就是 1664×928，不需要）。失败不影响主流程（退回原片）。
+        try:
+            import time as _t
+            _t0 = _t.time()
+            _before = len(vdata)
+            vdata = _upscale_video_on_box(client_id, vdata, LIPSYNC_PRE_UPSCALE)
+            print("[comfy] 对口型前放大 ×%d：%.2f MB → %.2f MB，耗时 %.0fs（底片分辨率提高后脸像素翻倍）"
+                  % (LIPSYNC_PRE_UPSCALE, _before / 1048576.0, len(vdata) / 1048576.0, _t.time() - _t0), flush=True)
+        except Exception as _e:
+            print("[comfy] WARN 对口型前放大失败，改用原底片：%s" % _e, flush=True)
 
     speakers = payload.get("speakers") if isinstance(payload.get("speakers"), dict) else {}
     segs = payload.get("segments") if isinstance(payload.get("segments"), list) else []

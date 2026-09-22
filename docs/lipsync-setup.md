@@ -390,6 +390,43 @@ python3 /tmp/jump.py   <对口型产物> <源片>   # 全局逐帧运动：段�
 python3 /tmp/align.py  <对口型产物> <源片>   # 逐帧对齐：段内偏移应回到 +0（不再 +4…+9 漂移）
 ```
 
+### 9.5 A 方案：对口型前放大底片（2026-09-22，worker 侧开关）
+
+**动机**（用户实测「说话时嘴部都是马赛克」）：motion 阶段出片是 **480p**（`video_params.resolution=480p`，832×464），
+本镜说话人只有 **53–84px** 的脸；而 LatentSync **已经是官方最高档 1.6 / 512×512**
+（日志 `Using LatentSync 1.6 config (512x512)`，权重 5.07GB）⇒ 模型侧没有余地，
+是**喂进去的像素太少**：512 配置把脸对齐放大到 420×560，嘴部几乎没有真实像素支撑。
+
+**做法**：对口型之前，先把底片放大 2× 再送 LatentSync（静帧底片本来就是 1664×928，自动跳过）。
+
+```
+LoadVideo → GetVideoComponents → UpscaleModelLoader → ImageUpscaleWithModel
+          → ImageScaleBy(0.5,lanczos) → CreateVideo(fps=源片, audio=原音轨) → SaveVideo
+```
+
+- 权重：`realesr-general-x4v3.pth`（官方 Real-ESRGAN 发布物，**BSD-3**，4.9MB，x4 后缩回一半）。
+  ⚠️ 官方 release 里**没有** `RealESRGAN_x4plus.pth`（会 404），别照旧博客抄 URL。
+- 开关（worker env）：`WEAVEORA_LIPSYNC_PRE_UPSCALE=2`（0/1=关）、`WEAVEORA_LIPSYNC_PRE_UPSCALE_MODEL=realesr-general-x4v3.pth`。
+- 实测（4090/47G，160 帧 832×464→1664×928）：**50–72 秒**，无 OOM；失败自动退回原底片（不阻断任务）。
+- 副产品：交付分辨率对齐定妆照（**1664×928**，`assets.width/height` 也按新值落库）。
+
+**A/B 实测**（第1镜 V80，同一条 prompt/配音，唯一变量=放大开关）：
+
+| 指标 | 旧（480p 底片） | 新（放大 2× 底片） |
+|---|---|---|
+| 段尾「啪」的帧差（帧108，源片自身=1.02） | 5.08（**5.0×**） | **1.03（1.0×）** ← 段间淡入淡出生效 |
+| 全局最大逐帧运动 | 11.90（源片最大 4.76） | **4.44**（低于源片自身最大值） |
+| 可卿段驱动帧 | 4/49（脸太小×42） | **54/62** |
+| 同观看尺寸下嘴/脸区拉普拉斯锐度 | 5.36 | **8.97（1.67×）** |
+| 块效应（8px 对齐/非对齐） | 1.00 | 1.00（无块状伪影） |
+
+复测脚本：`jump.py`（段边界）、`align.py`（段内对齐）、`sharp_ab.py`（同尺寸锐度）。
+
+**顺带修的真 bug**：`GetVideoComponents` 的输出序号是 **(images, audio, fps)**，而
+`_interp_video_on_box()`（对口型后插帧）一直把 `["2", 2]`（FLOAT=fps）接到 `CreateVideo.audio`
+⇒ ComfyUI 直接 `prompt_outputs_failed_validation`。因为插帧开关默认关、且异常被 try/except 吞成一行
+WARN，所以**从来没被验证出来过**。现已改为索引 1。
+
 ---
 
 ## 十、未安装时的行为

@@ -692,7 +692,9 @@ public class JobService {
         if (TERMINAL.contains(job.state())) {
             throw new BizException(ErrorCode.JOB_NOT_CANCELLABLE, "任务已进入终态，不可取消");
         }
-        // 运行中/排队：立即取消为终态（worker 迟到回执会被忽略）；卡住不再阻塞队列
+        // ★ 2026-09-22：**必须先置 cancelRequested** —— worker 每轮上报进度时读这个标志，
+        //   读到 true 就 /interrupt 并退出。只改 state 的话 GPU 会照旧跑完（僵尸 prompt 堵串行队列）。
+        job.requestCancel();
         job.cancel();
         emit(job, Map.of("type", "job.cancelled"));
         metrics.jobCancelled();
@@ -966,6 +968,9 @@ public class JobService {
         GenerationJob job = jobs.findById(jobId)
                 .filter(j -> List.of("queued", "running").contains(j.state())).orElse(null);
         if (job == null) return 0;
+        // ★ 2026-09-22：同 cancel —— 不置标志的话 worker 不会中断，
+        //   用户看到的就是「队列管理里点了结束/失败，GPU 却还在跑」。
+        job.requestCancel();
         job.fail("ADMIN_FAIL", "管理员手工终止（避免阻塞队列）");
         emit(jobs.save(job), Map.of("type", "job.failed", "code", "ADMIN_FAIL"));
         return 1;
@@ -1075,7 +1080,20 @@ public class JobService {
      * —— 僵尸 prompt 会把后面真正要跑的任务堵死，表现为「新任务一直 queued / 单张关键帧要等好几分钟」。
      */
     public boolean progress(UUID jobId, int progress, String stage) {
-        GenerationJob job = requireRunning(jobId);
+        GenerationJob job = jobs.findById(jobId)
+                .orElseThrow(() -> new BizException(ErrorCode.NOT_FOUND, "任务不存在"));
+        if (!"running".equals(job.state())) {
+            // ★ 2026-09-22：worker 还在跑，而 API 侧这个任务已经不是 running 了（被用户取消、被管理员
+            //   标失败、或已被回收）⇒ **必须回「停」**，否则 worker 会继续等 ComfyUI 跑完：
+            //   实测症状就是「任务在界面上已经取消/失败，GPU 却还在跑，后面任务全堵着」。
+            //   以前这里直接抛 JOB_NOT_CANCELLABLE ⇒ worker 侧 `except: return False` ⇒ 取消静默失效。
+            if (job.cancelRequested() || "cancelled".equals(job.state()) || "failed".equals(job.state())) {
+                log.info("progress ping on finished job={} state={} cancelRequested={} -> 通知 worker 停止",
+                        jobId, job.state(), job.cancelRequested());
+                return true;
+            }
+            throw new BizException(ErrorCode.JOB_NOT_CANCELLABLE, "任务状态 " + job.state() + " 不可回执");
+        }
         job.progress(progress, stage);
         Map<String, Object> evt = new LinkedHashMap<>();
         evt.put("type", "job.progress");

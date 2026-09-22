@@ -134,6 +134,18 @@ public class GenerationJob {
         this.errorMessage = null;
     }
 
+    /**
+     * 请求取消（2026-09-22）：**只置标志**，worker 靠它中断 ComfyUI 里正在跑的 prompt。
+     *
+     * <p>为什么必需：取消如果只改 state，worker 完全不知情，会继续等 ComfyUI 跑完（lipsync 一段 1–2 分钟），
+     * 而 ComfyUI 是串行的 ⇒ 僵尸 prompt 把后面的任务全堵死（表现为「取消了但 GPU 还在跑」「新任务一直 queued」）。
+     * 仓储里本来就有 `requestCancel` 的 @Modifying 查询，但**从未被调用** ⇒ 从 2026-09-16 引入到今天，
+     * 取消/标失败实际上从来没有真正停下来过。改在实体上置位，与同事务的 save 一起落库。
+     */
+    public void requestCancel() {
+        this.cancelRequested = true;
+    }
+
     public void succeed() {
         this.state = "succeeded";
         this.progress = 100;
