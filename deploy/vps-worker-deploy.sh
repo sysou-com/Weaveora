@@ -85,6 +85,33 @@ if [ -f "$WF_SRC" ]; then
   #   现在与 .py 同口径：先 cp 出 <file>.bak.<ts>，再原子改名。
   echo "   工作流 JSON: $("${SSH[@]}" "[ -f $WF_DST ] && cp -f $WF_DST $WF_DST.bak.$TS; mv -f $WF_DST.new $WF_DST && echo \"已同步（备份 $WF_DST.bak.$TS）\"" || true)"
 fi
+# ★ 2026-09-23 缺口（用户报「第一镜 motion 失败」的真因）：
+#   worker 在 VPS **本机**读工作流 JSON，而 deploy/comfy/*.json（edit/film/ltx25…）以前全靠
+#   手工 cp ⇒ 有人在盒上放了新工作流、忘了同步 VPS，任务就会
+#   `COMFY_ERROR: LTX-2.5 工作流不可读（.../ltx25_i2v_api.json）：No such file or directory`。
+#   本步只做两件事（**故意不覆盖已存在的文件** —— 线上工作流与仓库存在有意不一致的历史，
+#   例如 edit 工作流线上是"无 2511 节点"回滚版；静默覆盖会把雷带回来）：
+#     ① 仓库有、VPS 没有 → 补齐；
+#     ② 两边都有但 md5 不同 → 只**报警并打印两个 md5**，由人决定（谁要同步就手工 cp）。
+COMFY_DIR="$(cd "$(dirname "$0")/comfy" 2>/dev/null && pwd || true)"
+if [ -n "${COMFY_DIR:-}" ] && [ -d "$COMFY_DIR" ]; then
+  echo "   引擎工作流 JSON（deploy/comfy/*.json，只补齐缺失、不覆盖）："
+  "${SSH[@]}" "mkdir -p '$DIR/workflows'" || true
+  for wf in "$COMFY_DIR"/*.json; do
+    [ -f "$wf" ] || continue
+    b="$(basename "$wf")"
+    LMD5="$(md5sum "$wf" | cut -d' ' -f1)"
+    RMD5="$("${SSH[@]}" "[ -f '$DIR/workflows/$b' ] && md5sum '$DIR/workflows/$b' | cut -d' ' -f1" || true)"
+    if [ -z "$RMD5" ]; then
+      scp -i "$KEY" -q "$wf" "$HOST:$DIR/workflows/$b" && echo "     + 补齐缺失：$b（md5 $LMD5）"
+    elif [ "$LMD5" != "$RMD5" ]; then
+      echo "     ! 两处不一致（未覆盖）：$b  仓库=$LMD5  线上=$RMD5"
+    else
+      echo "     = 一致：$b"
+    fi
+  done
+fi
+
 for svc in "$SVC" "weaveora-gpu-worker"; do
   if "${SSH[@]}" "systemctl list-unit-files 2>/dev/null | grep -q '^$svc'"; then
     "${SSH[@]}" "systemctl restart $svc; sleep 4; echo \"   $svc -> \$(systemctl is-active $svc)\""
