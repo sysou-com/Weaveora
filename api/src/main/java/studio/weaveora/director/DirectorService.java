@@ -196,7 +196,10 @@ public class DirectorService {
         script.putArray("acts");
         merged.putObject("audio").put("music_mood", "uniform, consistent");
         ObjectNode edit = merged.putObject("edit_plan");
-        edit.put("fps", 30);
+        edit.put("fps", 32);   // ★ 2026-09-22 线路 A：成片帧率默认 32fps（= 原生 16fps × 2）
+        //  为什么必须是 16 的整数倍：ComfyUI 的 FrameInterpolate.multiplier 只收整数 2–16，
+        //  整数倍才能“等分插入”得到均匀时间轴；旧默认 30fps（1.875×）既插不了帧，
+        //  又会在导出阶段被 ffmpeg `fps=30` 用复制帧拉齐 → 节奏不均（顿挫）。
         edit.put("transition_default", "cut");
         edit.put("subtitle", true);
 
@@ -320,7 +323,7 @@ public class DirectorService {
             obj.set("shots", node);
             obj.putObject("script").put("theme", "");
             obj.putObject("audio").put("music_mood", "");
-            obj.putObject("edit_plan").put("fps", 30).put("transition_default", "cut").put("subtitle", true);
+            obj.putObject("edit_plan").put("fps", 32).put("transition_default", "cut").put("subtitle", true);   // 同上市口径：32fps = 16×2（线路 A）
             return obj;
         }
         return node;

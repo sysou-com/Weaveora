@@ -1840,13 +1840,28 @@ watch(
  *  ★ 2026-09-19（用户要求）：不再另外给一行文字提示（“本机 GPU 上限由显存决定 ≈ 5.04s（此值对本机车道无效）”）——
  *  它和框里原有的 7.56 并列出现，两个数只会让人懵。改为：本机车道就把框里**换成真正生效的那个数**，只有一个数。 */
 const gpuMotionLane = computed(() => (motionLimits.data.value?.engine ?? 'gpu') !== 'cloud')
+/**
+ * 【P13 口径】本机 GPU 车道的「模型上限(s)」。
+ *
+ * ★ 2026-09-22 修正（用户报「视频上限只有 3.75 了」）：除数必须是**原生 16fps**，不是项目成片帧率。
+ *   模型是按原生帧数出片的（worker：frames = min(时长×16, 帧上限)），而成片帧率只决定**插帧倍数**
+ *   （32fps → RIFE ×2）→ 用 32 去除 121 帧得到 3.78s 是**双重扣除**，会把人误导成「上限只剩 3.75」。
+ *   真实口径：121 帧 ÷ 16fps = **7.56s**（后端 `maxClipSec` 已经是这么算的，这里改成同口径，不再自己算）。
+ *   为什么这个数字很关键：如果用户按 3.75 去填帧数（→60 帧），worker 只生成 3.75s 内容，
+ *   导出时用 tpad **克隆尾帧补到 5s** → 后段 1.25s 静止（历史上踩过一次，见 docs/notes/出图管线-经验与坑.md）。
+ */
 const modelCapEffective = computed<number | null>(() => {
   const v = motionLimits.data.value
   if (!v) return null
-  const fps = Math.max(1, Number(v.fps) || 30)
+  // 优先用后端算好的（单一真源）；否则按原生 16fps 回算，最后才回退旧口径。
+  const native = Number((v as { nativeFps?: number }).nativeFps) || MOTION_NATIVE_FPS
+  const backend = Number(v.maxClipSec)
+  if (Number.isFinite(backend) && backend > 0) {
+    return Number(backend.toFixed(2))
+  }
   const n = Number(v.gpuMaxFrames)
   if (!Number.isFinite(n) || n <= 0) return null
-  return Number((n / fps).toFixed(2))
+  return Number((n / native).toFixed(2))
 })
 
 /** 当前图片模型一次能收几张参考图（来自模型 schema 的 mapping.refsMax；未知则 0=不提示） */

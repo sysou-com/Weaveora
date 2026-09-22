@@ -37,6 +37,8 @@ export interface VideoLimits {
   minFrames: number
   maxFrames: number
   fps: number
+  /** 原生帧率（A14B=16）——「帧上限→秒数」必须用它除（2026-09-22 修：不能用项目成片帧率） */
+  nativeFps?: number
   maxClipSec: number
   gpuMaxFrames: number
   cloudMaxFrames: number
