@@ -1,22 +1,27 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref } from 'vue'
-import { useMessage } from 'naive-ui'
 
 import { adminFailJob, adminQueueJobs } from '@/api/admin'
 import { JOB_STATE_LABEL } from '@/api/jobs'
 import type { JobRecord } from '@/api/types'
 
-const message = useMessage()
 const rows = ref<JobRecord[]>([])
 const loading = ref(false)
+/** ★ 2026-09-23：拉取失败时必须**清空旧行并显式告警** ——
+ *  用户实测「队列里一条任务显示进行中挂了好几小时」，而库里 0 条；
+ *  原因就是这个 catch：以前只弹一个 toast，`rows` 保留上一次的成功结果 ⇒
+ *  登录过期/接口报错后，旧快照里的“生成中”会永久留在页面上。 */
+const loadError = ref('')
 let timer: ReturnType<typeof setInterval> | undefined
 
 async function load(): Promise<void> {
   loading.value = true
   try {
     rows.value = await adminQueueJobs()
+    loadError.value = ''
   } catch (e) {
-    message.error(e instanceof Error ? e.message : '加载失败（需管理员）')
+    rows.value = []
+    loadError.value = e instanceof Error ? e.message : '加载失败（需管理员）'
   } finally {
     loading.value = false
   }
@@ -47,7 +52,11 @@ function fmt(d: string): string {
         查看全部排队/运行中任务；对长时间卡住的任务可手工标失败。系统也会每 15 分钟自动回收超时任务。
       </p>
     </header>
-    <div v-if="!rows.length && !loading" class="empty text-secondary">当前没有排队/运行中任务。</div>
+    <div v-if="loadError" class="empty" style="color: #c45c4a">
+      队列数据获取失败：{{ loadError }}
+      <span class="text-secondary">（旧数据已清空 —— 很可能登录已过期，请重新登录后再看）</span>
+    </div>
+    <div v-else-if="!rows.length && !loading" class="empty text-secondary">当前没有排队/运行中任务。</div>
     <div class="list">
       <div v-for="j in rows" :key="j.id" class="row">
         <span class="font-mono k">{{ j.kind }}</span>

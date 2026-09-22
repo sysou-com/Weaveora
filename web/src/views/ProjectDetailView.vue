@@ -1862,7 +1862,7 @@ const modelCapEffective = computed<number | null>(() => {
   const v = motionLimits.data.value
   if (!v) return null
   // 优先用后端算好的（单一真源）；否则按原生 16fps 回算，最后才回退旧口径。
-  const native = Number((v as { nativeFps?: number }).nativeFps) || MOTION_NATIVE_FPS
+  const native = Number((v as { nativeFps?: number }).nativeFps) || MOTION_NATIVE_FPS.value
   const backend = Number(v.maxClipSec)
   if (Number.isFinite(backend) && backend > 0) {
     return Number(backend.toFixed(2))
@@ -2516,7 +2516,11 @@ const _jobsKey = () => ['jobs', workspaceId.value, projectId.value] as const
  */
 function _pollWhileActive(jobKey: readonly unknown[]): number | false {
   const list = (queryClient.getQueryData(jobKey) as JobRecord[] | undefined) ?? []
-  return list.some((j) => j.state === 'queued' || j.state === 'running') ? 5000 : false
+  if (list.some((j) => j.state === 'queued' || j.state === 'running')) return 5000
+  // ★ 2026-09-23 补：**空闲也慢轮询（30s）**。只按“缓存里有活动任务”开轮询有致命盲区：
+  //   任务若不是在**本页**发起的（别的标签页 / 管理员 / 助手用 API 跑的），本页缓存里就没有
+  //   running ⇒ 永不轮询 ⇒ 用户看到的就是“资源库一直看不到更新”。30s 一次开销可忽略。
+  return 30_000
 }
 const jobs = useQuery({
   queryKey: computed(_jobsKey),
@@ -3074,18 +3078,23 @@ function deleteJobOne(jobId: string): void {
 const MOTION_MIN = ref(32)
 const MOTION_MAX = ref(96)
 /**
- * motion 原生帧率（与 worker `WEAVEORA_MOTION_NATIVE_FPS` 同口径，缺省 16）：
- * A14B 按 16fps 原生节奏生成，所以「需要多少帧」= 镜头时长 × 16（不是 30！）。
+ * motion 原生帧率：**按出片引擎取值**，由后端 `motionLimits.nativeFps` 下发（这里只做初始值 16）。
+ *   · Wan2.2 I2V-A14B = 16fps（原生节奏）；
+ *   · LTX-2.5 = 24fps。
+ * 为什么必须按引擎：「需要多少帧」= 镜头时长 × 原生 fps（worker 侧的换算同一口径）；
+ * 写死 16 会让 LTX 镜头整体错 1.5 倍（UI 说 5s、实际出 3.3s）。
  * 踩过的坑（2026-09-15）：UI 选 121 帧 + 按成片 30fps 理解 → 运动快 1.875×、5s 只剩 4.13s。
  */
-const MOTION_NATIVE_FPS = 16
+const MOTION_NATIVE_FPS = ref(16)
+/** 当前出片引擎（后端 motionLimits.motionEngine 下发；wan22 | ltx25） */
+const motionEngine = ref<'wan22' | 'ltx25'>('wan22')
 /** 本镜时长（用于把帧数自动算出来 + 显本次帧数对应的视频长度） */
 const motionShotSec = computed<number>(() => {
   const v = Number(project.data.value?.shotDurationSec ?? 0)
   return v > 0 ? v : 5
 })
-const motionNeedFrames = computed<number>(() => Math.round(motionShotSec.value * MOTION_NATIVE_FPS))
-const motionFramesSec = computed<number>(() => (Number(motionFrames.value) || 0) / MOTION_NATIVE_FPS)
+const motionNeedFrames = computed<number>(() => Math.round(motionShotSec.value * MOTION_NATIVE_FPS.value))
+const motionFramesSec = computed<number>(() => (Number(motionFrames.value) || 0) / MOTION_NATIVE_FPS.value)
 const motionTooFew = computed<boolean>(() => Number(motionFrames.value) < motionNeedFrames.value)
 const motionLimitSource = ref('')
 const motionOpen = ref(false)
@@ -3104,6 +3113,10 @@ watch(
     MOTION_MIN.value = v.minFrames
     MOTION_MAX.value = v.maxFrames
     motionLimitSource.value = v.source
+    // ★ 2026-09-23：原生帧率/引擎按后端下发同步（LTX-2.5 = 24fps，Wan2.2 = 16fps）
+    const _nf = Number((v as { nativeFps?: number }).nativeFps)
+    if (Number.isFinite(_nf) && _nf > 0) MOTION_NATIVE_FPS.value = _nf
+    motionEngine.value = ((v as { motionEngine?: string }).motionEngine === 'ltx25') ? 'ltx25' : 'wan22'
     if (motionFrames.value > v.maxFrames) motionFrames.value = v.maxFrames
     // 自动把「模型上限(s)」写为后端算出的真实上限（min(配置, 模型 schema)）：
     // 否则用户会拿一个比模型大的值去校准 → 排出的段仍超过模型能力 → 配音被截断。
@@ -5254,6 +5267,7 @@ const shotTotal = computed(() => {
       <NModal v-model:show="motionOpen" preset="card" :title="'生成运动(motion)'" style="max-width: 420px">
         <div class="motion-form">
           <p class="text-secondary">
+            当前出片引擎：**{{ motionEngine === 'ltx25' ? 'LTX-2.5（原生 24fps / 1280×704 / 自带音轨）' : 'Wan2.2 I2V（原生 16fps / 480p + RIFE 插帧）' }}**。
             帧数不用自己算：按**镜头时长 × 原生 {{ MOTION_NATIVE_FPS }}fps** 自动填（本镜约 {{ motionShotSec }}s → {{ motionNeedFrames }} 帧）。
             它只当**上限**用（worker 实际取 min(时长×{{ MOTION_NATIVE_FPS }}, 帧数)，填大了无害，填小了会把动作压短）。
             <span v-if="motionLimitSource" class="state-hint font-mono">· 上限来源：{{ motionLimitSource }}</span>
