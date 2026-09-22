@@ -36,8 +36,34 @@ IOU_STRONG = 0.45            # 与上一帧框重叠到这个程度 → 直接�
 CENTER_MAX = 0.85            # 中心位移上限（× 脸框对角线，容忍快速移动）
 MAX_LOST_RESET = 90          # 连续丢失多少帧后重置轨迹（≈3 秒 @30fps）
 # 质量闸门：不达标的帧**不驱动**（保留原帧）。宁可这帧嘴不动，也不要把画面搞坏。
-MIN_FACE_W = 64              # 源片里脸宽下限（太小 → 对齐不可靠，贴回去必然发虚）
-MAX_YAW_PROXY = 0.55         # 侧脸代理上限（鼻子相对两眼中线的水平偏移 / 眼距）
+#
+# ★ 2026-09-22 实测（第1镜 V80 资产「嘴部乱码 + 卡顿」的真因就在这里）：
+#   同一镜里两个角色是**近景双人**，insightface 实测——宝玉脸宽 76–84px、**可卿脸宽仅 53–64px**。
+#   脸宽下限 64px ⇒ 可卿那段 **49 帧里 42 帧被判「脸太小」不驱动**（节点日志：
+#   `选脸统计：不驱动:脸太小×42，驱动×4`）⇒ 她说话时嘴几乎不动、偶尔几帧突然动一下，
+#   看上去就是「嘴部乱跳/乱码 + 卡顿」；宝玉那段 36/39 驱动、但有 3 帧被侧脸闸门拦下
+#   ⇒ 嘴区驱/不驱逐帧交替，同样显脏。**点选坐标本身是对的**（hint 与实测脸心误差 ≤0.02）。
+#
+#   所以这三个阈值全部改成从环境变量读（**默认值与原来完全一致，不改行为**，改动只在刻意开时生效）：
+#     WEAVEORA_LIPSYNC_MIN_FACE=48      # 脸宽下限（px；双人近景/半身镜常见 50–70px）
+#     WEAVEORA_LIPSYNC_MAX_YAW=0.55     # 侧脸代理上限
+#     WEAVEORA_LIPSYNC_HOLD_FRAMES=2    # 抖动抑制：连续不达标 <N 帧且上一帧在驱动 → 继续驱动
+#   注意：脸宽下限调低是**折中**——LatentSync 把对齐图放大到 256×256，55px 的脸放大约 4.6×，
+#   贴回去必然发虚（所以原始 64 才是保守值）。真正的质量解是「对话镜用更近的景别」。
+def _env_num(name, default, cast=float):
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        return cast(float(raw))
+    except (TypeError, ValueError):
+        print("[weaveora] 环境变量 %s=%r 解析失败，用默认 %s" % (name, raw, default), flush=True)
+        return default
+
+
+MIN_FACE_W = _env_num("WEAVEORA_LIPSYNC_MIN_FACE", 64.0)     # 源片里脸宽下限（px）
+MAX_YAW_PROXY = _env_num("WEAVEORA_LIPSYNC_MAX_YAW", 0.55)    # 侧脸代理上限
+HOLD_FRAMES = int(_env_num("WEAVEORA_LIPSYNC_HOLD_FRAMES", 0))  # 抖动抑制帧数（0=关）
 # 实测（2026-09-14，本片素材）：正脸 0.004–0.14；正常 3/4 侧脸 0.32–0.39；
 # 转身背离 0.56–0.72。所以上限取 0.55 —— 只挡"快背过去了"的帧，
 # 不误杀 3/4 侧脸（那个角度 LatentSync 靠 3 点对齐照样能驱动）。
@@ -172,9 +198,12 @@ class FaceDetector:
         self._lmk = None       # 轨迹：上一帧的关键点
         self._emb = None       # 轨迹自累积特征（EMA）—— 同一视频里长出来的，比定妆照可靠
         self._lost = 0         # 连续丢失帧数
+        self._reject_streak = 0  # 连续被质量闸门拦下的帧数（抖动抑制用）
         self.last_driven = False
         self.last_reason = ""
         self.stats = {}
+        print("[weaveora] 质量闸门：脸宽>=%.0fpx 侧脸<=%.2f 抖动抑制=%d帧（环境变量 WEAVEORA_LIPSYNC_MIN_FACE / _MAX_YAW / _HOLD_FRAMES）"
+              % (MIN_FACE_W, MAX_YAW_PROXY, HOLD_FRAMES), flush=True)
         if target_point is not None:
             try:
                 px, py = float(target_point[0]), float(target_point[1])
@@ -299,6 +328,12 @@ class FaceDetector:
             reason = "脸太小"
         elif yaw is not None and yaw > MAX_YAW_PROXY:
             reason = "侧脸"
+        # 抖动抑制（2026-09-22）：单帧不达标会让嘴区「忽动忽停」，看上去像乱码/卡顿。
+        # 连续不达标 < HOLD_FRAMES 且上一帧在驱动 → 继续驱动这一帧（放宽单帧噪声）。
+        if reason and HOLD_FRAMES > 0 and self.last_driven and self._reject_streak < HOLD_FRAMES:
+            self._bump("驱动:抖动抑制(%s)" % reason)
+            reason = ""
+        self._reject_streak = self._reject_streak + 1 if reason else 0
         self.last_driven = not reason
         self.last_reason = reason or why
         self._bump("驱动" if not reason else ("不驱动:" + reason))

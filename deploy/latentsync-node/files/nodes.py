@@ -166,7 +166,7 @@ import requests
 # 缺能力就直接失败并给出修复指引（而不是静默降级）。
 # 改本文件/本仓库任何节点侧文件后，**必须同步 bump 这里的版本号**，并在
 # docs/lipsync-setup.md 第九节登记、用 deploy/latentsync-node/apply.sh 重新打补丁。
-WEAVEORA_NODE_VERSION = "2026-09-22.1"
+WEAVEORA_NODE_VERSION = "2026-09-22.3"
 WEAVEORA_NODE_FEATURES = [
     "point_lock",      # 支持用户点选人脸（faceHints）
     "inline_spec",     # 锁定规格可用**内联 JSON**传入（跨机不用传文件）
@@ -176,6 +176,8 @@ WEAVEORA_NODE_FEATURES = [
     "fps_pin",         # 帧率：生成=播放=源片 fps
     "debug_box",       # WEAVEORA_DEBUG_BOX=1 → 把选中的脸画框进产物
     "debug_box_frame_coords",  # 调试框画在**原帧坐标**（仿射逆变换），不再锚在左上角
+    "quality_gate_tunable",  # 质量闸门阈值可调（WEAVEORA_LIPSYNC_MIN_FACE / _MAX_YAW / _HOLD_FRAMES）
+    "no_fps_resample",       # 解码不复采样（修 util.read_video 硬编码 -r 25 导致的时基错位）
 ]
 _WEAVEORA_VERSION_REGISTERED = [False]
 

@@ -15,11 +15,11 @@ worker（API 服务器）与 ComfyUI 节点（GPU 服务器）之间只能手工
 | 段落内帧错位 / 画面撕裂 | 旧代码按方案时间窗切段（与配音实际时长不等）→ LatentSync `loop_video` 正放+倒放凑帧 | 时间轴错乱 |
 | 出画/转身后锁错人 | 静态点选逐帧找最近脸 | 换人、画面被毁 |
 
-补丁内容（版本 `2026-09-22.1`；`2026-09-14.1` 为轨迹锁人基线）：
+补丁内容（版本 `2026-09-22.2`；`2026-09-14.1` 为轨迹锁人基线）：
 
 | 文件 | 补了什么 |
 |---|---|
-| `latentsync/utils/face_detector.py` | **轨迹锁人**（点选/定妆照只播种，之后按「上一帧框 + 自累积人脸特征」逐帧跟住，绝不换人）；**质量闸门**（跟丢/脸太小<64px/侧脸>0.55 → 该帧不驱动）；`last_driven` 契约 |
+| `latentsync/utils/face_detector.py` | **轨迹锁人**（点选/定妆照只播种，之后按「上一帧框 + 自累积人脸特征」逐帧跟住，绝不换人）；**质量闸门**（跟丢/脸太小<64px/侧脸>0.55 → 该帧不驱动）；`last_driven` 契约；`2026-09-22.2`：三个门槛改为**环境变量可调**（`WEAVEORA_LIPSYNC_MIN_FACE` / `_MAX_YAW` / `_HOLD_FRAMES` 抖动抑制，**默认值不变**） |
 | `latentsync/utils/image_processor.py` | **贴回遮罩收紧到嘴+下巴**（原版覆盖整个下半脸+两侧脸颊，是"糊脸/糊到邻脸"的直接原因；模型输入仍用原遮罩，避免分布偏移）；`build_paste_mask()` 支持 `WEAVEORA_PASTE_BAND/GROW/BLUR` 调参 |
 | `latentsync/pipelines/lipsync_pipeline.py` | 逐帧「驱动/不驱动」贯通（不驱动 = 输出原帧）；贴回用新遮罩；`WEAVEORA_DEBUG_BOX` / 请求级 `debugBox` 调试画框；中间片按源片 fps 写；**`2026-09-22.1`：调试框改用仿射逆变换画回原帧坐标**（此前恒锚在画面左上角，见 `docs/lipsync-setup.md` §9.3） |
 | `nodes.py` | `WEAVEORA_NODE_VERSION` / `WEAVEORA_NODE_FEATURES` + `GET /weaveora/version` 接口；节点日志打印收到的锁定规格（内联 JSON / 文件路径） |

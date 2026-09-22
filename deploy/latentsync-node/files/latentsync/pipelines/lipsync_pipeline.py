@@ -461,7 +461,22 @@ class LipsyncPipeline(DiffusionPipeline):
         whisper_chunks = self.audio_encoder.feature2chunks(feature_array=whisper_feature, fps=video_fps)
 
         audio_samples = read_audio(audio_path)
-        video_frames = read_video(video_path, use_decord=False)
+        # ★★ Weaveora 2026-09-22（关键修复）：**不许再重采样帧率**。
+        #   util.read_video() 的 change_fps 默认 True，里面是 `ffmpeg -i in -r 25` —— 硬编码 25fps！
+        #   而本机上游（节点/worker）已按**源片 fps**（本片 32）写好临时视频、并按同一 fps 做
+        #   whisper 分块与写回（feature2chunks(fps=video_fps) / write_video(fps=video_fps)）。
+        #   于是「解码 25fps + 生成 32fps」两套时基打架，实测后果（第1镜 V80 资产，逐帧对齐量出）：
+        #     · 节点只拿到 39/49 帧（= 计划帧数 × 25/32）⇒ 段内画面被拉慢 1.28×、嘴比声音慢；
+        #     · 段内内容相对时间轴渐进漂移（输出帧 k 对应源帧 k+4…+9）；
+        #     · 段首/段尾硬跳（实测全局帧差 9.71 / 11.90，是同一帧处源片自身运动的 8.1× / 11.6×）
+        #       ⇒ 用户看到的「嘴部乱码 + 画面卡顿」。
+        #   这里读原样帧率（change_fps=False）；临时视频是节点按 video_fps 写的，两者天然一致。
+        video_frames = read_video(video_path, change_fps=False, use_decord=False)
+        # 打一行「到底吃进去多少帧 / 按什么 fps 分块」——这两个值不一致就是上面那类时基 bug：
+        _fr = len(video_frames)
+        print("[weaveora] 帧率口径：解码 %d 帧（change_fps=False，视频原始 fps）｜"
+              "whisper 分块 fps=%.2f → %d 块（差 %+d 帧）"
+              % (_fr, float(video_fps), len(whisper_chunks), len(whisper_chunks) - _fr), flush=True)
 
         video_frames, faces, boxes, affine_matrices, driven = self.loop_video(whisper_chunks, video_frames)
 
