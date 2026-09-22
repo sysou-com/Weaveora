@@ -94,13 +94,24 @@ export async function rewritePromptFromZh(
   originalNegative?: string,
   lang: 'zh' | 'en' = 'en',
   frames?: RewriteFrame[],
+  opts?: { useTemplate?: boolean; templateScope?: 'image' | 'shot' },
 ): Promise<RewriteResult> {
   return request<RewriteResult>(`/api/v1/projects/${projectId}/director/rewrite-prompt`, {
     method: 'POST',
     headers: { [WORKSPACE_HEADER]: workspaceId },
     // lang：'zh' → LLM 返回**中文**正/负向词（含每帧）；'en' → 英文
     // frames：运镜关键帧必须一起传，否则 keyframes[].positive_prompt 不会被重写
-    body: { rawText, originalPositive, originalNegative, lang, ...(frames && frames.length ? { frames } : {}) },
+    // useTemplate：把**官方口径的提示词模板**随请求带给 LLM（前端「使用模板」勾选框，默认 true）
+    // templateScope：'image' = 只写出图正词；'shot' = 分镜（positive_prompt 是图生视频正词 + keyframes[] 是出图正词）
+    body: {
+      rawText,
+      originalPositive,
+      originalNegative,
+      lang,
+      ...(frames && frames.length ? { frames } : {}),
+      ...(opts?.useTemplate !== undefined ? { useTemplate: opts.useTemplate } : {}),
+      ...(opts?.templateScope ? { templateScope: opts.templateScope } : {}),
+    },
   })
 }
 

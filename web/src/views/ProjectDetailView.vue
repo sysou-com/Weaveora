@@ -8,7 +8,7 @@ import {
   Save,
   WandSparkles,
 } from 'lucide-vue-next'
-import { NAlert, NButton, NDropdown, NIcon, NInput, NInputNumber, NModal, NRadioButton, NRadioGroup, NSelect, NSkeleton, NTag, useDialog, useMessage } from 'naive-ui'
+import { NAlert, NButton, NCheckbox, NDropdown, NIcon, NInput, NInputNumber, NModal, NRadioButton, NRadioGroup, NSelect, NSkeleton, NTag, useDialog, useMessage } from 'naive-ui'
 import type { SelectOption } from 'naive-ui'
 import { computed, h, nextTick, onErrorCaptured, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
@@ -3668,6 +3668,8 @@ const aiPreview = ref<RewriteResult | null>(null)
 const aiImageMode = ref(false)
 /** P5：AI 更新提示词的语言（用户要求：选中文则正/负词**含运镜关键帧**都用中文） */
 const aiLang = ref<'zh' | 'en'>('zh')
+/** 「使用模板」（2026-09-22 用户要求）：勾选时把**官方口径的提示词模板**随请求带给 LLM；默认勾选。 */
+const aiUseTemplate = ref(true)
 /** 本次重写的运镜关键帧快照（应用时按序回写 keyframes[].positive_prompt） */
 const aiFrames = ref<Array<{ label: string; composition: string }>>([])
 
@@ -3741,7 +3743,8 @@ async function openAiImageRewrite(): Promise<void> {
   aiBusy.value = true
   aiPreview.value = null
   try {
-    aiPreview.value = await rewritePromptFromZh(workspaceId.value, projectId.value, zh)
+    aiPreview.value = await rewritePromptFromZh(workspaceId.value, projectId.value, zh, undefined, undefined,
+      aiLang.value, undefined, { useTemplate: aiUseTemplate.value, templateScope: 'image' })
   } catch (e) {
     message.error(e instanceof Error ? e.message : '生成失败，请重试')
     aiOpen.value = false
@@ -3786,6 +3789,8 @@ async function openAiRewrite(shot: DirectorShot): Promise<void> {
         positivePrompt: k.positive_prompt ?? '',
         negativePrompt: shot.negative_prompt ?? '',
       })),
+      // templateScope='shot'：positive_prompt 是**图生视频**正词（运动+运镜）+ keyframes[] 是出图正词
+      { useTemplate: aiUseTemplate.value, templateScope: 'shot' },
     )
   } catch (e) {
     message.error(e instanceof Error ? e.message : '生成失败，请重试')
@@ -3799,6 +3804,18 @@ async function openAiRewrite(shot: DirectorShot): Promise<void> {
 async function changeAiLang(lang: 'zh' | 'en'): Promise<void> {
   if (aiLang.value === lang) return
   aiLang.value = lang
+  if (aiImageMode.value) {
+    await openAiImageRewrite()
+  } else if (aiShot.value) {
+    const s = aiShot.value
+    await openAiRewrite(s)
+  }
+}
+
+/** 「使用模板」勾选切换 → 重新生成（与语言切换同口径：选了就重新跑一次） */
+async function changeAiUseTemplate(v: boolean): Promise<void> {
+  if (aiUseTemplate.value === v) return
+  aiUseTemplate.value = v
   if (aiImageMode.value) {
     await openAiImageRewrite()
   } else if (aiShot.value) {
@@ -5325,6 +5342,16 @@ const shotTotal = computed(() => {
           </NRadioGroup>
           <span class="text-secondary" style="font-size: 11.5px">
             Qwen 系模型对中文理解好；选哪种，正/负词与运镜关键帧都用哪种
+          </span>
+        </div>
+        <!-- 使用模板（2026-09-22）：把官方口径模板（图生视频=运动+运镜；出图=图N指代+一句自然语言）带给 LLM -->
+        <div class="ai-lang-row" style="margin-top: -4px">
+          <NCheckbox :checked="aiUseTemplate" size="small" data-testid="ai-use-template"
+                     @update:checked="(v: boolean) => changeAiUseTemplate(v)">
+            使用模板（官方口径）
+          </NCheckbox>
+          <span class="text-secondary" style="font-size: 11.5px">
+            出图：图N 指代 + 一句自然语言；图生视频：运动 + 运镜（不重复外观/场景）。取消勾选则不带给 AI
           </span>
         </div>
         <template v-if="aiBusy">

@@ -1310,8 +1310,13 @@ MOTION_PRESETS = {
     #   full = Wan 官方仓库 `wan/configs/wan_i2v_A14B.py` 的**原厂推理默认**：
     #          sample_steps 40 / sample_shift 5.0 / sample_guide_scale (3.5, 3.5) / boundary 0.900 → switch 36
     #   旧值（hero 6 步挂低噪蒸馏 / full 24 步）已弃用：hero 那套实测「冲」，见 docs/notes/出图管线-经验与坑.md。
-    "hero":     {"steps": 20, "switch": 10, "cfg_high": 3.5, "cfg_low": 3.5, "lora_high": 0.0, "lora_low": 0.0, "shift": 5.0},
-    "full":     {"steps": 40, "switch": 36, "cfg_high": 3.5, "cfg_low": 3.5, "lora_high": 0.0, "lora_low": 0.0, "shift": 5.0},
+    # ★ 2026-09-22 用户裁定：**两档 non-distilled 档的 shift 由 5.0 改为 8.0**。
+    #   依据（社区/模板一致口径，非官方文档）：`ModelSamplingSD3` 在**非蒸馏标准档 = 8.0**，
+    #   只有「4 步蒸馏档」才用 5.0；我们跑的是 20/40 步非蒸馏，却一直用着蒸馏档的 5.0 → 口径错配。
+    #   注：Wan 仓库 gui.py 对小尺寸（832×480 等）反而把 sample_shift 降到 3.0，两种口径不冲突但不同源；
+    #   本次按 ComfyUI 模板（我们实际运行的运行时）对齐。回退：改这一行 + 清 DB video_params.shift。
+    "hero":     {"steps": 20, "switch": 10, "cfg_high": 3.5, "cfg_low": 3.5, "lora_high": 0.0, "lora_low": 0.0, "shift": 8.0},
+    "full":     {"steps": 40, "switch": 36, "cfg_high": 3.5, "cfg_low": 3.5, "lora_high": 0.0, "lora_low": 0.0, "shift": 8.0},
 }
 # 给高噪声专家挂 LoRA 的显存风险阈值：超过它就在日志里点名提醒（48G 实测 0.6 也 OOM）
 MOTION_LORA_HIGH_WARN = 0.0

@@ -752,6 +752,54 @@ public class DirectorService {
             前面所有写「prompt 字段用英文」「英文 positive_prompt」的规则**本次全部不适用**。
             """;
 
+    /**
+     * ★ 2026-09-22（用户要求）：「使用模板」—— 把**官方口径的提示词模板**随请求带给 LLM。
+     *
+     * <p>为什么要有：官方口径很明确（图生视频 = <b>运动 + 运镜</b>，图像已确定主体/场景/风格；
+     * 图像编辑 = 1–3 张图 + <b>一条</b>指令 + 「图N」按送入顺序指代 + 短句不冗余 + 冲突要拆步），
+     * 但这些规则散在官方文档里；LLM 每次自由发挥就会漂回老路（把静态构图/外观/人物档案也写进视频正词）。
+     * 把模板原文注入请求，保证写法正确；模板只约束**写法**，不改变**输出语言**（语言仍由 lang 决定）。
+     *
+     * <p>模板文件：{@code prompts/prompt_template_motion.md}（图生视频）、
+     * {@code prompts/prompt_template_still.md}（出图/关键帧）。文件读不到时返回空串（不阻塞重写）。
+     *
+     * @param scope  {@code image} = 只写出图正词（项目级「AI 生成提示词」）；
+     *               其它/null = 分镜（{@code positive_prompt} 是图生视频正词 + {@code keyframes[]} 是出图正词，两份都给）
+     * @param frames 仅用于日志（帧数）
+     */
+    static String officialTemplateBlock(String scope, java.util.List<RewriteFrame> frames) {
+        boolean shot = scope == null || scope.isBlank() || !"image".equalsIgnoreCase(scope.trim());
+        StringBuilder sb = new StringBuilder();
+        appendTemplateResource(sb, "prompt_template_motion.md",
+                shot ? "图生视频正词（= positive_prompt）" : null);
+        appendTemplateResource(sb, "prompt_template_still.md",
+                shot ? "出图正词（= keyframes[].positive_prompt）" : "出图正词（= positive_prompt）");
+        if (sb.length() == 0) {
+            return "";
+        }
+        return "\n\n================ 提示词模板（官方口径 · 用户已勾选「使用模板」） ================\n"
+                + "下面模板是**写法硬约束**，本次输出必须遵守；它们**不改变输出语言**（语言仍按 lang 决定）。\n"
+                + sb
+                + "\n================ 模板结束 ================";
+    }
+
+    /** 读一个模板资源并带标题拼到 sb；title 为 null 表示本次不需要该模板。 */
+    private static void appendTemplateResource(StringBuilder sb, String file, String title) {
+        if (title == null) {
+            return;
+        }
+        try {
+            String t = new String(new ClassPathResource("prompts/" + file).getInputStream().readAllBytes(),
+                    StandardCharsets.UTF_8);
+            if (!t.isBlank()) {
+                sb.append("\n---\n【").append(title).append("｜模板 prompts/").append(file).append("】\n")
+                  .append(t.trim()).append('\n');
+            }
+        } catch (IOException e) {
+            log.warn("prompts/{} 读取失败，本次不带该模板（不阻塞重写）：{}", file, e.toString());
+        }
+    }
+
     private String loadSystemPrompt(String mode) {
         String file = "image".equals(mode) ? "director_image_system.md" : "director_video_system.md";
         try {
@@ -784,7 +832,8 @@ public class DirectorService {
     public java.util.Map<String, Object> rewritePrompt(UUID userId, UUID workspaceId, UUID projectId,
                                                        String rawText, String originalPositive,
                                                        String originalNegative, String lang,
-                                                       java.util.List<RewriteFrame> frames) {
+                                                       java.util.List<RewriteFrame> frames,
+                                                       Boolean useTemplate, String templateScope) {
         ProjectContextPort.ProjectSnapshot project = context.require(userId, workspaceId, projectId);
         boolean amend = originalPositive != null && !originalPositive.isBlank();
         boolean zh = lang != null && "zh".equalsIgnoreCase(lang.trim());
@@ -860,6 +909,19 @@ public class DirectorService {
                   .append("\n  原负词：").append(f.negativePrompt() == null ? "" : f.negativePrompt());
             }
             user = user + fb + "\n\n请输出 **" + outSpec + "** 的 JSON（含 keyframes 数组，" + frames.size() + " 个元素）。";
+        }
+        // ★ 2026-09-22（用户要求「AI 生成提示词 / AI 更新提示词 增加使用模板」）：
+        //   勾选时把**官方口径模板**随请求带给 LLM（模板文件见 prompts/prompt_template_*.md）。
+        //   默认开：useTemplate == null 也当作 true（旧客户端/未传字段时不下发变化）。
+        if (useTemplate == null || useTemplate) {
+            String tpl = officialTemplateBlock(templateScope, frames);
+            if (!tpl.isEmpty()) {
+                system = system + tpl;
+            }
+            log.info("rewrite-prompt：使用模板={}（scope={}、frames={}）", !tpl.isEmpty(), templateScope,
+                    frames == null ? 0 : frames.size());
+        } else {
+            log.info("rewrite-prompt：用户取消勾选「使用模板」，本次不带官方模板");
         }
         LlmRequest req = new LlmRequest(system, user, "rewrite", rawText, "image", "16:9", null, null);
         try {

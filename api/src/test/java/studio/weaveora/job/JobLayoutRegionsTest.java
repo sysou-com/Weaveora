@@ -231,9 +231,15 @@ class JobLayoutRegionsTest {
         assertFalse(pos.contains("x="), pos);
         assertFalse(pos.contains("Picture 1"), "视频通路不送参考图，不该出现槽位名: " + pos);
         assertFalse(pos.contains("位置以本清单为准"), pos);
-        // ③ 身份与档案保留：只带 性别/年龄（硬约束）
-        assertTrue(pos.contains("宝玉[性别 男 male]"), pos);
-        assertTrue(pos.contains("警幻[性别 女 female]"), pos);
+        // ③ ★ 2026-09-22（用户裁定）：motion 正词**不再带任何系统追加的人物信息**
+        //   （主体清单/性别年龄档案/「面容发型服饰以参考图为准」等硬约束全部删除）——
+        //   图生视频只写「运动 + 运镜」（官方公式：图像已确定主体/场景/风格），身份由首帧（关键帧）承担。
+        //   注：**剧情文案本身**点名角色不算「人物信息」（那是导演写的动作描述，本用例的 payload 就含「宝玉/警幻」）。
+        assertFalse(pos.contains("主体与人物设定"), "motion 不再写人物设定块: " + pos);
+        assertFalse(pos.contains("[性别"), "motion 不再写性别/年龄硬约束: " + pos);
+        assertFalse(pos.contains("面容/发型/服饰/体态一律以各自参考图"), "motion 不再写外观以参考图为准: " + pos);
+        assertFalse(pos.contains("不得把男性画成女性"), "motion 不再写性别硬约束: " + pos);
+        assertFalse(pos.contains("Subjects & profiles"), "motion 不得中英混杂: " + pos);
         // ④ 构图以关键帧为准；**不再**写「同框身高比例按档案」
         //    ★ 2026-09-22 产品决策：该行与「以关键帧为准」直接冲突，实测导致模型重设三人身高/体型
         //    （用户报「clip 里面部和体态都变了」）⇒ 整行删除。

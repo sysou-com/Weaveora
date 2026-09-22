@@ -145,7 +145,8 @@ public class DirectorController {
             @Valid @RequestBody RewritePromptRequest body) {
         return ResponseEntity.ok(directorService.rewritePrompt(
                 uid(request), ws(workspaceId), projectId, body.rawText(),
-                body.originalPositive(), body.originalNegative(), body.lang(), body.frames()));
+                body.originalPositive(), body.originalNegative(), body.lang(), body.frames(),
+                body.useTemplate(), body.templateScope()));
     }
 
     /**
@@ -154,12 +155,19 @@ public class DirectorController {
      * @param lang   'zh' → 正/负向词（含每帧）全部中文；'en'（默认）→ 英文
      * @param frames 运镜关键帧（P2）：本镜是 2–4 帧运镜镜头时**必须**一起传，
      *               否则帧提示词不会被重写（用户实测：第 3 镜的 2 帧仍是旧英文）
+     * @param useTemplate 是否把**官方口径的提示词模板**随请求一起带给 LLM（前端「使用模板」勾选框，默认勾选）。
+     *               null 视为 true（旧客户端/未传时按默认开）。
+     * @param templateScope 模板范围：{@code image} = 只写出图/关键帧正词（项目级「AI 生成提示词」）；
+     *               {@code shot} = 分镜（{@code positive_prompt} 是**图生视频**正词 + {@code keyframes[]} 是出图正词），
+     *               两者分别按运动模板与出图模板写。为 null/空时按是否带 frames 推断（带 frames → shot）。
      */
     public record RewritePromptRequest(@NotBlank String rawText,
                                        String originalPositive,
                                        String originalNegative,
                                        String lang,
-                                       java.util.List<DirectorService.RewriteFrame> frames) {
+                                       java.util.List<DirectorService.RewriteFrame> frames,
+                                       Boolean useTemplate,
+                                       String templateScope) {
     }
 
     @PostMapping("/director/generate")

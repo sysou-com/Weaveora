@@ -1,5 +1,5 @@
 {
-  "_comment": "Weaveora · Qwen-Image **高步数电影档**（纯文生图，去 Lightning 蒸馏 LoRA）。与 qwen_image_txt2img_api.json 的区别：去掉 Lightning、cfg 3.5、steps 24 —— 只有 cfg>1 时负向词与项目风格词才真正生效（Lightning 档必须 cfg=1.0，负词会被完全忽略，实测出来偏插画/古典）。worker 注入 6.text / 7.text / 8 尺寸 / 9.seed；steps/cfg 走 services.image 或 params。",
+  "_comment": "Weaveora · Qwen-Image **高步数电影档**（纯文生图，去 Lightning 蒸馏 LoRA）。与 qwen_image_txt2img_api.json 的区别：去掉 Lightning、cfg 4.0、steps 40（★ 2026-09-22 用户裁定：出图档统一回官方口径 40 步 / cfg 4.0；此前 24/3.5 是过渡档）—— 只有 cfg>1 时负向词与项目风格词才真正生效（Lightning 档必须 cfg=1.0，负词会被完全忽略，实测出来偏插画/古典）。worker 注入 6.text / 7.text / 8 尺寸 / 9.seed；steps/cfg 走 services.image 或 params。",
   "1": {
     "class_type": "UNETLoader",
     "_meta": {
@@ -103,8 +103,8 @@
         0
       ],
       "seed": 0,
-      "steps": 24,
-      "cfg": 3.5,
+      "steps": 40,
+      "cfg": 4.0,
       "sampler_name": "euler",
       "scheduler": "simple",
       "denoise": 1.0

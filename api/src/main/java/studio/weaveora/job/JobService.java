@@ -2931,9 +2931,20 @@ public class JobService {
         java.util.List<String> orderItems = new java.util.ArrayList<>();
         java.util.List<Double> orderX = new java.util.ArrayList<>();
         java.util.List<Integer> orderSlot = new java.util.ArrayList<>();
+        // ★ 2026-09-22 用户裁定：**motion 正词不再带任何人物信息** —— 只把名字收集起来记日志。
+        java.util.List<String> motionNames = new java.util.ArrayList<>();
         for (int i = 0; i < refs.subjects().size(); i++) {
             String name = refs.subjects().get(i);
             if (name == null || name.isBlank()) {
+                continue;
+            }
+            // ★ 2026-09-22（用户裁定）：motion(clip) 静默删除「主体名 + 性别年龄档案 + 硬约束」整块。
+            //   为什么删：① 官方图生视频公式只有「运动 + 运镜」（图像已确定主体/场景/风格），
+            //   再叠一层文字人物设定只会与首帧抢话语权；② 身份本来就由首帧（关键帧）承担；
+            //   ③ 之前那串「不得把男性画成女性 / 面容发型服饰以参考图为准」在**视频通路没有参考图**，
+            //   指向了一张并不存在的图。名字仍收进 motionNames 仅用于日志排障。
+            if (motion) {
+                motionNames.add(name);
                 continue;
             }
             if (sb.length() > 0) {
@@ -2944,12 +2955,8 @@ public class JobService {
             //   拼成 `Picture 1: <|vision_start|>…`（见节点源码 _get_qwen_prompt_embeds），
             //   官方 2511 模板/社区写法也都是 `Picture 1` / `Picture 2`；我们之前只写 `image1`，
             //   模型未必能把两者对上 → 多主体时张冠李戴。现在两种名字并列写，怎么读都不歧义。
-            // ★ motion(clip)：视频通路不送参考图（只有首帧）→ **不写 Picture/image 槽位名**，避免指向不存在的图。
-            if (motion) {
-                sb.append(name);
-            } else {
-                sb.append("Picture ").append(i + 1).append(" (image").append(i + 1).append(") = ").append(name);
-            }
+            // ★ motion(clip) 不再进到这里（2026-09-22：视频通路不送参考图，且正词已不写人物信息）。
+            sb.append("Picture ").append(i + 1).append(" (image").append(i + 1).append(") = ").append(name);
             // ★ P14（2026-09-16 用户实测「宝玉被当女性」）：把该主体的人物档案直接写进正词。
             //   ★ 2026-09-21 简化：绑了定妆照时只写**性别/年龄**（describeRef）——
             //   身高/体态/性格/外貌·服饰是“文字版外观断言”，会与参考图抢话语权（用户实测“可卿变丰腴、
@@ -2972,8 +2979,9 @@ public class JobService {
                 orderSlot.add(i + 1);
             }
         }
-        if (sb.length() > 0) {
-            // ★ 2026-09-16 曾加「位置以本清单为准」的覆盖句（当时的真因：镜文案「警幻居后景」与位置总控的框
+        if (sb.length() > 0 || motion) {
+            // ★ 2026-09-16 曾加「位置以本清单为准」的覆盖句
+            //   （当时的真因：镜文案「警幻居后景」与位置总控的框
             //   x=0.06/0.24/0.65 直接矛盾，模型只能猜）。
             // ★ 2026-09-21 产品决策变更：**方位以剧情句为准**，区域框降级为兑底、冲突只提示不纠偏
             //   （见 PromptConflictDetector）；上句已被 add 里的新表述取代，此处留史以免重蹈。
@@ -2999,24 +3007,16 @@ public class JobService {
             }
             String add;
             if (motion) {
-                // ★ motion(clip)：身份 + 档案 + 「以关键帧为构图基准」；不含任何框/坐标。
+                // ★ 2026-09-22（用户裁定）：motion 正词**已去掉全部人物信息**（主体名/性别年龄/档案/硬约束），
+                //   只保留「以关键帧为构图基准」+ 动作/朝向/运镜口径 —— 对齐官方图生视频公式「运动 + 运镜」。
                 add = zh
-                        ? "\n主体与人物设定（本镜按关键帧里出现的角色，顺序与系统内部一致）：" + sb
-                          + "。方括号里是该主体的人物设定（性别/年龄），**必须严格遵守**："
-                          + "不得把男性画成女性（或反之），不得画成与年龄不符的样貌；"
-                          + "面容/发型/服饰/体态一律以各自参考图（定妆照）为准，不得按文字更改。"
-                          + "【以关键帧为构图基准】本镜从已生成的关键帧首帧开始运动：画面构图、每个角色在画面中的位置"
+                        ? "\n【以关键帧为构图基准】本镜从已生成的关键帧首帧开始运动：画面构图、每个角色在画面中的位置"
                           + "与相对大小一律以关键帧为准。"
                           + "只需表现动作、朝向、方向与镜头运动（前后景纵深、左右移动、走位、转身、推拉摇移）；"
                           + "禁止重新设计构图、禁止重新安排站位、禁止把某个角色单独放大或推近，"
                           + "禁止让他/她越走越近、越走越大、越走越高；近大远小只能来自透视与镜头运动，"
                           + "不得改变人物之间的相对大小与身高比例。"
-                        : "\nSubjects & profiles (in keyframe order; internal order matches): " + sb
-                          + ". The bracketed facts are each subject's hard constraints (gender/age) — obey them"
-                          + " strictly: never render a male character as female or vice versa, and never change their"
-                          + " age; face/hair/costume/build always follow each subject's own reference (portrait) image and"
-                          + " must not be altered by text."
-                          + " [Keyframe is authoritative for composition] This shot starts from an already"
+                        : "\n[Keyframe is authoritative for composition] This shot starts from an already"
                           + " generated keyframe: the framing and each character's position and relative size are"
                           + " fixed by it. "
                           + "Express only action, facing, direction and camera movement (depth/foreground,"
@@ -3051,7 +3051,8 @@ public class JobService {
             }
             payload.put("positive_prompt", cur + add);
             if (motion) {
-                log.info("refs: motion(clip) 主体档案已写入正词（不含位置框；构图以关键帧为准）：{}", sb);
+                log.info("refs: motion(clip) 正词**已不带人物信息**（按官方公式只写运动+运镜；构图以关键帧为准）；"
+                        + "本镜在场主体（仅日志）：{}", motionNames);
             } else {
                 log.info("refs: 参考图↔主体（含位置={}）已写入正词：{}", !pos.isEmpty(), sb);
                 // ★ 2026-09-21 产品决策（用户裁定）：**方位以剧情句为准**，区域框降级为兜底；

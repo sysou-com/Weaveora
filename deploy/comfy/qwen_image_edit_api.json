@@ -1,5 +1,5 @@
 {
-  "_comment": "Weaveora · Qwen-Image-Edit（参考图锚定，单遍：prompt + 参考图同时输入）。★ 2026-09-16 修正结构：官方是「参考图 → 缩放到目标尺寸 → VAEEncode → 作为 KSampler 的采样起点(latent_image)」，同时同一张图喂进 TextEncodeQwenImageEditPlus。旧版用 EmptySD3LatentImage 当起点 → 模型几乎不听参考图、且容易出鬼图。worker 注入 6.prompt / 7.prompt / 12.image / 14.image / 13 尺寸（ImageScale）/ 9.seed；steps/cfg 走 services.image 或 params，denoise 固定 1.0。",
+  "_comment": "Weaveora · Qwen-Image-Edit（参考图锚定，单遍：prompt + 参考图同时输入）。★ 2026-09-16 修正结构：官方是「参考图 → 缩放到目标尺寸 → VAEEncode → 作为 KSampler 的采样起点(latent_image)」，同时同一张图喂进 TextEncodeQwenImageEditPlus。旧版用 EmptySD3LatentImage 当起点 → 模型几乎不听参考图、且容易出鬼图。worker 注入 6.prompt / 7.prompt / 12.image / 14.image / 13 尺寸（ImageScale）/ 9.seed；steps/cfg 走 services.image 或 params，denoise 固定 1.0。★ 2026-09-22 补齐 2511 官方模板的两个节点：17=CFGNorm（接在 ModelSamplingAuraFlow 之后）、18/19=FluxKontextMultiReferenceLatentMethod（reference_latents_method=index_timestep_zero，分别修饰正/负 conditioning）；官方模板备注「用 Comfy 官方权重不需要、用第三方重打包权重可能需要」而本工作流用的是 qwen_image_edit_2511_fp8mixed（重打包档）故补齐。",
   "1": {
     "class_type": "UNETLoader",
     "_meta": {
@@ -158,15 +158,15 @@
     },
     "inputs": {
       "model": [
-        "5",
+        "17",
         0
       ],
       "positive": [
-        "6",
+        "18",
         0
       ],
       "negative": [
-        "7",
+        "19",
         0
       ],
       "latent_image": [
@@ -214,6 +214,46 @@
     "class_type": "LoadImage",
     "inputs": {
       "image": ""
+    }
+  },
+  "17": {
+    "class_type": "CFGNorm",
+    "_meta": {
+      "title": "cfgnorm"
+    },
+    "inputs": {
+      "model": [
+        "5",
+        0
+      ],
+      "strength": 1.0,
+      "pre_cfg": false
+    }
+  },
+  "18": {
+    "class_type": "FluxKontextMultiReferenceLatentMethod",
+    "_meta": {
+      "title": "ref-method-positive"
+    },
+    "inputs": {
+      "conditioning": [
+        "6",
+        0
+      ],
+      "reference_latents_method": "index_timestep_zero"
+    }
+  },
+  "19": {
+    "class_type": "FluxKontextMultiReferenceLatentMethod",
+    "_meta": {
+      "title": "ref-method-negative"
+    },
+    "inputs": {
+      "conditioning": [
+        "7",
+        0
+      ],
+      "reference_latents_method": "index_timestep_zero"
     }
   }
 }
