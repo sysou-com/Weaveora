@@ -110,6 +110,9 @@ def run_one(args, mode, width, height, summary):
     tag = args.tag or mode
     wf = args.wf or WF[mode]
     print("\n=== [%s] %s ===" % (tag, wf))
+    # ★ 必须先指 COMFY 再 build：build 里要 /upload/image 上传参考图（上传走的也是模块级 COMFY）。
+    #   在 VPS 上跑就得指到 GPU 网关（生产路径）；在盒上跑指 127.0.0.1:8001。
+    c.COMFY = args.url.rstrip("/")
     row = {"tag": tag, "mode": mode, "workflow": os.path.basename(wf), "steps": args.steps,
            "guidance": args.guidance, "lora": args.lora or "", "size": "%dx%d" % (width, height),
            "ok": False, "seconds": None, "outputs": [], "error": ""}
@@ -122,7 +125,6 @@ def run_one(args, mode, width, height, summary):
         return False
     print("   注入后：size=%dx%d steps=%s guidance=%s seed=%s denoise=%s img2img=%s flux2=%s"
           % (width, height, args.steps, args.guidance, args.seed, use_denoise, is_i2i, is_flux2))
-    c.COMFY = args.url.rstrip("/")
     c._ORPHAN_CLEAR_DONE["v"] = True      # ★ 试枪绝不去"清理"队列里的 prompt（万一是别人的任务）
     t0 = time.time()
     try:

@@ -17,6 +17,12 @@
 # 用法：bash deploy/vps-worker-deploy.sh
 # 可覆盖：WEAVEORA_WORKER_HOST / WEAVEORA_SSH_KEY / WEAVEORA_WORKER_DIR
 set -euo pipefail
+# ★ 2026-09-23：先把脚本所在目录的**绝对路径**存下来。
+#   为什么：下面有一句 `cd ../worker`，之后 `$0`（相对路径 `deploy/vps-worker-deploy.sh`）
+#   再拼 `deploy/comfy` 就解析成 `worker/deploy/comfy` ⇒ cd 失败、被 `|| true` 吞掉
+#   ⇒「引擎工作流 JSON 只补齐缺失」那段**静默不执行**。
+#   本次实测代价：新加的 flux2 三个工作流一直没上 VPS，直到试枪报 `FileNotFoundError` 才暴露。
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 HOST="${WEAVEORA_WORKER_HOST:-root@sysou.com}"
 # SSH key：优先显式覆盖 $WEAVEORA_SSH_KEY；默认按「存在即用」顺序探测（2026-09-16：
@@ -36,7 +42,7 @@ FILES=(stub_worker.py cloud_client.py cloud_image.py comfy_client.py audio_clien
 WF_SRC="$(cd "$(dirname "$0")/windows" && pwd)/lipsync_workflow_api.json"
 WF_DST="$DIR/lipsync_workflow_api.json"
 
-cd "$(dirname "$0")/../worker"
+cd "$SCRIPT_DIR/../worker"
 
 # ★ 2026-09-22 修正：SSH 数组必须**在安全闸之前**定义 —— 原来它写在下面第 53 行，
 #   预检里的 `${SSH[@]}` 展开为空 → 整条 psql 命令被当成本地命令 → 预检**静默空转**
@@ -93,7 +99,7 @@ fi
 #   例如 edit 工作流线上是"无 2511 节点"回滚版；静默覆盖会把雷带回来）：
 #     ① 仓库有、VPS 没有 → 补齐；
 #     ② 两边都有但 md5 不同 → 只**报警并打印两个 md5**，由人决定（谁要同步就手工 cp）。
-COMFY_DIR="$(cd "$(dirname "$0")/comfy" 2>/dev/null && pwd || true)"
+COMFY_DIR="$SCRIPT_DIR/comfy"
 if [ -n "${COMFY_DIR:-}" ] && [ -d "$COMFY_DIR" ]; then
   echo "   引擎工作流 JSON（deploy/comfy/*.json，只补齐缺失、不覆盖）："
   "${SSH[@]}" "mkdir -p '$DIR/workflows'" || true
@@ -110,6 +116,9 @@ if [ -n "${COMFY_DIR:-}" ] && [ -d "$COMFY_DIR" ]; then
       echo "     = 一致：$b"
     fi
   done
+else
+  echo "   !! 找不到 deploy/comfy（COMFY_DIR='${COMFY_DIR:-}'）—— 引擎工作流**没跟随部署**，"\
+       "worker 会在运行时报 No such file or directory；这里**不许静默跳过**"
 fi
 
 for svc in "$SVC" "weaveora-gpu-worker"; do

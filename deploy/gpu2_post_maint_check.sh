@@ -44,8 +44,13 @@ echo "  （含数据盘上的 Phase2/3 权重；若断链先看挂载点：df -h
 chk_nodone(){ f="$ROOT/$1"; want="$2"; got=$(stat -Lc%s "$f" 2>/dev/null || echo 0)
   if [ "$got" = "$want" ]; then ok "$(basename "$f") $got"; else bad "$(basename "$f") 期望 $want 实际 $got"; fi; }
 chk(){ f="$ROOT/$1"; want="$2"; got=$(stat -Lc%s "$f" 2>/dev/null || echo 0)
-  if [ "$got" = "$want" ] && [ -f "$f.done" ]; then ok "$(basename "$f") $got"
-  else bad "$(basename "$f") 期望 $want 实际 $got$( [ -f "$f.done" ] || echo '（缺 .done）')"; fi; }
+  # ★ 2026-09-23：`.done` 要跟着**软链解析后的真文件**找。
+  #   为什么：数据盘上的权重是 `/opt/weaveora/models/xxx -> /addDisk/...` 软链，下载器把 .done 写在
+  #   **真文件旁边**（/addDisk/...），所以 `[ -f "$f.done" ]` 永远为假 ⇒ 会出现
+  #   「字节数完全正确却报 FAIL（缺 .done）」的假警报（本次实测）。
+  real="$(readlink -f "$f" 2>/dev/null || echo "$f")"
+  if [ "$got" = "$want" ] && { [ -f "$f.done" ] || [ -f "$real.done" ]; }; then ok "$(basename "$f") $got"
+  else bad "$(basename "$f") 期望 $want 实际 $got$( { [ -f "$f.done" ] || [ -f "$real.done" ]; } || echo '（缺 .done）')"; fi; }
 chk models/diffusion_models/qwen_image_fp8_e4m3fn.safetensors 20430635136
 chk models/text_encoders/qwen_2.5_vl_7b_fp8_scaled.safetensors 9384670680
 chk models/vae/qwen_image_vae.safetensors 253806246
