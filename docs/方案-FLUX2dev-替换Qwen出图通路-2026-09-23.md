@@ -344,6 +344,29 @@ echo "下载已后台化，PID=$!；进度只看日志尾部一行（不要 whil
 ssh root@sysou.com "sudo -u postgres psql -d weaveora -At -c \"select services->'image' from user_engine_settings where gpu_server_url is not null;\""
 ```
 
+### 6.4.1 一键切换脚本（**已落地**：`deploy/image_variant_switch.sh`，带回读）
+
+```bash
+bash deploy/image_variant_switch.sh show          # 只读回读（不改）
+bash deploy/image_variant_switch.sh flux2         # → FLUX.2 质量档（20 步 / guidance 4 / 不挂 LoRA）
+bash deploy/image_variant_switch.sh flux2-turbo   # → FLUX.2 加速档（8 步 + Flux_2-Turbo-LoRA_comfyui）
+bash deploy/image_variant_switch.sh qwen          # → 回滚到现役 Qwen-Image（40 步 / cfg 4 / film 工作流）
+```
+只动 `user_engine_settings.services.image`；**改完立刻回读 6 个字段**（防 CLAUDE.md §四 记过的“平台配置页把旧快照写回”）。
+
+### 6.4.2 A/B 怎么跑（**已落地**：`deploy/diag/diag_flux2_ab.sh` + `diag_flux2_smoke.py`）
+
+```bash
+# 在 GPU 盒上后台跑（同 prompt / 同 seed / 同尺寸 / 同参考图；6 组对照）
+setsid nohup bash /opt/weaveora/diag/diag_flux2_ab.sh \
+    --prompt '<英文正词>' --ref 宝玉=/path/baoyu.png --ref 可卿=/path/keqing.png \
+    > /opt/weaveora/logs/ab_flux2.log 2>&1 </dev/null &
+```
+矩阵 = `qwen-t2i(40步)` / `flux2-t2i(20步)` / `flux2-t2i+Turbo(8步)` / `qwen-edit(40步)` / `flux2-edit(20步)` / `flux2-edit+Turbo(8步)`；
+末尾自动跑 `wv_faceid.py`（关键帧身份/站位客观判定）。
+★ 关键设计：诊断脚本**直接 import `comfy_client`**，注入与提示词前缀均走生产同一真源（`_image_edit_prefix`）
+⇒ A/B 只差“模型本身”，不差流程；且能当场暴露“只有真 POST 才会出现”的 400（09-23 二段坑 1）。
+
 ### 6.5 明确**不做**的事
 
 1. **不升级 ComfyUI**（0.34.0 已具备 Flux2 全部所需；升级会牵动 Qwen/LTX 既有工作流与自定义节点）。
