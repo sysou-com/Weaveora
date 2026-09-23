@@ -162,6 +162,7 @@ const MOTION_KEYS = [
   'sampler_name', 'scheduler', 'model_high', 'model_low', 'mode', 'dual',
   'width', 'height', 'frames', 'fps',
   'engine',            // ★ 2026-09-23 出片引擎（wan22 / ltx25）—— 与后端 MOTION_KEYS + worker 白名单三处必须成对
+  'fps_x2',            // ★ 2026-09-23（P5）LTX-2.5 时间轴 ×2（24→48fps）—— 同上，三处成对
   'presetSnapshots',   // ★ 档位参数记忆（每个 preset 存一份自己的参数快照）
 ]
 const motionPresetOptions = ['draft', 'balanced', 'motion', 'hero', 'full'].map((v) => ({ label: v, value: v }))
@@ -171,6 +172,15 @@ const motionPresetOptions = ['draft', 'balanced', 'motion', 'hero', 'full'].map(
 const motionEngineOptions = [
   { label: 'Wan2.2 I2V（480p·16fps，旧，默认）', value: 'wan22' },
   { label: 'LTX-2.5（1280×704·24fps，新）', value: 'ltx25' },
+]
+// ★ 2026-09-23（P5）：LTX-2.5 的**时间轴 ×2**（24 → 48fps）。
+//   走官方 `ltx-2v-latent-temporal-upscaler-x2`（在 latent 域把时间轴放大 2×，时长不变、音画仍同步），
+//   比 RIFE 插帧更原生（无插帧伪影），代价是解码阶段耗时/显存上涨。
+//   值落 `video_params.fps_x2`（0/1）→ services.motion.fps_x2 → worker `_ltx25_x2_on()`。
+//   ★ 开了它，项目成片帧率应该是 48（后端 deliverFps 会按引擎归一，不必手改计划）。
+const motionFpsOptions = [
+  { label: '24fps（原生，推荐）', value: 0 },
+  { label: '48fps（时间轴 ×2，耗时/显存上涨）', value: 1 },
 ]
 
 // ★ 档位参数记忆（2026-09-18 用户口径）：“调整档位时把当前档参数保存下来，下次切回去时用它自动填充覆盖”。
@@ -823,6 +833,15 @@ onMounted(loadEnvStatus)
               @update:value="(v: string | null) => mSet('engine', v ?? 'wan22')"
             />
           </NFormItem>
+          <NFormItem label="帧率（LTX-2.5）" style="width: 260px">
+            <NSelect
+              :value="numOf(videoParams.fps_x2) ? 1 : 0"
+              :options="motionFpsOptions"
+              size="small"
+              :disabled="(videoParams.engine as string) !== 'ltx25'"
+              @update:value="(v: number | null) => mSet('fps_x2', v ? 1 : 0)"
+            />
+          </NFormItem>
           <NFormItem label="分辨率" style="width: 230px">
             <NSelect
               :value="(videoParams.resolution as string) ?? '480p'"
@@ -839,7 +858,9 @@ onMounted(loadEnvStatus)
         <div style="margin: -4px 0 8px; color: #888; font-size: 12px; line-height: 1.5">
           出片引擎选 <b>LTX-2.5</b> 时：下面的「档位 / steps / cfg / shift / LoRA」与「分辨率」<b>仅对 Wan2.2 生效</b>——
           LTX-2.5 走自己的两段式（分辨率由画幅决定、长边上限 1280，单镜时长上限 20s，输出 24fps 且自带音轨）；
-          显存峰值 44.7/46.1 GiB，<b>同一时间只能跑一个 GPU 任务</b>。切换后按项目生效，无需改服务器配置。
+          显存峰值 44.7/46.1 GiB，<b>同一时间只能跑一个 GPU 任务</b>。切换后按项目生效，无需改服务器配置。<br />
+          <b>成片帧率</b>不用手改：交付口按引擎归一（Wan=16 的整数倍→32；LTX=24 的整数倍→24 / 开 ×2 则 48），
+          否则导出阶段会用<b>复制帧</b>拉齐 → 顿挫。
         </div>
         <NFormItem label="高级：直接编辑 motion JSON（白名单键，逗号分隔的任一子集即可）">
           <NInput

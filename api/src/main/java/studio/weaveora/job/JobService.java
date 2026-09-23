@@ -353,7 +353,7 @@ public class JobService {
                         String raw = kf.path("positive_prompt").asText(shot.path("positive_prompt").asText(""));
                         // ★ 逐帧位置：把帧号传进去，applyLayoutRegions 才能取 keyframes[fi].layout
                         ObjectNode payload = videoShotPayload("still", plan, shot, req.revisionId(), shotId,
-                                revisionNo, raw, seed, project, style, refs, fi, imgMaxSide);
+                                revisionNo, raw, seed, project, style, refs, fi, imgMaxSide, userId);
                         payload.put("keyframe_index", fi);
                         payload.put("keyframe_count", frames.size());
                         payload.put("frame_label", frameLabel(kf, fi, frames.size()));
@@ -378,7 +378,7 @@ public class JobService {
                         : frames.get(0).path("positive_prompt").asText(shot.path("positive_prompt").asText(""));
                 ObjectNode payload = videoShotPayload(req.kind(), plan, shot, req.revisionId(), shotId,
                         revisionNo, rawPrompt, seed, project, style, refs, -1,
-                        imgMaxSide);
+                        imgMaxSide, userId);
                 if ("clip".equals(req.kind())) {
                     // motion 帧数：可显式指定（范围校验）
                     if (req.frames() != null) {
@@ -2638,7 +2638,7 @@ public class JobService {
         //   写死 16 会让 LTX 镜头整体错 1.5 倍（表现：UI 说 5s、实际只出 3.3s）。
         String mEng = "wan22";
         try {
-            mEng = engineSettings.servicesOf(userId).path("motion").path("engine").asText("wan22").trim().toLowerCase();
+            mEng = engineSettings.motionEngine(userId);
         } catch (RuntimeException ignore) {
             // 读不到就按环境变量默认（单帧单引擎部署时即 env 里的那个）
         }
@@ -2649,7 +2649,12 @@ public class JobService {
         out.put("engine", route);
         out.put("minFrames", motionFramesMin);
         out.put("maxFrames", hi);
-        out.put("fps", fps);
+        // ★ P2：`fps` = **实际交付帧率**（按引擎归一：必须被原生帧率整除，否则导出会复制帧拉齐）；
+        //   `planFps` = 计划里写的建议值（可能与之不同，UI 要能看出来）。
+        out.put("fps", engineSettings.deliverFps(userId, plan));
+        out.put("planFps", fps);
+        out.put("defaultDeliverFps", engineSettings.defaultDeliverFps(userId));
+        out.put("fpsX2", isLtx && engineSettings.motionFpsX2(userId));
         // 【2026-09-17 口径修正】帧上限→秒数**必须用原生 fps**：
         // 旧实现除以 edit_plan.fps(30) → 本机 121 帧算成 4.03s，而实际能出 121/16=7.56s；
         // 偏小的值会让「按配音校准」把 5–7s 的正常镜头**多切一段**（多一次推理 + 接缝 + 补帧）。
@@ -2729,7 +2734,8 @@ public class JobService {
     /** 视频镜头 payload 公共构造（含 P3 的 revision_no/prompt_md5；正词可传关键帧词）。 */
     private ObjectNode videoShotPayload(String kind, JsonNode plan, JsonNode shot, UUID revisionId, UUID shotId,
                                         int revisionNo, String positiveRaw, long seed, ProjectSnapshot project,
-                                        StyleTemplate style, RefCtx refs, int keyframeIndex, int imgMaxSide) {
+                                        StyleTemplate style, RefCtx refs, int keyframeIndex, int imgMaxSide,
+                                        UUID userId) {
         ObjectNode payload = mapper().createObjectNode();
         payload.put("kind", kind);
         payload.put("mode", "video");
@@ -2762,7 +2768,12 @@ public class JobService {
         payload.put("negative_prompt", neg);
         stampRevisionMeta(payload, revisionNo, pos);
         payload.put("duration_sec", shot.path("duration_sec").asDouble(3));
-        payload.put("fps", plan.path("edit_plan").path("fps").asInt(30));
+        // ★ P2（2026-09-23）：出片帧率按**引擎**归一（必须被原生帧率整除；Wan 16 / LTX 24）。
+        //   旧写法直接把 `edit_plan.fps`（DirectorService 写死 32、历史计划还有 30）当交付帧率传给
+        //   worker 与导出 —— LTX-2.5 原生只有 24fps ⇒ 导出阶段 `ffmpeg fps=32` 会用复制帧拉齐（顿挫）。
+        payload.put("fps", "clip".equals(kind)
+                ? engineSettings.deliverFps(userId, plan)
+                : plan.path("edit_plan").path("fps").asInt(30));
         payload.put("seed", seed);
         // P12：画幅以**项目的视频格式**（竖屏/宽屏）为准 —— 不能让计划里的 aspect_ratio 覆盖，
         // 否则同一项目换个模型/换版方案就会出不同画幅（切换模型时尤其明显）。

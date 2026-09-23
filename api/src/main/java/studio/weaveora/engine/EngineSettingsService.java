@@ -35,16 +35,20 @@ public class EngineSettingsService {
     private final String storeKey;
     /** 语音/转写服务默认地址（weaveora.tts-url；worker 侧默认 :8091，此处含 ssh 隧道场景默认 :18091） */
     private final String defaultTtsUrl;
+    /** Wan2.2 I2V-A14B 的原生帧率（ComfyUI 官方模板节奏；env `weaveora.video.motion-native-fps`） */
+    private final int wanNativeFps;
 
     public EngineSettingsService(UserEngineSettingsRepository repo, ModelSchemaService schemaService,
                                  WorkerEnvSyncService workerEnvSync,
                                  @Value("${weaveora.store-key:}") String storeKey,
-                                 @Value("${weaveora.tts-url:http://127.0.0.1:18091}") String ttsUrl) {
+                                 @Value("${weaveora.tts-url:http://127.0.0.1:18091}") String ttsUrl,
+                                 @Value("${weaveora.video.motion-native-fps:16}") int wanNativeFps) {
         this.repo = repo;
         this.schemaService = schemaService;
         this.workerEnvSync = workerEnvSync;
         this.storeKey = storeKey;
         this.defaultTtsUrl = (ttsUrl == null || ttsUrl.isBlank()) ? "http://127.0.0.1:18091" : ttsUrl;
+        this.wanNativeFps = Math.max(1, wanNativeFps);
     }
 
     /**
@@ -108,9 +112,103 @@ public class EngineSettingsService {
             //   `ltx25` = LTX-2.5 生产档，1280×704/24fps/一次过）。
             //   必须与 worker 的 MOTION_SERVICE_KEYS 成对；漏一边 → 白名单静默丢弃 → 「UI 配了没效果」（四段坑 3）。
             "engine",
+            // ★ 2026-09-23（P5）：LTX-2.5 **时间轴 ×2**（24→48fps，官方 latent temporal upscaler，
+            //   比 RIFE 插帧更原生）。与前端 MOTION_KEYS + worker MOTION_SERVICE_KEYS **三处必须成对**。
+            "fps_x2",
             // ★ 档位参数记忆（2026-09-18）：UI 切换 preset 时把每个档的参数快照存在这里；
             //   它本身只是元数据（worker 会忽略），但必须过白名单才能存取。
             "preset_snapshots");
+
+    // ---- 出片帧率口径（P2，2026-09-23）---------------------------------------------
+    //
+    // 为什么要有这一段：**成片帧率必须是出片引擎原生帧率的整数倍**。
+    //   · Wan2.2 I2V-A14B = 16fps → 成片 32fps（16×2，RIFE 插帧，插值器只收整数倍）；
+    //   · LTX-2.5        = 24fps → 成片 24fps（原生）/ 48fps（时间轴 ×2 = 24×2）。
+    // 而 `edit_plan.fps` 是**计划里的建议值**（DirectorService 写死 32，历史计划还有 30），
+    // 导出阶段 `ConcatService.encodeSegment()` 会用它做 `ffmpeg fps=<成片帧率>`：
+    //   LTX 出的是 24fps，按 32 拉齐 → ffmpeg 用**复制帧**补齐（24→32 非整数倍）⇒ 节奏不均（顿挫）。
+    // 所以「真正用哪个帧率」统一由这里判定：引擎能整除就尊重计划值，不能整除就按引擎缺省归一。
+
+    /** 出片（motion）引擎：`ltx25` / `wan22`。UI 未配 → env `WEAVEORA_MOTION_ENGINE` → 缺省 `wan22`。 */
+    @Transactional(readOnly = true)
+    public String motionEngine(UUID userId) {
+        String e = "";
+        try {
+            e = servicesOf(userId).path("motion").path("engine").asText("").trim().toLowerCase();
+        } catch (RuntimeException ignore) {
+            // 读不到配置就走 env 默认（与 JobService.motionLimits 同一套殫错）
+        }
+        if (e.isEmpty()) {
+            String env = System.getenv("WEAVEORA_MOTION_ENGINE");
+            e = env == null ? "" : env.trim().toLowerCase();
+        }
+        return e.startsWith("ltx") ? "ltx25" : "wan22";
+    }
+
+    /** 出片引擎的原生帧率：LTX-2.5 = 24fps；Wan2.2 I2V-A14B = 16fps。 */
+    @Transactional(readOnly = true)
+    public int motionNativeFps(UUID userId) {
+        return "ltx25".equals(motionEngine(userId)) ? 24 : wanNativeFps;
+    }
+
+    /** LTX-2.5 时间轴 ×2（24→48fps）是否开：`services.motion.fps_x2`。 */
+    @Transactional(readOnly = true)
+    public boolean motionFpsX2(UUID userId) {
+        JsonNode v = null;
+        try {
+            v = servicesOf(userId).path("motion").path("fps_x2");
+        } catch (RuntimeException ignore) {
+            return false;
+        }
+        if (v == null || v.isMissingNode() || v.isNull()) {
+            return false;
+        }
+        if (v.isBoolean()) {
+            return v.asBoolean();
+        }
+        if (v.isNumber()) {
+            return v.asInt() != 0;
+        }
+        String s = v.asText("").trim().toLowerCase();
+        return "1".equals(s) || "true".equals(s) || "yes".equals(s) || "on".equals(s);
+    }
+
+    /** 自托管出片时，本引擎的「缺省成片帧率」（Wan=16×2=32；LTX 看 ×2 开关：48 / 24）。 */
+    @Transactional(readOnly = true)
+    public int defaultDeliverFps(UUID userId) {
+        if ("ltx25".equals(motionEngine(userId))) {
+            return motionFpsX2(userId) ? 48 : 24;
+        }
+        return wanNativeFps * 2;
+    }
+
+    /**
+     * 成片/交付帧率（写给 worker 的 `payload.fps` + 导出编码 `ffmpeg fps=` 用）。
+     *
+     * <p>规则：**必须能被出片引擎的原生帧率整除**（Wan 16 / LTX 24）。能整除 → 尊重计划值
+     * （如 Wan 32/48、LTX 24/48）；不能整除（LTX 项目里历史计划写的 32、或旧计划的 30）
+     * → 按引擎缺省归一，并 WARN 一行（不去改用户的计划文件，只在交付口生效）。
+     */
+    @Transactional(readOnly = true)
+    public int deliverFps(UUID userId, JsonNode plan) {
+        int planFps = plan == null ? 0 : plan.path("edit_plan").path("fps").asInt(0);
+        if (!"gpu".equals(resolveEngine(userId, "clip"))) {
+            // 云视频模型：原生帧率不在我们手上，不自作主张
+            return planFps > 0 ? planFps : 30;
+        }
+        int nativeFps = motionNativeFps(userId);
+        int fallback = defaultDeliverFps(userId);
+        if (planFps <= 0) {
+            return fallback;
+        }
+        if (planFps % nativeFps == 0) {
+            return planFps;
+        }
+        log.warn("[fps] 计划成片帧率 {} 不是出片引擎 {} 原生 {}fps 的整数倍 → 本次交付按 {}fps"
+                        + "（否则导出阶段 ffmpeg `fps=` 会用复制帧拉齐 ⇒ 顿挫） user={}",
+                planFps, motionEngine(userId), nativeFps, fallback, userId);
+        return fallback;
+    }
 
     /**
      * 视频引擎是自托管（GPU）时，sanitize 之后仍要保住 motion 档位键。

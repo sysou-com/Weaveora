@@ -3088,6 +3088,11 @@ const MOTION_MAX = ref(96)
 const MOTION_NATIVE_FPS = ref(16)
 /** 当前出片引擎（后端 motionLimits.motionEngine 下发；wan22 | ltx25） */
 const motionEngine = ref<'wan22' | 'ltx25'>('wan22')
+// ★ P2：**实际交付帧率**（后端按引擎归一：Wan=16 的整数倍、LTX=24 的整数倍）与**计划里写的值**（可能不同）。
+const motionDeliverFps = ref<number>(32)
+const motionPlanFps = ref<number>(0)
+// ★ P5：LTX-2.5 时间轴 ×2（24→48fps）是否开（后端 motionLimits.fpsX2 下发）。
+const motionFpsX2 = ref<boolean>(false)
 /** 本镜时长（用于把帧数自动算出来 + 显本次帧数对应的视频长度） */
 const motionShotSec = computed<number>(() => {
   const v = Number(project.data.value?.shotDurationSec ?? 0)
@@ -3117,6 +3122,12 @@ watch(
     const _nf = Number((v as { nativeFps?: number }).nativeFps)
     if (Number.isFinite(_nf) && _nf > 0) MOTION_NATIVE_FPS.value = _nf
     motionEngine.value = ((v as { motionEngine?: string }).motionEngine === 'ltx25') ? 'ltx25' : 'wan22'
+    // ★ P2（2026-09-23）：成片帧率按**引擎归一**后由后端下发（`fps` = 实际交付帧率，`planFps` = 计划里写的值）
+    const _df = Number((v as { fps?: number }).fps)
+    if (Number.isFinite(_df) && _df > 0) motionDeliverFps.value = _df
+    const _pf = Number((v as { planFps?: number }).planFps)
+    motionPlanFps.value = Number.isFinite(_pf) && _pf > 0 ? _pf : 0
+    motionFpsX2.value = (v as { fpsX2?: boolean }).fpsX2 === true
     if (motionFrames.value > v.maxFrames) motionFrames.value = v.maxFrames
     // 自动把「模型上限(s)」写为后端算出的真实上限（min(配置, 模型 schema)）：
     // 否则用户会拿一个比模型大的值去校准 → 排出的段仍超过模型能力 → 配音被截断。
@@ -5267,7 +5278,12 @@ const shotTotal = computed(() => {
       <NModal v-model:show="motionOpen" preset="card" :title="'生成运动(motion)'" style="max-width: 420px">
         <div class="motion-form">
           <p class="text-secondary">
-            当前出片引擎：**{{ motionEngine === 'ltx25' ? 'LTX-2.5（原生 24fps / 1280×704 / 自带音轨）' : 'Wan2.2 I2V（原生 16fps / 480p + RIFE 插帧）' }}**。
+            当前出片引擎：**{{ motionEngine === 'ltx25' ? 'LTX-2.5（原生 24fps / 1280×704 / 自带音轨）' : 'Wan2.2 I2V（原生 16fps / 480p + RIFE 插帧）' }}**，
+            成片帧率：**{{ motionDeliverFps }}fps**<template v-if="motionEngine === 'ltx25'">（{{ motionFpsX2 ? '时间轴 ×2' : '原生' }}）</template>。
+            <template v-if="motionPlanFps > 0 && motionPlanFps !== motionDeliverFps">
+              ⚠ 方案里写的成片帧率 {{ motionPlanFps }}fps 不是本引擎原生帧率的整数倍，交付/导出会按
+              {{ motionDeliverFps }}fps 处理（否则导出会用**复制帧**拉齐 → 顿挫）。
+            </template><br />
             帧数不用自己算：按**镜头时长 × 原生 {{ MOTION_NATIVE_FPS }}fps** 自动填（本镜约 {{ motionShotSec }}s → {{ motionNeedFrames }} 帧）。
             它只当**上限**用（worker 实际取 min(时长×{{ MOTION_NATIVE_FPS }}, 帧数)，填大了无害，填小了会把动作压短）。
             <span v-if="motionLimitSource" class="state-hint font-mono">· 上限来源：{{ motionLimitSource }}</span>

@@ -104,6 +104,8 @@ public class ConcatService {
     private final ProjectContextPort projects;
     private final WorkspaceGuard guard;
     private final PlanReader planReader;
+    /** ★ P2（2026-09-23）：成片帧率按**出片引擎**归一（必须被原生帧率整除 —— Wan 16 / LTX 24）。 */
+    private final studio.weaveora.engine.EngineSettingsService engineSettings;
     private final String ffmpeg;
     private final String subtitleFont;
     /** 成片画布（可配置；默认值 = 历史常量）。见 {@link #canvasFor}。 */
@@ -115,6 +117,7 @@ public class ConcatService {
                          studio.weaveora.asset.AudioAssetLookup audioLookup,
                          StoragePort storage,
                          ProjectContextPort projects, WorkspaceGuard guard, PlanReader planReader,
+                         studio.weaveora.engine.EngineSettingsService engineSettings,
                          @Value("${weaveora.ffmpeg:ffmpeg}") String ffmpeg,
                          @Value("${weaveora.subtitle-font:}") String subtitleFont,
                          @Value("${weaveora.render.canvas.wide:1280x720}") String canvasWide,
@@ -127,6 +130,7 @@ public class ConcatService {
         this.projects = projects;
         this.guard = guard;
         this.planReader = planReader;
+        this.engineSettings = engineSettings;
         this.ffmpeg = ffmpeg;
         this.subtitleFont = subtitleFont == null ? "" : subtitleFont;
         this.canvasWide = canvasWide;
@@ -152,7 +156,9 @@ public class ConcatService {
         if (subtitleOn && !subOk) {
             log.warn("subtitle enabled but ffmpeg lacks ass/libass filter; skip burning");
         }
-        int fps = plan.path("edit_plan").path("fps").asInt(30);
+        // ★ P2（2026-09-23）：编码帧率按**出片引擎**归一 —— 旧写法直接用 plan 的 fps（DirectorService 写死 32、
+        //   历史计划还有 30），而 LTX-2.5 出的是 24fps ⇒ `ffmpeg fps=32` 会用**复制帧**拉齐（24→32 非整数倍）= 顿挫。
+        int fps = engineSettings.deliverFps(userId, plan);
         String aspect = plan.path("aspect_ratio").asText("");
         int[] canvas = canvasFor(aspect);
         List<UUID> shotIds = planReader.shotIds(revisionId);

@@ -36,9 +36,17 @@ export interface VideoLimits {
   engine: string
   minFrames: number
   maxFrames: number
+  /** ★ P2：**实际交付帧率**（按出片引擎归一：必须能被原生帧率整除，否则导出会复制帧拉齐 = 顿挫） */
   fps: number
-  /** 原生帧率（A14B=16）——「帧上限→秒数」必须用它除（2026-09-22 修：不能用项目成片帧率） */
+  /** ★ P2：方案 `edit_plan.fps` 里写着的值（可能 ≠ fps，UI 要能看出来并提醒） */
+  planFps?: number
+  /** ★ P5：LTX-2.5 时间轴 ×2（24→48fps）是否开 */
+  fpsX2?: boolean
+  defaultDeliverFps?: number
+  /** 原生帧率（Wan2.2=16 / LTX-2.5=24）——「帧上限→秒数」必须用它除（2026-09-22 修：不能用项目成片帧率） */
   nativeFps?: number
+  /** ★ 2026-09-23：当前出片引擎（wan22 | ltx25），由后端 services.motion.engine 判定 */
+  motionEngine?: string
   maxClipSec: number
   gpuMaxFrames: number
   cloudMaxFrames: number

@@ -544,9 +544,9 @@
   }
  },
  "902": {
-  "class_type": "PrimitiveInt",
+  "class_type": "PrimitiveFloat",
   "inputs": {
-   "value": 48
+   "value": 48.0
   }
  }
 }

@@ -44,11 +44,14 @@ public class ExportService {
     private final ProjectContextPort projects;
     private final WorkspaceGuard guard;
     private final PlanReader planReader;
+    /** ★ P2（2026-09-23）：edl 记录的成片帧率也按**出片引擎**归一（与 ConcatService 同口径）。 */
+    private final studio.weaveora.engine.EngineSettingsService engineSettings;
 
     public ExportService(EditPackageRepository packages, AssetRepository assets,
                          studio.weaveora.asset.AudioAssetLookup audioLookup,
                          StoragePort storage,
-                         ProjectContextPort projects, WorkspaceGuard guard, PlanReader planReader) {
+                         ProjectContextPort projects, WorkspaceGuard guard, PlanReader planReader,
+                         studio.weaveora.engine.EngineSettingsService engineSettings) {
         this.packages = packages;
         this.assets = assets;
         this.audioLookup = audioLookup;
@@ -56,6 +59,7 @@ public class ExportService {
         this.projects = projects;
         this.guard = guard;
         this.planReader = planReader;
+        this.engineSettings = engineSettings;
     }
 
     @Transactional
@@ -70,7 +74,7 @@ public class ExportService {
             throw new BizException(ErrorCode.VALIDATION, "当前仅支持视频项目导出成片（图片请从资产库下载）");
         }
         List<UUID> shotIds = planReader.shotIds(revisionId);
-        PackageData data = build(workspaceId, project, plan, shotIds);
+        PackageData data = build(userId, workspaceId, project, plan, shotIds);
 
         String zipKey = workspaceId + "/" + projectId + "/exports/" + UUID.randomUUID() + ".zip";
         storage.put(zipKey, new ByteArrayInputStream(data.zip()), data.zip().length, "application/zip");
@@ -99,9 +103,10 @@ public class ExportService {
 
     // ---------- 组装 ----------
 
-    private PackageData build(UUID workspaceId, ProjectSnapshot project, JsonNode plan, List<UUID> shotIds) {
+    private PackageData build(UUID userId, UUID workspaceId, ProjectSnapshot project, JsonNode plan, List<UUID> shotIds) {
         JsonNode editPlan = plan.path("edit_plan");
-        int fps = editPlan.path("fps").asInt(30);
+        // ★ P2：与 ConcatService 同一口径（必须能被出片引擎原生帧率整除，否则成片会有复制帧拉齐的顿挫）
+        int fps = engineSettings.deliverFps(userId, plan);
         int width = 1280;
         int height = 720;
         double duration = 0;

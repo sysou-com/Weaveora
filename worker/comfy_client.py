@@ -1353,7 +1353,11 @@ MOTION_SERVICE_KEYS = ("preset", "steps", "switch", "switch_step", "cfg", "cfg_h
                        #   到这里被 continue 掉 → _motion_resolution 只读得到 params.resolution
                        #   （clip 的 payload.params 里没这个键）⇒ **永远回落 480p 桶**，而且不报错、日志无异常。
                        #   教训：新增配置项必须同时改 API 与 worker 的接收白名单（见四段交接 §5-3）。
-                       "resolution")
+                       "resolution",
+                       # ★ 2026-09-23（P5）：LTX-2.5 **时间轴 ×2**（24→48fps，走 *_48fps 工作流）。
+                       #   与 API 的 `MOTION_KEYS` + 前端 `MOTION_KEYS` **三处必须成对** ——
+                       #   少一处就是「UI 上配了 48fps，实际还是 24fps」的静默失效。
+                       "fps_x2")
 
 # 显存口径（A14B 双专家实测，GPU#2 48G，832×480）：
 #   · 33 帧 → 峰值 41.8 GiB；121 帧 → 峰值 47.3 GiB（线性拟合）
@@ -2024,6 +2028,20 @@ LTX25_WORKFLOW_X2 = os.environ.get("WEAVEORA_LTX25_WORKFLOW_X2",
                                    "/opt/weaveora/workflows/ltx25_i2v_48fps_api.json")
 
 
+def _ltx25_x2_on(params):
+    """时间轴 ×2（24→48fps）是否开：**引擎配置页下发优先**（`services.motion.fps_x2`），
+    未配才看环境变量 `WEAVEORA_LTX25_FPS_X2`。
+
+    与「出片引擎」同一套优先级（UI > env）——不要只看 env，否则 UI 上改了开关没反应。
+    """
+    v = (params or {}).get("fps_x2")
+    if v is None:
+        return LTX25_FPS_X2
+    if isinstance(v, bool):
+        return v
+    return str(v).strip().lower() in ("1", "true", "yes", "on")
+
+
 def _strip_audio(mp4):
     """LTX 出的 mp4 自带音轨；交付链（对口型/导出）用的是 TTS 音轨 → 默认剥掉，避免串轨。
     要保留（做「环境声/氛围镜」）就设 WEAVEORA_LTX25_KEEP_AUDIO=1。"""
@@ -2091,11 +2109,13 @@ def _motion_ltx25(client_id, payload, progress_fn=None):
     seed = int(payload.get("seed") or 1)
     prefix = "weaveora_ltx25_" + _uuid.uuid4().hex[:6]
     # ★ 时间轴 ×2（24→48fps）开关：走 *_48fps 工作流（生成仍 24fps，解码前把 latent 时间轴放大 2×）
-    wf = LTX25_WORKFLOW_X2 if LTX25_FPS_X2 else LTX25_WORKFLOW
-    _deliver_fps = int(LTX25_NATIVE_FPS * 2) if LTX25_FPS_X2 else int(LTX25_NATIVE_FPS)
+    #   优先级：引擎配置页 services.motion.fps_x2 > env WEAVEORA_LTX25_FPS_X2（P5）
+    _x2 = _ltx25_x2_on(_p)
+    wf = LTX25_WORKFLOW_X2 if _x2 else LTX25_WORKFLOW
+    _deliver_fps = int(LTX25_NATIVE_FPS * 2) if _x2 else int(LTX25_NATIVE_FPS)
     print("[comfy] ltx25 出片：%dx%d 时长 %.2fs（生成 %gfps → %d 帧；交付 %dfps%s）seed=%d workflow=%s"
           % (w, h, dur, LTX25_NATIVE_FPS, int(round(dur * LTX25_NATIVE_FPS)) + 1,
-             _deliver_fps, "，时间轴 ×2" if LTX25_FPS_X2 else "", seed, wf),
+             _deliver_fps, "，时间轴 ×2" if _x2 else "", seed, wf),
           flush=True)
     # ---- 跑前腾显存：LTX 峰值 44.7G/46.1G，必须先把 ComfyUI 常驻缓存卸掉（实测过）
     try:
@@ -2135,7 +2155,7 @@ def _motion_ltx25(client_id, payload, progress_fn=None):
     face = None if fr is None else (fr[0] == fr[1] and fr[1] > 0)
     face_n = None if fr is None else "%d/%d" % (fr[0], fr[1])
     notes = ("LTX-2.5 生产档（distilled 两段式；生成 %gfps%s；音轨%s）"
-             % (LTX25_NATIVE_FPS, "→ 时间轴×2 交付 %dfps" % _deliver_fps if LTX25_FPS_X2 else "",
+             % (LTX25_NATIVE_FPS, "→ 时间轴×2 交付 %dfps" % _deliver_fps if _x2 else "",
                 "已保留" if LTX25_KEEP_AUDIO else "已剥离（交付用 TTS 音轨）"))
     print("[comfy] ltx25 出片完成：%sx%s %s 帧 %.2fs" % (pw, ph,
           int(round(float(pdur or 0) / 1000.0 * LTX25_NATIVE_FPS)), float(pdur or 0) / 1000.0), flush=True)
@@ -3269,6 +3289,36 @@ def _source_fps(video_bytes, tmp, tag="fps"):
     return float(fps or 25.0) or 25.0
 
 
+def _lipsync_seg_windows(durs, fps, total, margin=4):
+    """把「每段配音时长」切成帧窗口：返回 `[(a, b, own_b)]`（★ 2026-09-23 / P8）。
+
+    · `own_b` = 该段的**归属窗口**终点 —— 与下一段**首尾相接、绝不重叠**（不再二次贴回）；
+    · `b`     = 喂给 LatentSync 的**推理窗口**终点 = 归属 + `margin` 帧 —— 保证「视频帧 ≥ 音频需求」，
+                否则节点会走 `loop_video`（正放+倒放凑帧）把时间轴弄乱；`margin` 那几帧只用于推理。
+    · 起点按**帧数累加**（不每次四舍五入时间）→ 顺带消掉 ±1 帧的累计漂移。
+
+    旧写法 `a = round(t_cum*fps)` / `b = a + round(dur*fps) + 4` 会让上一段的尾巴（含 4 帧余量）
+    与下一段的头**重叠**（实测 「0-50帧」/「46-108帧」），同几帧被两段各推理一次再淡入覆盖。
+    """
+    out = []
+    a = 0
+    for d in durs:
+        try:
+            dd = float(d)
+        except (TypeError, ValueError):
+            dd = 0.0
+        if total <= 0:
+            out.append((0, 0, 0))
+            continue
+        a = max(0, min(a, total - 1))
+        own_len = max(1, int(round(max(0.0, dd) * fps)))   # 该段归属的帧数（≈ 音频需求）
+        own_b = min(a + own_len, total)
+        b = min(a + own_len + max(0, int(margin)), total)
+        out.append((a, b, own_b))
+        a = own_b
+    return out
+
+
 def _splice(source_bytes, seg_results, fps, tmp):
     """把各段的处理结果**按原时间轴替换回原帧序列**。
 
@@ -3855,8 +3905,21 @@ def generate_lipsync(client_id, payload, progress_fn=None):
             #   实际配音 3.3s → 按窗口切 96 帧、音频要 99 帧 → 触发 LatentSync 的
             #   loop_video「正放+倒放」凑帧 → 时间轴错乱）。
             #   所以用「累加配音时长」定位每段的起点，并给 +4 帧余量保证「视频帧 ≥ 音频需求」。
+            #
+            # ★ 2026-09-23（P8）**收掉段间 4 帧重叠**：
+            #   旧写法 `a = round(t_cum*fps)`、`b = a + round(dur*fps) + 4` ⇒ 上一段的尾巴
+            #   （含那 4 帧余量）与下一段的头**重叠**：同几帧被两段各推理一次，写回时后
+            #   一段再淡入盖在前一段上（实测日志「0-50帧」/「46-108帧」⇒ 46–50 重叠）。
+            #   新写法把两件事**分开**：
+            #     · 归属窗口 own_b —— 段与段**首尾相接、不重叠**；起点按帧数累加（`a += own_len`）
+            #       而不是每次四舍五入时间 → 顺带消掉 ±1 帧的累计漂移；
+            #     · 推理窗口 b —— 仍在归属窗口上多切 4 帧（`own_len + 4`）喂给 LatentSync，
+            #       保证「视频帧 ≥ 音频需求」（否则会触发节点的 loop_video 正放+倒放凑帧）。
+            #   写回（`_splice`）只写 [a, own_b)，那 4 帧余量只用于推理、**不再写回** ⇒ 无二次贴回。
             plan = []
             t_cum = 0.0
+            _durs = []          # 每段配音时长（先收齐再统一切窗口，便于单测 _lipsync_seg_windows）
+            _rows = []
             for i, s in enumerate(segs):
                 who = (s.get("subject") or "").strip()
                 vk = (s.get("voiceKey") or "").strip()
@@ -3874,16 +3937,22 @@ def generate_lipsync(client_id, payload, progress_fn=None):
                         dur = max(0.1, (float(s.get("endMs", 0)) - float(s.get("startMs", 0))) / 1000.0)
                     except (TypeError, ValueError):
                         dur = 0.1
-                a = max(0, int(round(t_cum * fps)))
-                want = max(1, int(round(dur * fps)) + 4)
-                b = min(a + want, total)
-                plan.append((i, s, who, seg_audio, a, b, dur))
+                _rows.append((i, s, who, seg_audio, dur))
+                _durs.append(dur)
                 t_cum += dur
+            for (i, s, who, seg_audio, dur), (a, b, own_b) in zip(_rows, _lipsync_seg_windows(_durs, fps, total)):
+                plan.append((i, s, who, seg_audio, a, b, own_b, dur))
             if plan:
                 print("[comfy] 第%s镜各段（按配音时间轴）：%s"
-                      % (shot_no, " / ".join("%s %d-%d帧(%.2fs)" % (q[2] or "?", q[4], q[5], q[6]) for q in plan)),
+                      % (shot_no, " / ".join("%s 归属%d-%d帧(%.2fs) 推理%d-%d帧"
+                                        % (q[2] or "?", q[4], q[6], q[7], q[4], q[5])
+                                        for q in plan)),
                       flush=True)
-            for (i, s, who, seg_audio, a, b, dur) in plan:
+                _ov = [(plan[j][6], plan[j + 1][4]) for j in range(len(plan) - 1)
+                       if plan[j + 1][4] < min(plan[j][5], plan[j][6])]
+                print("[comfy] 段间重叠：%s（归属窗口首尾相接；+4 帧只用于推理、不写回）"
+                      % ("无" if not _ov else "仍存在 %s" % _ov), flush=True)
+            for (i, s, who, seg_audio, a, b, own_b, dur) in plan:
                 if b <= a:
                     continue
                 seg_video = _cut_frames(vdata, a, b, tmp, "s%d" % i)
@@ -3907,9 +3976,12 @@ def generate_lipsync(client_id, payload, progress_fn=None):
                 seg_mp4 = _run_lipsync_graph(client_id, seg_video, seg_audio, ep, on_tick=_tick,
                                              lips_expression=_lips_expr)
                 pf = _decode_frames(seg_mp4, tmp, "seg%d" % i)
-                results.append((a, b, pf))
-                cursor = b
-                print("[comfy] 第%s段完成：%s 帧 %d-%d（产出 %d 帧）" % (i + 1, who or "?", a, b, len(pf)),
+                # ★ P8：写回的区间是**归属窗口** [a, own_b)，不是推理窗口 [a, b)
+                #   —— 那 4 帧余量只用于「让 LatentSync 有足够帧驱动音频」，不再二次贴回。
+                results.append((a, own_b, pf))
+                cursor = own_b
+                print("[comfy] 第%s段完成：%s 帧 %d-%d（归属 %d 帧；推理窗口 %d-%d 共 %d 帧，产出 %d 帧）"
+                      % (i + 1, who or "?", a, own_b, own_b - a, a, b, b - a, len(pf)),
                       flush=True)
             if not results:
                 raise ComfyError("按段驱动失败：没有可处理的有效段（检查台词的 at_sec/end_sec）")
