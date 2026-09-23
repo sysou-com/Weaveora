@@ -59,6 +59,18 @@
 > 为什么单独立这条：引擎配置页保存时会**把旧快照写回**（历史事故：把失效端口洗回过），
 > 且这是**共享生产配置**——多人在同一仓工作时，归因必须先确认"当时到底跑的是谁"。
 
+**验收凭据写清（2026-09-23 23:4x 补充，peer 只读复核引出）**：
+
+⛔ **不能拿盒上 `/history` 当凭据** —— ComfyUI 的 `/history` 是**内存态、重启即清**；
+我 23:2x 那次“整栈重启”（为了 `--cache-ram 16 16`）已经把它清空（peer 复核时只剩 1 条 23:24:27 的 Qwen warmup）。
+
+✅ **真正留存、可回查的凭据是这三层**：
+1. **DB**：`generation_jobs`（kind/state/payload.seed/positive_prompt）+ `assets`（prompt_snapshot/宽高/storage_key）—— 归一因一律拿这个对；
+2. **我方诊断留档（重启不会丢）**：VPS `/opt/weaveora/diag_out/ab_flux2/smoke.json`（试枪三档 `ok=true`，151.5s / 114.3s / 49.3s）+ `/opt/weaveora/logs/smoke_flux2.log`；
+3. **盒上产物**：`/opt/weaveora/ComfyUI/output/weaveora_flux2_*.png`（22:37–22:49，含试枪三件 + A/B 的 t2i 一张）。
+
+⇒ 因此按用户裁定「B：不跑 A/B，直接上生产」，**本次验收的凭据 = 接下来那次换模型压测在 DB 里的落库记录 + 我方日志**，不是盒上历史。
+
 ### 0.5.5 ⛔ 已知的**静默冲配置**风险：旧版引擎页保存会冲掉 turbo 档的 LoRA 五键
 
 **已从后端源码核实**（peer 2026-09-23 发现，我复核）：
