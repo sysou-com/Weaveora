@@ -1,0 +1,70 @@
+{
+  "_comment": "Weaveora · FLUX.2 [dev] 真 img2img（关键帧当底图；历史兜底档，编辑通路缺位时才走）。结构 = txt2img + 「LoadImage → ImageScale → VAEEncode 当采样起点」+ 「Flux2Scheduler → SplitSigmasDenoise.low_sigmas」实现 denoise<1（SamplerCustomAdvanced **没有** denoise 入参，必须靠截断 sigma 排程）。worker 会：把底图缩到目标尺寸、把 params.denoise（或引擎配置 denoise）写进 SplitSigmasDenoise.denoise。",
+  "1": {
+    "class_type": "UNETLoader",
+    "inputs": { "unet_name": "flux2_dev_fp8mixed.safetensors", "weight_dtype": "default" }
+  },
+  "2": {
+    "class_type": "CLIPLoader",
+    "inputs": { "clip_name": "mistral_3_small_flux2_fp8.safetensors", "type": "flux2", "device": "default" }
+  },
+  "3": {
+    "class_type": "VAELoader",
+    "inputs": { "vae_name": "full_encoder_small_decoder.safetensors" }
+  },
+  "6": {
+    "class_type": "CLIPTextEncode",
+    "inputs": { "clip": ["2", 0], "text": "" },
+    "_meta": { "title": "Positive Prompt (Flux2)" }
+  },
+  "7": {
+    "class_type": "FluxGuidance",
+    "inputs": { "conditioning": ["6", 0], "guidance": 4.0 }
+  },
+
+  "12": { "class_type": "LoadImage", "inputs": { "image": "" } },
+  "13": {
+    "class_type": "ImageScale",
+    "inputs": { "image": ["12", 0], "upscale_method": "lanczos", "width": 1664, "height": 928, "crop": "disabled" }
+  },
+  "14": { "class_type": "VAEEncode", "inputs": { "pixels": ["13", 0], "vae": ["3", 0] } },
+
+  "40": {
+    "class_type": "BasicGuider",
+    "inputs": { "model": ["1", 0], "conditioning": ["7", 0] }
+  },
+  "42": {
+    "class_type": "Flux2Scheduler",
+    "inputs": { "steps": 20, "width": 1664, "height": 928 }
+  },
+  "43": {
+    "class_type": "KSamplerSelect",
+    "inputs": { "sampler_name": "euler" }
+  },
+  "44": {
+    "class_type": "RandomNoise",
+    "inputs": { "noise_seed": 0 }
+  },
+  "48": {
+    "class_type": "SplitSigmasDenoise",
+    "inputs": { "sigmas": ["42", 0], "denoise": 0.65 }
+  },
+  "45": {
+    "class_type": "SamplerCustomAdvanced",
+    "inputs": {
+      "noise": ["44", 0],
+      "guider": ["40", 0],
+      "sampler": ["43", 0],
+      "sigmas": ["48", 1],
+      "latent_image": ["14", 0]
+    }
+  },
+  "46": {
+    "class_type": "VAEDecode",
+    "inputs": { "samples": ["45", 0], "vae": ["3", 0] }
+  },
+  "47": {
+    "class_type": "SaveImage",
+    "inputs": { "images": ["46", 0], "filename_prefix": "weaveora_flux2_i2i" }
+  }
+}

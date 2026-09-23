@@ -60,6 +60,21 @@ chk latentsync/vae/diffusion_pytorch_model.safetensors 334643276
 chk_nodone latentsync/whisper/tiny.pt 75572083   # 该文件历史清单里没有 .done 标记，只查字节
 chk models/echo_mimic/transformer/diffusion_pytorch_model.safetensors 3414541616
 chk models/echo_mimic/Wan2.1-Fun-V1.1-1.3B-InP/models_t5_umt5-xxl-enc-bf16.pth 11361920418
+# ★ 2026-09-23：FLUX.2 [dev] 出图通路（A 档：fp8mixed + Mistral-3 fp8 编码器）。
+#   为什么必须进这张清单：fp8mixed 主模型在 /addDisk（软链进 models/），**软链一断 ComfyUI 会静默
+#   回退/读另一份同名权重** ⇒ 症状是「图出得来但完全不对，且不报错」（CLAUDE.md §四-2）。
+chk models/diffusion_models/flux2_dev_fp8mixed.safetensors 35455599592
+chk models/text_encoders/mistral_3_small_flux2_fp8.safetensors 18034640095
+chk models/vae/flux2-vae.safetensors 336213556
+chk models/vae/full_encoder_small_decoder.safetensors 249519092
+chk models/loras/Flux_2-Turbo-LoRA_comfyui.safetensors 2760814880
+# 同名多副本检查（**只数真文件**：同名 >1 份就可能用错权重；模型目录里的软链不算份）。
+# 用 -type f 而不是 -L：软链指过去的那份就是真文件本身，不能重复计数（否则正常布局也会误报 2 份）。
+for base in flux2_dev_fp8mixed mistral_3_small_flux2_fp8 full_encoder_small_decoder; do
+  n=$( { find / -xdev -type f -name "$base.safetensors" 2>/dev/null; \
+         find /addDisk -xdev -type f -name "$base.safetensors" 2>/dev/null; } | wc -l )
+  [ "$n" -le 1 ] && ok "$base 无同名多副本（$n 份真文件）" || bad "$base 存在 $n 份真文件 —— 先核实软链指向，别直接出图"
+done
 # 节点需要的权重软链（重建后最容易丢）
 for l in "$ROOT/ComfyUI/custom_nodes/ComfyUI-LatentSyncWrapper/checkpoints/latentsync_unet.pt" \
          "$ROOT/ComfyUI/custom_nodes/ComfyUI-LatentSyncWrapper/checkpoints/whisper/tiny.pt"; do

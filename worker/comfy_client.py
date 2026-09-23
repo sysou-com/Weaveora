@@ -75,6 +75,14 @@ IMAGE_LORA_STEPS = int(os.environ.get("WEAVEORA_IMAGE_LORA_STEPS", "4") or 4)
 #   所以取 1.5：蒸馏模型的工作点附近，同时保留部分负词权重（cfg-1=0.5）。
 #   注意：负词里如果还写着「真人肖像」这类“禁止画真实人脸”的词，在这个 cfg 下依然会把脸推向非写实 → 必须删。
 IMAGE_LORA_CFG = float(os.environ.get("WEAVEORA_IMAGE_LORA_CFG", "1.5") or 1.5)
+# ★ 2026-09-23：**FLUX.2 专用档位**。理由：`Flux_2-Turbo-LoRA_comfyui` 是按「**8 步 + guidance 4.0**」训的
+#   （官方量化档模板里 Switch(Step) 在 20 ↔ 8 之间切，而 FluxGuidance 固定 4）——
+#   与 Qwen-Image Lightning 的「4 步 + cfg 1.5」**不是同一套工作点**，混用就是坏图。
+IMAGE_LORA_STEPS_FLUX2 = int(os.environ.get("WEAVEORA_IMAGE_LORA_STEPS_FLUX2", "8") or 8)
+IMAGE_LORA_CFG_FLUX2 = float(os.environ.get("WEAVEORA_IMAGE_LORA_CFG_FLUX2", "4.0") or 4.0)
+# ★ FLUX.2 [dev] 是 **guidance 蒸馏**（官方模板用 BasicGuider 单条件、无 uncond 分支）⇒ 负词架构上不生效
+#   **且不报错**。产品 2026-09-23 裁定：把负词**折进正词**。置 0 则直接丢弃（只打 WARN，不静默）。
+FLUX2_FOLD_NEGATIVE = (os.environ.get("WEAVEORA_FLUX2_FOLD_NEGATIVE", "1") or "1").strip() == "1"
 # ★ 2026-09-21：出图后**自动放大**（SeedVR2 —— ComfyUI 0.34 核心原生节点，无需自定义节点）。
 #   动机（实测，同图同 seed）：I2V 只吃 480p（长边 832）→ 首帧会被下采样；**源越锐、降采样后越锐**：
 #     1664×928 原生 → 下采样到 832 的高频能量 3.15
@@ -147,6 +155,57 @@ def _wf_of_class(graph, class_type):
             if isinstance(n, dict) and n.get("class_type") == class_type]
 
 
+# ── FLUX.2（[dev] / klein）通路的识别与专属注入 ──────────────────────────────────
+# 为什么必须单独一套：Flux2 的官方结构**没有 KSampler** —— 采样走 `SamplerCustomAdvanced` + `BasicGuider`，
+#   步数在 `Flux2Scheduler`、引导在 `FluxGuidance`、种子在 `RandomNoise`，且**没有 uncond 分支**。
+#   不识别它 = 现网那套「参数推送」对它完全失效（UI 改了步数/引导却毫无变化）。
+_FLUX2_LATENT = "EmptyFlux2LatentImage"
+
+
+def _wf_is_flux2(graph):
+    """工作流是不是 FLUX.2 结构（Flux2Scheduler / EmptyFlux2LatentImage 任一存在即可判定）。"""
+    return bool(_wf_of_class(graph, "Flux2Scheduler")) or bool(_wf_of_class(graph, _FLUX2_LATENT))
+
+
+def _wf_upstream_text_node(graph, start_ref):
+    """顺着 conditioning 链往回找第一个文本编码节点 id（Flux2 没有 KSampler 可以定位正/负词）。"""
+    seen = set()
+    stack = [str(start_ref)] if start_ref is not None else []
+    while stack:
+        nid = stack.pop()
+        if nid in seen or nid not in graph:
+            continue
+        seen.add(nid)
+        n = graph[nid]
+        if n.get("class_type") in ("CLIPTextEncode", "CLIPTextEncodeFlux",
+                                   "TextEncodeQwenImageEditPlus", "TextEncodeQwenImageEdit"):
+            return nid
+        for v in (n.get("inputs") or {}).values():
+            if isinstance(v, list) and v and str(v[0]) in graph:
+                stack.append(str(v[0]))
+    return None
+
+
+def _flux2_fold_negative(positive, negative, zh):
+    """把负词**折进正词**（FLUX.2 专用）。
+
+    为什么必须折：FLUX.2 [dev] 是 guidance 蒸馏，`BasicGuider` 只吃一个 conditioning ⇒ 负词不参与计算、
+    而且**不报错**（静默失效）。但不能把负词原样拼进正词 —— 对蒸馏模型「别画 X」这类否定句可能起反作用，
+    所以这里做**同义正向改写**（不是照抄）。原负词会打进日志，不静默丢失。
+    """
+    if not (negative or "").strip():
+        return positive
+    if zh:
+        tail = ("。画面要求：写实摄影质感（真实皮肤与材质）；背景是真实场景而非纯色/白色/影棚背景；"
+                "构图是叙事镜头而非证件照式正面像；不要 3D 渲染或 CGI 感；不要插画、卡通或塑料感皮肤。")
+    else:
+        tail = (". Rendering requirements: photorealistic photography with real skin and material detail; "
+                "the background is a real scene rather than a plain, white or studio backdrop; "
+                "framing is a narrative camera shot rather than an ID-photo frontal pose; "
+                "no 3D-render or CGI look; no illustration, cartoon or plastic-skin style.")
+    return (positive or "").rstrip() + tail
+
+
 def _wf_inject_size(graph, width, height):
     """把目标尺寸写进工作流：Empty*LatentImage（txt2img）与 ImageScale/ImageResize（Edit 档：
     官方结构是**把参考图缩放到目标尺寸 → VAEEncode → 当采样起点**）。
@@ -157,12 +216,19 @@ def _wf_inject_size(graph, width, height):
     并返回写入个数（0 = 尺寸由底图决定，调用侧需自行缩放底图）。
     """
     n_hit = 0
-    for ct in ("EmptySD3LatentImage", "EmptyLatentImage", "ImageScale", "ImageResize"):
+    for ct in ("EmptySD3LatentImage", "EmptyLatentImage", _FLUX2_LATENT, "ImageScale", "ImageResize"):
         for _nid, n in _wf_of_class(graph, ct):
             ins = n.get("inputs", {})
             if "width" in ins and "height" in ins:
                 ins["width"], ins["height"] = int(width), int(height)
                 n_hit += 1
+    # ★ Flux2：`Flux2Scheduler` 的 w/h 决定 sigma 排程（seq_len = W*H/256），**必须与 latent 尺寸同步写**。
+    #   只改 latent 不改 scheduler ⇒ 排程按旧尺寸算 → 出图发黑/退化（与 steps/cfg 那类静默错值同性质）。
+    for _nid, n in _wf_of_class(graph, "Flux2Scheduler"):
+        ins = n.setdefault("inputs", {})
+        if "width" in ins and "height" in ins:
+            ins["width"], ins["height"] = int(width), int(height)
+            n_hit += 1
     if n_hit == 0:
         for _nid, n in _wf_of_class(graph, "ImageScaleBy"):
             ins = n.get("inputs", {})
@@ -178,6 +244,19 @@ def _wf_inject_text(graph, positive, negative):
     兼容两类节点（重要）：普通 `CLIPTextEncode`（入参名为 text）与 Qwen-Image-**Edit** 的
     `TextEncodeQwenImageEditPlus`（入参名为 **prompt**）—— 写错入参名会静默不生效（图照出，但用的还是空提示词）。
     """
+    # ★ FLUX.2：没有 KSampler，正词要靠 FluxGuidance.conditioning 往回走；**负词没有位置**
+    #   （guidance 蒸馏，单条件）—— 折进正词的动作在 generate_via_workflow 里做，这里只写正词。
+    if _wf_is_flux2(graph):
+        gf = _wf_of_class(graph, "FluxGuidance")
+        ref = (gf[0][1].get("inputs") or {}).get("conditioning") if gf else None
+        pos_id = _wf_upstream_text_node(graph, ref[0] if isinstance(ref, list) and ref else None)
+        if not pos_id:
+            texts = _wf_of_class(graph, "CLIPTextEncode")
+            pos_id = texts[0][0] if texts else None
+        if pos_id and pos_id in graph:
+            ins = graph[pos_id].setdefault("inputs", {})
+            ins["text" if "text" in ins else "prompt"] = positive or ""
+        return pos_id, None
     ks = _wf_of_class(graph, "KSampler") or _wf_of_class(graph, "KSamplerAdvanced")
     pos_id = neg_id = None
     if ks:
@@ -222,6 +301,28 @@ def _wf_inject_text(graph, positive, negative):
 
 
 def _wf_inject_sampler(graph, seed, steps, cfg, denoise):
+    if _wf_is_flux2(graph):
+        # Flux2 语义映射：steps→Flux2Scheduler.steps；**cfg→FluxGuidance.guidance**；
+        #   seed→RandomNoise.noise_seed；denoise→SplitSigmasDenoise（只有真 img2img 那份工作流有）。
+        #   尺寸由 _wf_inject_size 同步写 Flux2Scheduler。
+        hit = False
+        if steps and int(steps) > 0:
+            for _nid, n in _wf_of_class(graph, "Flux2Scheduler"):
+                n.setdefault("inputs", {})["steps"] = int(steps)
+                hit = True
+        if cfg is not None:
+            for _nid, n in _wf_of_class(graph, "FluxGuidance"):
+                n.setdefault("inputs", {})["guidance"] = float(cfg)
+                hit = True
+        if seed is not None:
+            for _nid, n in _wf_of_class(graph, "RandomNoise"):
+                n.setdefault("inputs", {})["noise_seed"] = int(seed)
+                hit = True
+        if denoise is not None and float(denoise) < 1.0:
+            for _nid, n in _wf_of_class(graph, "SplitSigmasDenoise"):
+                n.setdefault("inputs", {})["denoise"] = float(denoise)
+                hit = True
+        return hit
     for ct in ("KSampler", "KSamplerAdvanced"):
         for _nid, n in _wf_of_class(graph, ct):
             ins = n.setdefault("inputs", {})
@@ -313,6 +414,57 @@ def _wf_prune_unused_images(graph, used):
     return len(drop)
 
 
+def _wf_prune_flux2_refs(graph, used):
+    """FLUX.2 版「摘空槽」（**不能照用 Qwen 版**）。
+
+    为什么不能照用（两条都会 400）：
+      ① Flux2 的参考槽是**链**：LoadImage → ImageScale → VAEEncode → ReferenceLatent。
+         只摘 LoadImage 会留下"缺输入"的 ImageScale/VAEEncode ⇒ ComfyUI 直接 400
+         （2026-09-23 二段坑 1：模板摊平出的节点问题只有真 POST 才暴露）。
+      ② 也不能把 ReferenceLatent 整个删掉 —— 它是**串链**（conditioning 逐个往下传），
+         删中间一个就断了整条 conditioning 链。
+    ⇒ 正确做法：**摘掉该槽 ReferenceLatent 的 `latent` 入参**（该入参是 optional，不传即空过），
+      再把从这个 LoadImage 出发的整条支链（ImageScale / VAEEncode）删掉。
+    """
+    if used <= 0:
+        return 0
+    # ★ 排序键必须与 _wf_set_image 完全一致（都是 str(id)），否则槽位对齐会错位。
+    refs = sorted(_wf_of_class(graph, "ReferenceLatent"), key=lambda x: str(x[0]))
+    imgs = sorted(_wf_of_class(graph, "LoadImage"), key=lambda x: str(x[0]))
+    if used >= len(imgs) and used >= len(refs):
+        return 0
+    drop = {str(nid) for nid, _n in imgs[used:]}
+    for nid, n in refs[used:]:
+        ins = n.get("inputs")
+        if isinstance(ins, dict):
+            ins.pop("latent", None)   # optional ⇒ 不传 = 空过（ReferenceLatent 只是透传 conditioning）
+    ref_ids = {str(nid) for nid, _n in refs}
+    # 从被摘掉的 LoadImage **向下游**走（LoadImage→ImageScale→VAEEncode），遇 ReferenceLatent 停。
+    frontier = list(drop)
+    while frontier:
+        nid = frontier.pop()
+        for oid, on in list(graph.items()):
+            if str(oid) in ref_ids or str(oid) in drop:
+                continue
+            ins = on.get("inputs") if isinstance(on, dict) else None
+            if not isinstance(ins, dict):
+                continue
+            for _k, v in list(ins.items()):
+                if isinstance(v, list) and v and str(v[0]) == nid:
+                    drop.add(str(oid))
+                    frontier.append(str(oid))
+    for nid in drop:
+        graph.pop(nid, None)
+    for _nid, n in list(graph.items()):
+        ins = n.get("inputs") if isinstance(n, dict) else None
+        if not isinstance(ins, dict):
+            continue
+        for k, v in list(ins.items()):
+            if isinstance(v, list) and v and str(v[0]) in drop:
+                del ins[k]
+    return len(drop)
+
+
 def _wf_set_image(graph, filenames):
     """把（多）参考图写进工作流里的 LoadImage 节点；多个 LoadImage 按节点 id 顺序依次分配。"""
     if isinstance(filenames, str):
@@ -334,6 +486,14 @@ def _wf_latent_is_img2img(graph):
     踩过的坑：Edit 工作流也有 LoadImage 节点（参考图），但它用的是 EmptySD3LatentImage，
     若一律按“有参考图就设 denoise=0.5”，Edit 会只画一半步数 → 图糊。
     """
+    if _wf_is_flux2(graph):
+        sc = _wf_of_class(graph, "SamplerCustomAdvanced")
+        if not sc:
+            return False
+        ref = sc[0][1].get("inputs", {}).get("latent_image")
+        if not (isinstance(ref, list) and ref and isinstance(ref[0], str)):
+            return False
+        return graph.get(ref[0], {}).get("class_type") == "VAEEncode"
     ks = _wf_of_class(graph, "KSampler") or _wf_of_class(graph, "KSamplerAdvanced")
     if not ks:
         return False
@@ -408,7 +568,7 @@ def _wf_save_prefix(graph, prefix):
 def _wf_watch_nodes(graph):
     """采样/解码节点 id：让 worker 能用 /ws 或 /history 看进度（拿不到也不影响出图）。"""
     ids = []
-    for ct in ("KSampler", "KSamplerAdvanced", "VAEDecode", "SaveImage"):
+    for ct in ("KSampler", "KSamplerAdvanced", "SamplerCustomAdvanced", "VAEDecode", "SaveImage"):
         ids += [nid for nid, _n in _wf_of_class(graph, ct)]
     return ids
 
@@ -470,6 +630,8 @@ def generate_via_workflow(client_id, payload, progress_fn=None, on_tick=None):
     else:
         path, mode = IMAGE_TXT2IMG_WF, "txt2img"
     graph = _wf_load(path)
+    # ★ FLUX.2 通路判定（一次算好）：它没有 KSampler，参数/文字/尺寸/参考图槽的注入路径全部不同。
+    _is_flux2 = _wf_is_flux2(graph)
     if progress_fn:
         progress_fn(40, "sampling")
     # ★ Edit 档（Qwen-Image-Edit）：模型本来就是**「prompt + 参考图」同时输入**——
@@ -481,22 +643,40 @@ def generate_via_workflow(client_id, payload, progress_fn=None, on_tick=None):
     #     就变成“英文头 + 中文身 + 中文尾”，实测会让模型两头听（用户报过中英混杂）。
     #     槽位名用模型自己的 `Picture N` 口径（TextEncodeQwenImageEditPlus 内部就是这么拼的）。
     if mode == "edit" and ref_names:
-        slot_hint = " ".join("Picture %d" % (i + 1) for i in range(len(ref_names)))
+        # 槽位措辞必须跟模型走：FLUX.2 的参考图机制是 ReferenceLatent（官方模板的措辞是 Reference Image 1/2/…），
+        # Qwen-Image-Edit 是 TextEncodeQwenImageEditPlus（内部拼 Picture 1/2/…）——
+        # 拿 Qwen 的措辞去喂 FLUX.2，等于让模型去找一个不存在的 "Picture 2"。
+        slot_hint = " ".join(("Reference Image %d" if _is_flux2 else "Picture %d") % (i + 1)
+                             for i in range(len(ref_names)))
         if _looks_zh(positive):
             positive = ("参考图按送入顺序对应片中角色（%s）。每个角色的面容、发型、年龄与服装必须严格跟随"
                         "其自己的参考图；把角色放进下面描述的剧情场景里（背景/光线/机位/动作以文字描述为准，"
                         "**不要**保留参考图的纯色/白底写真背景）。场景：" % slot_hint) + (positive or "")
-            negative = ((negative + ", ") if negative else "") + \
-                       "白色背景, 纯色背景, 影棚背景, 角色设定图, 证件照, 正面证件照, 3d渲染, cgi"
+            if not _is_flux2:
+                negative = ((negative + ", ") if negative else "") + \
+                           "白色背景, 纯色背景, 影棚背景, 角色设定图, 证件照, 正面证件照, 3d渲染, cgi"
         else:
             positive = ("The reference image(s) are %s and show this shot's character(s) in that order; keep each "
                         "character's face, hairstyle, age and costume strictly consistent with their own reference, "
                         "and place them into the scene described below (background / lighting / camera framing / "
                         "action follow the description; do NOT keep the plain or white studio backdrop of the "
                         "reference image(s)). Scene: " % slot_hint) + (positive or "")
-            negative = ((negative + ", ") if negative else "") + \
-                       "white background, plain backdrop, solid color background, studio portrait, character sheet, " \
-                       "front facing ID photo, 3d render, cgi"
+            if not _is_flux2:
+                negative = ((negative + ", ") if negative else "") + \
+                           "white background, plain backdrop, solid color background, studio portrait, character sheet, " \
+                           "front facing ID photo, 3d render, cgi"
+    # ★ FLUX.2：负词架构上不生效（guidance 蒸馏 / BasicGuider 单条件）→ 产品 2026-09-23 裁定：折进正词。
+    #   为什么放在 _wf_inject_text 之前：折完要把 negative 清空，否则负词会被当成第二条 conditioner 去找位置。
+    if _is_flux2:
+        if (negative or "").strip():
+            if FLUX2_FOLD_NEGATIVE:
+                print("[comfy] FLUX.2：负词在 guidance 蒸馏下不生效 → 已折进正词（原文留档）：%s"
+                      % negative.strip().replace("\n", " ")[:240], flush=True)
+            else:
+                print("[comfy] ⚠️ FLUX.2：负词被丢弃（WEAVEORA_FLUX2_FOLD_NEGATIVE=0，产品已确认无需）：%s"
+                      % negative.strip().replace("\n", " ")[:240], flush=True)
+        positive = _flux2_fold_negative(positive, negative, _looks_zh(positive)) if FLUX2_FOLD_NEGATIVE else positive
+        negative = ""
     _wf_inject_text(graph, positive, negative)
     _wf_inject_model(graph, IMAGE_MODEL)
     # LoRA（提速）：params.lora 优先（用于同镜同 seed 的 A/B 对照，不必重启 worker）> 环境变量/引擎配置
@@ -507,19 +687,25 @@ def generate_via_workflow(client_id, payload, progress_fn=None, on_tick=None):
     # ★ 只在 **Edit 通路（Qwen-Image-Edit-2511）** 挂 LoRA：
     #   蒸馏 LoRA 与基座严格绑定，挂到 txt2img 的 Qwen-Image 基座上会权重不匹配（报错或出鬼图）；
     #   而关键帧/定妆照（带参考图的那些）走的正是 edit 通路 —— 也正是 7~8 分钟那一批。
-    lora_on = bool(_lora) and mode == "edit" and _wf_inject_lora(graph, _lora, _lora_s)
+    # ★ 挂在哪一档：Qwen 只给 Edit 通路挂（蒸馏 LoRA 与基座严格绑定，挂到 Qwen-Image txt2img 基座上会不匹配）；
+    #   FLUX.2 的 Turbo LoRA 是**在 dev 基座上训的**，t2i 与 edit 通用 ⇒ 两种模式都挂。
+    lora_on = bool(_lora) and (mode == "edit" or _is_flux2) and _wf_inject_lora(graph, _lora, _lora_s)
     log_line = ("挂 LoRA %s @%.2f" % (_lora, float(_lora_s))) if lora_on else ""
     _wf_inject_size(graph, width, height)
     steps = IMAGE_STEPS or (params.get("steps") if isinstance(params.get("steps"), (int, float)) else 0)
-    # 有 LoRA 且调用方没显式指定步数 → 用 LoRA 的工作点（默认 4），否则 40 步跑蒸馏模型白浪费时间
-    if lora_on and not isinstance(params.get("steps"), (int, float)) and IMAGE_LORA_STEPS > 0:
-        steps = IMAGE_LORA_STEPS
+    # 有 LoRA 且调用方没显式指定步数 → 用 LoRA 的工作点（Qwen 默认 4；FLUX.2 Turbo 默认 8），
+    # 否则拿 40/20 步去跑蒸馏模型白浪费时间。
+    _lora_steps = IMAGE_LORA_STEPS_FLUX2 if _is_flux2 else IMAGE_LORA_STEPS
+    if lora_on and not isinstance(params.get("steps"), (int, float)) and _lora_steps > 0:
+        steps = _lora_steps
     # cfg 优先级：引擎配置页（IMAGE_CFG）> payload.params.cfg > 工作流 JSON 自带值
     cfg = IMAGE_CFG if IMAGE_CFG > 0 else (params.get("cfg") if isinstance(params.get("cfg"), (int, float)) else None)
-    # 有 LoRA 且调用方没显式指定 cfg → 用 LoRA 的工作点（默认 1.5）；
+    # 有 LoRA 且调用方没显式指定 cfg → 用 LoRA 的工作点；
     #   拿引擎配置里的 40 步/cfg4.0 去跑 4 步蒸馏模型会直接出坏图（已实测）。
-    if lora_on and not isinstance(params.get("cfg"), (int, float)) and IMAGE_LORA_CFG > 0:
-        cfg = IMAGE_LORA_CFG
+    #   ★ FLUX.2 这里承载的是 **guidance**（FluxGuidance），Turbo 档官方就是 4.0。
+    _lora_cfg = IMAGE_LORA_CFG_FLUX2 if _is_flux2 else IMAGE_LORA_CFG
+    if lora_on and not isinstance(params.get("cfg"), (int, float)) and _lora_cfg > 0:
+        cfg = _lora_cfg
     is_i2i = _wf_latent_is_img2img(graph)
     denoise = 1.0
     if mode == "edit":
@@ -551,10 +737,12 @@ def generate_via_workflow(client_id, payload, progress_fn=None, on_tick=None):
                 print("[comfy] ⚠️ 参考图 %d 张 > 工作流槽位 %d 个 → 多出的**会被丢掉**（%s）；"
                       "该镜可能丢身份锚定，请给工作流加 LoadImage 槽或用更少主体"
                       % (len(ref_names), slots, ",".join(ref_names[:len(ref_names) - slots])), flush=True)
-            pruned = _wf_prune_unused_images(graph, len(ref_names))
+            pruned = (_wf_prune_flux2_refs(graph, len(ref_names)) if _is_flux2
+                      else _wf_prune_unused_images(graph, len(ref_names)))
             if pruned:
-                print("[comfy] 参考图 %d 张 < 工作流槽位 %d 个 → 已摘掉多余空槽 %d 个（避免重复注入同一张脸）"
-                      % (len(ref_names), slots, pruned), flush=True)
+                print("[comfy] 参考图 %d 张 < 工作流槽位 %d 个 → 已摘掉多余空槽 %d 个（避免重复注入同一张脸；"
+                      "%s）" % (len(ref_names), slots, pruned, "FLUX.2 版：摘 latent 入参 + 整条支链" if _is_flux2
+                              else "Qwen 版：摘 LoadImage"), flush=True)
     # ★ 位置优先：方案里每个主体在画面中的位置（x/y/w/h，归一化）→ 区域条件
     regions = payload.get("referenceRegions") or []
     subjects = payload.get("referenceSubjects") or []
@@ -572,7 +760,11 @@ def generate_via_workflow(client_id, payload, progress_fn=None, on_tick=None):
             continue
         pairs.append((i, nm, (subjects[i] if i < len(subjects) else ""), x, y, w, h))
     if pairs:
-        if IMAGE_AREA_COND:
+        if _is_flux2:
+            # FLUX.2 走 BasicGuider，同样没有 "area" 读点 ⇒ 区域条件既无效也可能报错。
+            print("[comfy] FLUX.2：区域条件（ConditioningSetArea*）不被模型消费（BasicGuider 无 area 读点）"
+                  "→ 位置只写进提示词（%d 个主体）" % len(pairs), flush=True)
+        elif IMAGE_AREA_COND:
             _wf_apply_areas(graph, mode, pairs)
         else:
             # ★ 2026-09-19 定性（查过 ComfyUI 源码，不再只写“需开启”）：
@@ -3437,7 +3629,7 @@ def apply_services(svc):
     # 只要换一个 JSON，不用改 worker、不用重启；参数注入靠 class_type/标题约定（见 generate_via_workflow）。
     img = g("image")
     if isinstance(img, dict):
-        global IMAGE_ENGINE, IMAGE_COMFY, IMAGE_TXT2IMG_WF, IMAGE_IMG2IMG_WF, IMAGE_EDIT_WF, IMAGE_MODEL, IMAGE_STEPS, IMAGE_DENOISE, IMAGE_CFG, IMAGE_LORA, IMAGE_LORA_STRENGTH, IMAGE_LORA_CFG
+        global IMAGE_ENGINE, IMAGE_COMFY, IMAGE_TXT2IMG_WF, IMAGE_IMG2IMG_WF, IMAGE_EDIT_WF, IMAGE_MODEL, IMAGE_STEPS, IMAGE_DENOISE, IMAGE_CFG, IMAGE_LORA, IMAGE_LORA_STRENGTH, IMAGE_LORA_CFG, IMAGE_LORA_STEPS_FLUX2, IMAGE_LORA_CFG_FLUX2
         eng = img.get("engine")
         if isinstance(eng, str) and eng.strip():
             IMAGE_ENGINE = eng.strip().lower()
@@ -3474,6 +3666,13 @@ def apply_services(svc):
         lc = img.get("loraCfg") or img.get("lora_cfg")
         if isinstance(lc, (int, float)) and float(lc) > 0:
             IMAGE_LORA_CFG = float(lc)
+        # ★ FLUX.2 专用档（留空 = 用 env 默认 8 步 / guidance 4.0）；只在引擎页显式配了才覆盖。
+        ls2 = img.get("loraStepsFlux2") or img.get("lora_steps_flux2")
+        if isinstance(ls2, (int, float)) and float(ls2) > 0:
+            IMAGE_LORA_STEPS_FLUX2 = int(ls2)
+        lc2 = img.get("loraCfgFlux2") or img.get("lora_cfg_flux2")
+        if isinstance(lc2, (int, float)) and float(lc2) > 0:
+            IMAGE_LORA_CFG_FLUX2 = float(lc2)
         print("[comfy] 文生图配置（引擎配置下发）：engine=%s workflow=%s img2img=%s edit=%s model=%s steps=%s cfg=%s denoise=%s lora=%s@%s"
               % (IMAGE_ENGINE, IMAGE_TXT2IMG_WF or "-", IMAGE_IMG2IMG_WF or "-", IMAGE_EDIT_WF or "-",
                  IMAGE_MODEL or "-", IMAGE_STEPS or "-", IMAGE_CFG or "-", IMAGE_DENOISE,

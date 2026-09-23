@@ -1,0 +1,145 @@
+#!/usr/bin/env python3
+"""回归：FLUX.2 [dev] 通路的**参数/文字/尺寸/参考槽**注入（2026-09-23 新增）。
+
+背景（为什么必须有这套测试）：
+  ComfyUI 的 FLUX.2 官方结构**没有 KSampler** —— 采样是 `SamplerCustomAdvanced` + `BasicGuider`，
+  步数在 `Flux2Scheduler`、引导在 `FluxGuidance`（**不是 cfg**）、种子在 `RandomNoise`，
+  参考图靠 `ReferenceLatent` **串链**。现网那套注入器是按 `KSampler` / `EmptySD3LatentImage` /
+  `LoadImage` 写的 —— 不改就会出现「UI 改了步数/引导但毫无变化」的**静默失效**（四段坑 3 的翻版）。
+
+本测试锁四件事：
+  1) **识别**：Flux2 工作流被判为 Flux2；Qwen 工作流**不被误判**（否则会走错注入分支）；
+  2) **参数落点**：steps→Flux2Scheduler.steps、cfg→FluxGuidance.guidance、seed→RandomNoise、
+     denoise→SplitSigmasDenoise；尺寸**同时**写 EmptyFlux2LatentImage 与 Flux2Scheduler
+     （只写一个 ⇒ 排程按旧尺寸算 ⇒ 出图发黑/退化）；LoRA 插在 UNETLoader 后且 BasicGuider 改指它；
+  3) **文字**：正词写到 FluxGuidance 上游那个 CLIPTextEncode；Flux2 **没有负词位**（返回 None）；
+  4) **空槽摘除**：少于 3 张参考图时，摘掉该槽 ReferenceLatent 的 `latent` 入参 + 整条支链，
+     且 **conditioning 串链不能断**（断链 = ComfyUI 400 `prompt_outputs_failed_validation`）。
+
+用法：`python worker/test_flux2_injection.py`（纯本地，不需要 ComfyUI / 网络 / GPU）
+"""
+import json
+import os
+import sys
+
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import comfy_client as c  # noqa: E402
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+WF_DIR = os.path.join(os.path.dirname(HERE), "deploy", "comfy")
+
+OK = [0]
+FAIL = []
+
+
+def check(cond, msg):
+    if cond:
+        OK[0] += 1
+        print("  ✓ %s" % msg)
+    else:
+        FAIL.append(msg)
+        print("  ✗ %s" % msg)
+
+
+def load(name):
+    with open(os.path.join(WF_DIR, name), encoding="utf-8") as fh:
+        g = json.load(fh)
+    g.pop("_comment", None)
+    return g
+
+
+def main():
+    # ── 1. txt2img ──────────────────────────────────────────────────────────
+    print("\n[1] flux2_dev_txt2img_api.json")
+    g = load("flux2_dev_txt2img_api.json")
+    check(c._wf_is_flux2(g), "识别为 FLUX.2")
+    c._wf_inject_size(g, 1280, 704)
+    check(g["41"]["inputs"]["width"] == 1280 and g["41"]["inputs"]["height"] == 704,
+          "EmptyFlux2LatentImage 尺寸已注入")
+    check(g["42"]["inputs"]["width"] == 1280 and g["42"]["inputs"]["height"] == 704,
+          "Flux2Scheduler 的 w/h **同步**注入（缺这条 ⇒ 排程错、图发黑）")
+    pid, nid = c._wf_inject_text(g, "POS", "NEG")
+    check(pid == "6" and g["6"]["inputs"]["text"] == "POS", "正词写到 FluxGuidance 上游节点")
+    check(nid is None, "FLUX.2 返回 neg=None（无 uncond 分支，负词只能折进正词）")
+    c._wf_inject_sampler(g, 98765, 8, 4.0, 1.0)
+    check(g["42"]["inputs"]["steps"] == 8, "steps → Flux2Scheduler.steps")
+    check(abs(g["7"]["inputs"]["guidance"] - 4.0) < 1e-9, "cfg → FluxGuidance.guidance（语义映射）")
+    check(g["44"]["inputs"]["noise_seed"] == 98765, "seed → RandomNoise.noise_seed")
+    check(c._wf_latent_is_img2img(g) is False, "txt2img 不被误判成 img2img（否则 denoise 会改错）")
+    c._wf_inject_lora(g, "Flux_2-Turbo-LoRA_comfyui.safetensors", 1.0)
+    check(g.get("lora_main", {}).get("class_type") == "LoraLoaderModelOnly", "Turbo LoRA 节点已插入")
+    check(g["40"]["inputs"]["model"] == ["lora_main", 0], "BasicGuider.model 已改指 LoRA 输出")
+
+    # ── 2. 负词折进正词 ─────────────────────────────────────────────────────
+    print("\n[2] 负词折进正词（产品 2026-09-23 裁定）")
+    folded = c._flux2_fold_negative("A woman in a garden", "white background, 3d render", False)
+    check("photorealistic" in folded and "A woman in a garden" in folded,
+          "英文：原文保留 + 追加**正向**约束句（不是照抄负词）")
+    check("white background" not in folded, "英文：负词原句没有被原样塞进正词")
+    zh = c._flux2_fold_negative("庭院里的女子", "白色背景, 3d渲染", True)
+    check("写实摄影" in zh and "庭院里的女子" in zh, "中文：跟随提示词语言")
+    check(c._flux2_fold_negative("x", "", False) == "x", "无负词时原样返回")
+
+    # ── 3. edit：3 / 2 / 1 张参考图 ─────────────────────────────────────────
+    print("\n[3] flux2_dev_edit_api.json 参考槽")
+    g = load("flux2_dev_edit_api.json")
+    check(c._wf_is_flux2(g), "识别为 FLUX.2")
+    c._wf_set_image(g, ["r1.png", "r2.png", "r3.png"])
+    check([g[i]["inputs"]["image"] for i in ("12", "15", "18")] == ["r1.png", "r2.png", "r3.png"],
+          "3 张参考图按槽位 1/2/3 写入")
+    check(c._wf_prune_flux2_refs(g, 3) == 0, "3 张 = 槽位刚好，不动刀")
+    check(g["32"]["inputs"]["latent"] == ["20", 0] and g["40"]["inputs"]["conditioning"] == ["32", 0],
+          "ReferenceLatent 串链 + 链尾接 BasicGuider 完好")
+
+    g = load("flux2_dev_edit_api.json")
+    c._wf_set_image(g, ["r1.png", "r2.png"])
+    check(c._wf_prune_flux2_refs(g, 2) == 3, "2 张：摘掉第 3 槽支链的 3 个节点")
+    check(all(k not in g for k in ("18", "19", "20")), "支链节点（LoadImage/ImageScale/VAEEncode）已删")
+    check("latent" not in g["32"]["inputs"], "第 3 槽 ReferenceLatent 的 latent 入参已摘（optional ⇒ 空过）")
+    check(g["32"]["inputs"]["conditioning"] == ["31", 0], "conditioning 串链**没断**（断了就是 400）")
+    check(g["30"]["inputs"]["latent"] == ["14", 0] and g["31"]["inputs"]["latent"] == ["17", 0],
+          "保留槽仍挂着各自正确的 latent（没有错位）")
+
+    g = load("flux2_dev_edit_api.json")
+    c._wf_set_image(g, ["only.png"])
+    check(c._wf_prune_flux2_refs(g, 1) == 6, "1 张：摘掉 2 条支链共 6 个节点")
+    check(g["30"]["inputs"]["latent"] == ["14", 0], "第 1 槽保留")
+    check("latent" not in g["31"]["inputs"] and "latent" not in g["32"]["inputs"], "第 2/3 槽空过")
+
+    # ── 4. img2img ──────────────────────────────────────────────────────────
+    print("\n[4] flux2_dev_img2img_api.json")
+    g = load("flux2_dev_img2img_api.json")
+    check(c._wf_is_flux2(g), "识别为 FLUX.2")
+    check(c._wf_latent_is_img2img(g) is True, "识别为真 img2img")
+    c._wf_inject_sampler(g, 1, 20, 4.0, 0.65)
+    check(abs(g["48"]["inputs"]["denoise"] - 0.65) < 1e-9, "denoise → SplitSigmasDenoise")
+    check(g["45"]["inputs"]["sigmas"] == ["48", 1], "sigmas 接 low_sigmas（槽 1）")
+    check(g["45"]["inputs"]["latent_image"] == ["14", 0], "采样起点 = VAEEncode 底图")
+    c._wf_inject_size(g, 1024, 1024)
+    check(g["13"]["inputs"]["width"] == 1024, "底图缩到目标尺寸")
+
+    # ── 5. Qwen 通路不被误判（防回归）────────────────────────────────────────
+    print("\n[5] 回归：Qwen 工作流不被误判为 FLUX.2")
+    for name in ("qwen_image_txt2img_film_api.json", "qwen_image_edit_api.json",
+                 "qwen_image_img2img_api.json"):
+        g = load(name)
+        check(not c._wf_is_flux2(g), "%s 不误判" % name)
+    g = load("qwen_image_edit_api.json")
+    c._wf_set_image(g, ["a.png", "b.png"])
+    check(c._wf_prune_unused_images(g, 2) == 1, "Qwen 版摘空槽仍走旧逻辑（只摘 LoadImage）")
+    pid, nid = c._wf_inject_text(g, "P", "N")
+    check(pid == "6" and nid == "7", "Qwen 正/负词定位不受影响")
+
+    print("\n结果：%d 项通过，%d 项失败" % (OK[0], len(FAIL)))
+    for m in FAIL:
+        print("  - %s" % m)
+    return 1 if FAIL else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

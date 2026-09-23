@@ -1,0 +1,62 @@
+{
+  "_comment": "Weaveora · FLUX.2 [dev] 文生图（定妆照 / 无参考帧）。由官方模板 image_flux2_fp8 + image_flux2_text_to_image 摊平为 API 格式（2026-09-23）。★ 没有负词节点：FLUX.2 [dev] 是 guidance 蒸馏，官方模板用 BasicGuider 单条件、无 uncond 分支 ⇒ 负词不生效（worker 会把它折进正词，见 comfy_client._flux2_fold_negative）。★ 步数/guidance/种子由 worker 注入（Flux2Scheduler.steps / FluxGuidance.guidance / RandomNoise.noise_seed），尺寸同时写 EmptyFlux2LatentImage 与 Flux2Scheduler（seq_len=W*H/256）。★ Turbo LoRA（8 步档）由 worker 按 params.lora / WEAVEORA_IMAGE_LORA 注入 LoraLoaderModelOnly。",
+  "1": {
+    "class_type": "UNETLoader",
+    "inputs": { "unet_name": "flux2_dev_fp8mixed.safetensors", "weight_dtype": "default" }
+  },
+  "2": {
+    "class_type": "CLIPLoader",
+    "inputs": { "clip_name": "mistral_3_small_flux2_fp8.safetensors", "type": "flux2", "device": "default" }
+  },
+  "3": {
+    "class_type": "VAELoader",
+    "inputs": { "vae_name": "full_encoder_small_decoder.safetensors" }
+  },
+  "6": {
+    "class_type": "CLIPTextEncode",
+    "inputs": { "clip": ["2", 0], "text": "" },
+    "_meta": { "title": "Positive Prompt (Flux2)" }
+  },
+  "7": {
+    "class_type": "FluxGuidance",
+    "inputs": { "conditioning": ["6", 0], "guidance": 4.0 }
+  },
+  "40": {
+    "class_type": "BasicGuider",
+    "inputs": { "model": ["1", 0], "conditioning": ["7", 0] }
+  },
+  "41": {
+    "class_type": "EmptyFlux2LatentImage",
+    "inputs": { "width": 1664, "height": 928, "batch_size": 1 }
+  },
+  "42": {
+    "class_type": "Flux2Scheduler",
+    "inputs": { "steps": 20, "width": 1664, "height": 928 }
+  },
+  "43": {
+    "class_type": "KSamplerSelect",
+    "inputs": { "sampler_name": "euler" }
+  },
+  "44": {
+    "class_type": "RandomNoise",
+    "inputs": { "noise_seed": 0 }
+  },
+  "45": {
+    "class_type": "SamplerCustomAdvanced",
+    "inputs": {
+      "noise": ["44", 0],
+      "guider": ["40", 0],
+      "sampler": ["43", 0],
+      "sigmas": ["42", 0],
+      "latent_image": ["41", 0]
+    }
+  },
+  "46": {
+    "class_type": "VAEDecode",
+    "inputs": { "samples": ["45", 0], "vae": ["3", 0] }
+  },
+  "47": {
+    "class_type": "SaveImage",
+    "inputs": { "images": ["46", 0], "filename_prefix": "weaveora_flux2_t2i" }
+  }
+}
