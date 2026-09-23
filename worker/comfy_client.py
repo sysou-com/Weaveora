@@ -43,9 +43,13 @@ IMAGE_EDIT_WF = os.environ.get("WEAVEORA_IMAGE_EDIT_WORKFLOW", "").strip()
 # ★ P1 防复发（2026-09-18 用户实测事故）：Edit 通路是「参考图锚定」的唯一正确姿势（denoise 必须 1.0）。
 #   若 edit 工作流为空，关键帧会**静默降级**成 img2img（槽位少 + denoise 0.65）→ 把定妆照半重绘成
 #   「不像的定妆照」（用户报的正是这个）。所以：环境变量为空时回落到本机标准路径。
+#   ★ 2026-09-23：默认值随生产切到 FLUX.2（原来是 qwen_image_edit_api.json）。
+#     这是个**隐性回退**：DB 的 services.image.editWorkflow 才是运行时真源，这里只是它为空时的兵底。
+#     两个值指向不同模型 = 一旦 DB 被清空就会“静默地跑另一个模型”（本项目的经典事故形态）。
 if not IMAGE_EDIT_WF:
-    _default_edit_wf = "/opt/weaveora/workflows/qwen_image_edit_api.json"
-    if os.path.exists(_default_edit_wf):
+    _default_edit_wf = os.environ.get("WEAVEORA_IMAGE_EDIT_WORKFLOW",
+                                      "/opt/weaveora/workflows/flux2_dev_edit_api.json").strip()
+    if _default_edit_wf and os.path.exists(_default_edit_wf):
         IMAGE_EDIT_WF = _default_edit_wf
 IMAGE_MODEL = os.environ.get("WEAVEORA_IMAGE_MODEL", "").strip()
 IMAGE_STEPS = int(os.environ.get("WEAVEORA_IMAGE_STEPS", "0") or 0)

@@ -96,6 +96,43 @@ if (req.services() != null) {
 
 > 当前生产 = `flux2`（20 步 / lora=null）⇒ **不受此风险影响**；`verify` 实测 ✓ 未发现自相矛盾。
 
+### 0.5.6 试枪能证明什么 / **不能**证明什么（peer 只读复核引出，2026-09-23 23:5x）
+
+| | 结论 | 证据 |
+|---|---|---|
+| ✅ **试枪证得了** | ComfyUI + 三个工作流 + 五件权重 + **worker 注入逻辑的 flux2 分支**可用 | `smoke.json` 三档 `ok=true`（151.5 / 114.3 / 49.3 s）+ 盒上产物 `weaveora_flux2_*.png`（22:37–22:49） |
+| ✅ **“同一份字节”证明** | 试枪跑的**就是现在生产在用的那份工作流** | VPS 三个工作流 mtime = **22:35**，早于试枪（22:37/22:40/22:49），且现在 md5 与当时**字符级一致** |
+| ❌ **试枪没证明** | **平台全链路**（计划 → 用户确认闸门 → 落库 → 资产 → `engine_route`/计费）通不通 | 试枪是 probe **直驱 worker 注入函数**，日志格式是 probe 自己的；`generation_jobs` **一条都没落**（全表 1010 行、最新 `created_at` = 2026-09-23 13:09:24，近 4h 新增 0） |
+
+⇒ 因此 §0.5.4 那句“验收凭据 = DB”得说清楚：**DB 侧现在是空集** —— “三档全过”**不等于**“平台已通”。
+平台那一层要靠接下来的真实任务补上（看 `generation_jobs` 新增 + `assets` 落库 + `engine_route`）。
+
+### 0.5.7 ⚠️ env 与 DB 两个真源：env 曾是**过期 fallback（还指着 qwen）**
+
+**运行时以 DB 为准（已有运行时证据）**：worker 13:09:25 那行日志打的是
+`workflow=…/qwen_image_txt2img_film_api.json`（**带 _film**），而当时 env 写的是 `qwen_image_txt2img_api.json`（**无 _film**）⇒ 运行的是前者 = **DB 覆盖 env** ✓。
+
+**已修的隐患（2026-09-23 23:35）**：三个隐性回退都还指着 Qwen，一旦 DB 行被清空会**静默落回 qwen 路径**：
+1. env `WEAVEORA_IMAGE_WORKFLOW`（qwen txt2img）→ 已改 flux2
+2. env `WEAVEORA_IMAGE_IMG2IMG_WORKFLOW`（qwen img2img）→ 已改 flux2
+3. 代码里 **硬编码**的 `_default_edit_wf`（`qwen_image_edit_api.json`）→ 已改为读 `WEAVEORA_IMAGE_EDIT_WORKFLOW`（默认 flux2）
+
+**两个容易搞错的运维事实（实测）**：
+- VPS 上有**两个** worker 服务，读的是**不同** env 文件：
+  `weaveora-cloud-worker` → `/etc/weaveora/weaveora-worker.env`（`WORKER_MODE=cloud`，**无** IMAGE_* 变量）
+  `weaveora-gpu-worker` → `/etc/weaveora/weaveora-gpu-worker.env`（**comfy/出图走这个**）
+  ⇒ 改 IMAGE_* 要改后者；已用 `/proc/<pid>/environ` 逐字回读确认生效。
+- 旧日志里 `comfy=http://180.127.11.**167**:20694` 而现在是 `.169:57712` ⇒ 中间换过实例（也解释了两个 peer 的盒上公钥为何失效）。
+
+### 0.5.8 ⚠️ img2img 的 denoise：试枪参数 ≠ 生产参数（**非本次切换引入**，待产品确认）
+
+- 试枪 img2img 跑的是 `denoise=0.65`（probe 默认），而 **DB `services.image.denoise = 1.0`**。
+- 按 worker 代码，真 img2img（单参考图 + latent 来自 `VAEEncode`）取 `params.denoise ?? IMAGE_DENOISE` ⇒ **生产会注入 1.0**。
+- 语义：`denoise=1.0` = 从纯噪声开始采样 ⇒ **输入底图贡献为零，img2img 静默退化成 txt2img**。
+- 当前**不可达**（`editWorkflow` 已配，选路永远进 edit 分支），所以不影响本次验收；
+  但若将来 `editWorkflow` 被清空（历史事故形态），就会静默走成 txt2img。
+- 诚实标注：**Qwen 时代同一行也是 `denoise=1.0`，不是本次引入**。⇒ 待产品定：FLUX.2 img2img 期望值是 **0.65**（“以底图为起点”，worker 默认）还是 **1.0**（等同 txt2img）。
+
 ---
 
 ## 0. 结论速览
