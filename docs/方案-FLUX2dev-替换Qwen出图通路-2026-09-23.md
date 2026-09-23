@@ -59,6 +59,31 @@
 > 为什么单独立这条：引擎配置页保存时会**把旧快照写回**（历史事故：把失效端口洗回过），
 > 且这是**共享生产配置**——多人在同一仓工作时，归因必须先确认"当时到底跑的是谁"。
 
+### 0.5.5 ⛔ 已知的**静默冲配置**风险：旧版引擎页保存会冲掉 turbo 档的 LoRA 五键
+
+**已从后端源码核实**（peer 2026-09-23 发现，我复核）：
+```java
+// api/src/main/java/studio/weaveora/engine/EngineSettingsService.java:780
+// 服务地址（配音/配乐、对口型、转写、人脸）：整块替换；空串字段在 worker 侧会回退默认值
+if (req.services() != null) {
+    s.setServices(req.services().isObject() ? req.services() : null);
+}
+```
+⇒ `services` 是**整块替换**。而**旧版**引擎配置页的 `save()` **不带**
+`image.lora / loraStrength / loraCfg / loraStepsFlux2 / loraCfgFlux2`
+⇒ 在旧页面上点一次“保存配置”就会：
+
+> 把 `lora` 冲成空，但 **`steps=8` 还在** ⇒ worker 跑 **FLUX.2 @ 8 步且不挂 Turbo LoRA**
+> = 欠采样、画面发虚/发钝，**而且不报错**（典型的“看着切了其实坏了”）。
+
+**防护（已落地）**：
+1. `deploy/image_variant_switch.sh` 新增 **`verify`** 子命令：把“steps≤10 但无 lora”抬成硬告警，并检查通路混搭（workflow=FLUX.2 但 editWorkflow=Qwen）、
+   steps 与模型的官方旋钮不匹配等。**读不到配置也算失败**（空值不当通过）。
+2. 铁律：**用了 `flux2-turbo` 就别在旧版页面点保存**；每次切完跑 `bash deploy/image_variant_switch.sh verify`。
+3. 新版页面（peer 在改，尚未提交）已把这 5 个键读写闭环。
+
+> 当前生产 = `flux2`（20 步 / lora=null）⇒ **不受此风险影响**；`verify` 实测 ✓ 未发现自相矛盾。
+
 ---
 
 ## 0. 结论速览
