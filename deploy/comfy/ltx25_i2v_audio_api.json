@@ -228,7 +228,7 @@
     0
    ],
    "audio_latent": [
-    "366",
+    "404",
     0
    ]
   }
@@ -532,5 +532,26 @@
    "duration": 4.0
   }
  },
- "_comment": "【实验留档 · 未上线】音频条件变体：把 LTXVEmptyLatentAudio 换成 LoadAudio→TrimAudioDuration→LTXVAudioVAEEncode（与官方 video_ltx2_3_ia2v.json 同构，omega 排程逐字相同）。★ 2026-09-23 实测（负结果）：输出音轨与输入配音相关度 0.068（空音频基线 0.228）⇒ 该 latent 在 stage1 从 sigma=1.0 一起去噪，模型会重新生成音频，**不能**让 LTX 说我们的配音。要真音频驱动须走 A2Vid/DubIt（需 distilled LoRA / IC-LoRA，见 docs/方案-LTX2-A2Vid与DubIt评估-2026-09-23.md）。保留此文件是为了别再重复这条路；worker 不引用它。"
+ "402": {
+  "class_type": "SolidMask",
+  "inputs": {
+   "value": 0.0,
+   "width": 1024,
+   "height": 1024
+  }
+ },
+ "404": {
+  "class_type": "SetLatentNoiseMask",
+  "inputs": {
+   "samples": [
+    "366",
+    0
+   ],
+   "mask": [
+    "402",
+    0
+   ]
+  }
+ },
+ "_comment": "【实验留档】LTX-2.5 音频条件变体（A2Vid 式）。链路（与官方 video_ltx2_3_ia2v.json 同构）：LoadAudio(400) → TrimAudioDuration(401) → LTXVAudioVAEEncode(366) → SetLatentNoiseMask(404, mask=SolidMask(402, value=0)) → LTXVConcatAVLatent(377)。★ 关键：必须给音频 latent 挂 **noise_mask=0**（冻结），否则它会跟视频一起从 sigma=1.0 重去噪 = 模型自己重生成语音（2026-09-23 实测：不挂 mask 时输出音轨与输入配音相关仅 0.068；空音频基线 0.228）。官方 ia2v 里正是 SetLatentNoiseMask + SolidMask 这两个节点起这个作用（已核本地源码 comfy_extras/nodes_lt.py 的 LTXVConcatAVLatent 用 noise_mask 区分冻结/去噪）。"
 }
