@@ -1,4 +1,4 @@
-# 安排「N 小时后唤醒」并让机器进入 S3 睡眠（Weaveora GPU 机夜间休眠用）
+﻿# 安排「N 小时后唤醒」并让机器进入 S3 睡眠（Weaveora GPU 机夜间休眠用）
 #   用法：powershell -File sleep_hours.ps1 5
 param([double]$Hours = 5)
 
