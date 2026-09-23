@@ -86,13 +86,16 @@ public class EngineSettingsService {
         // ★ image（文生图，本机 ComfyUI）：engine=comfy 时 worker 直接把 workflow（文生图）/
         //   editWorkflow（参考图锚定，Qwen-Image-Edit）/ img2imgWorkflow（关键帧当底图）的 API 格式 JSON
         //   POST 给 ComfyUI。路径是 **worker 机器上的绝对路径**（装在哪台机就填哪台的）→ 默认留空 = worker 自带默认。
-        //   steps/cfg/denoise 是**出图档位旋钮**：cfg（true_cfg_scale）直接决定提示词遵从度，
-        //   0 = 不改（用工作流 JSON 自带值）。Qwen-Image-Edit 官方 Qwen 口径 = steps 40 / cfg 4.0。
+        //   steps/cfg/denoise 是**出图档位旋钮**：cfg（真 CFG）直接决定提示词遵从度，
+        //   0 = 不改（用工作流 JSON 自带值）。
+        //   ★ 2026-09-24：生产切到 FLUX.2 [dev] —— 官方口径 **20 步 / guidance 4.0**
+        //   （worker 把 cfg 映射到 FluxGuidance.guidance）；Qwen-Image-Edit 的 40 步/cfg4.0 是另一套旋钮，
+        //   两者不可互推（CLAUDE.md 2026-09-22“五段”已记过）。
         out.set("image", merge(cur, "image", mapper.createObjectNode()
                 .put("engine", "builtin").put("comfyUrl", gpu)
                 .put("workflow", defaultImageWorkflow()).put("img2imgWorkflow", defaultImageImg2imgWorkflow())
                 .put("editWorkflow", defaultImageEditWorkflow()).put("model", "")
-                .put("steps", 40).put("cfg", 4.0).put("denoise", 1.0)));
+                .put("steps", 20).put("cfg", 4.0).put("denoise", 1.0)));
         // ★ motion：自托管图生视频（Wan2.2 I2V-A14B 双专家）的**档位**随任务下发。
         //   为什么必须走这里：clip 的 payload.params 在 JobService.videoShotPayload() 里只塞了
         //   {width,height}，preset/steps/lora_*/cfg_* 若不靠这条链路下发就永远到不了 worker ——
@@ -349,20 +352,27 @@ public class EngineSettingsService {
 
     // ---- 出图工作流的服务端默认值（P1 防复发：2026-09-18 事故 ----
     //   保存页会把空字段写成 null，一旦 editWorkflow 为空，关键帧就从 Edit 通路**静默降级**到
-    //   img2img（单槽 + denoise 0.65）→ 把定妆照半重绘成"不像的定妆照"。
+    //   img2img（单槽 + denoise 0.65）→ 把定妆照半重绘成“不像的定妆照”。
     //   所以：null 时必须回落到**具体默认路径**，不再依赖 worker 环境变量（worker 侧也有同样兜底）。
+    //
+    // ★ 2026-09-24：三个默认值随生产切到 FLUX.2 [dev]（原来是 qwen_*）。
+    //   为什么必须一起改（peer 只读复核提出、我复核源码确认）：旧默认 + DB 里的 FLUX.2 参数（steps=20）
+    //   = 拿 Qwen 工作流 + FLUX.2 旋钮出图 —— 正是 CLAUDE.md 记过的“20 步 → 亮度 0–21 近全黑”那类退化，
+    //   而且不报错。触发条件很具体：**任一字段被写成 null**（在旧版配置页上保存就可能发生）。
+    //   注意：它只能兜“字段为空”；如果页面把**旧快照**（qwen 路径）显式写回，那是页面侧的幂等问题，
+    //   得靠 `deploy/image_variant_switch.sh verify` 回读发现。
     private String defaultImageWorkflow() {
-        return imageWfOr(env("WEAVEORA_DEFAULT_IMAGE_WF"), "/opt/weaveora/workflows/qwen_image_txt2img_film_api.json");
+        return imageWfOr(env("WEAVEORA_DEFAULT_IMAGE_WF"), "/opt/weaveora/workflows/flux2_dev_txt2img_api.json");
     }
 
     private String defaultImageImg2imgWorkflow() {
         return imageWfOr(env("WEAVEORA_DEFAULT_IMAGE_IMG2IMG_WF"),
-                "/opt/weaveora/workflows/qwen_image_img2img_api.json");
+                "/opt/weaveora/workflows/flux2_dev_img2img_api.json");
     }
 
     private String defaultImageEditWorkflow() {
         return imageWfOr(env("WEAVEORA_DEFAULT_IMAGE_EDIT_WF"),
-                "/opt/weaveora/workflows/qwen_image_edit_api.json");
+                "/opt/weaveora/workflows/flux2_dev_edit_api.json");
     }
 
     private static String env(String k) {

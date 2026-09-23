@@ -20,7 +20,9 @@ import java.util.Map;
  *   refs:[{assetId:"…", checked:true, region:{x,y,w,h}}],   // 用户素材图（勾选才参与锚定）
  *   portraitAssetId:"…", portraitVersion:2,                 // 定妆图（由素材图生成，优先用于锚定）
  *   gender:"male", age:"17", height:"178cm", build:"清瘦",   // ★ P14 主体设定（2026-09-16 用户要求）
- *   personality:"多情敏感", appearance:"面若中秋之月，大红箭袖，项上金螭璎珞"
+ *   personality:"多情敏感", appearance:"面若中秋之月，大红箭袖，项上金螭璎珞",
+ *   portraitPositivePrompt:"…", portraitNegativePrompt:"…",      // ★ 2026-09-23 定妆照自定义提示词（空 = 用系统默认模板）
+ *   portraitPromptLang:"zh"                                        //   保存时的语言（zh|en）
  * }]
  * </pre>
  *
@@ -249,13 +251,91 @@ public final class PlanSubjects {
         }
     }
 
+    /**
+     * ★ 2026-09-23（用户要求）：定妆照**自定义提示词**（弹框里改过并点「保存」的那份）。
+     *
+     * <p>为什么存进方案 `subjects[]` 而不另开一张表：定妆照提示词是「主体」的属性，
+     * 与 {@code traits}/{@code refs}/{@code portraitAssetId} 同处一个真源 —— 主体改名/别名归并时
+     * 跟着走，也不会被 {@link #write} 洗掉（另开一张表就得自己维护对齐，这类对齐最容易腐化）。
+     *
+     * <p>语义：**三个字段全空 = 用 {@code SubjectPrompts} 的系统默认模板**（旧数据即此状态，
+     * 所以读取侧必须容错空值）。保存的是用户**看到的整段文本**（含默认模板里的
+     * `Reference image(s): N` 计数句），生成时原样使用、不重新拼装。
+     */
+    public record PortraitPrompt(String positive, String negative, String lang) {
+
+        public static final PortraitPrompt EMPTY = new PortraitPrompt("", "", "");
+
+        private static boolean blank(String s) {
+            return s == null || s.isBlank();
+        }
+
+        public boolean isEmpty() {
+            return blank(positive) && blank(negative) && blank(lang);
+        }
+
+        /** 有没有真正保存过提示词（只看正/负词；只存了语言不算）。 */
+        public boolean hasPrompt() {
+            return !blank(positive) || !blank(negative);
+        }
+
+        /** 语言（zh|en）：除显式 en 外一律 zh（与前端选择器默认值口径一致）。 */
+        public String langOrZh() {
+            return "en".equalsIgnoreCase(lang == null ? "" : lang.trim()) ? "en" : "zh";
+        }
+
+        /** 从主体 JSON 读（容错缺失 / 旧数据）。 */
+        public static PortraitPrompt parse(JsonNode s) {
+            if (s == null || !s.isObject()) {
+                return EMPTY;
+            }
+            return new PortraitPrompt(
+                    s.path("portraitPositivePrompt").asText("").trim(),
+                    s.path("portraitNegativePrompt").asText("").trim(),
+                    s.path("portraitPromptLang").asText("").trim());
+        }
+
+        /** 写回主体 JSON（全空不写，保持方案干净）。 */
+        public void write(ObjectNode o) {
+            if (!blank(positive)) {
+                o.put("portraitPositivePrompt", positive.trim());
+            }
+            if (!blank(negative)) {
+                o.put("portraitNegativePrompt", negative.trim());
+            }
+            if (!blank(lang)) {
+                o.put("portraitPromptLang", lang.trim());
+            }
+        }
+
+        /** 合并（别称归并 / 抽取合并用）：本条目优先，空的才用另一份。 */
+        public PortraitPrompt merge(PortraitPrompt other) {
+            if (other == null) {
+                return this;
+            }
+            return new PortraitPrompt(
+                    blank(positive) ? other.positive : positive,
+                    blank(negative) ? other.negative : negative,
+                    blank(lang) ? other.lang : lang);
+        }
+    }
+
     /** 一个剧情主体。 */
     public record Subject(String name, String kind, List<String> aliases, boolean enabled, boolean locked,
-                          List<Ref> refs, String portraitAssetId, int portraitVersion, Traits traits) {
+                          List<Ref> refs, String portraitAssetId, int portraitVersion, Traits traits,
+                          PortraitPrompt portraitPrompt) {
 
         public Subject(String name, String kind, List<String> aliases, boolean enabled, boolean locked,
                        List<Ref> refs, String portraitAssetId, int portraitVersion) {
-            this(name, kind, aliases, enabled, locked, refs, portraitAssetId, portraitVersion, Traits.EMPTY);
+            this(name, kind, aliases, enabled, locked, refs, portraitAssetId, portraitVersion,
+                    Traits.EMPTY, PortraitPrompt.EMPTY);
+        }
+
+        /** 兼容构造（不含定妆照提示词）—— 旧调用点不用改。 */
+        public Subject(String name, String kind, List<String> aliases, boolean enabled, boolean locked,
+                       List<Ref> refs, String portraitAssetId, int portraitVersion, Traits traits) {
+            this(name, kind, aliases, enabled, locked, refs, portraitAssetId, portraitVersion,
+                    traits, PortraitPrompt.EMPTY);
         }
 
         /** 参与锚定的素材图（已勾选）。 */
@@ -269,6 +349,11 @@ public final class PlanSubjects {
 
         public Traits traitsOrEmpty() {
             return traits == null ? Traits.EMPTY : traits;
+        }
+
+        /** 定妆照自定义提示词（容错 null）。 */
+        public PortraitPrompt portraitPromptOrEmpty() {
+            return portraitPrompt == null ? PortraitPrompt.EMPTY : portraitPrompt;
         }
 
         /** 该主体可用于锚定的资产：定妆图优先，其次勾选的素材图。 */
@@ -403,6 +488,7 @@ public final class PlanSubjects {
             String portrait = base.portraitAssetId();
             int pv = base.portraitVersion();
             Traits traits = base.traitsOrEmpty();
+            PortraitPrompt portraitPrompt = base.portraitPromptOrEmpty();
             List<String> dropped = new ArrayList<>();
             for (int idx : g) {
                 if (idx == keep) {
@@ -429,9 +515,10 @@ public final class PlanSubjects {
                     pv = d.portraitVersion();
                 }
                 traits = traits.merge(d.traitsOrEmpty());
+                portraitPrompt = portraitPrompt.merge(d.portraitPromptOrEmpty());
             }
             out.add(new Subject(base.name(), base.kind(), List.copyOf(aliases), base.enabled(), base.locked(),
-                    List.copyOf(refs.values()), portrait == null ? "" : portrait, pv, traits));
+                    List.copyOf(refs.values()), portrait == null ? "" : portrait, pv, traits, portraitPrompt));
             System.out.println("[PlanSubjects] 别称归并：「" + String.join("、", dropped)
                     + "」→ 同一主体「" + base.name() + "」（别名 " + aliases + "，合并后 " + refs.size() + " 张参考图）");
         }
@@ -483,7 +570,8 @@ public final class PlanSubjects {
                 refs,
                 s.path("portraitAssetId").asText(""),
                 s.path("portraitVersion").asInt(0),
-                Traits.parse(s));
+                Traits.parse(s),
+                PortraitPrompt.parse(s));
     }
 
     /** 写回方案（覆盖 referenceAssets 以保持旧代码可读：只写勾选的）。 */
@@ -521,6 +609,8 @@ public final class PlanSubjects {
             }
             // ★ P14 主体设定（性别/年龄/身高/体态/性格/外貌）—— 空的不写
             s.traitsOrEmpty().write(o);
+            // ★ 2026-09-23 定妆照自定义提示词 —— 空的不写（= 用系统默认模板）
+            s.portraitPromptOrEmpty().write(o);
         }
         plan.set("subjects", arr);
         plan.set("referenceAssets", legacy);

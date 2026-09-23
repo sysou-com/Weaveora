@@ -819,16 +819,31 @@ const portraitPositive = ref('')
 const portraitNegative = ref('')
 const portraitPromptBusy = ref(false)
 const portraitGenBusy = ref(false)
+/**
+ * ★ 2026-09-23（用户要求）：定妆照弹框的**提示词语言**（与「AI 生成提示词」同口径，默认中文）。
+ * 它只决定「没有保存过自定义词时用哪种语言的系统默认模板」；已保存的词永远按它自己那份用
+ * （后端返回 `lang`）。
+ */
+const portraitLang = ref<'zh' | 'en'>('zh')
+/** 当前框里这份是「用户保存过的」还是「系统默认模板」（仅用于提示文案） */
+const portraitPromptSaved = ref(false)
+const portraitPromptSaving = ref(false)
 
 async function openPortraitDialog(name: string): Promise<void> {
   const revId = genRevisionId()
   if (!revId) return
   if (dirty.value && !(await savePlanInPlace())) return
   const picked = portraitRefCandidates()
+  const sub = planSubjects().find((x) => x.name === name)
   portraitSubject.value = name
   portraitRefIds.value = picked
   portraitPositive.value = ''
   portraitNegative.value = ''
+  // 语言初值：保存过 → 用它保存时的语言；否则跟随项目（与 AI 弹框同口径，缺省中文）
+  portraitLang.value = sub?.portraitPromptLang === 'en' ? 'en'
+    : sub?.portraitPromptLang === 'zh' ? 'zh'
+      : ((draft.value as { promptLang?: string } | null)?.promptLang === 'en' ? 'en' : 'zh')
+  portraitPromptSaved.value = false
   portraitOpen.value = true
   await loadPortraitPrompt()
 }
@@ -861,17 +876,19 @@ const portraitNoRef = computed<boolean>(() => {
   return !sub?.portraitAssetId
 })
 
-/** 拉取默认正/负向词（真源在后端 SubjectPrompts；拉不到就用本地兜底） */
-async function loadPortraitPrompt(): Promise<void> {
+/** 拉取正/负向词：**优先“该主体已保存的自定义词”**，没有才用系统默认模板（真源在后端 SubjectPrompts） */
+async function loadPortraitPrompt(lang?: 'zh' | 'en'): Promise<void> {
   const name = portraitSubject.value
   const revId = genRevisionId()
   portraitPromptBusy.value = true
   try {
     if (!revId) throw new Error('no revision')
     const d = await portraitPromptDefaults(workspaceId.value, projectId.value, revId, name,
-      portraitRefIds.value.length)
+      portraitRefIds.value.length, lang ?? portraitLang.value)
     portraitPositive.value = d.positivePrompt
     portraitNegative.value = d.negativePrompt
+    portraitPromptSaved.value = d.saved === true
+    if (d.lang === 'en' || d.lang === 'zh') portraitLang.value = d.lang
   } catch {
     const sub = planSubjects().find((x) => x.name === name)
     const kind = sub?.kind ?? 'person'
@@ -880,8 +897,65 @@ async function loadPortraitPrompt(): Promise<void> {
       : `${name} 标准设定图：主体居中、纯色背景、均匀布光、细节清晰；严格保持参考图的外形/材质/颜色。不要文字、不要边框。`
     portraitPositive.value = `标准角色设定图：${tail}`
     portraitNegative.value = 'text, watermark, logo, subtitle, multiple people, deformed face, extra limbs, lowres, blurry, 3d render, cgi'
+    portraitPromptSaved.value = false
   } finally {
     portraitPromptBusy.value = false
+  }
+}
+
+/**
+ * 切提示词语言（与「AI 生成提示词」同口径：选了就整条换成该语言的默认模板）。
+ *
+ * 为什么要重新拉一次：默认模板是按语言拼的（`SubjectPrompts` 是单一真源），
+ * 前端不另存一份英文模板。切完要**点「保存提示词」才会覆盖已保存的那份**（否则只是看看）。
+ */
+async function changePortraitLang(lang: 'zh' | 'en'): Promise<void> {
+  if (portraitLang.value === lang) return
+  portraitLang.value = lang
+  await loadPortraitPrompt(lang)
+  message.info(`已按${lang === 'zh' ? '中文' : '英文'}默认模板重新填充 —— 改完点「保存提示词」才会覆盖已保存的那份（若已保存过）`, { duration: 4000 })
+}
+
+/**
+ * ★ 2026-09-23（用户要求）：把弹框里这份提示词**就地保存到该主体**（方案 `subjects[]`）。
+ *
+ * 为什么走 `patchSubjectMeta`：它只改主体元数据、不影响生成语义 ⇒ **不另存 vN+1、不需重新确认**，
+ * 与「主体设定/别名」同一套口径。只提交 `hasPortraitPrompt` 这一组字段，
+ * 后端不带该标记的字段一律原样保留（别名/勾选/定妆图/档案不受影响）。
+ *
+ * `silent=true` 用于「生成前自动记住」：失败不打断生成（只提示）。
+ */
+async function savePortraitPrompt(silent = false): Promise<boolean> {
+  const revId = genRevisionId()
+  const name = portraitSubject.value
+  if (!revId || !name) return false
+  const pos = portraitPositive.value.trim()
+  if (!pos) {
+    if (!silent) message.warning('正向提示词不能为空（想回到系统默认模板请点「恢复默认词」）')
+    return false
+  }
+  const neg = portraitNegative.value.trim()
+  portraitPromptSaving.value = true
+  try {
+    await patchSubjectMeta(workspaceId.value, projectId.value, revId, [{
+      name,
+      hasPortraitPrompt: true,
+      portraitPositivePrompt: pos,
+      portraitNegativePrompt: neg,
+      portraitPromptLang: portraitLang.value,
+    }])
+    // ★ 同步本地草稿：不写回的话，以后一次「保存修改（手改版）」会用旧草稿把刚存的词盖掉
+    setPlanSubjects(planSubjects().map((s) => (s.name === name
+      ? { ...s, portraitPositivePrompt: pos, portraitNegativePrompt: neg, portraitPromptLang: portraitLang.value }
+      : s)))
+    portraitPromptSaved.value = true
+    if (!silent) message.success(`已保存「${name}」的定妆照提示词（已就地保存，无需重新确认；下次打开自动预填）`)
+    return true
+  } catch (e) {
+    message.warning(e instanceof Error ? e.message : '定妆照提示词保存失败')
+    return false
+  } finally {
+    portraitPromptSaving.value = false
   }
 }
 
@@ -905,6 +979,9 @@ async function confirmPortrait(): Promise<void> {
   portraitGenBusy.value = true
   portraitBusy.value = true
   try {
+    // ★ 2026-09-23（用户要求）：生成即记住这份词 —— 用户口径是“每次生成之后提示词都不保存”。
+    //   失败不拦（silent）：提示词没存上也要能把图出出来。
+    await savePortraitPrompt(true)
     const pickedIds = [...portraitRefIds.value]
     const created = await createJobsLive(workspaceId.value, projectId.value, {
       revisionId: revId,
@@ -1137,6 +1214,9 @@ async function saveSubjectMeta(): Promise<void> {
         build: x.build ?? '',
         personality: x.personality ?? '',
         appearance: x.appearance ?? '',
+        // ★ 2026-09-23：**故意不在这里带 `hasPortraitPrompt`** —— 后端口径是“不带这个标记就原样保留”，
+        //   所以“只改别名/勾选”永远不会把用户保存的定妆照提示词洗掉；
+        //   若要改/清空提示词，走弹框里的「保存提示词」（它才带 hasPortraitPrompt=true）。
       })))
     // 元数据已落库 → 不置脏（避免又要求“保存 + 确认”）
     metaSyncedAt.value = Date.now()
@@ -1249,7 +1329,11 @@ function syncReferenceAssets(): void {
     out.push({ name, kind: old?.kind ?? 'person', aliases: [...(old?.aliases ?? []), ...extra], enabled: old?.enabled ?? true, locked: old?.locked ?? false, refs: refsOf, portraitAssetId: old?.portraitAssetId ?? '', portraitVersion: old?.portraitVersion ?? 0, region: old?.region ?? null,
       // ★ P14：人物档案不能在这里被抹掉（syncReferenceAssets 每次改参考图都会重建 subjects）
       gender: old?.gender ?? '', age: old?.age ?? '', height: old?.height ?? '', build: old?.build ?? '',
-      personality: old?.personality ?? '', appearance: old?.appearance ?? '' })
+      personality: old?.personality ?? '', appearance: old?.appearance ?? '',
+      // ★ 2026-09-23：同理 —— 用户保存过的定妆照提示词也不能被重建抹掉（同一类腐化点）
+      portraitPositivePrompt: old?.portraitPositivePrompt ?? '',
+      portraitNegativePrompt: old?.portraitNegativePrompt ?? '',
+      portraitPromptLang: old?.portraitPromptLang ?? '' })
     byName.delete(name)
   }
   // 没有素材图但有定妆图/别名的主体也要保留（否则一键抽取的结果会丢）
@@ -5416,10 +5500,30 @@ const shotTotal = computed(() => {
             · <button type="button" class="link-btn" @click="openTraits(portraitSubject)">补主体设定（性别/年龄…）</button>
           </template>
         </p>
+        <!-- ★ 2026-09-23（用户要求）：像「AI 生成提示词」一样可选提示词语言；默认中文；切换会用该语言的默认模板重填 -->
+        <div class="ai-lang-row">
+          <span class="ai-label" style="margin: 0">提示词语言</span>
+          <NRadioGroup :value="portraitLang" size="small" data-testid="portrait-lang"
+                       @update:value="(v) => changePortraitLang(v as 'zh' | 'en')">
+            <NRadioButton value="zh">中文</NRadioButton>
+            <NRadioButton value="en">English</NRadioButton>
+          </NRadioGroup>
+          <span class="text-secondary" style="font-size: 11.5px">
+            切换会用该语言的默认模板重填（保存过的词按它保存时的语言回位）
+          </span>
+        </div>
         <template v-if="portraitPromptBusy">
-          <div class="g-loading" style="padding: 20px 0">读取默认提示词…</div>
+          <div class="g-loading" style="padding: 20px 0">读取提示词…</div>
         </template>
         <template v-else>
+          <p class="text-secondary" style="font-size: 11.5px; margin: 0 0 8px" data-testid="portrait-prompt-source">
+            <template v-if="portraitPromptSaved">
+              ✓ 当前用的是<b>你保存过的</b>提示词（改完点「保存提示词」覆盖）
+            </template>
+            <template v-else>
+              当前是<b>系统默认模板</b>（{{ portraitLang === 'zh' ? '中文' : '英文' }}）；改完点「保存提示词」就会记住
+            </template>
+          </p>
           <div class="ai-fields">
             <label class="ai-label">正向提示词（定妆规范 + 你的要求；可改）</label>
             <NInput v-model:value="portraitPositive" type="textarea" :autosize="{ minRows: 4, maxRows: 10 }"
@@ -5430,15 +5534,24 @@ const shotTotal = computed(() => {
           </div>
           <p class="text-secondary" style="font-size: 11.5px; margin: 10px 0 0">
             提示：定妆照建议**纯色背景、正面半身、中性表情**（后续它会被当作锚定图喂进每一镜；
-            带白底/影棚背景的原图容易把构图带偏，worker 会自动在负词里追加“白色背景/证件照”类词）。
-            只改上面这两栏；确认后会**用这些参考图 + 这份提示词**生成新的一版定妆照。
+            带白底/影棚背景的原图容易把构图带偏，worker 会自动在负词里追加“白色背景/证件照”类词）。<br>
+            <b>「保存提示词」</b>会就地存到该主体（不另存版本、不用重新确认），下次打开自动预填；
+            <b>「生成定妆照」也会自动记住</b>这份词。保存的是你看到的整段文本，参考图张数变了也不会自动改那句
+            <code>Reference image(s): N</code>（想跟着张数走就点「恢复默认词」重生成再改）。
           </p>
           <div class="ai-actions">
-            <NButton size="small" :disabled="portraitGenBusy" @click="portraitOpen = false">取消</NButton>
-            <NButton size="small" :disabled="portraitGenBusy" @click="loadPortraitPrompt">恢复默认词</NButton>
+            <NButton size="small" :disabled="portraitGenBusy || portraitPromptSaving" @click="portraitOpen = false">取消</NButton>
+            <NButton size="small" :disabled="portraitGenBusy || portraitPromptSaving"
+                     data-testid="portrait-restore-default" @click="loadPortraitPrompt(portraitLang)">恢复默认词</NButton>
+            <NButton size="small" secondary :loading="portraitPromptSaving" :disabled="portraitGenBusy"
+                     data-testid="portrait-save-prompt"
+                     title="就地保存到该主体（不另存版本、不用重新确认）；下次打开自动预填"
+                     @click="savePortraitPrompt()">
+              保存提示词
+            </NButton>
             <NButton size="small" type="primary" :loading="portraitGenBusy"
                      data-testid="portrait-generate"
-                     :title="portraitNoRef ? '零参考：会退化成纯文生图，可能出噪声图（仍可继续，会二次确认）' : '用上面的参考图 + 提示词生成定妆照'"
+                     :title="portraitNoRef ? '零参考：会退化成纯文生图，可能出噪声图（仍可继续，会二次确认）' : '用上面的参考图 + 提示词生成定妆照（并自动记住这份词）'"
                      @click="confirmPortrait">
               生成定妆照
             </NButton>

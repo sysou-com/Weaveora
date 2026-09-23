@@ -387,9 +387,16 @@ sequenceDiagram
 1. **锚定只用定妆照**：出图时每个主体注入的参考图 = 该主体的定妆照；**没有定妆照的主体不注入**（主主体缺定妆照则直接报错中止，绝不拿别的图凑合）。
 2. **参考图（上传素材）只作为「生成定妆照 / 指定定妆照」的输入**，**不参与出图锚定**。
    界面上「参考图」区的加入/移出与勾选，语义都是「作为生成定妆照的候选参考」，不得写成「参与锚定」。
-3. **定妆照生成也走用户确认闸门**（同 §0-3）：点「生成定妆照」先弹出可编辑的**正/负向提示词**（预填系统默认模板），
+3. **定妆照生成也走用户确认闸门**（同 §0-3）：点「生成定妆照」先弹出可编辑的**正/负向提示词**，
    用户确认后，才用「该主体选定的参考图 + 这份提示词」出图；默认模板的单一真源在后端（`SubjectPrompts`），
    前端只做展示与编辑，不得另写一份。
+   **预填顺序（2026-09-23 用户裁定）：该主体已保存的自定义词 > 系统默认模板**。
+   自定义词落在方案 `subjects[].portraitPositivePrompt / portraitNegativePrompt / portraitPromptLang`，
+   由弹框的「保存提示词」按钮（或点「生成定妆照」时自动）经 `POST …/subjects/meta`（带 `hasPortraitPrompt=true`）**就地保存** ——
+   不另存 vN+1、不需重新确认（与主体档案/别名同一套口径）；后端**只有收到 `hasPortraitPrompt` 才替换**，
+   否则原样保留（所以「改个别名/勾选」永远不会把用户存的词洗掉）。保存的是用户看到的**整段文本**，生成时原样使用。
+   弹框还提供**提示词语言**（`zh`|`en`，**默认中文**，与「AI 生成提示词」弹框同口径）：
+   只决定“没保存过时用哪种语言的默认模板”（`SubjectPrompts.portraitPrompt(…, lang)`），已保存的词按它自己保存时的语言回位。
 
 > 位置（画面构图）由用户在「位置总控（相对位置 / 区域%）」显式设定，并由系统作为**最终裁定**写进提示词
 > （`Picture N (imageN) = 主体 (方位, x/y, 框 w×h)` + 「位置以本清单为准」）。因此 **LLM 不得在 `positive_prompt` 里自行发明画面方位**
@@ -446,7 +453,7 @@ sequenceDiagram
    |---|---|
    | 导演生成 / 单镜重写 LLM 上下文 | `DirectorService.settingAndSubjectBlock()`（`buildUserPrompt` 与 `rewritePrompt` 共用） |
    | 出图正词（每镜） | `JobService.applySetting()`（年代，追加 `【设定年代/世界观】`）+ `applyLayoutRegions()`（`Picture N = 主体[档案]`） |
-   | 定妆照提示词 | `SubjectPrompts.portraitPrompt(name, kind, refCount, traits)` |
+   | 定妆照提示词 | `SubjectPrompts.portraitPrompt(name, kind, refCount, traits, lang)`（已保存的自定义词优先，见 §7.5.1-3） |
 
 > **`subjects[]` 与 `setting` 都归用户所有**：导演新一版时由 `DirectorService.mergePrevSubjectsAndSetting()`
 > 强制继承上一版（丢弃 LLM 自己编的 `subjects`），否则一带而过就会把定妆照与档案洗掉（等价于“一致性突然全崩”）。

@@ -97,6 +97,9 @@ public class DirectorController {
      *
      * <p>★ P14：kind 与人物档案（性别/年龄/…）**从方案的 subjects[] 读**，不由前端传 ——
      * 否则前端拿着旧草稿就能生成一份与方案不一致的定妆提示词。
+     *
+     * <p>★ 2026-09-23（用户要求）：已保存的自定义词优先（见 `subjects[].portraitPositivePrompt`）；
+     * 返回体多两个字段：{@code saved}（用的是不是保存过的词）、{@code lang}（zh|en，供弹框语言选择器回位）。
      */
     @GetMapping("/revisions/{revisionId}/portrait-prompt")
     public ResponseEntity<java.util.Map<String, Object>> portraitPrompt(
@@ -105,9 +108,10 @@ public class DirectorController {
             @PathVariable UUID projectId,
             @PathVariable UUID revisionId,
             @RequestParam(name = "subject") String subject,
-            @RequestParam(name = "refCount", required = false, defaultValue = "0") int refCount) {
+            @RequestParam(name = "refCount", required = false, defaultValue = "0") int refCount,
+            @RequestParam(name = "lang", required = false, defaultValue = "zh") String lang) {
         return ResponseEntity.ok(directorService.portraitPromptDefaults(
-                uid(request), ws(workspaceId), projectId, revisionId, subject, Math.max(0, refCount)));
+                uid(request), ws(workspaceId), projectId, revisionId, subject, Math.max(0, refCount), lang));
     }
 
     /** P11：AI 一键配乐（依据剧情给出 2~5 段「时间段 + 情绪」）。 */

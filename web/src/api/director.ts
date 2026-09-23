@@ -196,6 +196,9 @@ export async function extractSubjects(
  *
  * 后端从**方案 subjects[]** 读 kind 与人物档案（性别/年龄/…），所以必须传 revisionId ——
  * 保证「弹框里看到的就是 createPortraitJob 真正会用的那份」。
+ *
+ * ★ 2026-09-23（用户要求）：**若该主体保存过自定义词，后端直接返回那一份**（`saved=true`），
+ * `lang` 只决定“没有保存过时用哪种语言的默认模板”。
  */
 export async function portraitPromptDefaults(
   workspaceId: string,
@@ -203,13 +206,18 @@ export async function portraitPromptDefaults(
   revisionId: string,
   subject: string,
   refCount: number,
+  lang: 'zh' | 'en' = 'zh',
 ): Promise<{
   positivePrompt: string
   negativePrompt: string
   kind?: string
   traits?: Record<string, string>
+  /** true = 这份是用户自己保存过的（不是系统默认模板） */
+  saved?: boolean
+  /** 实际使用的语言（保存过的词以它保存时的语言为准） */
+  lang?: 'zh' | 'en'
 }> {
-  const qs = new URLSearchParams({ subject, refCount: String(refCount) })
+  const qs = new URLSearchParams({ subject, refCount: String(refCount), lang })
   return request(`/api/v1/projects/${projectId}/revisions/${revisionId}/portrait-prompt?${qs.toString()}`, {
     headers: { [WORKSPACE_HEADER]: workspaceId },
   })
@@ -235,6 +243,15 @@ export async function patchSubjectMeta(
     build?: string
     personality?: string
     appearance?: string
+    /**
+     * ★ 2026-09-23：定妆照**自定义提示词**。
+     * `hasPortraitPrompt=true` 时后端整份替换（允许清空 = 回到系统默认模板）；
+     * 不带这个键则**原样保留**已有值（改别名/勾选不会把它洗掉）。
+     */
+    hasPortraitPrompt?: boolean
+    portraitPositivePrompt?: string
+    portraitNegativePrompt?: string
+    portraitPromptLang?: 'zh' | 'en' | string
   }>,
 ): Promise<RevisionDetail> {
   return request<RevisionDetail>(`/api/v1/projects/${projectId}/revisions/${revisionId}/subjects/meta`, {

@@ -36,28 +36,53 @@ public final class SubjectPrompts {
     private SubjectPrompts() {
     }
 
-    /** 组装该主体的定妆图正向提示词（默认值）。 */
+    /** 组装该主体的定妆图正向提示词（默认值，中文）。 */
     public static String portraitPrompt(String name, String kind, int refCount) {
-        return portraitPrompt(name, kind, refCount, null);
+        return portraitPrompt(name, kind, refCount, null, "zh");
+    }
+
+    /** 组装该主体的定妆图正向提示词（默认值，中文）。 */
+    public static String portraitPrompt(String name, String kind, int refCount,
+                                       studio.weaveora.director.plan.PlanSubjects.Traits traits) {
+        return portraitPrompt(name, kind, refCount, traits, "zh");
     }
 
     /**
      * 组装该主体的定妆图正向提示词（默认值）。
      *
      * ★ P14（2026-09-16 用户要求）：把「主体设定」（性别/年龄/身高/体态/性格/外貌）拼进定妆提示词 ——
-     * 定妆照是所有分镜的**唯一错定图**，如果它本身就把性别/年龄段画错，后面每一镜都会错。
+     * 定妆照是所有分镜的**唯一锚定图**，如果它本身就把性别/年龄段画错，后面每一镜都会错。
+     *
+     * ★ 2026-09-23（用户要求）：定妆照弹框也要能选**提示词语言**（与「AI 生成提示词」同口径，默认中文）。
+     *   {@code lang=en} 时四项模板与人物档案句都走英文；**负向词本来就是中英双语**（{@link #PORTRAIT_NEGATIVE}）；
+     *   参考图计数句两种语言都用英文（模型对 "Reference image(s)" 更敏感，且旧行为即如此，不改）。
+     *
+     * @param lang {@code zh}（缺省）/ {@code en}；其它值一律当 {@code zh}
      */
     public static String portraitPrompt(String name, String kind, int refCount,
-                                       studio.weaveora.director.plan.PlanSubjects.Traits traits) {
-        String core = portraitCore(name, kind);
+                                       studio.weaveora.director.plan.PlanSubjects.Traits traits,
+                                       String lang) {
+        boolean zh = !isEn(lang);
+        String core = portraitCore(name, kind, zh ? "zh" : "en");
         if (traits != null && !traits.isEmpty()) {
-            core += "\n角色设定（必须体现在画面里）：" + traits.describe(true) + "。";
-            String gz = traits.genderZh();
-            if (!gz.isEmpty()) {
-                core += "这个角色是「" + gz + "」，"
-                        + ("男".equals(gz) ? "严重禁止画成女性、不要女性化的五官与发型服装。"
-                                           : "女".equals(gz) ? "严重禁止画成男性、不要男性化的五官与体型。"
-                                                             : "请按参考图与上面的描述如实表现性别特征。");
+            if (zh) {
+                core += "\n角色设定（必须体现在画面里）：" + traits.describe(true) + "。";
+                String gz = traits.genderZh();
+                if (!gz.isEmpty()) {
+                    core += "这个角色是「" + gz + "」，"
+                            + ("男".equals(gz) ? "严重禁止画成女性、不要女性化的五官与发型服装。"
+                                               : "女".equals(gz) ? "严重禁止画成男性、不要男性化的五官与体型。"
+                                                                 : "请按参考图与上面的描述如实表现性别特征。");
+                }
+            } else {
+                core += "\nCharacter specs (must be visible in the image): " + traits.describe(false) + ".";
+                String ge = traits.genderEn();
+                if (!ge.isEmpty()) {
+                    core += " This character is " + ge.toUpperCase() + " — "
+                            + ("male".equals(ge) ? "strictly forbidden to depict a female: no feminine facial features, hairstyle or clothing."
+                                                 : "female".equals(ge) ? "strictly forbidden to depict a male: no masculine facial features or build."
+                                                                       : "depict the gender faithfully per the reference and the specs above.");
+                }
             }
         }
         if (refCount > 0) {
@@ -67,9 +92,49 @@ public final class SubjectPrompts {
         return core;
     }
 
-    /** 主语模板（不含参考图计数句），供前端弹框展示/微调。 */
+    /** 语言归一：除显式 {@code en} 外一律当中文（与前端选择器的默认值口径一致）。 */
+    private static boolean isEn(String lang) {
+        return lang != null && "en".equalsIgnoreCase(lang.trim());
+    }
+
+    /** 主语模板（不含参考图计数句），中文；供前端弹框展示/微调。 */
     public static String portraitCore(String name, String kind) {
+        return portraitCore(name, kind, "zh");
+    }
+
+    /**
+     * 主语模板（不含参考图计数句），按语言取。
+     *
+     * ★ 注意：返回值会过 {@code String.format(..., name)} ⇒ 正文里任何字面量百分号必须写成 {@code %%}。
+     */
+    public static String portraitCore(String name, String kind, String lang) {
         String k = kind == null ? "" : kind.trim().toLowerCase();
+        if (isEn(lang)) {
+            String baseEn = switch (k) {
+                case "vehicle" ->
+                        "Standard sheet (three-view feel): %s — overall silhouette clear, structural details accurate, "
+                                + "pure white background, even lighting, photoreal cinematic look; strictly preserve the "
+                                + "reference's shape, livery and proportions. Draw only this one subject: no text, "
+                                + "no frame, no multiple subjects.";
+                case "object" ->
+                        "Standard prop sheet: %s — centered, pure white background, even lighting, crisp details, "
+                                + "photoreal look; strictly preserve the reference's shape, material and colour. "
+                                + "Draw only this one object: no text, no frame.";
+                case "scene" ->
+                        "Standard environment sheet: %s — wide establishing composition, no people, natural light, "
+                                + "clear depth layers; strictly preserve the reference's spatial structure and mood. "
+                                + "Draw only this one scene: no text, no frame.";
+                default ->
+                        "Standard character sheet: %s — front-facing half-body (waist up, head and shoulders to chest), "
+                                + "neutral expression, pure white background (#FFFFFF), subject fills the frame, "
+                                + "gap between head top and frame top under 5%%, no large empty margins, face large and "
+                                + "sharp, upper costume and accessories (headpiece / jewellery / collar / lapel) clearly "
+                                + "legible, soft even lighting, photoreal cinematic look; strictly preserve the reference "
+                                + "character's features (face, hair, costume, apparent age). Draw only this one character: "
+                                + "no text, no frame, no extra people, no environment or scene elements.";
+            };
+            return String.format(baseEn, name == null ? "" : name);
+        }
         String base = switch (k) {
             case "vehicle" ->
                     "标准设定图（三视图感）：%s 整体外形清晰、结构细节准确、纯白色背景、均匀布光、写实电影质感；"

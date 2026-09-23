@@ -196,6 +196,17 @@ export interface PlanSubject {
   build?: string
   personality?: string
   appearance?: string
+  /**
+   * ★ 2026-09-23（用户要求）：该主体的**定妆照自定义正/负向提示词**。
+   *
+   * 为什么存在这里：定妆照提示词是「主体」的属性，与档案/参考图/定妆图同一个真源；
+   * 全空 = 用后端 `SubjectPrompts` 的系统默认模板（旧数据即此状态）。
+   * 语义：保存的是用户**看到的整段文本**，生成时原样使用（不重新拼装）。
+   */
+  portraitPositivePrompt?: string
+  portraitNegativePrompt?: string
+  /** 保存提示词时用的是哪种语言（zh|en），弹框语言选择器靠它回位 */
+  portraitPromptLang?: 'zh' | 'en' | ''
 }
 
 export interface DirectorShot {
@@ -676,6 +687,13 @@ export interface ServiceEndpoints {
     width?: number | null
     height?: number | null
     denoise?: number | null
+    /** FLUX.2 Turbo 档的 LoRA（worker 的 IMAGE_LORA；为空 = 不挂） */
+    lora?: string | null
+    loraStrength?: number | null
+    /** Wan 档 LoRA 的 cfg / （FLUX.2 档）steps、guidance 覆盖 */
+    loraCfg?: number | null
+    loraStepsFlux2?: number | null
+    loraCfgFlux2?: number | null
   } | null
 }
 

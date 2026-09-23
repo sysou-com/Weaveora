@@ -2554,18 +2554,32 @@ public class JobService {
         payload.put("portrait_version", (sub == null ? 1 : sub.portraitVersion() + 1));
         // ★ P13b（2026-09-16 用户要求）：定妆图也要像分镜一样**先弹正/负向提示词让用户改**。
         //   用户确认过的就照用（不再被默认模板覆盖）；没给（旧链路 / 直接调 API）才用默认模板。
+        // ★ 2026-09-23（用户要求）：取值顺序 = **请求里带的 > 主体已保存的自定义词 > 系统默认模板**。
+        //   已保存的那份在 `subjects[].portraitPositivePrompt/portraitNegativePrompt`（弹框里点「保存」或直接生成时写入）。
+        var savedPortraitPrompt = sub == null
+                ? studio.weaveora.director.plan.PlanSubjects.PortraitPrompt.EMPTY
+                : sub.portraitPromptOrEmpty();
         String positivePrompt = req.positivePrompt() == null ? "" : req.positivePrompt().trim();
         String negativePrompt = req.negativePrompt() == null ? "" : req.negativePrompt().trim();
         if (positivePrompt.isEmpty()) {
-            positivePrompt = studio.weaveora.director.SubjectPrompts.portraitPrompt(
-                    subject, sub == null ? null : sub.kind(), keys.size(),
-                    // ★ P14：定妆照必须体现主体设定（性别/年龄/体态/外貌）—— 它是所有分镜的唯一错定图
-                    sub == null ? studio.weaveora.director.plan.PlanSubjects.Traits.EMPTY : sub.traitsOrEmpty());
+            if (savedPortraitPrompt.hasPrompt() && !savedPortraitPrompt.positive().isBlank()) {
+                positivePrompt = savedPortraitPrompt.positive();
+                log.info("portrait 用主体已保存的正词 project={} subject={} len={}",
+                        projectId, subject, positivePrompt.length());
+            } else {
+                positivePrompt = studio.weaveora.director.SubjectPrompts.portraitPrompt(
+                        subject, sub == null ? null : sub.kind(), keys.size(),
+                        // ★ P14：定妆照必须体现主体设定（性别/年龄/体态/外貌）—— 它是所有分镜的唯一锚定图
+                        sub == null ? studio.weaveora.director.plan.PlanSubjects.Traits.EMPTY : sub.traitsOrEmpty(),
+                        savedPortraitPrompt.langOrZh());
+            }
         } else {
             log.info("portrait 用户自定义正词 project={} subject={} len={}", projectId, subject, positivePrompt.length());
         }
         if (negativePrompt.isEmpty()) {
-            negativePrompt = studio.weaveora.director.SubjectPrompts.portraitNegativePrompt();
+            negativePrompt = savedPortraitPrompt.hasPrompt() && !savedPortraitPrompt.negative().isBlank()
+                    ? savedPortraitPrompt.negative()
+                    : studio.weaveora.director.SubjectPrompts.portraitNegativePrompt();
         }
         payload.put("positive_prompt", positivePrompt);
         payload.put("negative_prompt", negativePrompt);

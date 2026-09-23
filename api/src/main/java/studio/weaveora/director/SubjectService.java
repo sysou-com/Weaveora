@@ -90,7 +90,10 @@ public class SubjectService {
                 byName.put(mergeInto, new PlanSubjects.Subject(old.name(), old.kind(), merged,
                         old.enabled(), old.locked(), old.refs(), old.portraitAssetId(), old.portraitVersion(),
                         // ★ P14：合并时把 LLM 新抽到的属性并进来（旧值优先，缺失才用新的）
-                        old.traitsOrEmpty().merge(p.traitsOrEmpty())));
+                        old.traitsOrEmpty().merge(p.traitsOrEmpty()),
+                        // ★ 2026-09-23：定妆照自定义提示词属于用户，抽取主体时**必须原样带走**
+                        //   （旧调用点用的是不含该字段的兼容构造 → 等于每次抽取都把用户保存的提示词洗掉）
+                        old.portraitPromptOrEmpty().merge(p.portraitPromptOrEmpty())));
                 continue;
             }
             if (byName.containsKey(p.name())) {
@@ -107,7 +110,9 @@ public class SubjectService {
                         merged, old.enabled(), old.locked(), old.refs(),
                         old.portraitAssetId(), old.portraitVersion(),
                         // ★ P14：用户已经填过的属性不覆盖，只补空的
-                        old.traitsOrEmpty().merge(p.traitsOrEmpty())));
+                        old.traitsOrEmpty().merge(p.traitsOrEmpty()),
+                        // ★ 2026-09-23：同上 —— 保用户的定妆照提示词
+                        old.portraitPromptOrEmpty().merge(p.portraitPromptOrEmpty())));
             } else {
                 byName.put(p.name(), p);
                 added.add(p.name());

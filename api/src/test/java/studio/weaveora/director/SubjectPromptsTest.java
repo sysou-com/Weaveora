@@ -2,6 +2,7 @@ package studio.weaveora.director;
 
 import org.junit.jupiter.api.Test;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -88,5 +89,77 @@ class SubjectPromptsTest {
                 studio.weaveora.director.plan.PlanSubjects.Traits.EMPTY);
         assertFalse(p.contains("角色设定（必须体现在画面里）"), p);
         assertTrue(p.contains("标准角色设定图"), p);
+    }
+
+    // ---------- ★ 2026-09-23（用户要求）：定妆照弹框也要能选**提示词语言**（默认中文） ----------
+
+    @Test
+    void languageDefaultsToChineseWhenNotGiven() {
+        assertEquals(SubjectPrompts.portraitPrompt("宝玉", "person", 0),
+                SubjectPrompts.portraitPrompt("宝玉", "person", 0, null, "zh"));
+        // 认不出的语言值一律当中文（防前端传来 null/空/大写/乱码）
+        assertEquals(SubjectPrompts.portraitPrompt("宝玉", "person", 0),
+                SubjectPrompts.portraitPrompt("宝玉", "person", 0, null, ""));
+        assertEquals(SubjectPrompts.portraitPrompt("宝玉", "person", 0),
+                SubjectPrompts.portraitPrompt("宝玉", "person", 0, null, "cn"));
+        assertEquals(SubjectPrompts.portraitPrompt("宝玉", "person", 0),
+                SubjectPrompts.portraitPrompt("宝玉", "person", 0, null, null));
+    }
+
+    @Test
+    void englishTemplateKeepsTheSameGuardRails() {
+        String en = SubjectPrompts.portraitPrompt("宝玉", "person", 2, null, "en");
+        assertTrue(en.contains("宝玉"), en);
+        assertTrue(en.contains("Standard character sheet"), en);
+        assertTrue(en.contains("pure white background"), en);
+        // 与中文模板同一套硬规则：单主体 / 无文字 / 无环境
+        assertTrue(en.contains("no extra people"), en);
+        assertTrue(en.contains("no text"), en);
+        assertTrue(en.contains("no environment"), en);
+        // 参考图计数句两种语言都用英文（模型对这句更敏感，且旧行为即如此）
+        assertTrue(en.contains("Reference image(s): 2"), en);
+        assertFalse(en.contains("标准角色设定图"), en);
+        // 大小写不敏感（前端可能传 EN）
+        assertTrue(SubjectPrompts.portraitPrompt("宝玉", "person", 0, null, "EN").contains("Standard character sheet"));
+    }
+
+    @Test
+    void englishTraitsAndGenderBanAreTranslated() {
+        var traits = new studio.weaveora.director.plan.PlanSubjects.Traits(
+                "male", "17", "178cm", "清瘦", "多情敏感", "大红箭袖");
+        String en = SubjectPrompts.portraitPrompt("宝玉", "person", 0, traits, "en");
+        assertTrue(en.contains("Character specs (must be visible in the image): gender male (男)"), en);
+        assertTrue(en.contains("age 17"), en);
+        assertTrue(en.contains("This character is MALE"), en);
+        assertTrue(en.contains("forbidden to depict a female"), en);
+
+        String female = SubjectPrompts.portraitPrompt("可卿", "person", 0,
+                new studio.weaveora.director.plan.PlanSubjects.Traits("female", "", "", "", "", ""), "en");
+        assertTrue(female.contains("forbidden to depict a male"), female);
+
+        String other = SubjectPrompts.portraitPrompt("某人", "person", 0,
+                new studio.weaveora.director.plan.PlanSubjects.Traits("other", "", "", "", "", ""), "en");
+        assertTrue(other.contains("depict the gender faithfully"), other);
+    }
+
+    @Test
+    void englishKindTemplatesAndUnknownKindFallback() {
+        String vehicle = SubjectPrompts.portraitPrompt("赤兔马", "vehicle", 0, null, "en");
+        assertTrue(vehicle.contains("three-view"), vehicle);
+        String object = SubjectPrompts.portraitPrompt("通灵宝玉", "object", 0, null, "en");
+        assertTrue(object.contains("Standard prop sheet"), object);
+        String scene = SubjectPrompts.portraitPrompt("太虚幻境", "scene", 0, null, "en");
+        assertTrue(scene.contains("Standard environment sheet"), scene);
+        String unknown = SubjectPrompts.portraitPrompt("宝玉", "???", 0, null, "en");
+        assertTrue(unknown.contains("Standard character sheet"), unknown);
+        assertNotEquals(vehicle, unknown);
+    }
+
+    @Test
+    void negativePromptIsBilingualSoItWorksForBothLanguages() {
+        // 负词是单一真源、中英双写 → 选 en 时不必也另写一份（否则两份会漂移）
+        String neg = SubjectPrompts.portraitNegativePrompt();
+        assertTrue(neg.contains("watermark"), neg);
+        assertTrue(neg.contains("水印"), neg);
     }
 }

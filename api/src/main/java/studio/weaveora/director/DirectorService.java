@@ -484,10 +484,20 @@ public class DirectorService {
                 studio.weaveora.director.plan.PlanSubjects.Traits nextTraits = in.path("hasTraits").asBoolean(false)
                         ? studio.weaveora.director.plan.PlanSubjects.Traits.parse(in)
                         : cur.traitsOrEmpty();
+                // ★ 2026-09-23（用户要求）：定妆照**自定义正/负向提示词**就地可改。
+                //   与 traits 同口径：带 "hasPortraitPrompt" 标记才整份替换（允许清空 = 回到系统默认模板），
+                //   否则**原样保留** —— 否则用户“只改个别名”就会把保存的提示词洗掉。
+                studio.weaveora.director.plan.PlanSubjects.PortraitPrompt nextPortraitPrompt =
+                        in.path("hasPortraitPrompt").asBoolean(false)
+                                ? new studio.weaveora.director.plan.PlanSubjects.PortraitPrompt(
+                                        in.path("portraitPositivePrompt").asText("").trim(),
+                                        in.path("portraitNegativePrompt").asText("").trim(),
+                                        in.path("portraitPromptLang").asText("").trim())
+                                : cur.portraitPromptOrEmpty();
                 subs.set(hit, new studio.weaveora.director.plan.PlanSubjects.Subject(
                         cur.name(), cur.kind(), nextAliases,
                         in.has("enabled") ? in.path("enabled").asBoolean(true) : cur.enabled(),
-                        cur.locked(), cur.refs(), portraitId, portraitVer, nextTraits));
+                        cur.locked(), cur.refs(), portraitId, portraitVer, nextTraits, nextPortraitPrompt));
             }
         }
         studio.weaveora.director.plan.PlanSubjects.write(obj, subs);
@@ -681,35 +691,58 @@ public class DirectorService {
     }
 
     /**
-     * P13b/P14：定妆图默认正/负向提示词（前端弹框预填）。
+     * P13b/P14：定妆图正/负向提示词（前端弹框预填）。
      *
      * <p>kind 与人物档案（性别/年龄/身高/体态/性格/外貌）从**方案 subjects[]** 读，
      * 保证「弹框里看到的就是 createPortraitJob 真正会用的那份」。
+     *
+     * ★ 2026-09-23（用户要求）：**已保存的自定义词优先**。用户在弹框里改完点「保存」（或直接生成）后，
+     * 这份词就存在 `subjects[].portraitPositivePrompt/portraitNegativePrompt` 里；再打开弹框预填它，
+     * 而不是每次都拿系统默认模板重新拼（旧行为 = 改完就丢）。没有保存过才回落到默认模板。
+     *
+     * @param lang 期望的默认模板语言（{@code zh} 缺省 / {@code en}）；
+     *             已保存的自定义词永远按**它自己保存时的语言**返回（`savedLang`）
      */
     @Transactional(readOnly = true)
     public java.util.Map<String, Object> portraitPromptDefaults(UUID userId, UUID workspaceId, UUID projectId,
-                                                                 UUID revisionId, String subject, int refCount) {
+                                                                 UUID revisionId, String subject, int refCount,
+                                                                 String lang) {
         context.require(userId, workspaceId, projectId);
         PromptRevision r = findRevision(workspaceId, projectId, revisionId);
         JsonNode plan = r.schemaJson() == null ? mapper.createObjectNode() : r.schemaJson();
         String kind = null;
         studio.weaveora.director.plan.PlanSubjects.Traits traits =
                 studio.weaveora.director.plan.PlanSubjects.Traits.EMPTY;
+        studio.weaveora.director.plan.PlanSubjects.PortraitPrompt saved =
+                studio.weaveora.director.plan.PlanSubjects.PortraitPrompt.EMPTY;
         for (studio.weaveora.director.plan.PlanSubjects.Subject s
                 : studio.weaveora.director.plan.PlanSubjects.parse(plan)) {
             if (studio.weaveora.director.plan.PlanSubjects.isSameSubject(s, subject)) {
                 kind = s.kind();
                 traits = s.traitsOrEmpty();
+                saved = s.portraitPromptOrEmpty();
                 break;
             }
         }
         if (kind == null && (subject == null || subject.isBlank())) {
             throw new BizException(ErrorCode.VALIDATION, "缺少 subject（要生成哪个主体的定妆图）");
         }
+        String outLang = saved.hasPrompt() ? saved.langOrZh()
+                : ("en".equalsIgnoreCase(lang == null ? "" : lang.trim()) ? "en" : "zh");
+        // ★ 防御：只有负词、没有正词（API 直写才可能造出这种数据）时，
+        //   正词仍应回落默认模板（否则弹框预填一个空正词、一生成就被拦）。
+        boolean hasSavedPositive = saved.hasPrompt() && saved.positive() != null && !saved.positive().isBlank();
         var out = new java.util.LinkedHashMap<String, Object>();
-        out.put("positivePrompt", studio.weaveora.director.SubjectPrompts.portraitPrompt(
-                subject, kind, Math.max(0, refCount), traits));
-        out.put("negativePrompt", studio.weaveora.director.SubjectPrompts.portraitNegativePrompt());
+        out.put("positivePrompt", hasSavedPositive
+                ? saved.positive()
+                : studio.weaveora.director.SubjectPrompts.portraitPrompt(
+                        subject, kind, Math.max(0, refCount), traits, outLang));
+        out.put("negativePrompt", saved.hasPrompt() && saved.negative() != null && !saved.negative().isBlank()
+                ? saved.negative()
+                : studio.weaveora.director.SubjectPrompts.portraitNegativePrompt());
+        // ★ 前端靠这两个字段：① 弹框标出“当前用的是你保存的词”；② 语言选择器回到保存时那个语言
+        out.put("saved", hasSavedPositive);
+        out.put("lang", outLang);
         out.put("kind", kind == null ? "" : kind);
         out.put("traits", traits.isEmpty() ? java.util.Map.of() : java.util.Map.of(
                 "gender", traits.gender() == null ? "" : traits.gender(),
