@@ -135,6 +135,22 @@ if (req.services() != null) {
 
 ---
 
+## 0.6 ★ 生产配置基线（**文生图 / 图生图 / 图生视频以此为准**）
+
+> 快照时间 **2026-09-24 01:20 实测回读**（API/Web 已按本基线部署）。任何“当时到底跑的什么”的争议，一律以本节 + 回读命令为准。
+
+| 通路 | 现役配置 | 配在哪 |
+|---|---|---|
+| **文生图**（定妆照 / 无参考帧） | `workflow=/opt/weaveora/workflows/flux2_dev_txt2img_api.json`；`steps=20`（→`Flux2Scheduler`）、`cfg=4.0`（→`FluxGuidance`）、`denoise=1.0`、`lora=null` | DB `user_engine_settings.services.image.*` |
+| **图生图 / 多参考改图**（关键帧） | `editWorkflow=…/flux2_dev_edit_api.json`（`ReferenceLatent` 3 槽，对齐 `refs[:3]`，空槽自动摘）；`img2imgWorkflow=…/flux2_dev_img2img_api.json`（真 img2img，**当前走不到**，见 §0.5.8） | 同上 |
+| **图生视频**（出片） | `services.motion.engine=**ltx25**`（LTX-2.5 distilled int8）；1280×704 / 121 帧 / 24fps（可选 48fps 时间轴×2）；shift=8；hero 档 | 同上 `services.motion` + 「视频参数」 |
+| **工程侧配套（不在 DB，最容易漏）** | ① 盒 ComfyUI 启动参数 `--cache-ram 16 16 --reserve-vram 0.5`（`services_up.sh`）② 预热 `WEAVEORA_WARMUP=off`（`warmup.sh`）③ worker **跨模型家族自动重启**（`WEAVEORA_COMFY_RELOAD_ON_SWITCH=1` + `WEAVEORA_EDGE_ADMIN_TOKEN`，网关路由 `POST /__edge/reload_comfy`）④ VPS worker env 三条 `WEAVEORA_IMAGE_*` 均指 flux2 ⑤ API 侧三处 `default*Workflow` + 默认 steps=20 | 盒 `/opt/weaveora/{services_up.sh,warmup.sh}`、VPS `/etc/weaveora/weaveora-gpu-worker.env`、`EngineSettingsService.java` |
+| 不受影响的通路 | 对口型 LatentSync 1.6 / talk EchoMimicV3 / 配音 CosyVoice2 / 配乐 ACE-Step / 人脸 buffalo_l / 转写 Whisper | — |
+| **回读（唯一权威）** | `bash deploy/image_variant_switch.sh show`（只读）/ `… verify`（自检：抓“steps≤10 但无 lora”这类静默冲配置） | — |
+| **回滚** | `bash deploy/image_variant_switch.sh qwen`（Qwen 权重一字节未删，均在盘） | — |
+
+---
+
 ## 0. 结论速览
 
 | # | 问题 | 结论 |

@@ -1,62 +1,80 @@
 # GPU 服务器能力搭建指南
 
 > 适用：Weaveora 自托管 GPU 服务器（当前主力机 **GPU#2 / RTX 4090 48G**）。
-> 目的：把服务器上已落地的六项能力（**文生图 / 图转视频 / 对口型 / 整脸口型(talk) / 配音 / 配乐**）连模型、版本、下载地址、体积、sha256、加载顺序**和踩过的坑**一次写清，做到「换机可照着重装、查问题时能对得上号」。
+> 目的：把服务器上已落地的能力（**文生图 / 图生图（多参考改图）/ 图转视频 / 对口型 / 整脸口型(talk) / 配音 / 配乐**）连模型、版本、下载地址、体积、加载顺序**和踩过的坑**一次写清，做到「换机可照着重装、查问题时能对得上号」。
 >
-> 关联文档：`docs/gpu-server-setup.md`、`docs/gpu-newserver-models.md`、`docs/gpu-newserver-batch1.md`、`docs/lipsync-setup.md`、`docs/wan22-dual-expert-prep.md`、`可行性分析-对口型-极端表情-2026-09.md`、`可行性分析-文生图-GPU2-2026-09.md`
-> 更新：2026-09-15（Phase 1 文生图已上线出图；Phase 2 Qwen-Image-Edit 下载中；T2 FLUX 排队）
+> 关联文档：`docs/方案-FLUX2dev-替换Qwen出图通路-2026-09-23.md`（**出图现役方案的唯一出处**）、`docs/磁盘操作记录-2026-09-23-FLUX2部署.md`、`docs/lipsync-setup.md`、`docs/gpu-模型清单与镜像备份.md`
+> 更新：**2026-09-24 01:xx**（出图切换为 FLUX.2 [dev] 并跑通生产；出片切 LTX-2.5；补今日 5 个新坑）
+> ⚠️ **地址/端口一律不写在本文件里**：每次现场读（① DB `user_engine_settings.gpu_server_url/gpu_server_port` ② VPS `/etc/weaveora/weaveora-gpu-worker.env` 的 `WEAVEORA_COMFY_URL` ③ 盒上 `/system_stats` 的 `argv[0]` 作身份判据）。
+> 🗑️ **2026-09-24 用户裁定移除的历史内容**：Windows 上搭 GPU 栈的步骤、以及**第一台 GPU 服务器（容器时代）**的整套内容（`/home/dataset-local` 持久卷、`scp/sftp 被关改 base64-over-ssh`、`36.103.182.217:30250`、`24G 卡` 档位推导、容器 overlay 会重置那几条）。
+> 它们**没有丢**：全在 git 历史里（`git log -p -- GPU服务器能力搭建指南.md`），也可以用 `git show <旧提交>:GPU服务器能力搭建指南.md` 取回整份。
 
 ---
 
 ## 0. 一句话总览
 
-| 能力 | 任务 kind | 跑在哪 | 主模型 | 许可 | 状态 |
-|---|---|---|---|---|---|
-| **文生图（T3 主力）** | `still`（imageEngine=gpu） | ComfyUI :8001 | **Qwen-Image fp8 + Qwen2.5-VL 7B**（默认**高步数电影档**：去 Lightning / cfg 3.5 / 24 步；参考图走 img2img denoise 0.50） | Apache-2.0 | ✅ 已出图（1280×704 实测 86–180s/张，视档位与是否冷加载） |
-| **一致性/改图** | `still`（一致性） | ComfyUI :8001 | **Qwen-Image-Edit fp8** | Apache-2.0 | ⏳ 下载中（Phase 2） |
-| **文生图（T2 备选）** | — | ComfyUI :8001 | **FLUX.1-schnell fp8** + T5-XXL fp8 + CLIP-L + AE | Apache-2.0 | ⏳ 排队（Phase 3） |
-| **图转视频（出片）** | `clip` | ComfyUI :8001 | **Wan2.2 I2V-A14B 双专家** fp8 + lightx2v 4 步 LoRA | Apache-2.0 | ✅ 生产在用 |
-| **对口型（普通对白）** | `lipsync` | ComfyUI :8001（LatentSync 节点） | **LatentSync 1.6** | Apache-2.0（权重）+ 节点 MIT | ✅ 生产在用 |
-| **整脸口型（喊叫/吟唱）** | `talk` | talk_server :8094 | **EchoMimicV3** + Wan2.1-Fun-1.3B 管线 | Apache-2.0 | 🟡 已实测通过，待部署接线 |
-| **配音** | `voice` | tts_server :8091 | **CosyVoice2-0.5B** / CosyVoice-300M-SFT | Apache-2.0 | ✅ 生产在用 |
-| **配乐** | `bgm` | ComfyUI :8001 | **ACE-Step 1.5 Turbo aio** | Apache-2.0 | ✅ 生产在用 |
-| **人脸/关键点/身份** | （内部依赖） | face_server :8093 | **insightface buffalo_l** + det_10g | 非商用（insightface 模型） | ✅ 在用 |
-| **转写（字幕/逐字）** | （按需） | tts_server :8091 `/transcribe` | **Whisper**（base / tiny） | MIT | ✅ 可用 |
+| 能力 | 任务 kind | 跑在哪 | 主模型（现役） | 状态 |
+|---|---|---|---|---|
+| **文生图（定妆照 / 无参考帧）** | `portrait`、`still`(txt2img) | ComfyUI :8001 | **FLUX.2 [dev] fp8mixed** 33.02 GiB + **Mistral-3-Small fp8** 16.80 GiB + small decoder（官方口径 **20 步 / guidance 4.0**） | ✅ **生产在用**（2026-09-23 22:37 起；试枪 152s@1024²，生产 1664×928 实测 176–366s/张） |
+| **图生图 / 多参考改图（关键帧）** | `still`(edit) | ComfyUI :8001 | 同上 + **ReferenceLatent 串链**（3 槽，与 `refs[:3]` 对齐；参考图缩到目标尺寸） | ✅ **生产在用**（关键帧 226s 实测；参考槽措辞自动改写 `Picture N → 参考图 N`） |
+| **出图后放大** | `still`(后处理) | ComfyUI :8001 | SeedVR2 3B fp8（`WEAVEORA_IMAGE_UPSCALE` 开关；**当前关**） | 🟡 备用（权重在系统盘） |
+| **图转视频（出片）** | `clip` | ComfyUI :8001 | **LTX-2.5 22B distilled int8** 21.5 GB + **gemma4-12b int8** 15.4 GB（1280×704 / 121 帧 / 24fps，可选 48fps×2） | ✅ **生产在用**（引擎页可切） |
+| **图转视频（旧档）** | `clip` | ComfyUI :8001 | Wan2.2 I2V-A14B 双专家 fp8（2×14.29 GB）+ lightx2v 4 步 LoRA | 🟡 权重在位，引擎页可切回 |
+| **对口型（普通对白）** | `lipsync` | ComfyUI :8001（LatentSync 节点） | **LatentSync 1.6** | ✅ 生产在用 |
+| **整脸口型（喊叫/吟唱）** | `talk` | talk_server :8094 | **EchoMimicV3** + Wan2.1-Fun-1.3B 管线（22 GB） | ✅ 已接线生产在用 |
+| **配音** | `voice` | tts_server :8091 | **CosyVoice2-0.5B** / CosyVoice-300M-SFT | ✅ 生产在用 |
+| **配乐** | `bgm` | ComfyUI :8001 | **ACE-Step 1.5 Turbo aio**（9.34 GiB） | ✅ 生产在用 |
+| **人脸/关键点/身份** | （内部依赖） | face_server :8093 | **insightface buffalo_l** + det_10g | ✅ 在用（非商用许可） |
+| **转写（字幕/逐字）** | （按需） | tts_server :8091 `/transcribe` | **Whisper**（base / tiny） | ✅ 可用 |
+
+> ⚠️ **已经退役/删掉的**（别再去找）：`qwen_image_fp8_e4m3fn`（旧文生图主力）与 `qwen_image_edit_2511_fp8mixed`（旧改图主力）**仍在盘上**但已不接生产（保留作 A/B 基线与回滚件）；
+> `flux1-schnell-fp8` / `t5xxl_fp8` / `clip_l` / `vae/ae`（旧 FLUX.1 备选档）**已删**（2026-09-23）。
 
 ---
 
 ## 1. 机器档案与运行环境
 
-### 1.1 主机
+### 1.1 主机（**以现网为准；地址/端口现场读，不写死**）
 
-> ⚠️ **本文里的公网 IP/端口只是当时的事实记录**：GPU 服务器公网地址会变（同一容器同时有**电信**与**移动**两个公网入口，IP 不同、端口相同；历史演变 `180.127.11.166:10558` → `223.109.239.32:10558` → 现 `180.127.11.167:21264`）。
-> **唯一权威来源 = 平台「生成引擎配置 → GPU 服务器地址 + 端口」**（保存后随任务下发给 worker，保存即生效）。
-> 代码/脚本里**不写死任何 GPU IP**：填了 GPU 服务器地址后，ComfyUI 推导为 `<gpu>:8001`、配音/转写为 `<gpu>/audio`、整脸口型为 `<gpu>/talk`、人脸为 `<gpu>`；换机/换线路只改这一处。
+> 🔴 **地址纪律**：本文不记录任何 IP/端口当“当前值”（历史上换过十几次：`.166/167/177/169` 与容器时代的 `10558/21264`…）。
+> 唯一权威来源 = 平台「生成引擎配置 → GPU 服务器地址 + 端口」；现场读取命令：
+> ```bash
+> ssh root@sysou.com "sudo -u postgres psql -d weaveora -At -c \"select gpu_server_url, gpu_server_port from user_engine_settings where gpu_server_url is not null and gpu_server_port is not null;\""
+> ```
+> 代码/脚本里**不写死任何 GPU IP**：填了 GPU 服务器地址后，ComfyUI 推导为 `<gpu>`（网关根）、配音/转写 `<gpu>/audio`、整脸口型 `<gpu>/talk`、人脸 `<gpu>`。
 
-| 项 | 值 |
+| 项 | 值（2026-09-24 实测） |
 |---|---|
-| 机型 | GPU#2（ssh 别名 `weaveora-gpu-a14b`） |
-| 公网（电信） | `180.127.11.167`，ssh `-p 21216`；网关 **`http://180.127.11.167:21264`** |
-| 公网（移动） | `223.109.239.30`，ssh `-p 21216`；网关 **`http://223.109.239.30:21264`**（备用线路，实测同样 200） |
-| 平台端口映射 | **外网 21264→容器 8800**（网关，唯一入口）；21265→8801、21266→8802、21267→8803、21268→8804、21269→8805（备用，当前未占用） |
-| GPU | **RTX 4090 48G**（`vram_total` 47.4 GiB） |
-| CPU / 内存 | 16 vCPU / **62 GB RAM**（2026-09-15 已从 31 GB 扩容）+ 8 GB swap（`/swap.img`，扩容后实测 0 占用）—— 见 §4 坑 37/38 |
-| OS | Ubuntu 24.04（主机名 `ubuntu24`） |
-| 系统盘 | `/dev/vda1` 200 G（已用 ~164 G，余 ~23 G） |
-| 数据盘 | `/dev/vdb1` ext4 **100 G** → **`/addDisk`**（2026-09-15 维护后挂载点变更；另建兼容软链 `/media/vipuser/addDisk → /addDisk` 以兼容既有软链；余 ~53 G） |
-| 持久卷 | **`/opt/weaveora`**（所有模型/脚本/日志/产物，禁写 /tmp 与系统盘） |
-| 已知瑕疵 | `nvidia-smi` NVML 版本错配（内核 595.71.05 vs 用户态 595.84）→ 计算正常；**显存以 ComfyUI `/system_stats` 为准** |
+| 机型 | **GPU#2 = 云主机 VM**（主机名 `ubuntu24`；ssh 别名 `gpu`/`gpu2`/`weaveora-gpu-a14b` 指向同一台，改端口**三处必须同步**） |
+| GPU | **RTX 4090 48G**（`nvidia-smi` 49140 MiB；ComfyUI `/system_stats` `vram_total` 47.4 GiB） |
+| CPU / 内存 | 16 vCPU / **48 GiB RAM**（48168 MB）+ 8 GiB swap |
+| OS | Ubuntu 24.04（kernel 6.x） |
+| 系统盘 | `/dev/vda1` 196 GiB，**余 ~8.8 GiB（~96% 已用）** —— 提醒：ComfyUI 的 `input/output/temp` 都写在系统盘 |
+| 数据盘 | `/dev/vdb1` ext4 **98 GiB → `/addDisk`**（持久盘，换实例还在；另建兼容软链 `/media/vipuser/addDisk → /addDisk`），**余 ~3.5 GiB（97%）** |
+| 持久卷 | **`/opt/weaveora`**（模型/脚本/日志/产物；模型可在 `/addDisk` + 软链） |
+| 已知瑕疵 | `nvidia-smi` 有时报 NVML 版本错配（内核模块 vs 用户态）→ 计算不受影响；**判断显存一律读 ComfyUI `/system_stats`，判断忙闲读 `/queue`** |
+
+> ⛔ **本机最大的结构约束（2026-09-24 两次真事故）**：48 GiB 内存 + 47.4 GiB 显存装不下两套大模型 ——
+> **图像家族 49.8 GiB**（FLUX.2 33 + 编码器 16.8）与**视频家族 34 GiB**（LTX 20 + gemma 14）**必须错开**。
+> 不重启就换家族 = OOM killer 杀 ComfyUI（`anon-rss 47.8 GB`），而 worker 只看到 `Connection refused`。
+> 现役解法：**worker 自动重启 ComfyUI**（判据与实现见 §4 坑 47–49）。
 
 ### 1.2 服务矩阵（systemd 单元 `weaveora-stack.service`，平台自启）
 
 | 端口 | 服务 | 启动脚本 | 能力 |
 |---|---|---|---|
-| **8800** | `edge_proxy.py` | `/opt/weaveora/edge_proxy.py` | 单端口多路复用（公网只有 10558 一个口） |
-| **8001** | ComfyUI **0.34.0** | `ComfyUI/main.py --listen 0.0.0.0 --port 8001 **--disable-smart-memory --cache-none** --reserve-vram 0.5` | 出图 / 出片 / 对口型 / 配乐 的宿主（详见坑 43：这两个 flag 是 48G 卡 + 62G 内存下的必需配置） |
+| **8800** | `edge_proxy.py` | `/opt/weaveora/edge_proxy.py` | 单端口多路复用（公网只映射一个口）+ 两个自用路由（`/__edge/health`、`/__edge/reload_comfy`） |
+| **8001** | ComfyUI **0.34.0** | `ComfyUI/main.py --listen 0.0.0.0 --port 8001 **--cache-ram 16 16** --reserve-vram 0.5` | 出图 / 出片 / 对口型 / 配乐 的宿主 |
 | **8091** | `tts_server.py` | `audio/tts_server.py 8091` | 配音 `/tts`、转写 `/transcribe`、`/load` `/unload` |
 | 8092 | `music_server.py` | 默认**不起**（HTTP 兜底） | 配乐（主线走 ComfyUI 原生节点） |
 | **8093** | `face_server.py --device cpu` | `face/face_server.py` | `/face/probe`（关键点/嘴张开度）、`/face/embed`（身份向量） |
-| **8094** | `talk_server.py` | `talk/talk_server.py` | 整脸口型 `/talk`、`/talk_batch`（喊叫/吟唱镜） |
+| **8094** | `talk_server.py` | `talk/talk_server.py` | 整脸口型 `/talk`、`/talk_batch` |
+
+> 🔴 **ComfyUI 启动参数为什么是 `--cache-ram 16 16`**（2026-09-24 修正；本文件旧版写的 `--disable-smart-memory --cache-none` 是**错的且危险**，已删）：
+> 盒上源码 `comfy/model_management.py:720 ensure_pin_budget()` 的余量 = `max(RAM_CACHE_HEADROOM/2, 2GB)`，而 `RAM_CACHE_HEADROOM` ← `--cache-ram` 的**第一个值**；
+> 只给一个值（旧配置 `--cache-ram 8`）时，`main.py:356` 会把第二个值（inactive/pin 阈值）默认成**总内存的 100%**，
+> 于是换模型时旧模型赖着不卸 → OOM。现网实测：`16 16` 下同家族连续出图正常，跨家族由 worker 主动重启兜住。
+> ⛔ **`--cache-none` 是铁律③ 明令禁止的**（每个节点每次重跑）；`--disable-smart-memory` 语义是“更激进地往 RAM 卸”（方向相反，当年那轮 OOM 就是它）。
 
 ### 1.3 网关路由（`deploy/edge_proxy.py`）
 
@@ -65,8 +83,9 @@
 | `/audio/*` | `127.0.0.1:8091`（剥前缀） | 配音、转写 |
 | `/bgm/*` | `127.0.0.1:8092`（剥前缀） | 配乐兜底 |
 | `/face/*` | `127.0.0.1:8093` | 人脸探测 |
-| `/talk*` | `127.0.0.1:8094` | 整脸口型（**待加**，见 §7） |
+| `/talk*` | `127.0.0.1:8094` | 整脸口型（**已接线**；`/talk/health`、`/talk_batch`、`/talk` 三条都保留原路径） |
 | `/__edge/health` | 网关自检 | 路由表 |
+| `/__edge/reload_comfy` (**POST**) | 网关节点的**内部管理路由** | `X-WV-Token` = 盒上 `WEAVEORA_EDGE_ADMIN_TOKEN`；作用 = 只重启 ComfyUI（杀 `main.py` 再跑幂等的 `services_up.sh`），**网关/TTS/face/talk 不受影响**，~10–18s 回来。**给 worker 做跨模型家族切换用**（见 §4 坑 47–49）；无 token 一律 403 |
 | 其余 `/*` | `127.0.0.1:8001` | ComfyUI（`/prompt` `/history` `/view` `/upload/image` `/ws`） |
 
 ### 1.4 软件版本矩阵
@@ -121,40 +140,54 @@
 
 > 所有 sha256 均为 **本机实测**（脚本 `/opt/weaveora/hashall.sh` → `logs/sha256_manifest.txt`）；标注「=官方」的表示与官方公布值逐字节一致。
 
-### 2.1 文生图 T3 —— Qwen-Image（主力，已上线）
+### 2.1 文生图 / 图生图（多参考改图）—— **FLUX.2 [dev]（现役主力）**
 
 | # | 文件（落盘） | 版本/作用 | 字节数 | sha256 | 下载地址 |
 |---|---|---|---|---|---|
-| 1 | `diffusion_models/qwen_image_fp8_e4m3fn.safetensors` | **Qwen-Image** 20B 主模型 fp8；文生图/图生图 | 20,430,635,136 | `98763a127701eb6fb59096f7742cb3aa7d64ed510b9f4e882d8351f8176e3ce3` | ModelScope `Comfy-Org/Qwen-Image_ComfyUI` → `split_files/diffusion_models/qwen_image_fp8_e4m3fn.safetensors` |
-| 2 | `text_encoders/qwen_2.5_vl_7b_fp8_scaled.safetensors` | **Qwen2.5-VL 7B** 文本/多模态编码器 fp8（`type=qwen_image`） | 9,384,670,680 | `cb5636d852a0ea6a9075ab1bef496c0db7aef13c02350571e388aea959c5c0b4` | 同上 → `split_files/text_encoders/qwen_2.5_vl_7b_fp8_scaled.safetensors` |
-| 3 | `vae/qwen_image_vae.safetensors` | Qwen-Image VAE（16 通道） | 253,806,246 | `a70580f0213e67967ee9c95f05bb400e8fb08307e017a924bf3441223e023d1f` | 同上 → `split_files/vae/qwen_image_vae.safetensors` |
-| 4 | `loras/Qwen-Image-Lightning-8steps-V1.0.safetensors` | **Lightning 8 步蒸馏 LoRA**（把 20~50 步压到 8 步） | 1,698,951,104 | `07b5a999881437f63124979844ba1949ce2438f65b6220628a196a7d30a4fff9` | ModelScope `lightx2v/Qwen-Image-Lightning` → `Qwen-Image-Lightning-8steps-V1.0.safetensors` |
-| | **小计** | | **≈ 31.7 GB** | | |
+| 1 | `diffusion_models/flux2_dev_fp8mixed.safetensors`（→ `/addDisk` + 软链） | **FLUX.2 [dev] 32B** 主模型 fp8mixed（带 `_quantization_metadata`，逐层 `float8_e4m3fn`；556 个张量） | 35,455,599,592 | `863a82e4ff950a42a6b0e80bea824828f129eb1a8fbbdbd9e8cb29859127b486`（**=官方**） | ModelScope `Comfy-Org/flux2-dev` → `split_files/diffusion_models/flux2_dev_fp8mixed.safetensors` |
+| 2 | `text_encoders/mistral_3_small_flux2_fp8.safetensors` | **Mistral-3-Small 24B** 文本编码器 fp8（`CLIPLoader.type=flux2`） | 18,034,640,095 | `e3467b7d912a234fb929cdf215dc08efdb011810b44bc21081c4234cc75b370e`（=官方） | 同上 → `split_files/text_encoders/mistral_3_small_flux2_fp8.safetensors` |
+| 3 | `vae/full_encoder_small_decoder.safetensors` | FLUX.2 VAE（**官方模板当前默认**；解码省显存） | 249,519,092 | `ea4273f02d1fafbf…`（前 16 位） | ModelScope `black-forest-labs/FLUX.2-small-decoder` → `full_encoder_small_decoder.safetensors` |
+| 4 | `vae/flux2-vae.safetensors` | FLUX.2 VAE（备选，官方量化档模板用） | 336,213,556 | `d64f3a68e1cc4f9f4e29b6e0da38a0204fe9a49f2d4053f0ec1fa1ca02f9c4b5`（=官方） | `Comfy-Org/flux2-dev` → `split_files/vae/flux2-vae.safetensors` |
+| 5 | `loras/Flux_2-Turbo-LoRA_comfyui.safetensors` | **Turbo 8 步加速档**（挂了就把 20 步→8 步，guidance 仍 4.0） | 2,760,814,880 | `011487390b8020baf22a9d543930c90d74a4809b7241bee6b0622777b17b413b`（=官方） | 同上 → `split_files/loras/Flux_2-Turbo-LoRA_comfyui.safetensors` |
+| | **小计** | | **≈ 52.9 GiB** | | |
 
-**工作流**（仓库内 API 格式，可被 worker 直接 `POST /prompt`）：
-`deploy/comfy/qwen_image_txt2img_api.json`（文生图）、`deploy/comfy/qwen_image_img2img_api.json`（**关键帧当底图**，`LoadImage → VAEEncode → KSampler(denoise 0.65/0.85)`）。
+**工作流**（仓库内 API 格式，worker 直接 `POST /prompt`；盒上同位置三处 md5 一致）：
+`deploy/comfy/flux2_dev_txt2img_api.json`（文生图/定妆照）、`flux2_dev_edit_api.json`（**多参考改图**：`LoadImage → ImageScale → VAEEncode → ReferenceLatent` 串链，3 槽对齐 `refs[:3]`）、`flux2_dev_img2img_api.json`（真 img2img：`SplitSigmasDenoise.low_sigmas`）。
 
-### 2.2 一致性 / 改图 —— Qwen-Image-Edit（Phase 2，下载中）
+**参数口径（与 Qwen 完全不是一套旋钮，不可互推）**：`Flux2Scheduler(steps=20, W, H)` + `FluxGuidance(4.0)` + `KSamplerSelect(euler)` + `SamplerCustomAdvanced` + `BasicGuider`。
+- worker 把 `services.image.cfg` **映射到 `FluxGuidance.guidance`**（不是真 CFG）；
+- **负词在 guidance 蒸馏下不生效**（无 uncond 分支）⇒ worker 把负词**折进正词**（`_flux2_fold_negative`，可用 `WEAVEORA_FLUX2_FOLD_NEGATIVE=0` 关）；
+- 生产正词是中文、且写着 Qwen 口径的 `Picture N (imageN)` ⇒ worker 自动改写成 `参考图 N`（`_flux2_slot_rewrite`），否则参考图映射会丢；
+- 区域条件（`ConditioningSetArea*`）对 Flux2 **无效**（同 Qwen），位置只写进提示词。
 
-| # | 文件 | 作用 | 字节数 | sha256 | 地址 |
-|---|---|---|---|---|---|
-| 1 | `diffusion_models/qwen_image_edit_fp8_e4m3fn.safetensors` | **Qwen-Image-Edit**：参考图+指令改图（跨镜一致性、换场景/换光、保角色） | 20,430,635,136 | 待校验（下载中） | ModelScope `Comfy-Org/Qwen-Image-Edit_ComfyUI` → `split_files/diffusion_models/qwen_image_edit_fp8_e4m3fn.safetensors` |
+**实测**：1024²/20 步 txt2img 151.5s、单参考 edit 114.3s、img2img(0.65) 49.3s（试枪）；生产 1664×928 定妆照 366s→176s（第二张起是稳态）、关键帧 226s。
 
-> 复用 2.1 的 Qwen2.5-VL 文本编码器与 Qwen-Image VAE。**这就是"输入参考图"的正路**（相比 SDXL+IP-Adapter 更干净：Apache-2.0、无 dev 派生权重）。
+### 2.2 已退役 / 已删的旧出图档（**别再照它重装**）
 
-### 2.3 文生图 T2 —— FLUX.1-schnell（Phase 3，排队中）
+| 档 | 文件 | 现状 |
+|---|---|---|
+| Qwen-Image（旧文生图主力） | `qwen_image_fp8_e4m3fn` 20.43 GB + `qwen_2.5_vl_7b_fp8_scaled` 9.38 GB + `qwen_image_vae` 0.25 GB + `Qwen-Image-Lightning-8steps-V1.0` 1.70 GB | **权重仍在盘上**，但已不接生产（留作 A/B 基线与回滚件）；回滚 = `bash deploy/image_variant_switch.sh qwen` |
+| Qwen-Image-Edit-2511（旧改图主力） | `qwen_image_edit_2511_fp8mixed` 20.53 GB（→ `/addDisk`） | 同上（回滚件） |
+| FLUX.1-schnell 备选档 | `flux1-schnell-fp8`、`t5xxl_fp8_e4m3fn`、`clip_l`、`vae/ae` | **已删**（2026-09-23，只被两份 `flux_schnell_*.json` 引用；恢复见 `docs/磁盘操作记录-2026-09-23-FLUX2部署.md §2`） |
+| 出图后放大（现役开关） | `seedvr2_3b_fp8_e4m3fn` 3.16 GiB（2026-09-23 从 `/addDisk` **移到系统盘**） | `WEAVEORA_IMAGE_UPSCALE` 开关，**当前关** |
 
-| # | 文件 | 作用 | 字节数 | sha256 | 地址 |
-|---|---|---|---|---|---|
-| 1 | `diffusion_models/flux1-schnell-fp8.safetensors` | **FLUX.1-schnell** 12B fp8（Apache-2.0，4 步出图） | 17,236,328,572 | 待校验 | ModelScope `Comfy-Org/flux1-schnell` → `flux1-schnell-fp8.safetensors` |
-| 2 | `text_encoders/t5xxl_fp8_e4m3fn.safetensors` | T5-XXL 文本编码器 fp8 | 4,893,934,904 | 待校验 | ModelScope `AI-ModelScope/flux_text_encoders` |
-| 3 | `text_encoders/clip_l.safetensors` | CLIP-L 文本编码器 | 246,144,152 | 待校验 | 同上 |
-| 4 | `vae/ae.safetensors` | FLUX VAE | 335,304,388 | 待校验 | ModelScope `AI-ModelScope/FLUX.1-schnell` |
-| | **小计** | | **≈ 22.7 GB** | | |
+### 2.3 图转视频（出片）—— **LTX-2.5 22B（现役）** / Wan2.2 I2V-A14B（旧档）
 
-**工作流**：`deploy/comfy/flux_schnell_txt2img_api.json`。定位：**出图速度档 + 与 Qwen-Image-Edit 组成"跨模型一致性"链路（(a) 方案）**；不装 FLUX.1-dev 派生的 IP-Adapter/PuLID（非商用许可）。
+**现役 = LTX-2.5**（`services.motion.engine=ltx25`）：1280×704 / 121 帧 / 24fps（可开 48fps 时间轴×2，实测 +7.7% 耗时、+0.3 GiB）。
 
-### 2.4 图转视频（出片）—— Wan2.2 I2V-A14B 双专家
+| # | 文件 | 作用 | 字节数 | 地址 |
+|---|---|---|---|---|
+| 1 | `diffusion_models/ltx-2.5-22b-distilled-transformer-comfy-int8-convrot.safetensors` | LTX-2.5 22B **distilled** int8 主干 | 21,504,034,224 | ModelScope `Lightricks/LTX-2.5` |
+| 2 | `text_encoders/gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors` | **Gemma4-12B** 文本编码器 int8 | 15,372,969,374 | 同上 |
+| 3 | `vae/ltx-2.5-video-vae-bf16.safetensors` / `vae/ltx-2.5-audio-vae-bf16.safetensors` | 视频 / 音频 VAE（音频 VAE 被三个 LTX 工作流引用，**别动**） | 1,472,223,346 / 364,866,540 | 同上 |
+| 4 | `latent_upscale_models/ltx-2.5-latent-{spatial,temporal}-upscaler-x2-bf16-1.0.safetensors` | 空间/时间 latent 放大器（48fps 用） | 995,778,752 / 261,944,000 | 同上 |
+| 5 | `loras/ltx-2.5-22b-ic-lora-pixel-spatial-upscaler-x2-1.0.safetensors`、`model_patches/ltx-2.5-duration-head-bf16.safetensors` | **零引用**（只在下载脚本里）；2026-09-23 已移到系统盘 | 327,322,640 / 3,843,690 | 同上 |
+| | **小计** | | **≈ 40.3 GB** | |
+
+> ⚠️ **LTX 的 dev 主干（int8，21.50 GB）与 distilled LoRA（8.90 GB）没下**（A2Vid 两段式才需要）—— 如需重置，见 `docs/方案-LTX2-A2Vid与DubIt评估-2026-09-23.md`。
+> `ltx-2.5` 暂**没有**文生图 / 图生图能力（官方只有 t2v/i2v/flf2v）—— 出图別指望它。
+
+**旧档 = Wan2.2 I2V-A14B 双专家**（引擎页可切回 `wan22`；试枪/回滚用）：
 
 | # | 文件 | 版本/作用 | 字节数 | sha256 | 地址 |
 |---|---|---|---|---|---|
@@ -259,7 +292,7 @@ worker 按**节点标题**找节点（`video`/`audio` 可 env 改名），按**�
 
 > 「顺序」= 一次请求里，服务端实际**依次加载/串联**的东西；显存峰值出现在最高点，换能力前必须让上一个释放。
 
-### 3.1 文生图 T3（Qwen-Image，ComfyUI）
+### 3.1 文生图 / 图生图（**FLUX.2 [dev]**，ComfyUI） —— 旧版本节写的是 Qwen-Image，已切换
 
 ```
 UNETLoader(qwen_image_fp8_e4m3fn, weight_dtype=default)
@@ -449,19 +482,20 @@ positive_prompt += """
 |---|---|---|---|
 | 1 | `huggingface.co` 直连超时/被墙 | 出口网络 | **禁写死 huggingface.co**；改用 ModelScope API（`https://modelscope.cn/api/v1/models/<org>/<repo>/repo?Revision=master&FilePath=<urlencoded>`）或 aifasthub / `hf-mirror.com` |
 | 2 | HF 镜像 API 一度 **403** | 镜像策略 | 切 ModelScope；用 `Range: bytes=0-0` 读 `Content-Range` **实测真实体积**再下 |
-| 3 | **scp/sftp 到 GPU#2 被关** | 平台收敛 | 一律 **base64-over-ssh**：`echo <b64> \| base64 -d > 目标文件` |
-| 4 | `FileNotFoundError: /tmp/xxx`（本地） | Windows 上 python 解析 `/tmp` 为 `D:\tmp` | 本地检查文件用 `C:/Users/<用户>/AppData/Local/Temp/...` 或直接跳过 |
-| 5 | 下载慢/断流 | 单连接限速 | 统一走 `gpu_model_downloader.js`：**10 路 Range + `.meta.json` 断点续传 + `.done` 标记**；单实例 `flock` 锁 |
-| 6 | `pkill -f xxx` **把自己的 ssh 命令也杀了**（两次） | `pkill -f` 匹配到自身命令行 | 用 `pkill -f '[x]xx'` 防自匹配，或先 `ps -eo pid,cmd` 列 PID 再按 PID 精确杀 |
+| 3 | ~~scp/sftp 到 GPU 被关~~ | ~~平台收敛（**容器时代**）~~ | ✅ **已不适**：现在是 VM，`scp` 直接可用（2026-09-23/24 实测）。仅当平台策略回退时才需 base64-over-ssh |
+| 4 | `FileNotFoundError: /tmp/xxx`（**本机**） | Windows 上 python 把 `/tmp` 解析成 `D:\tmp` | 属**本机工具链**范畴，见 `docs/notes/本机工具链坑.md`；查本地文件一律用 `C:/Users/<用户>/AppData/Local/Temp/...` |
+| 5 | 下载慢/断流 | 单连接限速（实测单连接 ~1.3 MiB/s，被服务端限速） | 统一走 `gpu_model_downloader.js`：**10 路 Range + `.meta.json` 断点续传 + `.done` 标记**；单实例 `flock`；长任务一律 `setsid … </dev/null >>log 2>&1 &`。⚠️ Linux 上必须 `WEAVEORA_CURL=curl`（默认写的是 `curl.exe`） |
+| 6 | `pkill -f xxx` **把自己的 ssh 命令也杀了**（三次，含 2026-09-24 一次） | `pkill -f` 匹配到自身命令行 | 用 `pkill -f '[x]xx'` 防自匹配（括号技巧），或先 `ps -eo pid,cmd` 再按 PID 杀。**2026-09-24 实例**：`pkill -f '/opt/weaveora/ComfyUI/main.py'` 把包着它那条 `bash -c` 也杀了 ⇒ “杀了不拉”——重启脚本后半段永远不执行 |
 
 ### 4.2 磁盘与文件完整性
 
 | # | 现象 | 根因 | 处置 |
 |---|---|---|---|
-| 7 | 磁盘写满，下载中断 | 系统盘 196 G 被模型吃满 | ① 下载脚本加**磁盘闸门**（`NEED_GB` 不足直接退出）；② 新增数据盘 `/media/vipuser/addDisk`，**新增大件下到新盘 + 软链回 `models/`**（ComfyUI 逐请求重扫，**不重启**） |
-| 8 | **字节数达标但文件其实没写完** | 下载器**稀疏预分配**（先按总长创建文件） | 判定"下完"必须 **`.done` 存在 + safetensors 头可解析**，不能只看 `stat` 字节数（曾因此在 LoRA 未写完时提交了出图任务） |
-| 9 | `buffalo_l` 的 `1k3d68.onnx`/`w600k_r50.onnx` 只有 **32 MiB**（正常 143/174 MB） | 下载中断 + 旧脚本按"文件存在"跳过 | 重下并**自检形状**（`emb=512`、`lm=(106,2)`）；保留 `.bak.20260915-095658` 便于对比 |
-| 10 | 模型与脚本混在 `/tmp`、容器重启就没了 | 平台容器会回收 | 一切落 **`/opt/weaveora`** 持久卷 |
+| 7 | 磁盘写满，下载中断 | 系统盘 196 GiB 被模型吃满（2026-09-24 实测只剩 ~8.8 GiB） | ① 下载脚本加**磁盘闸门**（不足直接 exit 2）；② 大件放**数据盘 `/addDisk`** + 在 `models/` 建同名**软链**（ComfyUI 逐请求重扫，**不重启**）；③ 兼容软链 `mkdir -p /media/vipuser && ln -sfn /addDisk /media/vipuser/addDisk`（挂载点历史变过） |
+| 8 | **字节数达标但文件其实没写完** | 下载器**稀疏预分配**（先 `truncate` 成完整长度） | 判定“下完”必须 **日志百分比 + safetensors 头可解析**；
+`ls -la` 会**立刻显示完整大小**（稀疏文件），不能当凭据；`.done` 也只是标记（实体删了它会变僵尸） |
+| 9 | `buffalo_l` 的 `1k3d68.onnx`/`w600k_r50.onnx` 只有 **32 MiB**（正常 143/174 MB） | 下载中断 + 旧脚本按“文件存在”跳过 | 重下并**自检形状**（`emb=512`、`lm=(106,2)`）；活副本在 `ComfyUI/custom_nodes/ComfyUI-LatentSyncWrapper/checkpoints/auxiliary/models/buffalo_l/` |
+| 10 | ~~模型与脚本混在 `/tmp`、容器重启就没了~~ | ~~平台容器会回收（**容器时代**）~~ | ✅ **已不适**：现在是 VM —— `/opt/weaveora` 随镜像/系统盘走、`/addDisk` 是**持久盘**；仍禁写 `/tmp` 与非持久目录 |
 
 ### 4.3 依赖与版本
 
@@ -482,16 +516,16 @@ positive_prompt += """
 | 18 | 出片 OOM | A14B 峰值 42 G，与其它服务抢显存 | 串行编排：clip 前 TTS `/unload`；talk OOM 自动降档；`--reserve-vram 0.5` |
 | 19 | 25 步 @768²/113 帧在 48G 上 OOM | 帧数/分辨率/步数三者乘积 | 用档位预设（draft/balanced/motion/hero），talk 走 512²/81 帧/8 步 |
 | 20 | **VAE 用错**：I2V-A14B 加载了 `wan2.2_vae.safetensors` | 旧清单写的是 **TI2V-5B** 的 VAE | A14B **必须** `wan_2.1_vae.safetensors`（已在代码常量里写死注释） |
-| 21 | 24G 卡跑不动 Wan | 显存口径 | 24G 需 fp8 量化 + `weight_dtype=fp8_e4m3fn_scaled`；48G 可直接 `default` |
-| 22 | 出图工作流里 `CLIPLoader.type` 填错 | Qwen-Image 必须 `type=qwen_image`；latent 用 `EmptySD3LatentImage`（16 通道）+ `ModelSamplingAuraFlow(shift=3.0)` | 已固化在 `deploy/comfy/qwen_image_*.json`（一次通过） |
+| 21 | ~~24G 卡跑不动 Wan~~ | ~~显存口径（**第一台服务器**）~~ | ✅ 已不适：现在是 48G 卡；fp8 量化 + `weight_dtype=default` 即可（历史行保留在 git） |
+| 22 | 出图工作流里 `CLIPLoader.type` / latent 节点填错 | 不同模型家族的加载器口径不同：Qwen-Image 用 `type=qwen_image` + `EmptySD3LatentImage`；**FLUX.2 用 `type=flux2` + `EmptyFlux2LatentImage` + `Flux2Scheduler` + `FluxGuidance` + `BasicGuider`**，**根本没有 `KSampler`** | 已固化在 `deploy/comfy/flux2_dev_*.json`；worker 靠 `_wf_is_flux2()` 判分派（否则参数注入静默失效） |
 
 ### 4.5 服务与生产接线
 
 | # | 现象 | 根因 | 处置 |
 |---|---|---|---|
-| 23 | **绝不自行重启 ComfyUI** | 平台会回收/重置容器，重启即事故 | 只热改"工作流 JSON / 脚本"；ComfyUI 每次 `/prompt` 现读工作流；新增模型靠**扫目录**自动发现 |
-| 24 | 平台只开一个公网端口 | 网关限制 | `edge_proxy.py` 单端口按路径多路复用（不用 nginx：容器重启会重置 overlay，apt 装的东西会丢） |
-| 25 | GPU IP/端口变更后生产 404/拒连 | EngineSettings 里写死了旧地址 | 6 个服务 URL 从 `180.127.11.167:15264` → **`180.127.11.166:10558`**（备份 `engine_services_backup_20260915.json`）；现已改成**只配「GPU 服务器地址+端口」一处**，其余服务地址留空自动跟随 |
+| 23 | ~~绝不自行重启 ComfyUI~~ | ~~平台会回收/重置容器，重启即事故（**容器时代**）~~ | ⚠️ **已反转（2026-09-24）**：现在是 VM，而且**跨模型家族必须重启 ComfyUI**（否则 OOM，见坑 47）—— 但重启仍要走护栏：先查队列（`deploy/gpu2_restart.sh`）。worker 已内置自动重启（跨家族/首次提交有驻留/不可达） |
+| 24 | 平台只开一个公网端口 | 网关限制 | `edge_proxy.py` 单端口按路径多路复用（不用 nginx） |
+| 25 | GPU IP/端口变更后生产 404/拒连 | `EngineSettings` 里曾写死旧地址 | 已改成**只配「GPU 服务器地址+端口」一处**，其余服务地址留空自动跟随（`GpuAddressSyncTest` 有回归）；⚠️ **平台配置页保存会把旧快照写回** ⇒ 每次保存后**必须回读**（`bash deploy/image_variant_switch.sh verify`） |
 | 29 | 对口型 100% 失败：`PyAVPlugin.write() got an unexpected keyword argument 'macro_block_size'` | ComfyUI venv 被换过（`ImageIO 2.37 + av 18`，无 `imageio-ffmpeg`）→ `imageio` 选中 **pyav 插件**，而它不支持 `macro_block_size`（`torchvision.io.write_video` 内部正是这么调） | 改 `deploy/latentsync-node/files/nodes.py`：**优先用 PyAV 写输入帧**（本机已装 av，ComfyUI 原生 LoadVideo 也用它），torchvision 仅作回退。⚠️ 补丁必须**保留函数内 `import torchvision.io as io` 的局部绑定**，否则后面 `io.read_video` 会 `UnboundLocalError: cannot access local variable 'io'` |
 | 30 | 节点一实例化就卡死，ComfyUI 队列（FIFO）被占 52 分钟 | ① venv 无 `pip` 且缺 `accelerate` → 节点自装依赖抛错；② 节点 `checkpoints/` 里 `latentsync_unet.pt` / `whisper/tiny.pt` 不见了 → 节点 `setup_models()` 转去 **huggingface.co 下 5 GB**（国内 ~0.6 MB/s） | ① 装回 `accelerate`（不动其它版本）；② 补节点自装标记 `~/.latentsync16_dependencies_installed`；③ **软链** `/opt/weaveora/latentsync/{latentsync_unet.pt,whisper/tiny.pt}` 回节点目录（零拷贝、不再触发下载）；④ `/etc/hosts` 加 `weaveora-hf-guard` 禁直连 HF/xet（§0.2 本就要求走 ModelScope/aifasthub） |
 | 31 | 卡住的任务**无法从外部清除** | `/interrupt` 只在**节点之间**生效，节点内部（`setup_models` 下载）卡住时无效；`ss -K` 内核不支持（Invalid argument）；定向 iptables REJECT 也没断掉在途连接；删半成品文件后它仍写已删除的 inode | 只能**等它自己报错退出**或重启 ComfyUI；重启前务必确认 `/queue` 为空（否则打断生产任务）。本次实测：52 分 44 秒后以 `Model download failed` 自行退出，队列清空，**没重启** |
@@ -504,22 +538,28 @@ positive_prompt += """
 | 39 | `/free` 调了但显存没回来 | ComfyUI 的卸载是**异步**的：发完立刻量 `vram_free` 还是旧值（实测 19.9 → 19.5 G），旧代码量一次就往下走 → 后续任务 OOM | `_free_comfy_models(wait_gb=…)`：POST `/free` 后**轮询等到显存真的回来**（最多 120 s），日志打「卸载完成：可用显存 X GiB（目标 Y）」 |
 | 40 | 体检"过得去"但实际 OOM（预估 44.5 G / 总 47.4 G） | VRAM 预估模型没算**碎片/CUDA 上下文/解码瞬时峰值**，且 `MOTION_VRAM_SAFETY_GB` 旧默认是 **0**（等于没有余量）；判定为"根本放不下"时旧代码直接 `raise`（任务失败） | ① 预留默认改 **4 GiB**；② 能放下但余量不足时**自动降帧**（80 → 56 帧，4n 对齐）并打印原因，输出仍由 `_retime_to_fps()` 补到目标时长 → **任务不再失败，只损失运动稠密度**（仅当连 40 帧都放不下才报错） |
 | 42 | **重启撞死正在跑的任务**：用户 21:49 发起的对口型任务，21:52 报 `502 edge proxy: upstream error: Cannot connect to host 127.0.0.1:8001` | 我为部署 talk 的 `/health` 改动直接 `systemctl restart weaveora-stack.service` —— **ComfyUI 正在重启**，任务的 `/history` 轮询直接 502。worker 是**单线程认领**（任务不会真并发），所以"重启撞车"才是最大生产风险 | 新增唯一入口 **`deploy/gpu2_restart.sh`**：先查库（queued/running 有就拦下，除非 `FORCE=1`）→ 再重启 → 自检端口与 ComfyUI 就绪。**以后任何重启都走它** |
-| 43 | talk 被内核 `oom_kill`（anon-rss 29.4G），连带 `weaveora-stack` 整体 failed | ComfyUI 的默认 RAM 缓存阈值是「系统内存的 10%（min 2G / max 10G）」→ 在 62G 机器上会把 **20–28G 权重留在内存里**；talk 每次请求 fork 的子进程要 **29.4G** → 相加超 62G → 内核 OOM。`--disable-smart-memory` 只管显存，**不管内存** | ComfyUI 加 **`--cache-none`**（不在 RAM 缓存模型；改从页缓存/磁盘重读，700MB/s 且页缓存可被内核回收）→ **根治 RAM OOM**。想换回速度可用 `--cache-ram 32`（保留 32G 空闲的软阈值）。另：talk 服务加资源预检，内存不够返回 **503 + 原因**（而不是被内核杀掉） |
+| 43 | talk 被内核 `oom_kill`（anon-rss 29.4G），连带 `weaveora-stack` 整体 failed | ComfyUI 的 RAM 缓存阈值很宽（旧配置只给一个值 `--cache-ram N` 时，第二个值默认 = **总内存 100%**）→ 会把 20–28G 权重留在内存里；talk 每次请求 fork 的子进程要 29.4G → 相加超内存 → 内核 OOM | ⚠️ **本条旧处置（`--cache-none`）已于 2026-09-24 作废**：`--cache-none` 是 `Weaveora.md` 铁律③ 明令禁止的（每个节点每次重跑）。现行：`--cache-ram 16 16`（两个值都要给）+ worker 跨家族自动重启（坑 47） |
+| 47 | ⭐ **跨模型家族不重启 = OOM killer 杀 ComfyUI**（两次真任务：关键帧→motion；worker 重启后的首张图）；worker 只看到 `COMFY_ERROR: Connection refused` | 48 GiB 内存/显存装不下**图像家族 49.8 GiB**（FLUX.2 33+16.8）与**视频家族 34 GiB**（LTX 20+14）；`dmesg` 实测 `anon-rss 47.8 GB`，整栈连网关一起死 | worker `_unload_before_model_switch()` **三类触发 → 重启 ComfyUI 再提交**：① 跨模型家族（模型指纹变化）② 本进程首次提交但盒上显存占用 >8GB（重启/部署后的盲区）③ ComfyUI 不可达（自愈）。重启走网关 `POST /__edge/reload_comfy`（VPS **无**盒上 SSH 权限）。实测：18s 回来，重启后 anon 2.5GB 干净加载 |
+| 48 | ⭐ `POST /free {"unload_models": true}` **不能用** | 它把权重**从显存卸到内存**（不是释放）：`free_memory()` 对 `sys.getrefcount(model)>1`（被执行缓存引用中）的模型只 offload | 实测 anon 13.5 → **45.3 GB**、整机 available 仅剩 **179 MB**（直接撞 OOM 线）⇒ 代之以**重启**（坑 47） |
+| 49 | ⭐ 预热脚本加载的是 **Qwen**，而生产是 FLUX.2 | `warmup.sh` 默认 `WEAVEORA_WARMUP=qwen`（历史默认），每次重启把 27 GB Qwen 读进来；且“刚加载就被卸载”会触发 ComfyUI 记账损坏 | ① 默认改 **`off`**；② 若要开预热，必须把工作流换成**与生产同族**的（`WEAVEORA_WARMUP=flux2`）；③ 损坏的症状：`'NoneType' object has no attribute 'model_size'`，**之后任何加载 0.04s 必崩**，只能重启 |
+| 50 | ⭐ 手工跑 `services_up.sh` 后 ComfyUI 没起 / 网关跑错端口 | 该脚本的两个变量默认值是**历史值**：`WEAVEORA_ROOT` 默认 `/home/dataset-local/weaveora`（第一台服务器的路径）、`WEAVEORA_GATEWAY_PORT` 默认 **8000** | 手工调用必须带全：`WEAVEORA_ROOT=/opt/weaveora WEAVEORA_GATEWAY_PORT=8800 bash services_up.sh`；systemd 起的（unit 里有 Environment）不受影响。`edge_proxy.py` 的 `/__edge/reload_comfy` 已经两个都显式 export |
+| 51 | 工作流“看着接好了”但提交即 400 | 模板摊平出的节点类型/接线问题**只有真 `POST /prompt` 才暴露**（`/object_info` 看不出） | 新工作流一律先试一枪：`python3 /opt/weaveora/diag/diag_flux2_smoke.py --mode all`（直接用生产注入器构造 graph） |
+| 52 | 部署了 worker，但新工作流在 VPS 上**根本不存在** | worker 在 **VPS 本机**读工作流 JSON（盒上有 ≠ worker 能读）；而 `deploy/vps-worker-deploy.sh` 里「引擎工作流只补齐缺失」那段曾因 `cd` 后相对路径解析错而**静默不执行** | 已修（cd 前存 `SCRIPT_DIR` 绝对路径 + 找不到 `deploy/comfy` 时**显式报错**）；部署后确认输出里有 `+ 补齐缺失：flux2_dev_*.json` 或 `= 一致：…` |
 | 44 | 资源让出散落在各分支、且内存读数读错机器 | ① 出图/出片/对口型/配乐/talk 各自零散调 `/free`、`/unload`；② worker 跑在 **VPS** 上，`/proc/meminfo` 读到的是 VPS 的内存（日志里一直显示 5.0 GiB，而 GPU 机实际 49.5G） | ① worker 收口成一个 **`_yield_resources(need_vram_gb, need_ram_gb, label)`**：`/free`(ComfyUI，并等显存真的回来) + `/unload`(TTS) + 打印让出前后资源，**五个重任务全走它**；② 内存预算改从 **GPU 机**取（talk 的 `/health` 新增 `ram_available_gb`，worker 经 `<talk_url>/health` 读取） |
 | 41 | 任务按创建顺序跑，`still→clip→still` 来回换大模型（每次重载 20–28 G） | 旧 claim 逻辑严格 FIFO，不同能力交错执行 → 反复卸载/加载 | **A3 同 kind 优先**：claim 时先收集候选再优先挑「与本节点上一个任务同类型」的（`JobService.lastClaimedKind`，进程内 Map）。**单跑行为不变**、跨 kind 不饿死（没同 kind 就取最早的）。实测：入队 `still(6) → clip(5) → still(4)`，实际执行为 `still(6) → still(4) → clip(5)` |
 | 36 | `start_talk.sh` 报 “already running” 但它其实没跑 | `ps | grep "[t]alk_server.py"` 匹配到了**执行这条命令的 shell 自身**（命令行里含该字符串）→ 误判 | 用更严格的模式（两段式 `grep "[e]cho_mimic_v3" | grep "[t]alk_server"`）或直接 `pgrep -f 'envs/talk/bin/python .*talk_server.py'`；这就是 §4.1 #6 「`pkill -f` 自匹配」的同族坑 |
 | 26 | 前端显示"方案有改动"但其实没改 | `prompt_revisions.schema_json` 是 **jsonb**（PG 重排对象键），前端 `JSON.stringify` 把**纯键序差异**当改动 | 新增 `canonicalJson()` 统一 dirty/pristine 比对；删掉 `startVoice/startBgm/startLipsync` 里会另存未确认版本的兜底保存 |
 | 27 | 部署与生产任务互踩 | 同一张卡 | 纪律：**串行、不插队、不抢显存**；部署只在任务空隙；只做 ≤5 s 短查，禁止长轮询（单次等待 ≤60 s） |
-| 28 | 许可风险 | FLUX.1-dev 系（含 IP-Adapter/PuLID 派生）**非商用** | 生产禁用 dev 派生权重；一致性改用 **Qwen-Image-Edit**（Apache-2.0）；T2 用 **FLUX.1-schnell**（Apache-2.0） |
+| 28 | 许可风险 | FLUX.1-dev 系（含 IP-Adapter/PuLID 派生）**非商用** | 云 API 档走官方服务；自托管只能用**允许的口径**。⚠️ 2026-09-23 用户裁定：**暂不考虑协议** —— 生产已切 FLUX.2 [dev]（**非商用许可**），此事**已入账待批**（见 `docs/方案-FLUX2dev-…md §9`），不是“已合规” |
 
 ---
 
 ## 5. 运维手册（常用命令）
 
 ```bash
-# 机器
-ssh root@180.127.11.166 -p 10512          # 别名 weaveora-gpu-a14b
-df -h / /media/vipuser/addDisk            # 两块盘
+# 机器（地址一律现场读，别名里已绑好 IdentityFile）
+ssh gpu                                # = gpu2 = weaveora-gpu-a14b（同一台；地址/端口变了要三处同步）
+df -h / /addDisk                       # 两块盘（数据盘是 /addDisk；兼容软链 /media/vipuser/addDisk → /addDisk）
 curl -s http://127.0.0.1:8001/system_stats | python3 -c 'import json,sys;d=json.load(sys.stdin)["devices"][0];print(round(d["vram_free"]/2**30,1),"G free")'
 
 # 服务健康
@@ -529,10 +569,26 @@ systemctl status weaveora-stack.service --no-pager | head -20
 # 任务忙闲（部署/出图前必查）
 curl -s http://127.0.0.1:8001/queue
 
-# 下载（后台静默；日志即进度）
-setsid nohup bash /opt/weaveora/dl_phase23.sh > /opt/weaveora/logs/dl_phase23.log 2>&1 < /dev/null &
-tail -n 3 /opt/weaveora/logs/dl_phase23.log ; cat /opt/weaveora/logs/dl_phase23.pid   # 叫停：kill $(cat …)
-df -h /media/vipuser/addDisk
+# ★ 重启（唯一入口：先查库 queued/running 就拦，FORCE=1 才强推）
+bash deploy/gpu2_restart.sh
+# ★ 跨模型家族时 worker 会自动重启 ComfyUI（走网关 POST /__edge/reload_comfy，带 X-WV-Token）
+#   手工触发（= 把上方重启降级为只重启 ComfyUI）：
+curl -s -X POST -H "X-WV-Token: $WEAVEORA_EDGE_ADMIN_TOKEN" "$GW/__edge/reload_comfy"
+# ★ 内存/OOM 观察器（压测、验收、排 OOM 时后台跑；看 AnonPages 峰值与 dmesg oom 计数）
+setsid bash /opt/weaveora/ram_watch.sh </dev/null >/dev/null 2>&1 & tail -5 /opt/weaveora/logs/ram_watch.log
+
+# ★ 出图配置回读/自检（切档后必跑；能抓出“steps≤10 但无 lora”这类静默冲配置）
+bash deploy/image_variant_switch.sh show    # 只读
+bash deploy/image_variant_switch.sh verify  # 自检
+
+# 下载（后台静默；日志即进度；Linux 上必须 WEAVEORA_CURL=curl）
+#   FLUX.2 五件套：bash /opt/weaveora/dl_flux2.sh   （REST_ONLY=1 只下系统盘那 4 件）
+setsid bash /opt/weaveora/dl_flux2.sh </dev/null >>/opt/weaveora/logs/dl_flux2.log 2>&1 &
+tail -n 3 /opt/weaveora/logs/dl_flux2.log ; cat /opt/weaveora/logs/dl_flux2.pid   # 叫停：kill $(cat …)
+df -h /addDisk
+
+# 权重自检（字节 + .done（跟 readlink 后的真文件找）+ 同名多副本）
+bash /opt/weaveora/post_maint_check.sh | grep -E "flux2|mistral|full_encoder|Turbo|多副本|FAIL"
 
 # 模型完整性（字节 + .done + safetensors 头 / sha256）
 bash /opt/weaveora/verify_models.sh                      # 结构自检
@@ -549,7 +605,15 @@ setsid nohup /opt/weaveora/envs/talk/bin/python /opt/weaveora/first_image.py > /
 
 ---
 
-## 6. 全量 sha256 表（本机实测，2026-09-15）
+## 6. 全量 sha256 表
+
+> 旧的「2026-09-15 全量主实测」已过时（其中 `qwen_image_fp8_e4m3fn` 等行仍在 §2.2 归档）。
+> **现役权重的权威校验请用**：① 盒上 `bash /opt/weaveora/post_maint_check.sh`（逐件字节 + 同名多副本）；
+> ② `docs/方案-FLUX2dev-替换Qwen出图通路-2026-09-23.md §3`（FLUX.2 五件的字节 + sha256，且与 ModelScope 官方值逐字节一致）；
+> ③ `docs/磁盘操作记录-2026-09-23-FLUX2部署.md`（下载实测：主模型 59.5 min、`sha256 = 863a82e4…27b486` = 官方）。
+
+<details>
+<summary>历史基线（2026-09-15，仅作对比，勿当现役——点开）</summary>
 
 | 文件 | 字节 | sha256 |
 |---|---|---|
@@ -586,30 +650,24 @@ setsid nohup /opt/weaveora/envs/talk/bin/python /opt/weaveora/first_image.py > /
 > 500 MiB–1 GiB 档另有小文件（`config.json`、tokenizer、`face_id` 等），逐字节校验即可，未逐一列 sha256。
 > 复算方式：`bash /opt/weaveora/hashall.sh` → `/opt/weaveora/logs/sha256_manifest.txt`。
 
+</details>
+
 ---
 
 ## 7. 待完成 / 后续
 
-> 🚧 **2026-09-15 16:20 发现 GPU 服务器进入维护/重建态**：ssh 主机密钥变了、原密钥被拒（`Permission denied (publickey)`），
-> 两个公网入口（10558/10588）均不可达（`000`）→ 依赖 GPU 的任务（出片/对口型/配音/配乐/本机出图）当前会失败。
-> 维护结束后的回归清单（都已就绪，只差环境）：
-> 1. 重新打通 ssh（新主机密钥已加入 `~/.ssh/known_hosts`；若新容器不认原公钥，需在平台侧重新注入）；
-> 2. `bash /opt/weaveora/services_up.sh`（或确认 `weaveora-stack.service` 已启动）→ 校验 5 个端口 + 持久卷 `/opt/weaveora` 完整；
-> 3. 部署网关新路由：推 `deploy/edge_proxy.py` 并**只重启网关进程**（不动 ComfyUI）→ `curl <网关>/talk/health` 应 200；
-> 4. 配置页把「图像引擎」切成 **GPU 服务器**（`imageEngine=gpu`）→ 出图走本机 Qwen-Image；
-> 5. 跑一遍第 5 镜三步链路（文生图 → motion → 对口型）+ 一个 `kind=talk` 任务（验证资产进「对口型」Tab）。
+> 现役状态：出图（FLUX.2）/ 出片（LTX-2.5）/ 对口型 / talk / 配音 / 配乐 **全部生产在用**；栈由 systemd 自启，跨家族自动重启已上线。
 
 | 项 | 状态 | 说明 |
 |---|---|---|
-| **Qwen-Image-Edit（Phase 2）** | ⏳ 下载中（20.4 G） | 下完 → 写 `qwen_image_edit_api.json` → 用**第 5 镜关键帧**当参考图出一张对照 |
-| **FLUX.1-schnell（T2，Phase 3）** | ⏳ 排队（22.7 G） | 走 `deploy/gpu2_dl_flux.sh`，同新盘 + 软链 |
-| **kind=talk 生产接线** | 🟡 代码已入库（`8e9dd80`），未部署 | 需：① `edge_proxy.py` 加 `/talk` → `:8094`（数秒网关重启，挑任务空隙）② VPS worker env `WEAVEORA_TALK_URL=http://180.127.11.166:10558/talk` ③ 重启 `weaveora-gpu-worker` ④ 部署 API jar ⑤ 建 talk 任务验证资产进「对口型」Tab |
-| **jaw_gain=1.25 增强档** | 🟡 参数已通 | 与 talk 接线一起验证 |
-| ~~A1 批量连跑~~ / ~~A2 预热~~ / ~~A3 同 kind 调度~~ | ✅ 已完成 | A3：API claim 同 kind 优先（已部署）；A2：`/opt/weaveora/warmup.sh` + 挂进 `services_up.sh`（后台、队列非空自动跳过、`WEAVEORA_WARMUP=off` 可关）；A1：多镜提交 + A3 亲和 + 模型常驻/页缓存，实测第二个同 kind 任务不再付加载成本 |
-| **文生图档位** | ✅ 默认 = B 高步数电影档 | 见 §3.1 档位表；切档只改「生成引擎配置 → 文生图」的 workflow/steps/cfg/denoise |
-| **旧模型迁到新盘** | ⏳ 可选 | 把 `diffusion_models/text_encoders/echo_mimic/checkpoints` 等旧大件"复制 → 校验 → 原子软链替换 → 删旧文件"迁到新盘，进一步松系统盘；**必须在任务空隙做** |
-| **A14B worker 部署** | ⏳ 待部署 | 并发会话已提交 `4e93235`（Wan2.2 I2V-A14B 双专家 + TTS 显存让位），尚未上 VPS worker |
-| **stable_syncnet.pt / ACE-Step split_files** | ⏳ 按需 | 推理不加载，磁盘紧张时再评估 |
+| **验收（用户亲自）** | 🟡 进行中 | 定妆照 → 关键帧 → 出片 → 再回出图；提交后看这三行：`工作流出图：flux2_dev_…`、`参考槽措辞已改写`、`负词…折进正词`；身份验收可用 `wv_faceid.py` |
+| **FLUX.2 中文提示词遵循度** | 🟡 未实测项 | 生产正词是中文，而 FLUX.2 用 Mistral-3 编码器（Qwen 本来以中文见长）—— 这是 A/B 没跑到就转生产的风险点，验收时重点看 |
+| **多参考身份一致性** | 🟡 零基线 | 三人同框那类镜，FLUX.2 无官方对比数据 |
+| **img2img 的 denoise** | 🟡 待产品定 | DB 当前 `denoise=1.0`（= 底图贡献为零、退化成 txt2img）；该通路**当前走不到**（edit 已配）；非本次引入 |
+| **许可（FLUX.2 dev 非商用）** | ⛔ **待处理** | 用户 2026-09-23 裁定“暂不考虑”，但**商用产品上生产必须回来解决**（BFL 商业授权 / 或换 Klein 4B Apache-2.0 等） |
+| **`/addDisk` 只剩 ~3.5 GiB** | 🟡 结构性 | 33 GiB 的 FLUX.2 一来就撞满；长期解法 = 扩盘，或验收后按流程处青 `qwen_image_edit_2511`（19.12 GiB，回滚件） |
+| **Wan2.2 双专家（26.6 GiB）** | 🟡 待定 | 引擎页可切回 `wan22`；确认不再用就可释放系统盘 |
+| **旧模型迁到新盘** | ⏳ 可选 | 必须在任务空隙做（复制 → 校验 → 原子软链替换 → 删旧） |
 
 ---
 
