@@ -42,6 +42,23 @@
 
 1. 剩 4 件权重下载 → 2. 三个工作流 **POST 试一枪**（真跑，验证节点类型/接线）→ 3. `services.image.*` 切到 flux2（**必须先试枪通过**，否则会打断线上出图）→ 4. G1–G5 A/B 验收。
 
+### 0.5.4 ★ 生产配置切换记录（2026-09-23 23:27）—— **供后续归因/对账使用**
+
+| 项 | 值 |
+|---|---|
+| **切换时间** | **2026-09-23 23:27:34 +0800**（同一工作目录，commit `6c5a13e`） |
+| **依据** | 用户 2026-09-23 裁定「B：不跑 A/B，直接让 FLUX.2 上生产，自己验收」；前置机制见本文件 §0.5.1（试枪三档全过）与 §9.0（OOM 事故 ⇒ 先上保险再切） |
+| **影响面** | 仅 `user_engine_settings.services.image.*`（用户 `sysou.com@outlook.com`）⇒ **只影响出图通路**；出片(LTX)/对口型/TTS/BGM **不受影响** |
+| 切换**前** | `workflow=qwen_image_txt2img_film_api.json`｜`editWorkflow=qwen_image_edit_api.json`｜`img2imgWorkflow=qwen_image_img2img_api.json`｜steps=40｜cfg=4.0｜denoise=1.0｜**无 lora 键** |
+| 切换**后** | `workflow=flux2_dev_txt2img_api.json`｜`editWorkflow=flux2_dev_edit_api.json`｜`img2imgWorkflow=flux2_dev_img2img_api.json`｜steps=**20**｜cfg=4.0（worker 映射为 `FluxGuidance.guidance`）｜denoise=1.0｜`lora=null` |
+| 回读命令 | `bash deploy/image_variant_switch.sh show` |
+| **回滚命令** | `bash deploy/image_variant_switch.sh qwen` —— **Qwen 权重一个字节未删**（`qwen_image_edit_2511_fp8mixed` 19.12 GiB、`qwen_image_fp8_e4m3fn` 19.03 GiB 均在盘） |
+| 同批变更（**不在 DB 里**，容易被忘） | ① 盒 `services_up.sh`：`--cache-ram 8` → **`16 16`**（防 OOM，已重启整栈、`argv` 已核）② worker `_flux2_slot_rewrite`：正词里 `Picture N (imageN)` → `参考图 N` |
+| ⛔ **归因纪律** | **禁止拿 Qwen 的基线判 FLUX.2 退化**：Qwen 官方口径 = 40 步 / cfg 4.0；FLUX.2 = 20 步 / **guidance** 4.0 —— 两者**不是同一套旋钮**（亮度/锐度基线不可比，2026-09-22 五段已记过一次） |
+
+> 为什么单独立这条：引擎配置页保存时会**把旧快照写回**（历史事故：把失效端口洗回过），
+> 且这是**共享生产配置**——多人在同一仓工作时，归因必须先确认"当时到底跑的是谁"。
+
 ---
 
 ## 0. 结论速览
