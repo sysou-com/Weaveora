@@ -559,6 +559,40 @@ def _wf_apply_areas(graph, mode, pairs, log=print):
     return True
 
 
+def _image_edit_prefix(positive, negative, ref_names, is_flux2):
+    """Edit 档的"怎么用这些参考图"前缀 + 负词补充（**单一真源**，worker 与 diag 共用）。
+
+    为什么抽成函数（2026-09-23）：出图 A/B 诊断脚本也必须用**生产同一套**提示词前缀，否则对照无效
+    （Qwen 用 "Picture N" / FLUX.2 用 "Reference Image N"、Flux2 不注负词 —— 两处各写一遍必然漂移）。
+    返回 (positive, negative)；不改入参。
+    """
+    if not ref_names:
+        return positive, negative
+    # 槽位措辞必须跟模型走：FLUX.2 的参考图机制是 ReferenceLatent（官方模板措辞 Reference Image 1/2/…），
+    # Qwen-Image-Edit 是 TextEncodeQwenImageEditPlus（内部拼 Picture 1/2/…）——
+    # 拿 Qwen 的措辞去喂 FLUX.2，等于让模型去找一个不存在的 "Picture 2"。
+    slot_hint = " ".join(("Reference Image %d" if is_flux2 else "Picture %d") % (i + 1)
+                         for i in range(len(ref_names)))
+    if _looks_zh(positive):
+        positive = ("参考图按送入顺序对应片中角色（%s）。每个角色的面容、发型、年龄与服装必须严格跟随"
+                    "其自己的参考图；把角色放进下面描述的剧情场景里（背景/光线/机位/动作以文字描述为准，"
+                    "**不要**保留参考图的纯色/白底写真背景）。场景：" % slot_hint) + (positive or "")
+        if not is_flux2:
+            negative = ((negative + ", ") if negative else "") + \
+                       "白色背景, 纯色背景, 影棚背景, 角色设定图, 证件照, 正面证件照, 3d渲染, cgi"
+    else:
+        positive = ("The reference image(s) are %s and show this shot's character(s) in that order; keep each "
+                    "character's face, hairstyle, age and costume strictly consistent with their own reference, "
+                    "and place them into the scene described below (background / lighting / camera framing / "
+                    "action follow the description; do NOT keep the plain or white studio backdrop of the "
+                    "reference image(s)). Scene: " % slot_hint) + (positive or "")
+        if not is_flux2:
+            negative = ((negative + ", ") if negative else "") + \
+                       "white background, plain backdrop, solid color background, studio portrait, character sheet, " \
+                       "front facing ID photo, 3d render, cgi"
+    return positive, negative
+
+
 def _wf_save_prefix(graph, prefix):
     for _nid, n in _wf_of_class(graph, "SaveImage"):
         n.setdefault("inputs", {})["filename_prefix"] = prefix
@@ -643,28 +677,7 @@ def generate_via_workflow(client_id, payload, progress_fn=None, on_tick=None):
     #     就变成“英文头 + 中文身 + 中文尾”，实测会让模型两头听（用户报过中英混杂）。
     #     槽位名用模型自己的 `Picture N` 口径（TextEncodeQwenImageEditPlus 内部就是这么拼的）。
     if mode == "edit" and ref_names:
-        # 槽位措辞必须跟模型走：FLUX.2 的参考图机制是 ReferenceLatent（官方模板的措辞是 Reference Image 1/2/…），
-        # Qwen-Image-Edit 是 TextEncodeQwenImageEditPlus（内部拼 Picture 1/2/…）——
-        # 拿 Qwen 的措辞去喂 FLUX.2，等于让模型去找一个不存在的 "Picture 2"。
-        slot_hint = " ".join(("Reference Image %d" if _is_flux2 else "Picture %d") % (i + 1)
-                             for i in range(len(ref_names)))
-        if _looks_zh(positive):
-            positive = ("参考图按送入顺序对应片中角色（%s）。每个角色的面容、发型、年龄与服装必须严格跟随"
-                        "其自己的参考图；把角色放进下面描述的剧情场景里（背景/光线/机位/动作以文字描述为准，"
-                        "**不要**保留参考图的纯色/白底写真背景）。场景：" % slot_hint) + (positive or "")
-            if not _is_flux2:
-                negative = ((negative + ", ") if negative else "") + \
-                           "白色背景, 纯色背景, 影棚背景, 角色设定图, 证件照, 正面证件照, 3d渲染, cgi"
-        else:
-            positive = ("The reference image(s) are %s and show this shot's character(s) in that order; keep each "
-                        "character's face, hairstyle, age and costume strictly consistent with their own reference, "
-                        "and place them into the scene described below (background / lighting / camera framing / "
-                        "action follow the description; do NOT keep the plain or white studio backdrop of the "
-                        "reference image(s)). Scene: " % slot_hint) + (positive or "")
-            if not _is_flux2:
-                negative = ((negative + ", ") if negative else "") + \
-                           "white background, plain backdrop, solid color background, studio portrait, character sheet, " \
-                           "front facing ID photo, 3d render, cgi"
+        positive, negative = _image_edit_prefix(positive, negative, ref_names, _is_flux2)
     # ★ FLUX.2：负词架构上不生效（guidance 蒸馏 / BasicGuider 单条件）→ 产品 2026-09-23 裁定：折进正词。
     #   为什么放在 _wf_inject_text 之前：折完要把 negative 清空，否则负词会被当成第二条 conditioner 去找位置。
     if _is_flux2:
