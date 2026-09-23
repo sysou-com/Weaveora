@@ -28,7 +28,10 @@ SSH=(ssh)
 EMAIL="${WEAVEORA_USER_EMAIL:-sysou.com@outlook.com}"
 WF=/opt/weaveora/workflows
 
-Q() { "${SSH[@]}" "$HOST" "sudo -u postgres psql -d weaveora -At -c \"$1\""; }
+# ★ SQL 一律走 **stdin 管道**（`psql -f -`），不拼进 ssh 的命令行。
+#   为什么：JSON patch 里带双引号，若拼进本地双引号包裹的 ssh 参数里，
+#   双引号会被本地 shell 吃掉 → 远端收到 `{workflow...}` → `invalid input syntax for type json`（本脚本已踩）。
+Q() { printf '%s\n' "$1" | "${SSH[@]}" "$HOST" "sudo -u postgres psql -d weaveora -At -f -"; }
 
 UID_="$(Q "select id from users where email='${EMAIL}';" | tr -d '\r' | head -1)"
 [ -n "$UID_" ] || { echo "!! 找不到用户 ${EMAIL} 的 user_id"; exit 1; }

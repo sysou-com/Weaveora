@@ -9,6 +9,7 @@ import base64
 import io
 import json
 import os
+import re
 import struct
 import sys
 import time
@@ -184,6 +185,43 @@ def _wf_upstream_text_node(graph, start_ref):
             if isinstance(v, list) and v and str(v[0]) in graph:
                 stack.append(str(v[0]))
     return None
+
+
+# ★ 2026-09-23：FLUX.2 参考槽措辞改写（**功能性**开关，默认开）。
+#   为什么必须：生产正词是 Java 侧拼的**中文**，里面写死了 Qwen 的口径
+#     「参考图映射（按送入顺序；Picture N 与 imageN 指同一张图）：Picture 1 (image1) = 宝玉…」
+#   —— 那是 `TextEncodeQwenImageEditPlus` 自己的序号约定。FLUX.2 的参考图走 `ReferenceLatent`，
+#   官方模板的措辞是 "Reference Image N"，**没有 Picture 这个概念**。不改就等于让模型去找一张
+#   不存在的 "Picture 2" ⇒ 参考图与角色的映射**可能整个丢掉**（且不会报错）。
+#   只改序号写法，不改任何剧情/身份描述；WEAVEORA_FLUX2_SLOT_REWRITE=0 可关。
+FLUX2_SLOT_REWRITE = (os.environ.get("WEAVEORA_FLUX2_SLOT_REWRITE", "1") or "1").strip() == "1"
+_FLUX2_SLOT_RE_PIC = re.compile(r"Picture\s*(\d+)\s*\(\s*image\s*\1\s*\)", re.IGNORECASE)
+# 光杆的 "Picture N"（没带括号的那种）也要管 —— 英文正词里就出现过 "...are Picture 1 and Picture 2"
+_FLUX2_SLOT_RE_BARE = re.compile(r"Picture\s*(\d+)", re.IGNORECASE)
+_FLUX2_SLOT_RE_IMG = re.compile(r"(?<![A-Za-z])image\s*(\d+)(?![0-9])", re.IGNORECASE)
+# 陈旧解释句：“参考图映射（按送入顺序；Picture N 与 imageN 指同一张图）：”
+#   —— 那里是**字面 N**（不是数字）⇒ 上面三条数字规则盖不到；
+#   槽号改完它还留着就变成自相矛盾的噪声（同句里既说“参考图 N” 又说“Picture N”）。一并清掉。
+_FLUX2_SLOT_RE_TAIL = re.compile(
+    r"[；;]\s*(?:Picture|image)\s*N\s*(?:与|和|and)\s*(?:Picture|image)\s*N\s*"
+    r"(?:指同一张图|refers? to the same image|are the same image)",
+    re.IGNORECASE)
+
+
+def _flux2_slot_rewrite(text):
+    """把 Qwen 口径的参考槽编号（Picture N (imageN) / imageN）改写成 FLUX.2 的口径。
+
+    中文正词用「参考图 N」，英文正词用「Reference Image N」（官方模板口径）—— 跟提示词语言走，
+    避免又搞出「英文头 + 中文身」那种两头听（2026-09-16 用户报过中英混杂）。
+    """
+    if not text:
+        return text
+    slot = "参考图 %s" if _looks_zh(text) else "Reference Image %s"
+    out = _FLUX2_SLOT_RE_TAIL.sub("", text)
+    out = _FLUX2_SLOT_RE_PIC.sub(lambda m: slot % m.group(1), out)
+    out = _FLUX2_SLOT_RE_BARE.sub(lambda m: slot % m.group(1), out)
+    out = _FLUX2_SLOT_RE_IMG.sub(lambda m: slot % m.group(1), out)
+    return out
 
 
 def _flux2_fold_negative(positive, negative, zh):
@@ -681,6 +719,12 @@ def generate_via_workflow(client_id, payload, progress_fn=None, on_tick=None):
     # ★ FLUX.2：负词架构上不生效（guidance 蒸馏 / BasicGuider 单条件）→ 产品 2026-09-23 裁定：折进正词。
     #   为什么放在 _wf_inject_text 之前：折完要把 negative 清空，否则负词会被当成第二条 conditioner 去找位置。
     if _is_flux2:
+        if FLUX2_SLOT_REWRITE and positive:
+            _rewritten = _flux2_slot_rewrite(positive)
+            if _rewritten != positive:
+                print("[comfy] FLUX.2：参考槽措辞已改写（Picture N (imageN) → %s）—— 否则映射会丢"
+                      % ("参考图 N" if _looks_zh(positive) else "Reference Image N"), flush=True)
+            positive = _rewritten
         if (negative or "").strip():
             if FLUX2_FOLD_NEGATIVE:
                 print("[comfy] FLUX.2：负词在 guidance 蒸馏下不生效 → 已折进正词（原文留档）：%s"

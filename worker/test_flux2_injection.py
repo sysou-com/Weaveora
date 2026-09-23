@@ -76,7 +76,25 @@ def main():
     check(g["40"]["inputs"]["model"] == ["lora_main", 0], "BasicGuider.model 已改指 LoRA 输出")
 
     # ── 2. 负词折进正词 ─────────────────────────────────────────────────────
-    print("\n[2] 负词折进正词（产品 2026-09-23 裁定）")
+    print("\n[2] 负词折进正词（产品 2026-09-23 裁定）+ 参考槽措辞改写")
+    # ★ 参考槽措辞：拿**生产真实正词**里那句当样本（Java 侧拼出来的中文口径）
+    prod = ("参考图映射（按送入顺序；Picture N 与 imageN 指同一张图）："
+            "Picture 1 (image1) = 宝玉[性别 男 male；年龄 13]；Picture 2 (image2) = 可卿；"
+            "Picture 3 (image3) = 警幻。请严格按这个对应关系。")
+    rw = c._flux2_slot_rewrite(prod)
+    check("Picture 1 (image1)" not in rw and "参考图 1" in rw, "中文：Picture N (imageN) → 参考图 N")
+    check("image2" not in rw and "参考图 2" in rw, "中文：残留的 imageN 也改掉")
+    check("宝玉" in rw and "警幻" in rw and "性别 男" in rw, "中文：只改槽号，身份描述一字不动")
+    en = c._flux2_slot_rewrite("The reference image(s) are Picture 1 and Picture 2; keep the face of image1.")
+    check("Reference Image 1" in en and "Picture" not in en, "英文：→ Reference Image N（官方模板口径）")
+    check(c._flux2_slot_rewrite("") == "" and c._flux2_slot_rewrite("no slots here") == "no slots here",
+          "无槽号时原文返回（不误伤）")
+    check(c._flux2_slot_rewrite("ImageMagick image processing") == "ImageMagick image processing",
+          "不误伤普通单词（ImageMagick / image processing）")
+    tail = c._flux2_slot_rewrite("参考图映射（按送入顺序；Picture N 与 imageN 指同一张图）：Picture 1 (image1) = 宝玉")
+    check("Picture" not in tail and "参考图 1 = 宝玉" in tail and "（按送入顺序）" in tail,
+          "陈旧解释句被清掉（不再自相矛盾）")
+
     folded = c._flux2_fold_negative("A woman in a garden", "white background, 3d render", False)
     check("photorealistic" in folded and "A woman in a garden" in folded,
           "英文：原文保留 + 追加**正向**约束句（不是照抄负词）")
