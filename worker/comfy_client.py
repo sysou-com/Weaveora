@@ -1504,8 +1504,103 @@ def generate(client_id, payload, progress_fn=None):
         raise
 
 
+# ★ 2026-09-24：换模型前先让 ComfyUI **卸掉上一套**（防“换模型 OOM”）。
+#   事故（真实任务，非压测）：2026-09-24 00:00 第一镜跑完关键帧（FLUX.2 主模型 33 GB + 文字编码器 16.8 GB）
+#   → 紧接着跑 motion（LTX 20 GB + gemma 14 GB）⇒ 47 GiB 内存的盒上 anon-rss 顶到 **47.8 GB**，
+#   OOM killer 杀掉 ComfyUI（**整栈连同网关一起死**），而 worker 收到的只是
+#   `COMFY_ERROR: <urlopen error [Errno 111] Connection refused>` —— 现象与根因隔着两层，极易误判。
+#   为什么 `--cache-ram` 调参治不了：被赖着不走的是“上一个正在用的模型”（active pin），
+#   `model_management.ensure_pin_budget()` 只在 `evict_active=True` 时才动它，而**加载路径不传**这个参数。
+#   解法：ComfyUI 自带 `POST /free {"unload_models": true}`
+#   （`server.py:1192` 设 flag → `main.py:424 unload_all_models()`），
+#   而主循环**空闲时也会读 flag** ⇒ 提交前调一下，就能保证新模型加载时旧的已经卸完。
+# ★ 跨模型家族切换时必须重启 ComfyUI（本机装不下两套大模型）—— 开关，默认开。
+COMFY_RELOAD_ON_SWITCH = (os.environ.get("WEAVEORA_COMFY_RELOAD_ON_SWITCH", "1") or "1").strip() == "1"
+# 与盒上 edge_proxy.py 的 `WEAVEORA_EDGE_ADMIN_TOKEN` 必须一致；未配置则跳过重启（只告警）
+EDGE_ADMIN_TOKEN = os.environ.get("WEAVEORA_EDGE_ADMIN_TOKEN", "").strip()
+_MODEL_KEY_LAST = {"v": ""}
+# 小件（3 GB 的放大模型等）：不值得为它触发一次重启（否则“出图→放大→再出图”会把 33 GB 反复重载）
+_MODEL_KEY_SKIP = ("seedvr2",)
+
+
+def _graph_model_key(prompt):
+    """从待提交的 prompt 图里抽出“这活要加载哪些大模型”的指纹（用来判是否换模型）。
+
+    只看三类加载器（UNETLoader / CheckpointLoaderSimple / CLIPLoader）—— 它们才是吃内存的大头；
+    VAE 不纳入（几十 MB，纳入了会因为 t2i/edit 用不同 VAE 而误触发卸载）。
+    自研节点（LatentSync/talk 等）的图里没有这些类 → key 为空 → 直接跳过（它们走别的服务）。
+    """
+    graph = (prompt or {}).get("prompt")
+    if not isinstance(graph, dict):
+        return ""
+    parts = []
+    for ct, key in (("UNETLoader", "unet_name"), ("CheckpointLoaderSimple", "ckpt_name"),
+                    ("CLIPLoader", "clip_name")):
+        for _nid, n in _wf_of_class(graph, ct):
+            v = (n.get("inputs") or {}).get(key)
+            if isinstance(v, str) and v and not any(s in v for s in _MODEL_KEY_SKIP):
+                parts.append("%s:%s" % (ct, v))
+    return "|".join(sorted(parts))
+
+
+def _unload_before_model_switch(prompt):
+    """跨**模型家族**切换时重启 ComfyUI（返回是否真的重启了）。
+
+    ★ 2026-09-24 实测结论（三层，全是真事故/真实测，不是推测）：
+      1) 不变重启 = OOM：盒是 48 GB 内存 / 48 GB 显存，**图像家族 49.8 GB**（FLUX.2 主模型 33 + 编码器 16.8）
+         与**视频家族 34 GB**（LTX 20 + gemma 14）装不下；上一套还钉在内存里就装新一套 ⇒
+         `anon-rss 47.8 GB` 被 OOM killer 杀，整栈连网关一起死，worker 只看到 `Connection refused`
+         （真实任务：第一镜跑完关键帧 → 跑 motion 就失败在这）。
+      2) `POST /free {"unload_models": true}` **不能用**：实测它把 33 GB 权重从显存**卸到内存**
+         （anon 13.5 → 45.3 GB，整机 available 只剩 179 MB）= 往 OOM 枪口上撞。
+         根因：`free_memory()` 对 `sys.getrefcount(model) > 1`（被执行缓存引用中）的模型只 offload 不释放。
+      3) 唯一可靠的手段 = **重启 ComfyUI**（~10 秒回来、其它服务不受影响）。
+         而 VPS worker **没有**盒上 SSH 权限（实测 `Permission denied`）⇒ 走我们自己网关的
+         `POST /__edge/reload_comfy`（`edge_proxy.py`，盒上新增，带 `X-WV-Token`）。
+
+    代价：重启后本次任务要付一次冷加载（~1–2 分钟）—— 比 OOM 杀进程便宜得多。
+    失败不拦任务（只告警），但会把风险吼在日志里。
+    """
+    key = _graph_model_key(prompt)
+    last = _MODEL_KEY_LAST["v"]
+    if not key:
+        return False
+    if last and last != key:
+        print("[comfy] ⚠️ 跨模型家族切换（装不下两套）→ 重启 ComfyUI 释放上一套\n"
+              "        旧：%s\n        新：%s" % (last, key), flush=True)
+        if COMFY_RELOAD_ON_SWITCH and EDGE_ADMIN_TOKEN:
+            try:
+                req = urllib.request.Request(
+                    _image_comfy() + "/__edge/reload_comfy", data=b"{}", method="POST",
+                    headers={"Content-Type": "application/json", "X-WV-Token": EDGE_ADMIN_TOKEN})
+                with urllib.request.urlopen(req, timeout=30) as r:
+                    r.read()
+                t0 = time.time()
+                ready = False
+                while time.time() - t0 < 180:          # 等它回来（冷启通常 10~40s）
+                    time.sleep(3)
+                    try:
+                        with urllib.request.urlopen(_image_comfy() + "/system_stats", timeout=8) as r2:
+                            r2.read()
+                            ready = True
+                            break
+                    except Exception:
+                        continue
+                print("[comfy]    ComfyUI 重启%s（%.0fs）—— 本次将付一次冷加载"
+                      % ("完成" if ready else "**未确认就绪**，仍继续", time.time() - t0), flush=True)
+            except Exception as e:  # noqa: BLE001
+                print("[comfy] ⚠️ 重启请求失败（本次可能 OOM/Connection refused）：%s" % e, flush=True)
+        else:
+            print("[comfy] ⚠️ 未启用/未配置重启通道（WEAVEORA_COMFY_RELOAD_ON_SWITCH=%s token=%s）"
+                  "—— 本次很可能 OOM，请人工看内存"
+                  % (COMFY_RELOAD_ON_SWITCH, "有" if EDGE_ADMIN_TOKEN else "无"), flush=True)
+    _MODEL_KEY_LAST["v"] = key
+    return True
+
+
 def _post_prompt(prompt, client_id):
     """POST /prompt；对偶发的 prompt 校验失败重试 1 次（同图重投，服务端状态问题）。"""
+    _unload_before_model_switch(prompt)
     for attempt in (1, 2):
         try:
             # 串行提交前提下，队里有东西就是上一个任务的僵尸 prompt → 清掉（否则本任务白等）。

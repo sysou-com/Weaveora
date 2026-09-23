@@ -26,6 +26,8 @@
 import argparse
 import asyncio
 import logging
+import os
+import subprocess
 import sys
 
 from aiohttp import ClientSession, ClientTimeout, WSMsgType, web
@@ -139,6 +141,51 @@ async def proxy_http(request, base, path):
         return web.Response(status=502, text="edge proxy: upstream error: %s\n" % e)
 
 
+async def reload_comfy(request):
+    """★ 2026-09-24：受 token 保护的「重启 ComfyUI」入口 —— 供 worker 做**跨模型家族切换**。
+
+    为什么必须有这条路（实测，不是推测）：
+      · 盒是 48 GB 内存 / 48 GB 显存，而**图像家族 49.8 GB**（FLUX.2 主模型 33 + 编码器 16.8）
+        与**视频家族 34 GB**（LTX 20 + gemma 14）**装不下**；
+        跨家族不重启 = OOM killer 杀 ComfyUI（`anon-rss 47.8 GB`）⇒ 整栈连网关一起死，
+        worker 端只看到 `Connection refused`（现象与根因隔着两层，极易误判成“motion 失败”）。
+      · `POST /free {"unload_models": true}` **不能用**：实测它把 33 GB 权重从显存
+        **卸载到内存**（anon 13.5 → 45.3 GB，整机 available 只剩 179 MB），方向完全错。
+      · VPS worker **没有** 盒上 SSH 权限（实测 `Permission denied`）⇒ 只能借我们自己这条网关开口子。
+
+    实现：**只杀 ComfyUI（main.py）再跑一遍 `services_up.sh`** —— 后者是幂等的（哪个端口不在就起哪个），
+    所以网关自己**不会被杀**（能正常回包），TTS/face/talk 也不受打扰；不重启整栈。
+    鉴权：`X-WV-Token` 头必须等于环境变量 `WEAVEORA_EDGE_ADMIN_TOKEN`（未配则一律 403）。
+    """
+    tok = os.environ.get("WEAVEORA_EDGE_ADMIN_TOKEN", "")
+    if not tok or request.headers.get("X-WV-Token", "") != tok:
+        return web.json_response({"ok": False, "err": "forbidden"}, status=403)
+    # 先等 ComfyUI 真的退出（释放 33 GB 显存/内存要几秒），再让 services_up.sh 把它拉起来；
+    # 若不等就重启，services_up 的 `up 8001` 可能还看到端口在听 → 跳过 → 反而留下一个死进程。
+    # ★ 两个已踩的坑（2026-09-24，都是实测）：
+    #   ① `pkill -f '/opt/weaveora/ComfyUI/main.py'` 会**自匹配**：模式串就在自己这条 `bash -c` 的
+    #      命令行里 ⇒ pkill 把自己这条 shell 也杀了，后面的 services_up 永远不执行
+    #      （现象：ComfyUI 被杀、网关变成 502、没人把它拉起来）。用 `[C]omfyUI` 括号技巧绕开。
+    #   ② `services_up.sh` 的 `ROOT=${WEAVEORA_ROOT:-/home/dataset-local/weaveora}` **默认是 GPU#1 的遗留路径**；
+    #      不带 WEAVEORA_ROOT 跑就会 `cd: /home/dataset-local/weaveora/ComfyUI: No such file` 然后 exit 1。
+    #      这里显式 export，不依赖调用方环境。
+    #   ③ `services_up.sh` 还需要 `WEAVEORA_GATEWAY_PORT`（默认 8000！）—— 漏了会把网关起在**错的端口**
+    #      （现象：ComfyUI 好了、但公网入口 57712 变成 502）。所以两个变量一起显式给。
+    cmd = ("export WEAVEORA_ROOT=/opt/weaveora WEAVEORA_GATEWAY_PORT=8800 ; "
+           "pkill -f '[C]omfyUI/main.py' ; "
+           "for i in $(seq 1 40); do pgrep -f '[C]omfyUI/main.py' >/dev/null || break; sleep 1; done ; "
+           "sleep 1 ; "
+           "mkdir -p /opt/weaveora/logs ; "
+           "setsid bash /opt/weaveora/services_up.sh >> /opt/weaveora/logs/services_up.log 2>&1")
+    try:
+        subprocess.Popen(["/bin/bash", "-c", cmd], start_new_session=True)
+    except Exception as e:  # noqa: BLE001
+        log.warning("reload_comfy 拉起失败: %s", e)
+        return web.json_response({"ok": False, "err": str(e)}, status=500)
+    log.info("reload_comfy：已请求重启 ComfyUI（调用方需自行轮询 /system_stats 到 200）")
+    return web.json_response({"ok": True, "reloading": True})
+
+
 async def handle(request):
     base, path = pick_upstream(request.path)
     if request.headers.get("Upgrade", "").lower() == "websocket":
@@ -173,6 +220,7 @@ def main():
 
     app = web.Application(client_max_size=1024 ** 3)   # 允许 1GB 上传
     app.router.add_get("/__edge/health", health)
+    app.router.add_post("/__edge/reload_comfy", reload_comfy)
     app.router.add_route("*", "/{tail:.*}", handle)
     app.on_startup.append(on_startup)
     app.on_cleanup.append(on_cleanup)

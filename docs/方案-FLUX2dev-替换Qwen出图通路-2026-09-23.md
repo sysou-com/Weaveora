@@ -597,6 +597,46 @@ Defaults: active 10% of system RAM (min 2GB, max 10GB), **inactive 100% of syste
 
 ---
 
+### 9.0.1 ✅ 已解决（2026-09-24 00:40）：跨模型家族时**自动重启 ComfyUI**
+
+**又发生了一次**（这次是真任务，不是压测）：第一镜关键帧成功（FLUX.2，226 s）→ 接着跑 motion 失败。
+`dmesg`：`Killed process 20402 (python) anon-rss 47,828,196 kB`（00:00:14）；worker 只拿到
+`COMFY_ERROR: <urlopen error [Errno 111] Connection refused>`（整栈连网关一起死）。
+
+**排查出的三个坑（都是实测，不是推理）**
+
+| # | 坑 | 证据 |
+|---|---|---|
+| 1 | **预热脚本加载的是 Qwen**（`WEAVEORA_WARMUP=qwen` 默认），每次重启把 27 GB Qwen 读进来 → 推高内存 + 把刚加载的模型卸来卸去 → 触发 ComfyUI 记账损坏 | `warmup.log: [00:03:00] 预热出图栈（Qwen-Image + Qwen2.5-VL）`；随后任何 FLUX.2 加载 0.04 s 报 `'NoneType' object has no attribute 'model_size'` |
+| 2 | **`POST /free {"unload_models": true}` 不能用**：它把 33 GB 权重从**显存搬到内存**（不是释放） | 实测 anon 13.5 → **45.3 GB**，整机 available 仅剩 **179 MB**（正撞 OOM 线） |
+| 3 | **`--cache-ram` 调参治不了**：赖着不走的是“上一个正在用的模型”（active pin），`ensure_pin_budget()` 只在 `evict_active=True` 时才动它 | 盒上 `model_management.py:720`、`main.py:424` 逐行 |
+
+**解法（已上线并端到端验证）**
+
+1. `warmup.sh` 默认 `qwen` → **`off`**（预热的模型必须与生产同族，否则纯害）。
+2. 盒上 `edge_proxy.py` 新增 **`POST /__edge/reload_comfy`**（`X-WV-Token` = 环境变量 `WEAVEORA_EDGE_ADMIN_TOKEN`）：
+   只杀 ComfyUI 再跑一遍幂等的 `services_up.sh` ⇒ **网关与 TTS/face/talk 不受影响**，ComfyUI ~10–18 s 回来。
+   （为什么绕网关：VPS worker **没有**盒上 SSH 权限，实测 `Permission denied`。）
+3. worker `comfy_client._unload_before_model_switch()`：提交前比对“这活要加载哪些大模型”的指纹
+   （UNETLoader/CheckpointLoaderSimple/CLIPLoader；seedvr2 等小件跳过），**跨家族就调上面的路由并等就绪**。
+
+**端到端验证（同进程内 FLUX.2 → LTX）**
+```
+第2步：提交 LTX 出片（视频家族 34 GB）
+[comfy] ⚠️ 跨模型家族切换（装不下两套）→ 重启 ComfyUI 释放上一套
+        旧：CLIPLoader:mistral_3_small_flux2_fp8|UNETLoader:flux2_dev_fp8mixed
+        新：CLIPLoader:gemma4-12b-…ltx-2.5…|UNETLoader:ltx-2.5-22b-distilled-…
+[comfy]    ComfyUI 重启完成（18s）—— 本次将付一次冷加载
+重启后：anon 2.5 GB / VRAM 409 MB  ← 干净加载，不是 45 GB 的 OOM 线
+```
+代价：**跨家族那一次任务付一次冷加载（~1–2 分钟）**；同家族内（连续出图/连续出片）不受影响。
+
+**顺带挖出的两个运维地雷（已在代码注释里写死）**
+- `pkill -f '/opt/weaveora/ComfyUI/main.py'` 会**自匹配**（模式串就在自己命令行里）⇒ 把自己那条 shell 也杀了、后续拉起永不执行。用 `[C]omfyUI` 括号技巧。
+- `services_up.sh` 手工调用必须带 **两个** 变量：`WEAVEORA_ROOT=/opt/weaveora`（默认值是 GPU#1 遗留路径 `/home/dataset-local/weaveora`）与 `WEAVEORA_GATEWAY_PORT=8800`（默认 8000 —— 漏了会把网关起错端口）。
+
+---
+
 | # | 风险 | 性质 | 缓解 |
 |---|---|---|---|
 | 1 | `fp8mixed 33.02 + fp8 TE 16.80 = 49.82 GiB > 47.4 GiB` 显存，**能否顺畅卸载换页未实测** | 🔴 最大未知 | §4-B 备件已定；Step 6 量"是否换页"。
