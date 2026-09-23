@@ -484,9 +484,32 @@ git revert <sha>；worker 侧恢复 /opt/weaveora/comfy_client.py.bak.<ts>
 
 ## 9. 风险与未验证项（诚实清单）
 
+### 9.0 ⛔ 【2026-09-23 22:55 实测事故】ComfyUI 被 OOM Killer 杀死 —— **最大的真阻塞点**
+
+**事实（dmesg + systemd 逐字）**：`oom-kill ... task_memcg=/system.slice/weaveora-stack.service, task=python,pid=1560`
+→ `Out of memory: Killed process 1560 (python) total-vm:191793880kB, anon-rss:47498668kB`（**45.3 GiB 匿名内存**）；
+`weaveora-stack.service: Failed with result 'oom-kill'`；8001/8800/8091/8093/8094 **五个端口全 000**。
+现场：A/B 刚把 `qwen-edit`(20.03 GiB) 跑完、紧接着上 `flux2-edit`(33.02 GiB) ⇒ 两个大模型在同一个 ComfyUI 进程里换茬。
+
+**根因（官方源码为据）**：现网启动参数是 `--cache-ram 8`（只给了一个值）。
+ComfyUI `comfy/cli_args.py:140` 逐字：*"`--cache-ram` … The first value sets the active-cache threshold; **the optional second value sets the inactive-cache/pin threshold**.
+Defaults: active 10% of system RAM (min 2GB, max 10GB), **inactive 100% of system RAM (max 128GB)**"* ——
+⇒ 不给第二个值，就默认允许把已加载的模型 **pin 到 ≈100% 内存**（本机 ≈48 GB）⇒ 换模型时不及时驱逐 ⇒ 45 GiB 匿名内存 ⇒ OOM。
+（另：`--disable-smart-memory` 是"更激进地往 **RAM** 卸"，方向相反，**不要**用它来治这个；`--cache-none` 是铁律③ 明令禁止的。）
+
+**对策（待确认 + 待实测）**：把启动参数改成**两个值**，例如 `--cache-ram 8 8`（或 `4 6`），让 pin 阀值从 100% 内存降到个位数 GB。
+验证方法：跑一次"出图(33GB) → 出片(LTX 20+14GB) → 出图"交替压测，盯 `free -m` 与 `dmesg -T | grep -i oom`。
+⚠️ 启动参数在 `/opt/weaveora/services_up.sh` 里 → 属**配置变更**，需用户确认后才改（且改完要重启整栈）。
+
+**为什么这条必须在上生产前解决**：切到 FLUX.2 后，图像通路（33 GB）与出片通路（LTX 20 GB 主干 + 14 GB 编码器）**共用同一个 ComfyUI 进程**，
+一个项目"先出图再出片"就会踩到完全一样的雷 —— 而这次它只是把一个 A/B 跑挂了，上生产就是**用户任务直接失败**。
+
+---
+
 | # | 风险 | 性质 | 缓解 |
 |---|---|---|---|
-| 1 | `fp8mixed 33.02 + fp8 TE 16.80 = 49.82 GiB > 47.4 GiB` 显存，**能否顺畅卸载换页未实测** | 🔴 最大未知 | §4-B 备件已定；Step 6 量"是否换页" |
+| 1 | `fp8mixed 33.02 + fp8 TE 16.80 = 49.82 GiB > 47.4 GiB` 显存，**能否顺畅卸载换页未实测** | 🔴 最大未知 | §4-B 备件已定；Step 6 量"是否换页"。
+  **→ 2026-09-23 已实测：三档试枪全过（txt2img 151.5s / edit 114.3s / img2img 49.3s @1024²·20步），显存不是瓶颈；真正爆的是 RAM（见 §9.0）** |
 | 2 | **48 GB 内存**（上一实例 47 GiB + swap 已用 2 GiB）：33 GiB 主模型 + 16.8 GiB 编码器同时驻留会打爆 | 🔴 | 调 `--cache-ram`（8/24/32 实测选）；出图与出片不并发 |
 | 3 | **负词失效**（guidance 蒸馏）——产品语义改动 | 🟠 | §6.3，需产品确认 |
 | 4 | 多参考 identity 一致性**是否真强于 2511**，官方无对比 | 🟠 | G3 判据，A/B 定 |
