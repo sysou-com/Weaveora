@@ -183,6 +183,18 @@ public class EngineSettingsService {
     }
 
     /**
+     * **纯函数**：把「计划里的成片帧率」归一成可交付的帧率（可单测，不依赖仓库/配置）。
+     *
+     * <p>规则：`planFps` 能被 `nativeFps` 整除 → 原样尊重；否则（含未填）→ 用 `fallback`。
+     */
+    static int normalizeDeliverFps(int planFps, int nativeFps, int fallback) {
+        if (nativeFps <= 0 || planFps <= 0) {
+            return fallback > 0 ? fallback : planFps;
+        }
+        return planFps % nativeFps == 0 ? planFps : fallback;
+    }
+
+    /**
      * 成片/交付帧率（写给 worker 的 `payload.fps` + 导出编码 `ffmpeg fps=` 用）。
      *
      * <p>规则：**必须能被出片引擎的原生帧率整除**（Wan 16 / LTX 24）。能整除 → 尊重计划值
@@ -198,16 +210,13 @@ public class EngineSettingsService {
         }
         int nativeFps = motionNativeFps(userId);
         int fallback = defaultDeliverFps(userId);
-        if (planFps <= 0) {
-            return fallback;
+        int eff = normalizeDeliverFps(planFps, nativeFps, fallback);
+        if (eff != planFps) {
+            log.warn("[fps] 计划成片帧率 {} 不是出片引擎 {} 原生 {}fps 的整数倍 → 本次交付按 {}fps"
+                            + "（否则导出阶段 ffmpeg `fps=` 会用复制帧拉齐 ⇒ 顿挫） user={}",
+                    planFps, motionEngine(userId), nativeFps, eff, userId);
         }
-        if (planFps % nativeFps == 0) {
-            return planFps;
-        }
-        log.warn("[fps] 计划成片帧率 {} 不是出片引擎 {} 原生 {}fps 的整数倍 → 本次交付按 {}fps"
-                        + "（否则导出阶段 ffmpeg `fps=` 会用复制帧拉齐 ⇒ 顿挫） user={}",
-                planFps, motionEngine(userId), nativeFps, fallback, userId);
-        return fallback;
+        return eff;
     }
 
     /**
