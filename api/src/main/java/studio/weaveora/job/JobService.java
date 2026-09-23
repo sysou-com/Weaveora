@@ -2982,6 +2982,7 @@ public class JobService {
         java.util.List<String> orderItems = new java.util.ArrayList<>();
         java.util.List<Double> orderX = new java.util.ArrayList<>();
         java.util.List<Integer> orderSlot = new java.util.ArrayList<>();
+        java.util.List<String> noPos = new java.util.ArrayList<>();   // 没设位置的主体（必须点名 + 记日志）
         // ★ 2026-09-22 用户裁定：**motion 正词不再带任何人物信息** —— 只把名字收集起来记日志。
         java.util.List<String> motionNames = new java.util.ArrayList<>();
         for (int i = 0; i < refs.subjects().size(); i++) {
@@ -3018,15 +3019,27 @@ public class JobService {
                 sb.append('[').append(tr.describeRef(zh)).append(']');
             }
             // motion：不写方位/坐标/框 —— 位置以关键帧为准（见方法注释）。
-            if (p != null && !motion) {
-                // ★ 2026-09-21 二次修正（用户实测第 4 镜「警幻和可卿的位置翻了 / 有人站错」）：
-                //   第一版简化只写**方位词**（posHintZh 只看 x/y，且丢掉 w/h）→ region x=0.34 的「可卿」
-                //   其实是**中间带**（0.34–0.67、占满画高），却被写成「上方」，与「左上/右上」并列时会被读成
-                //   “中间偏上”；三条竖带并列这个真正的硬约束完全丢了。
-                //   现在改用**横向区间 + 带位 + 是否占满画高**（仍不写「框 w×h」那种容易被画出来的形式）。
-                sb.append(zh ? bandHintZh(p[0], p[1], p[2], p[3]) : bandHint(p[0], p[1], p[2], p[3]));
+            if (!motion) {
+                // ★ 2026-09-23 线上事故修复（用户报「第 4 镜关键帧又少了一个人」）：
+                //   旧写法把「没有位置」的主体**整个从两张清单里排除**：
+                //     ① 自己括号里不写区间；② **不进 orderItems** ⇒ 尾句变成
+                //        「画面从左到右依次为：宝玉(image1) → 警幻(image3)；」——
+                //        正词**自述只有两个人**（后面又跟一句“禁止合并或省掉任何一位”，自相矛盾）。
+                //     实测（第 4 镜 rev85，job …cc36da5b0020）：可卿没设位置 ⇒ 模型就只画了两个人，
+                //        且把第三张参考图的服饰（警幻的佛禅）给了右侧那人 —— 完全对得上用户描述。
+                //   ⇒ 现在：**所有主体都进“从左到右”清单**；没位置的不再被隐式删掉，
+                //     而是显式写“位置未指定（按参考图与剧情自然安排）”，排序用槽位均分兜底。
+                if (p != null) {
+                    sb.append(zh ? bandHintZh(p[0], p[1], p[2], p[3]) : bandHint(p[0], p[1], p[2], p[3]));
+                    orderX.add((p[0] + Math.min(1.0, p[0] + p[2])) / 2);
+                } else {
+                    sb.append(zh ? "（位置：未指定，按剧情与参考图自然安排，**但必须出现在画面中**）"
+                                 : " (position: unspecified - arrange naturally, but MUST appear in frame)");
+                    // 槽位均分作为排序兑底（只用于“从左到右”那行的顺序，不写进正词）
+                    orderX.add((i + 0.5) / Math.max(1, refs.subjects().size()));
+                    noPos.add(name);
+                }
                 orderItems.add(name);
-                orderX.add((p[0] + Math.min(1.0, p[0] + p[2])) / 2);
                 orderSlot.add(i + 1);
             }
         }
@@ -3052,6 +3065,10 @@ public class JobService {
                 for (int k : idx) {
                     zhL.add(orderItems.get(k) + "(image" + orderSlot.get(k) + ")");
                     enL.add(orderItems.get(k) + " (image" + orderSlot.get(k) + ")");
+                }
+                if (!noPos.isEmpty()) {
+                    log.warn("refs: 以下主体**没有位置**（会用槽位均分兜底排序，并在正词里标注“未指定”）：{} —— "
+                            + "若不希望它们被模型随意摆放，请在「位置总控 / 预览点选」里补上", noPos);
                 }
                 orderLineZh = "画面从左到右依次为：" + String.join(" → ", zhL) + "；";
                 orderLineEn = "Left to right: " + String.join(" -> ", enL) + "; ";

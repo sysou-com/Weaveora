@@ -443,4 +443,46 @@ class JobLayoutRegionsTest {
         assertEquals(List.of("宝玉", "可卿"), JobService.castOf(json("{\"cast\":[\"宝玉\",\" 可卿 \",\"\"]}")));
         assertNull(JobService.castOf(json("{\"cast\":\"宝玉\"}")));
     }
+
+    /**
+     * ★ 2026-09-23 线上事故回归（用户报「第 4 镜关键帧又少了一个人，警幻的佛禅却穿在别人身上」）。
+     *
+     * <p>真因：**没有位置的主体被整个从「从左到右」清单里剔除** ⇒ 正词自述只有 N 个（有位置的）人，
+     * 而尾句又写着「禁止合并或省掉任何一位」→ 模型按"只有两个人"画。
+     * 实测第 4 镜 rev85（job …cc36da5b0020）的正词正是：
+     * <pre>
+     *   Picture 2 (image2) = 可卿                                   ← 没有位置
+     *   画面从左到右依次为：宝玉(image1) → 警幻(image3)；              ← 只列了 2 个！
+     * </pre>
+     * 契约：**只要有名字的参考图主体，就必须出现在「从左到右」清单里**；
+     * 没设位置的显式写「位置：未指定…但必须出现在画面中」，排序用槽位均分兜底。
+     */
+    @Test
+    void 缺位置的主体不得被从左到右清单剔除() {
+        ObjectNode p = payload("电影感关键帧：三人同框而立，烛影摇红");   // 中文正词 → 走中文措辞分支
+        JsonNode plan = json("{\"subjects\":[{\"name\":\"宝玉\"},{\"name\":\"可卿\"},{\"name\":\"警幻\"}]}");
+        JsonNode shot = json("""
+                {"layout":[{"subject":"宝玉","x":0.23,"y":0.18,"w":0.30,"h":0.45},
+                           {"subject":"警幻","x":0.51,"y":0.07,"w":0.30,"h":0.45}]}
+                """);
+
+        JobService.applyLayoutRegions(p, plan, shot, -1, refs("宝玉", "可卿", "警幻"));
+        String pos = p.path("positive_prompt").asText();
+
+        // 三个主体都得在清单里（可卿曾经在这里消失）
+        assertTrue(pos.contains("宝玉(image1)"), pos);
+        assertTrue(pos.contains("可卿(image2)"), pos);
+        assertTrue(pos.contains("警幻(image3)"), pos);
+        // 顺序句必须同时点名三个人
+        String line = pos.substring(pos.indexOf("画面从左到右依次为"));
+        line = line.substring(0, line.indexOf('；'));
+        assertTrue(line.contains("宝玉"), line);
+        assertTrue(line.contains("可卿"), line);
+        assertTrue(line.contains("警幻"), line);
+        // 没位置的要显式说明，且仍然强调必须出现
+        assertTrue(pos.contains("Picture 2 (image2) = 可卿（位置：未指定"), pos);
+        assertTrue(pos.contains("必须出现在画面中"), pos);
+        // 有位置的仍然写区间（没被这次改动破坏）
+        assertTrue(pos.contains("Picture 1 (image1) = 宝玉（位置：x 0.23–0.53"), pos);
+    }
 }
