@@ -1543,57 +1543,89 @@ def _graph_model_key(prompt):
     return "|".join(sorted(parts))
 
 
+def _comfy_vram_used_gb():
+    """问 ComfyUI 要“当前已占用多少显存”（拿不到返回 None）。
+
+    用途：worker 进程刚重启时，进程内没有“上次用了哪套模型”的记忆，
+    但盒上可能还驻留着上一套（例：刚跑完出片，LTX 34 GB 还在显存里）。
+    此时直接提交出图任务就是叠上去 → OOM。所以要看这个数做判断。
+    """
+    try:
+        with urllib.request.urlopen(_image_comfy() + "/system_stats", timeout=8) as r:
+            d = json.loads(r.read())
+        dev = (d.get("devices") or [{}])[0]
+        total = dev.get("vram_total") or 0
+        free = dev.get("vram_free") or 0
+        return (total - free) / (1024 ** 3) if total else None
+    except Exception:
+        return None
+
+
+def _edge_reload_comfy(reason):
+    """请盒上网关重启 ComfyUI 并等到就绪（返回是否确认就绪）。"""
+    if not (COMFY_RELOAD_ON_SWITCH and EDGE_ADMIN_TOKEN):
+        print("[comfy] ⚠️ 未启用/未配置重启通道（WEAVEORA_COMFY_RELOAD_ON_SWITCH=%s token=%s）"
+              "—— %s，本次很可能 OOM，请人工看内存"
+              % (COMFY_RELOAD_ON_SWITCH, "有" if EDGE_ADMIN_TOKEN else "无", reason), flush=True)
+        return False
+    try:
+        req = urllib.request.Request(
+            _image_comfy() + "/__edge/reload_comfy", data=b"{}", method="POST",
+            headers={"Content-Type": "application/json", "X-WV-Token": EDGE_ADMIN_TOKEN})
+        with urllib.request.urlopen(req, timeout=30) as r:
+            r.read()
+        t0 = time.time()
+        while time.time() - t0 < 180:          # 冷启通常 10~40s
+            time.sleep(3)
+            if _comfy_vram_used_gb() is not None:
+                print("[comfy]    ComfyUI 重启完成（%.0fs）—— 本次将付一次冷加载" % (time.time() - t0),
+                      flush=True)
+                return True
+        print("[comfy] ⚠️ ComfyUI 重启后 180s 仍未就绪（继续提交，可能失败）", flush=True)
+        return False
+    except Exception as e:  # noqa: BLE001
+        print("[comfy] ⚠️ 重启请求失败（本次可能 OOM/Connection refused）：%s" % e, flush=True)
+        return False
+
+
 def _unload_before_model_switch(prompt):
-    """跨**模型家族**切换时重启 ComfyUI（返回是否真的重启了）。
+    """决定本次提交是否需要**先重启 ComfyUI**，需要就重启并等就绪（返回是否重启了）。
 
     ★ 2026-09-24 实测结论（三层，全是真事故/真实测，不是推测）：
       1) 不变重启 = OOM：盒是 48 GB 内存 / 48 GB 显存，**图像家族 49.8 GB**（FLUX.2 主模型 33 + 编码器 16.8）
          与**视频家族 34 GB**（LTX 20 + gemma 14）装不下；上一套还钉在内存里就装新一套 ⇒
          `anon-rss 47.8 GB` 被 OOM killer 杀，整栈连网关一起死，worker 只看到 `Connection refused`
-         （真实任务：第一镜跑完关键帧 → 跑 motion 就失败在这）。
+         （真实任务两次：关键帧→motion 失败；worker 重启后首次出图失败）。
       2) `POST /free {"unload_models": true}` **不能用**：实测它把 33 GB 权重从显存**卸到内存**
          （anon 13.5 → 45.3 GB，整机 available 只剩 179 MB）= 往 OOM 枪口上撞。
          根因：`free_memory()` 对 `sys.getrefcount(model) > 1`（被执行缓存引用中）的模型只 offload 不释放。
-      3) 唯一可靠的手段 = **重启 ComfyUI**（~10 秒回来、其它服务不受影响）。
+      3) 唯一可靠的手段 = **重启 ComfyUI**（~10–18 秒回来、其它服务不受影响）。
          而 VPS worker **没有**盒上 SSH 权限（实测 `Permission denied`）⇒ 走我们自己网关的
-         `POST /__edge/reload_comfy`（`edge_proxy.py`，盒上新增，带 `X-WV-Token`）。
+         `POST /__edge/reload_comfy`（`edge_proxy.py`，带 `X-WV-Token`）。
 
-    代价：重启后本次任务要付一次冷加载（~1–2 分钟）—— 比 OOM 杀进程便宜得多。
-    失败不拦任务（只告警），但会把风险吼在日志里。
+    两类触发条件：
+      a) **跨模型家族**（指纹变化）—— 正常路径；
+      b) **本进程首次提交但盒上已有大模型驻留**（进程重启/部署后没记忆）—— 实战踩过：
+         我的 diag 把 LTX 留在显存 → worker 重启后直接出图 → 叠上去 OOM。
+         另：**ComfyUI 压根连不上**时也走重启（顺带自愈，而不是交个 502 出去）。
+
+    代价：重启后本次任务付一次冷加载（~1–2 分钟）—— 比 OOM 杀进程便宜得多。
     """
     key = _graph_model_key(prompt)
     last = _MODEL_KEY_LAST["v"]
     if not key:
         return False
-    if last and last != key:
-        print("[comfy] ⚠️ 跨模型家族切换（装不下两套）→ 重启 ComfyUI 释放上一套\n"
-              "        旧：%s\n        新：%s" % (last, key), flush=True)
-        if COMFY_RELOAD_ON_SWITCH and EDGE_ADMIN_TOKEN:
-            try:
-                req = urllib.request.Request(
-                    _image_comfy() + "/__edge/reload_comfy", data=b"{}", method="POST",
-                    headers={"Content-Type": "application/json", "X-WV-Token": EDGE_ADMIN_TOKEN})
-                with urllib.request.urlopen(req, timeout=30) as r:
-                    r.read()
-                t0 = time.time()
-                ready = False
-                while time.time() - t0 < 180:          # 等它回来（冷启通常 10~40s）
-                    time.sleep(3)
-                    try:
-                        with urllib.request.urlopen(_image_comfy() + "/system_stats", timeout=8) as r2:
-                            r2.read()
-                            ready = True
-                            break
-                    except Exception:
-                        continue
-                print("[comfy]    ComfyUI 重启%s（%.0fs）—— 本次将付一次冷加载"
-                      % ("完成" if ready else "**未确认就绪**，仍继续", time.time() - t0), flush=True)
-            except Exception as e:  # noqa: BLE001
-                print("[comfy] ⚠️ 重启请求失败（本次可能 OOM/Connection refused）：%s" % e, flush=True)
-        else:
-            print("[comfy] ⚠️ 未启用/未配置重启通道（WEAVEORA_COMFY_RELOAD_ON_SWITCH=%s token=%s）"
-                  "—— 本次很可能 OOM，请人工看内存"
-                  % (COMFY_RELOAD_ON_SWITCH, "有" if EDGE_ADMIN_TOKEN else "无"), flush=True)
+    used = _comfy_vram_used_gb()
+    need, why = False, ""
+    if used is None:
+        need, why = True, "ComfyUI 不可达（可能是上次 OOM/重启没起来）→ 先重启自愈"
+    elif last and last != key:
+        need, why = True, ("跨模型家族切换（装不下两套）\n        旧：%s\n        新：%s" % (last, key))
+    elif (not last) and used > 8:
+        need, why = True, ("本进程首次提交，但盒上已驻留 %.1f GB 显存（无法确认是哪套模型）" % used)
+    if need:
+        print("[comfy] ⚠️ 需重启 ComfyUI 释放上一套：%s" % why, flush=True)
+        _edge_reload_comfy(why)
     _MODEL_KEY_LAST["v"] = key
     return True
 
