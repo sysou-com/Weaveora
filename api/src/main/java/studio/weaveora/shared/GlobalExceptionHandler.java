@@ -36,6 +36,25 @@ public class GlobalExceptionHandler {
                 .body(ErrorResponse.of(ErrorCode.VALIDATION, msg, ""));
     }
 
+    /**
+     * 路径/查询参数类型不对（最典型：UUID 位置传了别的段）→ **400**，不是 500。
+     *
+     * <p>真实事故（2026-09-23）：前端在离开项目页后仍用空的 projectId 发请求
+     * {@code GET /api/v1/projects//jobs}，Tomcat 把 {@code //} 归一成 {@code /}，Spring 把下一段
+     * 当成 projectId ⇒ {@code Invalid UUID string: jobs}。它落到兜底 handler 里被记成
+     * 「unhandled error」+ 500 ⇒ 日志里当成服务端故障，排查方向被带偏。
+     * 参数绑定失败属于**客户端请求错**，返回 400 + 原话，便于一眼看出是哪个路径写错了。
+     */
+    @ExceptionHandler(org.springframework.web.method.annotation.MethodArgumentTypeMismatchException.class)
+    public ResponseEntity<ErrorResponse> handleTypeMismatch(
+            org.springframework.web.method.annotation.MethodArgumentTypeMismatchException ex) {
+        String msg = "参数 '" + ex.getName() + "' 的值不合法（应为 "
+                + (ex.getRequiredType() == null ? "期望类型" : ex.getRequiredType().getSimpleName())
+                + "）：" + ex.getValue();
+        log.warn("参数类型不匹配（400，非服务端故障）：{}", msg);
+        return ResponseEntity.badRequest().body(ErrorResponse.of(ErrorCode.VALIDATION, msg, ""));
+    }
+
     @ExceptionHandler(Exception.class)
     public ResponseEntity<ErrorResponse> handleUnexpected(Exception ex) {
         log.error("unhandled error", ex);

@@ -10,7 +10,7 @@ import {
 } from 'lucide-vue-next'
 import { NAlert, NButton, NCheckbox, NDropdown, NIcon, NInput, NInputNumber, NModal, NRadioButton, NRadioGroup, NSelect, NSkeleton, NTag, useDialog, useMessage } from 'naive-ui'
 import type { SelectOption } from 'naive-ui'
-import { computed, h, nextTick, onErrorCaptured, ref, watch } from 'vue'
+import { computed, h, nextTick, onBeforeUnmount, onErrorCaptured, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import {
@@ -918,7 +918,7 @@ async function confirmPortrait(): Promise<void> {
     if (!jobId) throw new Error('未创建定妆图任务')
     portraitOpen.value = false
     message.info(`「${name}」定妆图合成中…（参考图 ${pickedIds.length} 张：${pickedIds.map((i) => '#' + i.slice(-4)).join(' ') || '无'}）`)
-    const job = await waitJobDone(jobId, 600000)
+    const job = await waitJobDone(jobId, 600000, '定妆图生成')
     if (job.state !== 'succeeded') throw new Error(job.errorMessage || `任务${job.state}`)
     await queryClient.invalidateQueries({ queryKey: ['assets'] })
     await queryClient.invalidateQueries({ queryKey: ['jobs'] })
@@ -2667,6 +2667,20 @@ const freshActiveCount = computed(() => {
 //    否则赋值 elapsedTimer 会撞 TDZ（ReferenceError: Cannot access before initialization）。
 const nowTick = ref(Date.now())
 let elapsedTimer: ReturnType<typeof setInterval> | undefined
+// ★ 2026-09-23：离开本页要把两个定时器清掉。
+//   原来只在「活跃任务数回到 0」时才 clearInterval —— 任务在跑时用户直接切走（去管理队列/资产库），
+//   定时器会一直存活并继续 `jobs.refetch()`。配合当日那条 `waitJobDone` 的 projectId 漂移 bug，
+//   就是线上 `GET /api/v1/projects//jobs` → 500 连发的另一半来源。
+onBeforeUnmount(() => {
+  if (jobsTimer) {
+    clearInterval(jobsTimer)
+    jobsTimer = undefined
+  }
+  if (elapsedTimer) {
+    clearInterval(elapsedTimer)
+    elapsedTimer = undefined
+  }
+})
 function fmtDur(ms: number): string {
   const s = Math.max(0, Math.round(ms / 1000))
   if (s < 60) return `${s}秒`
@@ -3207,13 +3221,50 @@ function closeAudioPreview(): void {
   audioPreview.value = null
 }
 
-async function waitJobDone(jobId: string, timeoutMs: number): Promise<JobRecord> {
+async function waitJobDone(jobId: string, timeoutMs: number, what = '任务'): Promise<JobRecord> {
+  // ★ 2026-09-23 线上事故修复（用户报「生产定妆图都报错了」，实际任务全部成功）：
+  //   此处原来每轮都读 `projectId.value`（= `route.params.projectId`）。用户一旦离开项目页
+  //   （例：去「管理队列」看进度），它就变成空串 → 请求 `/api/v1/projects//jobs`
+  //   → Tomcat 把 `//` 归一成 `/`，Spring 把下一段当 projectId ⇒
+  //      `MethodArgumentTypeMismatchException: Invalid UUID string: jobs` → **HTTP 500**
+  //   → 这里抛错 → 调用方弹红「生成定妆图失败」，而**任务后台照样跑完**
+  //   （实测 09:00:07 去队列页 / 09:00:09 三个 500 / 09:00:12 回到项目页；同时那条 portrait 任务随后 succeeded）。
+  //   现在：① 进入时把 id **固定下来**（不再随路由漂移）；② 空 id 直接报真话；
+  //        ③ 页面已卸载就停下（别再打 API）；④ 超时话术改成「任务仍在后台继续，可到任务列表查看」。
+  const pid = projectId.value
+  const wid = workspaceId.value
+  if (!pid || !wid) {
+    throw new Error(`已离开项目页面，已停止等待（${what}仍在后台继续，可到任务列表查看）`)
+  }
   const t0 = Date.now()
+  let fails = 0
   for (;;) {
-    const list = await listJobs(workspaceId.value, projectId.value)
+    let list: JobRecord[]
+    try {
+      list = await listJobs(wid, pid)
+      fails = 0
+    } catch (e) {
+      // 单次拉取失败（网络/网关抖动）不应该把整个等待判死：任务可能还在正常跑。
+      // 但**连续失败 5 次（≈20s）**就别再默默等下去了 —— 可能是权限/服务真的不可用。
+      fails += 1
+      if (fails >= 5) {
+        throw new Error(
+          `${what}状态查询连续失败 ${fails} 次（${e instanceof Error ? e.message : '请求失败'}）——\n` +
+            '任务可能仍在后台运行：可到「任务」列表或「管理队列」查看，不必重新点生成。',
+        )
+      }
+      await new Promise((r) => setTimeout(r, 4000))
+      continue
+    }
     const j = list.find((x) => x.id === jobId)
     if (j && ['succeeded', 'failed', 'cancelled'].includes(j.state)) return j
-    if (Date.now() - t0 > timeoutMs) throw new Error('试听超时（首次加载模型可能较久，稍后重试）')
+    if (Date.now() - t0 > timeoutMs) {
+      throw new Error(
+        `${what}等待超时（已等 ${Math.round(timeoutMs / 1000)}s，首次会加载模型、可能较久）——\n` +
+          '任务**仍在后台继续**，不必重新点生成：等它跑完后到「任务」列表查看；\n' +
+          '也可以到「管理队列」页看它到底卡在哪一步。',
+      )
+    }
     await new Promise((r) => setTimeout(r, 4000))
   }
 }
@@ -3306,7 +3357,7 @@ async function previewVoice(shotNo?: number): Promise<void> {
     const jobId = created[0]?.id
     if (!jobId) throw new Error('未创建试听任务')
     message.info(`第 ${target.shot_no} 镜配音合成中…（首次会加载模型）`)
-    const job = await waitJobDone(jobId, 300000)
+    const job = await waitJobDone(jobId, 300000, '配音生成')
     if (job.state !== 'succeeded') throw new Error(job.errorMessage || `试听任务${job.state}`)
     await queryClient.invalidateQueries({ queryKey: ['assets'] })
     await queryClient.invalidateQueries({ queryKey: ['jobs'] })
@@ -3350,7 +3401,7 @@ async function genVoiceLine(shotNo: number, lineIndex: number): Promise<void> {
     const jobId = created[0]?.id
     if (!jobId) throw new Error('未创建配音任务')
     message.info(`第 ${shotNo} 镜第 ${lineIndex + 1} 段合成中…（首次会加载模型）`)
-    const job = await waitJobDone(jobId, 300000)
+    const job = await waitJobDone(jobId, 300000, '配音生成')
     if (job.state !== 'succeeded') throw new Error(job.errorMessage || `任务${job.state}`)
     await queryClient.invalidateQueries({ queryKey: ['assets'] })
     await queryClient.invalidateQueries({ queryKey: ['jobs'] })
@@ -3381,7 +3432,7 @@ async function previewVoiceLine(shotNo: number, lineIndex: number): Promise<void
     const jobId = created[0]?.id
     if (!jobId) throw new Error('未创建试听任务')
     message.info(`第 ${shotNo} 镜第 ${lineIndex + 1} 段试听合成中…`)
-    const job = await waitJobDone(jobId, 300000)
+    const job = await waitJobDone(jobId, 300000, '配音试听')
     if (job.state !== 'succeeded') throw new Error(job.errorMessage || `试听任务${job.state}`)
     await queryClient.invalidateQueries({ queryKey: ['assets'] })
     await queryClient.invalidateQueries({ queryKey: ['jobs'] })
@@ -3443,7 +3494,7 @@ async function previewBgm(): Promise<void> {
     if (!jobId) throw new Error('未创建试听任务')
     const mood = draft.value && isVideoPlan(draft.value) ? draft.value.audio.music_mood : ''
     message.info(`配乐生成中…（情绪：${mood || '默认'}；首次会加载模型）`)
-    const job = await waitJobDone(jobId, 600000)
+    const job = await waitJobDone(jobId, 600000, '配乐生成')
     if (job.state !== 'succeeded') throw new Error(job.errorMessage || `试听任务${job.state}`)
     await queryClient.invalidateQueries({ queryKey: ['assets'] })
     await queryClient.invalidateQueries({ queryKey: ['jobs'] })
