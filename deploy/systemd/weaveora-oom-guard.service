@@ -1,0 +1,17 @@
+[Unit]
+Description=Weaveora 预 OOM 守护（anon 超阈值先杀 ComfyUI，保住整栈）
+After=weaveora-stack.service
+
+[Service]
+Type=simple
+# 阈值论证见 deploy/gpu2_oom_guard.sh 头部：盒 48,168 MB；内核实测 anon 47.8 GB 开杀；
+# 正常业务峰值 anon ≈ 22 GB ⇒ 44 GB 只告警（留 20 GB 余量，不会误伤），46 GB 才动手（留 ~1.8 GB）。
+Environment=WEAVEORA_OOM_GUARD_WARN_MB=44000
+Environment=WEAVEORA_OOM_GUARD_KILL_MB=46000
+Environment=WEAVEORA_OOM_GUARD_INTERVAL=5
+ExecStart=/bin/bash /opt/weaveora/oom_guard.sh
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
