@@ -173,6 +173,39 @@ public class GenerationJob {
     public String state() { return state; }
     public String idempotencyKey() { return idempotencyKey; }
     public JsonNode payload() { return payload; }
+
+    /**
+     * ★ 2026-09-24（用户要求「双击任务看给模型的完整提示词」）：把 worker 报回的
+     * “**真正下发给模型**的提示词”与引擎参数追加进 {@code payload}。
+     *
+     * <p>为什么追加在 payload 而不是新列：{@code payload} 已是 jsonb，前端 JobRecord 也已下发它 ——
+     * 不用改表（也就不会碰 Flyway/实体双写纪律），字段为可选、旧任务缺字段时前端自然回退显示
+     * API 侧那份 {@code positive_prompt}。
+     *
+     * <p>为什么必须由 worker 报：API 侧只知道自己拼的那份文本；在它之后 worker 还会做
+     * 改写（原 Qwen 口径 → 模型口径）、加“怎么用参考图”前缀、把负词折成正向句
+     * （见 {@code comfy_client._image_edit_prompt}）——只看 API 那份会误判“到底喂了什么给模型”。
+     */
+    public void applyPromptReport(String finalPrompt, String finalNegative, JsonNode engineParams) {
+        boolean hasPrompt = finalPrompt != null && !finalPrompt.isBlank();
+        boolean hasNeg = finalNegative != null && !finalNegative.isBlank();
+        if (!hasPrompt && !hasNeg && engineParams == null) {
+            return;
+        }
+        com.fasterxml.jackson.databind.node.ObjectNode o = (payload != null && payload.isObject())
+                ? ((com.fasterxml.jackson.databind.node.ObjectNode) payload).deepCopy()
+                : JsonNodeFactory.instance.objectNode();
+        if (hasPrompt) {
+            o.put("finalPrompt", finalPrompt);
+        }
+        if (hasNeg) {
+            o.put("finalNegative", finalNegative);
+        }
+        if (engineParams != null) {
+            o.set("engineParams", engineParams);
+        }
+        this.payload = o;
+    }
     public int progress() { return progress; }
     public String stage() { return stage; }
     public boolean cancelRequested() { return cancelRequested; }

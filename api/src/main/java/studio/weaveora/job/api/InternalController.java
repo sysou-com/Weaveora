@@ -45,7 +45,8 @@ public class InternalController {
                                    Boolean faceDetected, String faceFrames, String notes) {
     }
 
-    public record CompleteRequest(List<CompleteAssetDto> assets) {
+    public record CompleteRequest(List<CompleteAssetDto> assets, String finalPrompt, String finalNegative,
+                                  JsonNode engineParams) {
     }
 
     public record FailRequest(String code, String message) {
@@ -90,7 +91,8 @@ public class InternalController {
                 .map(a -> new JobService.CompleteAsset(a.key(), a.mime(), a.width(), a.height(),
                         a.seed(), a.durationMs(), a.faceDetected(), a.faceFrames(), a.notes()))
                 .toList();
-        return ResponseEntity.ok(jobService.complete(jobId, items));
+        return ResponseEntity.ok(jobService.complete(jobId, items,
+                req.finalPrompt(), req.finalNegative(), req.engineParams()));
     }
 
     @PostMapping("/jobs/{jobId}/fail")

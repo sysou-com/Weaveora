@@ -2880,6 +2880,33 @@ const latestJobs = computed(() => {
     (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
   )
 })
+/** ★ 2026-09-24（用户要求）：双击任务 → 看「真正下发给模型」的完整提示词 + 引擎参数。
+ *  数据来源：worker 上报 → API 写进 job.payload.{finalPrompt,finalNegative,engineParams}。
+ *  旧任务/非工作流通路没有 finalPrompt → 回退显示 API 侧的 positive_prompt（并在弹窗里说明差异）。 */
+const jobPromptOpen = ref(false)
+const jobPromptJob = ref<JobRecord | null>(null)
+function openJobPrompt(j: JobRecord) {
+  jobPromptJob.value = j
+  jobPromptOpen.value = true
+}
+const jobPromptFinal = computed(() => !!jobPromptJob.value?.payload?.finalPrompt)
+const jobPromptText = computed(() =>
+  jobPromptJob.value?.payload?.finalPrompt ?? jobPromptJob.value?.payload?.positive_prompt ?? '')
+const jobPromptNeg = computed(() => jobPromptJob.value?.payload?.finalNegative ?? '')
+const jobPromptParams = computed(() => jobPromptJob.value?.payload?.engineParams ?? null)
+const jobPromptRefs = computed(() => jobPromptParams.value?.refs ?? [])
+function copyJobPrompt() {
+  const t = jobPromptText.value
+  if (!t) {
+    message.warning('这条任务没有留存提示词')
+    return
+  }
+  navigator.clipboard?.writeText(t).then(
+    () => message.success('已复制正词（' + t.length + ' 字）'),
+    () => message.warning('复制失败，请手动选择文本'),
+  )
+}
+
 const visibleJobs = computed(() => jobsForTab.value.slice(0, jobLimit.value))
 function showMoreJobs(): void {
   jobLimit.value += LIST_PAGE
@@ -5190,7 +5217,7 @@ const shotTotal = computed(() => {
           </button>
         </div>
         <div v-if="(jobs.data.value ?? []).length" class="job-list">
-          <div v-for="j in visibleJobs" :key="j.id" class="job-row" :data-testid="'job-' + j.id.slice(0, 8)" :title="jobAuditTitle(j)">
+          <div v-for="j in visibleJobs" :key="j.id" class="job-row" :data-testid="'job-' + j.id.slice(0, 8)" :title="jobAuditTitle(j) + '（双击查看给模型的完整提示词）'" @dblclick="openJobPrompt(j)">
             <label v-if="isJobActionable(j)" class="row-check">
               <input type="checkbox" :checked="jobSel.includes(j.id)" @change="toggleJobSel(j.id)" />
             </label>
@@ -5385,6 +5412,56 @@ const shotTotal = computed(() => {
       </div>
 
       <!-- ★ 2026-09-16 夜（用户要求 a）：生成**前**的“脸会过小”确认闸门（不阻断，可强推） -->
+      <!-- ★ 2026-09-24（用户要求）：双击任务 → 给模型的完整提示词 -->
+      <NModal v-model:show="jobPromptOpen" preset="card" title="给模型的完整提示词"
+              style="max-width: 900px" data-testid="job-prompt-modal">
+        <div v-if="jobPromptJob">
+          <div style="display: flex; flex-wrap: wrap; gap: 10px; align-items: center; font-size: 12px; margin-bottom: 8px;">
+            <NTag size="small" :bordered="false">{{ KIND_LABEL[jobPromptJob.kind] ?? jobPromptJob.kind }}</NTag>
+            <span class="font-mono">{{ jobPromptJob.id.slice(0, 8) }}</span>
+            <span v-if="jobPromptJob.payload?.shot_no != null">第 {{ jobPromptJob.payload.shot_no }} 镜</span>
+            <span>{{ JOB_STATE_LABEL[jobPromptJob.state] ?? jobPromptJob.state }}</span>
+            <span>{{ new Date(jobPromptJob.createdAt).toLocaleString() }}</span>
+          </div>
+          <NAlert v-if="!jobPromptFinal" type="warning" :bordered="false" style="margin-bottom: 10px">
+            这条任务生成于「提示词留痕」上线之前（或走的是非 ComfyUI 工作流通路）—— 下面显示的是
+            <b>API 侧拼的那份</b>，<b>不含</b> worker 之后的改写/前缀/折负词。新任务会显示真正下发给模型的原文。
+          </NAlert>
+          <div style="font-size: 12px; opacity: .75; margin-bottom: 4px;">
+            正词{{ jobPromptFinal ? '（真正下发给模型，' + jobPromptText.length + ' 字）' : '（API 侧，' + jobPromptText.length + ' 字）' }}
+          </div>
+          <pre :style="{ whiteSpace: 'pre-wrap', wordBreak: 'break-word', maxHeight: '340px', overflow: 'auto', background: 'rgba(0,0,0,.22)', padding: '10px', borderRadius: '6px', fontSize: '12px', lineHeight: '1.6', margin: '0' }">{{ jobPromptText }}</pre>
+          <template v-if="jobPromptNeg">
+            <div style="font-size: 12px; opacity: .75; margin: 10px 0 4px;">负词（FLUX.2 无负词通路：已折成正向句，原文留痕）</div>
+            <pre :style="{ whiteSpace: 'pre-wrap', wordBreak: 'break-word', maxHeight: '120px', overflow: 'auto', background: 'rgba(0,0,0,.22)', padding: '10px', borderRadius: '6px', fontSize: '12px', lineHeight: '1.6', margin: '0' }">{{ jobPromptNeg }}</pre>
+          </template>
+          <template v-if="jobPromptParams">
+            <div style="font-size: 12px; opacity: .75; margin: 10px 0 4px;">引擎参数</div>
+            <div style="font-size: 12px; line-height: 1.9;">
+              <span v-if="jobPromptParams.workflow">工作流 <b class="font-mono">{{ jobPromptParams.workflow }}</b>（{{ jobPromptParams.mode }}）</span>
+              <span v-if="jobPromptParams.size"> · 尺寸 <b class="font-mono">{{ jobPromptParams.size }}</b></span>
+              <span v-if="jobPromptParams.steps != null"> · steps <b class="font-mono">{{ jobPromptParams.steps }}</b></span>
+              <span v-if="jobPromptParams.guidance != null"> · guidance <b class="font-mono">{{ jobPromptParams.guidance }}</b></span>
+              <span v-else-if="jobPromptParams.cfg != null"> · cfg <b class="font-mono">{{ jobPromptParams.cfg }}</b></span>
+              <span v-if="jobPromptParams.denoise != null"> · denoise <b class="font-mono">{{ jobPromptParams.denoise }}</b></span>
+              <span v-if="jobPromptParams.seed != null"> · seed <b class="font-mono">{{ jobPromptParams.seed }}</b></span>
+              <span v-if="jobPromptParams.lora"> · LoRA <b class="font-mono">{{ jobPromptParams.lora }}</b></span>
+            </div>
+            <div v-if="jobPromptRefs.length" style="font-size: 12px; margin-top: 6px;">
+              参考图槽位：
+              <span v-for="(r, i) in jobPromptRefs" :key="r.slot" class="font-mono">
+                {{ i ? ' ｜ ' : '' }}Picture {{ r.slot }} = {{ r.subject ?? '—' }}
+                <span style="opacity:.6">({{ (r.file ?? '').slice(0, 12) }}…)</span>
+              </span>
+            </div>
+          </template>
+          <div style="display: flex; gap: 8px; justify-content: flex-end; margin-top: 14px;">
+            <NButton size="small" @click="copyJobPrompt">复制正词</NButton>
+            <NButton size="small" type="primary" @click="jobPromptOpen = false">关闭</NButton>
+          </div>
+        </div>
+      </NModal>
+
       <NModal v-model:show="faceWarnOpen" preset="card" title="⚠ 这些镜的脸会太小（身份锚定会失效）"
               style="max-width: 560px" data-testid="face-warn-modal">
         <p class="text-secondary" style="margin: 0 0 10px; font-size: 13px;">

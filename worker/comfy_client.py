@@ -264,11 +264,16 @@ def _flux2_fold_negative(positive, negative, zh):
     #   Java 侧给多主体加的「换脸/身份混淆/同一张脸重复/复制脸庞/同一人出现两次」这些在 Qwen 通路
     #   真进过负条件线的身份约束**静默消失**。这里按组识别并改写成**正向**约束句（仍不照抄负词）；
     #   只有正词**还没写**同类约束时才补，避免与 Java 侧「禁止互换面孔…同一张脸」重复（提示词白变长）。
-    ident = (any(k.lower() in neg_low for k in _FLUX2_NEG_IDENTITY)
+    ident = (any(k.lower() in neg_low for k in _FLUX2_NEG_SWAP)
              and not any(k.lower() in low for k in _FLUX2_POS_IDENTITY_COVERED))
+    # ★ 重复类单独判（不能被“同一张脸”那句覆盖）—— 第 4 镜「出现 2 个宝玉」就是这么丢的
+    dup = (any(k.lower() in neg_low for k in _FLUX2_NEG_DUP)
+           and not any(k.lower() in low for k in _FLUX2_POS_DUP_COVERED))
     if zh:
         mid = ("画面中每个角色只对应自己那张参考图，不同角色的面容/发型/服饰不得混用，"
                "同一张脸不得在画面里重复出现。" if ident else "")
+        if dup:
+            mid += "画面中每个角色**只出现一次**：不得重复画同一个人，不得出现两个同一角色。"
         tail = ("画面要求：写实摄影质感（真实皮肤与材质）；背景是真实场景而非纯色/白色/影棚背景；"
                 "构图是叙事镜头而非证件照式正面像；不要 3D 渲染或 CGI 感；不要插画、卡通或塑料感皮肤。")
         if not text.endswith(("。", "；", "！", "？")):
@@ -277,6 +282,9 @@ def _flux2_fold_negative(positive, negative, zh):
         mid = ("Each character matches only their own reference image: faces, hair and costume are never "
                "swapped or blended between characters, and the same face never appears twice in frame. "
                if ident else "")
+        if dup:
+            mid += ("Each character appears exactly once in frame: never draw the same person twice, "
+                    "never show two copies of one character. ")
         tail = ("Rendering requirements: photorealistic photography with real skin and material detail; "
                 "the background is a real scene rather than a plain, white or studio backdrop; "
                 "framing is a narrative camera shot rather than an ID-photo frontal pose; "
@@ -641,11 +649,21 @@ def _wf_apply_areas(graph, mode, pairs, log=print):
 
 
 # ★ 2026-09-24：负词分组关键词（折进正词用，见 `_flux2_fold_negative`）
-_FLUX2_NEG_IDENTITY = ("同一张脸重复", "换脸", "同一人出现两次", "身份混淆", "复制脸庞",
-                       "same face", "face swap", "swap face", "identity confusion", "duplicate face")
+#   ⚠️ 「换脸/身份混淆」（互换类）与「同一人出现两次/复制脸庞」（**重复类**）必须**分开判**：
+#   互换类若正词已写「禁止互换面孔…同一张脸」就算覆盖；重复类**不能**被那个覆盖 ——
+#   实测事故（第 4 镜「出现 2 个宝玉」）：API 侧负词明明带了
+#   `同一张脸重复, 换脸, 同一人出现两次, 身份混淆, 复制脸庞`，但 FLUX.2 没有负词通路，
+#   而 fold 的“已覆盖”判定拿「同一张脸」把**重复类**也一起放过了 ⇒ 最终正词里
+#   **一个“不得重复画同一个人”的字都没有**（实测：只出现一次/重复/复制 全不在）。
+_FLUX2_NEG_SWAP = ("换脸", "身份混淆", "face swap", "swap face", "identity confusion")
+_FLUX2_NEG_DUP = ("同一张脸重复", "同一人出现两次", "复制脸庞", "重复出现同一",
+                  "duplicate face", "duplicated face", "same face twice", "appears twice", "clone face")
 # 正词里已经写了同类约束的判据（写了就不再补，避免重复）
 _FLUX2_POS_IDENTITY_COVERED = ("互换面孔", "同一张脸", "重复出现",
                                "swap face", "same face", "appears twice")
+# ★ 重复类要**单独**的覆盖判据（上面那条会把“同一张脸重复”误判成已覆盖）
+_FLUX2_POS_DUP_COVERED = ("只出现一次", "仅出现一次", "恰出现一次", "每人只出现",
+                          "exactly once", "only appears once")
 
 
 def _image_edit_prefix(positive, negative, ref_names, is_flux2):
@@ -938,6 +956,29 @@ def generate_via_workflow(client_id, payload, progress_fn=None, on_tick=None):
             for _o in outs:
                 if isinstance(_o, dict):
                     _o["notes"] = ((_o.get("notes") + "；") if _o.get("notes") else "") + _note_txt
+        # ★ 2026-09-24（用户要求「双击任务看给模型的完整提示词」）：把**真正下发给模型**的那份文本与参数
+        #   随产物上报 → API 存进 job.payload.{finalPrompt,finalNegative,engineParams} → 前端可查。
+        #   为什么必须由 worker 报：API 侧只知道它自己拼的那一份；改写/前缀/折负词都在 worker 里做
+        #   （见 _image_edit_prompt）—— 只看 API 那份会误判“到底给模型喂了什么”。
+        _subj = payload.get("referenceSubjects") or []
+        _report = {
+            "final_prompt": positive,
+            "final_negative": negative,
+            "engine_params": {
+                "workflow": os.path.basename(path), "mode": mode,
+                "size": "%dx%d" % (width, height), "steps": steps,
+                "guidance": cfg if _is_flux2 else None,
+                "cfg": None if _is_flux2 else cfg,
+                "denoise": denoise, "seed": seed, "flux2": bool(_is_flux2),
+                "lora": (_lora or None),
+                "refs": [{"slot": i + 1,
+                          "subject": _subj[i] if i < len(_subj) else None,
+                          "file": n} for i, n in enumerate(ref_names)],
+            },
+        }
+        for _o in outs:
+            if isinstance(_o, dict):
+                _o.update(_report)
         return outs
     finally:
         COMFY = saved
@@ -2643,7 +2684,13 @@ def _motion_ltx25(client_id, payload, progress_fn=None):
     if progress_fn:
         progress_fn(100, "done")
     return [{"bytes": mp4, "mime": "video/mp4", "width": int(pw or w), "height": int(ph or h),
-             "duration_ms": pdur, "face_detected": face, "face_frames": face_n, "notes": notes}]
+             "duration_ms": pdur, "face_detected": face, "face_frames": face_n, "notes": notes,
+             # ★ 2026-09-24：出片也要留痕「给模型的完整提示词」（前端双击任务可查）
+             "final_prompt": positive, "final_negative": negative,
+             "engine_params": {"workflow": os.path.basename(wf), "mode": "ltx25",
+                               "size": "%dx%d" % (w, h), "steps": _p.get("steps"),
+                               "seed": seed, "fps": int(LTX25_NATIVE_FPS),
+                               "duration_sec": float(dur)}}]
 
 
 def generate_motion(client_id, payload, progress_fn=None):

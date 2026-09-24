@@ -230,7 +230,11 @@ def _complete(jid, payload, media):
     st, done = _req("POST", "/internal/jobs/%s/complete" % jid, {
         "assets": [{"key": up["key"], "mime": mime, "width": w, "height": h, "seed": seed,
                     "durationMs": dur, "faceDetected": extra.get("faceDetected"),
-                    "faceFrames": extra.get("faceFrames"), "notes": extra.get("notes")}]})
+                    "faceFrames": extra.get("faceFrames"), "notes": extra.get("notes")}],
+        # ★ 2026-09-24（用户要求）：把**真正下发给模型**的文本与参数一并落库（前端双击任务可查）
+        "finalPrompt": extra.get("finalPrompt"),
+        "finalNegative": extra.get("finalNegative"),
+        "engineParams": extra.get("engineParams")})
     if st != 200:
         _req("POST", "/internal/jobs/%s/fail" % jid, {"code": "COMPLETE_FAIL", "message": str(done)[:200]})
         return False
@@ -554,7 +558,11 @@ def execute_job(job):
                           o.get("width") or width, o.get("height") or height,
                           int(o.get("duration_ms") or 0) or int(float(payload.get("duration_sec", 3.0)) * 1000),
                           {"faceDetected": o.get("face_detected"), "faceFrames": o.get("face_frames"),
-                           "notes": o.get("notes")}) for o in outs]
+                           "notes": o.get("notes"),
+                           # ★ 2026-09-24：给模型的完整提示词 + 参数（前端双击任务可查）
+                           "finalPrompt": o.get("final_prompt"),
+                           "finalNegative": o.get("final_negative"),
+                           "engineParams": o.get("engine_params")}) for o in outs]
             else:
                 # 文生图：配了「本机 ComfyUI 工作流」（engine=comfy + 工作流 JSON）就走工作流出图，
                 # 否则用 worker 自带的 SDXL/IP-Adapter 代码路径（builtin）。
@@ -578,7 +586,13 @@ def execute_job(job):
                 # ★ 2026-09-21（§5-3）：尺寸优先用**产物真实尺寸**（放大后），退回 params ——
                 #   以前写死 params 尺寸，导致放大到 3328×1856 后 DB 里仍记 1664×928。
                 media = [(o["bytes"], "image/png",
-                          o.get("width") or width, o.get("height") or height, None) for o in outs]
+                          o.get("width") or width, o.get("height") or height, None,
+                          # ★ 2026-09-24：still 通路原来只传 5 元组 ⇒ extra 恒为空 ⇒ **P1 的降级 notes 根本没到资产卡**，
+                          #   一并修掉；同时把「给模型的完整提示词」+ 参数随产物上报。
+                          {"notes": o.get("notes"),
+                           "finalPrompt": o.get("final_prompt"),
+                           "finalNegative": o.get("final_negative"),
+                           "engineParams": o.get("engine_params")}) for o in outs]
             return _complete(jid, payload, media)
         except Exception as e:
             _req("POST", "/internal/jobs/%s/fail" % jid, {"code": "COMFY_ERROR", "message": str(e)[:500]})

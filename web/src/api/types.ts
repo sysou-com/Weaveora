@@ -512,6 +512,28 @@ export interface JobRecord {
     revision_no?: number
     prompt_md5?: string
     positive_prompt?: string
+    /**
+     * ★ 2026-09-24（用户要求「双击任务看给模型的完整提示词」）：**真正下发给模型**的那份完整正词
+     * （worker 在 API 那份基础上还会：改写槽位口径 / 加『怎么用参考图』前缀 / 把负词折成正向句）。
+     * 功能上线前的旧任务没有此字段 —— 前端回退显示 API 侧的 `positive_prompt`。
+     */
+    finalPrompt?: string
+    finalNegative?: string
+    engineParams?: {
+      workflow?: string
+      mode?: string
+      size?: string
+      steps?: number | null
+      guidance?: number | null
+      cfg?: number | null
+      denoise?: number | null
+      seed?: number
+      flux2?: boolean
+      lora?: string | null
+      fps?: number
+      duration_sec?: number
+      refs?: { slot: number; subject?: string | null; file?: string }[]
+    }
     seed?: number
     keyframe_index?: number
     keyframe_count?: number

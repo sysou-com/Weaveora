@@ -1116,7 +1116,8 @@ public class JobService {
     }
 
     @Transactional
-    public List<AssetResponse> complete(UUID jobId, List<CompleteAsset> items) {
+    public List<AssetResponse> complete(UUID jobId, List<CompleteAsset> items,
+                                        String finalPrompt, String finalNegative, JsonNode engineParams) {
         GenerationJob job = requireRunning(jobId);
         List<AssetResponse> created = new ArrayList<>();
         if (job.cancelRequested()) {
@@ -1126,6 +1127,10 @@ public class JobService {
             throw new BizException(ErrorCode.JOB_NOT_CANCELLABLE, "任务已请求取消");
         }
         job.succeed();
+        // ★ 2026-09-24（用户要求「双击任务看给模型的完整提示词」）：把 worker 报回的**真正下发**的那份文本
+        //   与引擎参数写进 job.payload（payload 本就是 jsonb，追加字段无需 migration）。
+        //   为什么由 worker 报：API 侧只知道自己拼的那份；改写/前缀/折负词都在 worker（`_image_edit_prompt`）。
+        job.applyPromptReport(finalPrompt, finalNegative, engineParams);
         jobs.save(job);
         metrics.jobSucceeded();
         String kind = List.of("clip", "still", "voice", "bgm", "portrait", "lipsync", "talk").contains(job.kind()) ? job.kind() : "still";
@@ -3158,7 +3163,14 @@ public class JobService {
                       + "括号里的横向区间与下面这句顺序**仅仅兜底**（剧情句没写方位时才用）：" + orderLineZh
                       + "面容、发型、服饰、体态一律以各自参考图为准，不得按文字更改；"
                       + "不同 imageN 是**不同的人**：禁止互换面孔、发型与服饰，禁止把两位画成同一张脸、"
-                      + "禁止合并或省掉任何一位；角色之间必须互相区分。"
+                      + "禁止合并或省掉任何一位；"
+                      // ★ 2026-09-24（用户报「第 4 镜出现 2 个宝玉」）：之前的硬约束只管“**别丢人/别串脸**”，
+                      //   没有任何“**数量/唯一性**”约束 —— 而 FLUX.2 没有负词通路，API 侧负词里的
+                      //   `同一人出现两次/复制脸庞` 本来就到不了模型 ⇒ 模型把主主体画两遍。
+                      //   这里把“共几位 + 每人只出现一次”写进正词（数量取从左到右清单的长度）。
+                      + "本镜共 " + orderItems.size() + " 个角色，画面中每人**只出现一次**"
+                      + "（不得重复、不得多画不在清单里的人）；"
+                      + "角色之间必须互相区分。"
                       + "方括号里的性别/年龄为硬约束（不得把男性画成女性或反之、不得改变年龄）。"
                       + "剧情句与上面这串兜底区间/顺序不一致时，**以剧情句为准**（系统已把该矛盾记成提示）。"
                     : "\nReference mapping (input order; Picture N and imageN are the same image): " + sb
@@ -3168,7 +3180,12 @@ public class JobService {
                       + "face/hair/costume/build always follow each subject's own reference image and must not be"
                       + " altered by the text; "
                       + "Different imageN are **different people**: never swap faces, hair or costume, never draw"
-                      + " two characters with the same face, and never merge or drop anyone; keep them clearly apart."
+                      + " two characters with the same face, and never merge or drop anyone;"
+                      // ★ 2026-09-24：补“数量/唯一性”约束（理由同上：FLUX.2 无负词通路，
+                      //   `appears twice / duplicate face` 到不了模型 ⇒ 会把同一角色画两遍）。
+                      + " there are exactly " + orderItems.size() + " characters in this shot and each appears"
+                      + " **exactly once** (never repeat a character, never add anyone who is not in the list);"
+                      + " keep them clearly apart."
                       + " The bracketed gender/age are hard constraints (never render a male character as female or"
                       + " vice versa, never change the age). **Composition (left/right, depth, occlusion, blocking and"
                       + " relative size) follows the story text**; where the story text disagrees with the fallback"
