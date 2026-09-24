@@ -42,6 +42,20 @@ Write-Host "--- 活动唤醒计时器 ---"
 powercfg.exe /waketimers
 
 # 4) 进入睡眠（休眠未启用 => 走 S3）
+# ★ 2026-09-24 修正：rundll32 powrprof.dll,SetSuspendState 在本机**静默无效**
+#   （脚本 exit 0、日志也打到"进入睡眠"，但 kernel-power 没有 42 事件 = 根本没挂起）。
+#   ⇒ 改用 .NET API（Win10 上可靠），仍保留 rundll32 作回退。
 Write-Host "--- 进入睡眠 ---"
 Start-Sleep -Seconds 2
-rundll32.exe powrprof.dll,SetSuspendState 0,1,0
+$suspended = $false
+try {
+  Add-Type -AssemblyName System.Windows.Forms
+  [System.Windows.Forms.Application]::SetSuspendState([System.Windows.Forms.PowerState]::Suspend, $false, $false)
+  $suspended = $true
+  Write-Host ".NET SetSuspendState(Suspend) 已调用"
+} catch {
+  Write-Host "!! .NET 挂起失败，回退 rundll32: $($_.Exception.Message)"
+  rundll32.exe powrprof.dll,SetSuspendState 0,1,0
+}
+Start-Sleep -Seconds 5
+Write-Host "(若仍未休眠，请看 Get-WinEvent Kernel-Power Id=42；本机实测 rundll32 无效、.NET 有效)"
