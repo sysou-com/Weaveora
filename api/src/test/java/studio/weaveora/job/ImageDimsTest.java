@@ -55,4 +55,12 @@ class ImageDimsTest {
         assertThat(ImageDims.of(null, 1920)).containsExactly(1536, 1536);
         assertThat(ImageDims.of("16:9", 99999)).containsExactly(4096, 2240); // 超上限夹到 4096（k=3.2）
     }
+
+    @Test
+    void 定妆照画幅_固定1比1_不再跟随项目画幅() {
+        // ★ 2026-09-24（用户裁定）：定妆照的唯一用途是**身份锚定**，参考图能传多少身份信息 ≈ 落在脸上的像素。
+        //   16:9（1664×928）实测脸宽仅 207–289px（占画面 ~4%）；1:1 + 「正面半身」⇒ 上半身填满画幅。
+        assertThat(JobService.PORTRAIT_ASPECT).isEqualTo("1:1");
+        assertThat(ImageDims.of(JobService.PORTRAIT_ASPECT, 1664)).containsExactly(1344, 1344);
+    }
 }

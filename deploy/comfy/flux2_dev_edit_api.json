@@ -1,5 +1,5 @@
 {
-  "_comment": "Weaveora · FLUX.2 [dev] 多参考改图（关键帧 / 定妆照锚定）。由官方模板 image_flux2_fp8 摊平为 API 格式（2026-09-23）。参考图机制 = ReferenceLatent **串链**（conditioning 逐个往下传），3 个槽与 worker 的 refs[:3] 对齐：LoadImage/ReferenceLatent 的节点 id 都按 str(id) 升序排，worker 的 _wf_set_image / _wf_prune_flux2_refs 用同一套排序键（改 id 会错位）。★ 空槽由 worker 摘掉（摘 ReferenceLatent 的 latent 入参 + 整条支链），不是删节点。★ 参考图缩放到**目标尺寸**（与现役 Qwen edit 口径一致、便于 A/B）；要提速可把每个 ImageScale 换成 ImageScaleToTotalPixels(megapixel=1)（官方口径，参考图降到 ~1MP ⇒ 每张 4096 token 而不是 6032）。",
+  "_comment": "Weaveora · FLUX.2 [dev] 多参考改图（关键帧 / 定妆照锚定）。由官方模板 image_flux2_fp8 摊平为 API 格式（2026-09-23）。参考图机制 = ReferenceLatent **串链**（conditioning 逐个往下传），3 个槽与 worker 的 refs[:3] 对齐：LoadImage/ReferenceLatent 的节点 id 都按 str(id) 升序排，worker 的 _wf_set_image / _wf_prune_flux2_refs 用同一套排序键（改 id 会错位）。★ 空槽由 worker 摘掉（摘 ReferenceLatent 的 latent 入参 + 整条支链），不是删节点。★ 参考图缩放到**官方口径 1MP**（`ImageScaleToTotalPixels(megapixels=1, area)`，保长宽比 ⇒ 每张 4096 token 而不是 6032）。★ 2026-09-24 为什么必须换掉原来的 `ImageScale(到目标尺寸)`：定妆照已改 **1:1（1344×1344）**，而目标画幅是 16:9 —— `ImageScale(crop=disabled)` 会把参考图**拉伸**（横向压 1.78×）把脸拧变形；官方那种「按总像素缩放、保长宽比」既保比例，又把参考图预算压回官方 1MP。",
   "1": {
     "class_type": "UNETLoader",
     "inputs": { "unet_name": "flux2_dev_fp8mixed.safetensors", "weight_dtype": "default" }
@@ -24,22 +24,22 @@
 
   "12": { "class_type": "LoadImage", "inputs": { "image": "" } },
   "13": {
-    "class_type": "ImageScale",
-    "inputs": { "image": ["12", 0], "upscale_method": "lanczos", "width": 1664, "height": 928, "crop": "disabled" }
+    "class_type": "ImageScaleToTotalPixels",
+    "inputs": { "image": ["12", 0], "upscale_method": "area", "megapixels": 1.0, "resolution_steps": 1 }
   },
   "14": { "class_type": "VAEEncode", "inputs": { "pixels": ["13", 0], "vae": ["3", 0] } },
 
   "15": { "class_type": "LoadImage", "inputs": { "image": "" } },
   "16": {
-    "class_type": "ImageScale",
-    "inputs": { "image": ["15", 0], "upscale_method": "lanczos", "width": 1664, "height": 928, "crop": "disabled" }
+    "class_type": "ImageScaleToTotalPixels",
+    "inputs": { "image": ["15", 0], "upscale_method": "area", "megapixels": 1.0, "resolution_steps": 1 }
   },
   "17": { "class_type": "VAEEncode", "inputs": { "pixels": ["16", 0], "vae": ["3", 0] } },
 
   "18": { "class_type": "LoadImage", "inputs": { "image": "" } },
   "19": {
-    "class_type": "ImageScale",
-    "inputs": { "image": ["18", 0], "upscale_method": "lanczos", "width": 1664, "height": 928, "crop": "disabled" }
+    "class_type": "ImageScaleToTotalPixels",
+    "inputs": { "image": ["18", 0], "upscale_method": "area", "megapixels": 1.0, "resolution_steps": 1 }
   },
   "20": { "class_type": "VAEEncode", "inputs": { "pixels": ["19", 0], "vae": ["3", 0] } },
 

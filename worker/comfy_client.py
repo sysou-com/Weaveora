@@ -212,19 +212,39 @@ _FLUX2_SLOT_RE_TAIL = re.compile(
     re.IGNORECASE)
 
 
+# ★ 2026-09-24：**字面 N**（没有数字）的残留。Java 侧那句「不同 imageN 是**不同的人**」是
+#   Qwen 口径的遗留（`Picture N`/`imageN` 在那里只是记号，不是「第 N 张图」）——FLUX.2 没有 Picture
+#   这个概念，留着就是让模型去找一张不存在的图。句子语境已知，按语境改写成通顺的正向句；
+#   其余兜底成「参考图」/「reference image」。
+_FLUX2_SLOT_RE_LIT_ZH = re.compile(r"不同\s*(?:Picture|image)\s*N\s*是", re.IGNORECASE)
+_FLUX2_SLOT_RE_LIT_EN = re.compile(r"Different\s+(?:Picture|image)\s*N\s+are", re.IGNORECASE)
+_FLUX2_SLOT_RE_LIT = re.compile(r"(?:Picture|image)\s*N(?![A-Za-z0-9])", re.IGNORECASE)
+
+
 def _flux2_slot_rewrite(text):
-    """把 Qwen 口径的参考槽编号（Picture N (imageN) / imageN）改写成 FLUX.2 的口径。
+    r"""把 Qwen 口径的参考槽编号（Picture N (imageN) / imageN）改写成 FLUX.2 的口径。
 
     中文正词用「参考图 N」，英文正词用「Reference Image N」（官方模板口径）—— 跟提示词语言走，
     避免又搞出「英文头 + 中文身」那种两头听（2026-09-16 用户报过中英混杂）。
+
+    ⚠️ 本函数**只能作用在 Java 侧拼的那份正词上**，绝不能跑在 `_image_edit_prefix` 的产物上 ——
+    前缀里的 "Reference Image N" 会被 `image\s*(\d+)` 再吃一遍（2026-09-24 的静默 bug）。
+    组装顺序见 `_image_edit_prompt`。
     """
     if not text:
         return text
-    slot = "参考图 %s" if _looks_zh(text) else "Reference Image %s"
+    zh = _looks_zh(text)
+    slot = "参考图 %s" if zh else "Reference Image %s"
     out = _FLUX2_SLOT_RE_TAIL.sub("", text)
     out = _FLUX2_SLOT_RE_PIC.sub(lambda m: slot % m.group(1), out)
     out = _FLUX2_SLOT_RE_BARE.sub(lambda m: slot % m.group(1), out)
     out = _FLUX2_SLOT_RE_IMG.sub(lambda m: slot % m.group(1), out)
+    # 字面 N 放最后：上面三条只认数字，认不出它
+    if zh:
+        out = _FLUX2_SLOT_RE_LIT_ZH.sub("不同的参考图对应", out)
+    else:
+        out = _FLUX2_SLOT_RE_LIT_EN.sub("Different reference images are", out)
+    out = _FLUX2_SLOT_RE_LIT.sub("参考图" if zh else "reference image", out)
     return out
 
 
@@ -237,15 +257,34 @@ def _flux2_fold_negative(positive, negative, zh):
     """
     if not (negative or "").strip():
         return positive
+    text = (positive or "").rstrip()
+    low = text.lower()
+    neg_low = negative.lower()
+    # ★ 2026-09-24：负词**分组**折进正词。旧实现只把 negative 打进日志（正文被整条丢掉）⇒
+    #   Java 侧给多主体加的「换脸/身份混淆/同一张脸重复/复制脸庞/同一人出现两次」这些在 Qwen 通路
+    #   真进过负条件线的身份约束**静默消失**。这里按组识别并改写成**正向**约束句（仍不照抄负词）；
+    #   只有正词**还没写**同类约束时才补，避免与 Java 侧「禁止互换面孔…同一张脸」重复（提示词白变长）。
+    ident = (any(k.lower() in neg_low for k in _FLUX2_NEG_IDENTITY)
+             and not any(k.lower() in low for k in _FLUX2_POS_IDENTITY_COVERED))
     if zh:
-        tail = ("。画面要求：写实摄影质感（真实皮肤与材质）；背景是真实场景而非纯色/白色/影棚背景；"
+        mid = ("画面中每个角色只对应自己那张参考图，不同角色的面容/发型/服饰不得混用，"
+               "同一张脸不得在画面里重复出现。" if ident else "")
+        tail = ("画面要求：写实摄影质感（真实皮肤与材质）；背景是真实场景而非纯色/白色/影棚背景；"
                 "构图是叙事镜头而非证件照式正面像；不要 3D 渲染或 CGI 感；不要插画、卡通或塑料感皮肤。")
+        if not text.endswith(("。", "；", "！", "？")):
+            text += "。"
     else:
-        tail = (". Rendering requirements: photorealistic photography with real skin and material detail; "
+        mid = ("Each character matches only their own reference image: faces, hair and costume are never "
+               "swapped or blended between characters, and the same face never appears twice in frame. "
+               if ident else "")
+        tail = ("Rendering requirements: photorealistic photography with real skin and material detail; "
                 "the background is a real scene rather than a plain, white or studio backdrop; "
                 "framing is a narrative camera shot rather than an ID-photo frontal pose; "
                 "no 3D-render or CGI look; no illustration, cartoon or plastic-skin style.")
-    return (positive or "").rstrip() + tail
+        if not text.endswith((".", "!", "?")):
+            text += "."
+        text += " "
+    return text + mid + tail
 
 
 def _wf_inject_size(graph, width, height):
@@ -601,6 +640,14 @@ def _wf_apply_areas(graph, mode, pairs, log=print):
     return True
 
 
+# ★ 2026-09-24：负词分组关键词（折进正词用，见 `_flux2_fold_negative`）
+_FLUX2_NEG_IDENTITY = ("同一张脸重复", "换脸", "同一人出现两次", "身份混淆", "复制脸庞",
+                       "same face", "face swap", "swap face", "identity confusion", "duplicate face")
+# 正词里已经写了同类约束的判据（写了就不再补，避免重复）
+_FLUX2_POS_IDENTITY_COVERED = ("互换面孔", "同一张脸", "重复出现",
+                               "swap face", "same face", "appears twice")
+
+
 def _image_edit_prefix(positive, negative, ref_names, is_flux2):
     """Edit 档的"怎么用这些参考图"前缀 + 负词补充（**单一真源**，worker 与 diag 共用）。
 
@@ -613,8 +660,11 @@ def _image_edit_prefix(positive, negative, ref_names, is_flux2):
     # 槽位措辞必须跟模型走：FLUX.2 的参考图机制是 ReferenceLatent（官方模板措辞 Reference Image 1/2/…），
     # Qwen-Image-Edit 是 TextEncodeQwenImageEditPlus（内部拼 Picture 1/2/…）——
     # 拿 Qwen 的措辞去喂 FLUX.2，等于让模型去找一个不存在的 "Picture 2"。
-    slot_hint = " ".join(("Reference Image %d" if is_flux2 else "Picture %d") % (i + 1)
-                         for i in range(len(ref_names)))
+    # 分隔符跟着语言走（中文「、」/ 英文「, 」）：别让模型看到 "Reference Image 1 Reference Image 2"
+    # 这种无分隔堆叠 —— 它得先自己切词才能对上「第几张」。
+    _sep = "、" if _looks_zh(positive) else ", "
+    slot_hint = _sep.join(("Reference Image %d" if is_flux2 else "Picture %d") % (i + 1)
+                          for i in range(len(ref_names)))
     if _looks_zh(positive):
         positive = ("参考图按送入顺序对应片中角色（%s）。每个角色的面容、发型、年龄与服装必须严格跟随"
                     "其自己的参考图；把角色放进下面描述的剧情场景里（背景/光线/机位/动作以文字描述为准，"
@@ -632,6 +682,32 @@ def _image_edit_prefix(positive, negative, ref_names, is_flux2):
             negative = ((negative + ", ") if negative else "") + \
                        "white background, plain backdrop, solid color background, studio portrait, character sheet, " \
                        "front facing ID photo, 3d render, cgi"
+    return positive, negative
+
+
+def _image_edit_prompt(positive, negative, ref_names, is_flux2):
+    r"""Edit 档正词的**完整组装**（单一真源：生产 / diag / 测试共用 —— 三处各写一遍必然漂移）。
+
+    顺序是**功能性的**，别调（2026-09-24 那次静默 bug 就是顺序错）：
+      ① FLUX.2 槽位措辞改写：Java 侧那份 Qwen 口径 `Picture N (imageN)` → FLUX.2 口径；
+      ② 加「怎么用这些参考图」前缀（`_image_edit_prefix`，FLUX.2 写官方的 `Reference Image N`）；
+      ③ FLUX.2 折负词进正词（它没有负词通路），并把 negative 清空。
+    为什么 ① 必须在 ② **之前**：② 写出来的已经是 FLUX.2 官方口径，① 的规则 `image\s*(\d+)` 会把
+    刚写好的 "Reference Image 1" 再改一遍 → 正词变成「（Reference 参考图 1 Reference 参考图 2…）」，
+    **官方口径从未进过模型**（2026-09-24 关键帧实测：faceid 身份 cos 0.49/0.54 → 0.27/0.17）。
+    """
+    if is_flux2 and FLUX2_SLOT_REWRITE and positive:
+        _rw = _flux2_slot_rewrite(positive)
+        if _rw != positive:
+            print("[comfy] FLUX.2：参考槽措辞已改写（Picture N (imageN) → %s）—— 否则映射会丢"
+                  % ("参考图 N" if _looks_zh(positive) else "Reference Image N"), flush=True)
+        positive = _rw
+    if ref_names:
+        positive, negative = _image_edit_prefix(positive, negative, ref_names, is_flux2)
+    if is_flux2:
+        if FLUX2_FOLD_NEGATIVE:
+            positive = _flux2_fold_negative(positive, negative, _looks_zh(positive))
+        negative = ""
     return positive, negative
 
 
@@ -718,26 +794,20 @@ def generate_via_workflow(client_id, payload, progress_fn=None, on_tick=None):
     #   ★ 2026-09-16：① 的语言**跟随提示词语言** —— 用户把正词改成中文后，这里再插一句英文
     #     就变成“英文头 + 中文身 + 中文尾”，实测会让模型两头听（用户报过中英混杂）。
     #     槽位名用模型自己的 `Picture N` 口径（TextEncodeQwenImageEditPlus 内部就是这么拼的）。
-    if mode == "edit" and ref_names:
-        positive, negative = _image_edit_prefix(positive, negative, ref_names, _is_flux2)
     # ★ FLUX.2：负词架构上不生效（guidance 蒸馏 / BasicGuider 单条件）→ 产品 2026-09-23 裁定：折进正词。
-    #   为什么放在 _wf_inject_text 之前：折完要把 negative 清空，否则负词会被当成第二条 conditioner 去找位置。
-    if _is_flux2:
-        if FLUX2_SLOT_REWRITE and positive:
-            _rewritten = _flux2_slot_rewrite(positive)
-            if _rewritten != positive:
-                print("[comfy] FLUX.2：参考槽措辞已改写（Picture N (imageN) → %s）—— 否则映射会丢"
-                      % ("参考图 N" if _looks_zh(positive) else "Reference Image N"), flush=True)
-            positive = _rewritten
-        if (negative or "").strip():
-            if FLUX2_FOLD_NEGATIVE:
-                print("[comfy] FLUX.2：负词在 guidance 蒸馏下不生效 → 已折进正词（原文留档）：%s"
-                      % negative.strip().replace("\n", " ")[:240], flush=True)
-            else:
-                print("[comfy] ⚠️ FLUX.2：负词被丢弃（WEAVEORA_FLUX2_FOLD_NEGATIVE=0，产品已确认无需）：%s"
-                      % negative.strip().replace("\n", " ")[:240], flush=True)
-        positive = _flux2_fold_negative(positive, negative, _looks_zh(positive)) if FLUX2_FOLD_NEGATIVE else positive
-        negative = ""
+    #   折完要把 negative 清空（在 _image_edit_prompt 里做），否则会被当成第二条 conditioner 去找位置。
+    if _is_flux2 and (negative or "").strip():
+        if FLUX2_FOLD_NEGATIVE:
+            print("[comfy] FLUX.2：负词在 guidance 蒸馏下不生效 → 已折进正词（原文留档）：%s"
+                  % negative.strip().replace("\n", " ")[:240], flush=True)
+        else:
+            print("[comfy] ⚠️ FLUX.2：负词被丢弃（WEAVEORA_FLUX2_FOLD_NEGATIVE=0，产品已确认无需）：%s"
+                  % negative.strip().replace("\n", " ")[:240], flush=True)
+    # ★ 正词组装**只走这一个真源**（改写 → 前缀 → 折负词；顺序在 _image_edit_prompt 里锁死）。
+    #   2026-09-24 修：旧代码把「加前缀」写在「改写」之前 ⇒ 前缀里刚写好的官方口径 "Reference Image N"
+    #   被改写规则又吃了一遍，正词里只剩「Reference 参考图 1 …」残句（官方口径从未进过模型）。
+    positive, negative = _image_edit_prompt(positive, negative,
+                                            ref_names if mode == "edit" else [], _is_flux2)
     _wf_inject_text(graph, positive, negative)
     _wf_inject_model(graph, IMAGE_MODEL)
     # LoRA（提速）：params.lora 优先（用于同镜同 seed 的 A/B 对照，不必重启 worker）> 环境变量/引擎配置

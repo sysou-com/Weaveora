@@ -94,6 +94,37 @@ def main():
     tail = c._flux2_slot_rewrite("参考图映射（按送入顺序；Picture N 与 imageN 指同一张图）：Picture 1 (image1) = 宝玉")
     check("Picture" not in tail and "参考图 1 = 宝玉" in tail and "（按送入顺序）" in tail,
           "陈旧解释句被清掉（不再自相矛盾）")
+    # ★ 2026-09-24：字面 N（imageN，没数字）的残留
+    lit = c._flux2_slot_rewrite("不同 imageN 是**不同的人**：禁止互换面孔、发型与服饰。")
+    check("imageN" not in lit and "Picture" not in lit and "不同的参考图对应" in lit,
+          "中文：字面 N 也改掉（不同 imageN 是 → 不同的参考图对应）")
+    lit_en = c._flux2_slot_rewrite("Different imageN are **different people**.")
+    check("imageN" not in lit_en and "Different reference images are" in lit_en,
+          "英文：字面 N 同样改写")
+    check(c._flux2_slot_rewrite("参考图映射（按送入顺序）：imageN") == "参考图映射（按送入顺序）：参考图"
+          and c._flux2_slot_rewrite("ImageNet is a dataset") == "ImageNet is a dataset",
+          "字面 N 兜底改写（中文篇→「参考图」），且不误伤 ImageNet")
+
+    # ★ 2026-09-24 回归（关键）：组装顺序。错序 ⇒ 前缀刚写好的官方口径被再吃一遍，
+    #   正词里只剩「Reference 参考图 1 …」残句 —— 官方口径从未进过模型。
+    final, _neg = c._image_edit_prompt(prod, "", ["a.png", "b.png", "c.png"], True)
+    check("Reference 参考图" not in final,
+          "★ 组装顺序：前缀里的官方口径不会再被槽位改写吃掉（无「Reference 参考图」残句）")
+    check(final.count("Reference Image 1") == 1 and "Reference Image 3" in final,
+          "★ 官方口径 Reference Image 1/2/3 真的进了最终正词")
+    check("参考图 1" in final and "宝玉" in final and "警幻" in final,
+          "Java 侧那句映射仍翻成「参考图 N」，身份描述一字不动")
+    qwen_pos, _ = c._image_edit_prompt("Picture 1 (image1) = 宝玉", "neg", ["a.png"], False)
+    check("Picture 1 (image1)" in qwen_pos, "Qwen 通路正词**不被**改写（口径不变）")
+
+    zh_id = c._flux2_fold_negative("庭院里的女子", "模糊, 换脸, 身份混淆", True)
+    check("同一张脸不得在画面里重复出现" in zh_id, "负词里的身份组折成**正向**约束句")
+    zh_cov = c._flux2_fold_negative("禁止互换面孔、发型与服饰，禁止把两位画成同一张脸。",
+                                    "换脸, 身份混淆", True)
+    check("同一张脸不得在画面里重复出现" not in zh_cov,
+          "正词已写同类约束时不重复补句（提示词不白变长）")
+    en_id = c._flux2_fold_negative("A woman in a garden", "same face, face swap", False)
+    check("never appears twice in frame" in en_id, "英文：身份组同样折算成正向句")
 
     folded = c._flux2_fold_negative("A woman in a garden", "white background, 3d render", False)
     check("photorealistic" in folded and "A woman in a garden" in folded,
@@ -110,6 +141,15 @@ def main():
     c._wf_set_image(g, ["r1.png", "r2.png", "r3.png"])
     check([g[i]["inputs"]["image"] for i in ("12", "15", "18")] == ["r1.png", "r2.png", "r3.png"],
           "3 张参考图按槽位 1/2/3 写入")
+    check(all(g[i]["class_type"] == "ImageScaleToTotalPixels"
+              and abs(g[i]["inputs"]["megapixels"] - 1.0) < 1e-9 for i in ("13", "16", "19")),
+          "参考图按**官方口径**缩到 1MP（ImageScaleToTotalPixels，**保长宽比** ⇒ 1:1 定妆照不会被拉成 16:9）")
+    c._wf_inject_size(g, 1664, 928)
+    check(all("width" not in g[i]["inputs"] and g[i]["inputs"]["megapixels"] == 1.0
+              for i in ("13", "16", "19")),
+          "尺寸注入**不会**再改写参考图缩放（旧 ImageScale 会被 _wf_inject_size 写成目标尺寸 ⇒ 拉伸变形）")
+    check(g["41"]["inputs"]["width"] == 1664 and g["42"]["inputs"]["width"] == 1664,
+          "目标画幅仍是 1664（只改参考图缩放，不动出图尺寸）")
     check(c._wf_prune_flux2_refs(g, 3) == 0, "3 张 = 槽位刚好，不动刀")
     check(g["32"]["inputs"]["latent"] == ["20", 0] and g["40"]["inputs"]["conditioning"] == ["32", 0],
           "ReferenceLatent 串链 + 链尾接 BasicGuider 完好")

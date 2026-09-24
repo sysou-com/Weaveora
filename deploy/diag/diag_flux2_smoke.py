@@ -7,7 +7,7 @@
   （当时 LTX 48fps 就是 `PrimitiveInt` 喂给了收 FLOAT 的入参，白跑一整轮才发现。）
 
 本脚本的特点：**不复制粘贴注入逻辑**，直接 import 盒上的 `comfy_client`，用与生产完全相同的那套函数
-（`_wf_inject_size/_text/_sampler/_set_image/_prune_*` + `_image_edit_prefix`）构造 graph ⇒
+（`_wf_inject_size/_text/_sampler/_set_image/_prune_*` + `_image_edit_prompt`）构造 graph ⇒
 "试枪通过"就等价于"生产注入后的图能跑"。参数/尺寸/提示词前缀全走同一真源，A/B 才有效。
 
 用法（在 GPU 盒上，纯本地、不经过 VPS worker）：
@@ -79,14 +79,14 @@ def build(args, mode, wf_path, width, height):
     ref_names = upload_refs(refs) if refs else []
 
     positive, negative = args.prompt, args.negative
-    if mode == "edit" and ref_names:
-        # ★ 与生产同一真源（_image_edit_prefix）：Qwen 用 "Picture N"、FLUX.2 用 "Reference Image N"
-        positive, negative = c._image_edit_prefix(positive, negative, ref_names, is_flux2)
-    if is_flux2:
-        if (negative or "").strip():
-            print("   FLUX.2：负词不生效 → 折进正词（原文：%s）" % negative.strip()[:120])
-        positive = c._flux2_fold_negative(positive, negative, c._looks_zh(positive))
-        negative = ""
+    if is_flux2 and (negative or "").strip():
+        print("   FLUX.2：负词不生效 → 折进正词（原文：%s）" % negative.strip()[:120])
+    # ★ 与生产**同一真源、同一顺序**（2026-09-24）：改写 → 前缀 → 折负词。
+    #   以前这里只有「前缀 + 折负词」两步，少了槽位改写 ⇒ diag 的正词与生产**不是同一份**，
+    #   A/B 对照会把「提示词不同」误算到「模型不同」头上。
+    positive, negative = c._image_edit_prompt(positive, negative,
+                                            ref_names if mode == "edit" else [],
+                                            is_flux2)
 
     c._wf_inject_size(graph, width, height)
     c._wf_inject_text(graph, positive, negative)

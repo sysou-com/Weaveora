@@ -57,6 +57,17 @@ public class JobService {
     private static final Logger log = LoggerFactory.getLogger(JobService.class);
 
     private static final UUID PRESET_STILL = UUID.fromString("11111111-1111-7111-8111-111111111111");
+    /**
+     * 定妆照画幅（2026-09-24 用户裁定）：**固定 1:1**，不跟项目画幅（16:9）。
+     *
+     * <p>为什么：定妆照的唯一用途是给关键帧/出片做**身份锚定**，而参考图能传递多少身份信息 ≈ 落在脸上的像素。
+     * 16:9 定妆照（1664×928）实测脸宽只有 207–289px（占画面约 4%），而同一方案里脸大的那版（455px）
+     * 关键帧 faceid cos 最高。1:1 + 「正面半身」模板（{@link studio.weaveora.director.SubjectPrompts#portraitCore}）
+     * 会让上半身填满画幅 ⇒ 同样 1MP 参考图预算下脸部像素翻倍以上。
+     *
+     * <p>尺寸由 {@code ImageDims.of("1:1", imageMaxResolution)} 算：1664 档 ⇒ 1344×1344。
+     */
+    static final String PORTRAIT_ASPECT = "1:1";
     private static final UUID PRESET_CLIP = UUID.fromString("22222222-2222-7222-8222-222222222222");
     private static final List<String> TERMINAL = List.of("succeeded", "failed", "cancelled");
 
@@ -2595,8 +2606,15 @@ public class JobService {
         if (keys.isEmpty()) {
             applySetting(payload, plan);
         }
-        payload.put("aspect_ratio", project.aspectRatio());
-        int[] dd = dimsFor(project.aspectRatio(), engineSettings.imageMaxSide(userId));
+        // ★ 2026-09-24（用户裁定）：定妆照改用 **1:1（档位跟随 image_max_resolution：1664 ⇒ 1344×1344）**，
+        //   不再跟随项目画幅（16:9）。为什么：定妆照的唯一用途是**身份锚定**，而参考图承载的身份信息
+        //   ≈ 落在脸上的像素。实测 1664×928（16:9）那版定妆照脸宽仅 207–289px（占画面约 4%），
+        //   同方案里脸大的那版（455px）关键帧 faceid cos 最高；关键帧身份 cos 已从 Qwen 时代的
+        //   0.49/0.54 掉到 0.27/0.17。1:1 让模型把上半身填满方形画幅 ⇒ 同样 1MP 参考图预算下
+        //   脸部像素翻倍以上（送进 edit 时按官方口径缩到 1MP，见 deploy/comfy/flux2_dev_edit_api.json）。
+        String portraitAspect = PORTRAIT_ASPECT;
+        payload.put("aspect_ratio", portraitAspect);
+        int[] dd = dimsFor(portraitAspect, engineSettings.imageMaxSide(userId));
         payload.set("params", mapper().createObjectNode().put("width", dd[0]).put("height", dd[1]));
         payload.put("seed", randomSeed());
         com.fasterxml.jackson.databind.node.ArrayNode keysNode = payload.putArray("referenceKeys");
