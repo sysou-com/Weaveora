@@ -848,6 +848,12 @@ def generate_via_workflow(client_id, payload, progress_fn=None, on_tick=None):
     # ★ P1 防复发（2026-09-18 用户实测事故）：多主体参考图却没走 Edit 通路 = **静默降级**，
     #   会把定妆照半重绘成「不像的定妆照」（img2img + denoise 0.65 + 槽位不足丢参考图）。
     _img_notes = []
+    # ★ 2026-09-24：API 侧「位置不对称 → 整镜降级为纯文字」的提示（payload.layoutNote）
+    #   必须随资产 notes 上报（前端资产卡 ⚠ 可见），不能只躺在后端日志/正词里 —— 用户看不到就等于没说。
+    _layout_note = payload.get("layoutNote")
+    if isinstance(_layout_note, str) and _layout_note.strip():
+        print("[comfy] ⚠️ " + _layout_note.strip(), flush=True)
+        _img_notes.append(_layout_note.strip())
     if len(ref_names) >= 2 and mode != "edit":
         _degraded = ("出图降级：参考图 %d 张但没有 Edit 通路（editWorkflow=%s）→ 已降级为 %s；"
                      "denoise 已强制 1.0（否则等于把参考图半重绘），并可能因槽位不足丢参考图。"

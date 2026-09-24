@@ -17,9 +17,11 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  *
  * <p>契约（2026-09-16 定稿）：
  * <ul>
- *   <li>位置三层优先级：帧级 {@code shots[].keyframes[j].layout} &gt; 镜级 {@code shots[].layout}
- *       &gt; 方案默认（{@code subjects[].region} → {@code referenceAssets[].region} / {@code refs[].region}）
- *       &gt; 预览图点选 {@code lipsync_targets}；</li>
+ *   <li>位置来源优先级：帧级 {@code shots[].keyframes[j].layout} &gt; 镜级 {@code shots[].layout}
+ *       &gt; 方案默认（{@code subjects[].region} → {@code referenceAssets[].region} / {@code refs[].region}）；
+ *       ★ 2026-09-24 用户裁定：{@code shots[].lipsync_targets}（对口型点选）**不再**作为构图位置来源（它只管口型）；</li>
+ *   <li>★ 2026-09-24 对称性守卫：一镜里“部分主体有框、部分没有” → **整镜降级为纯文字**（不下发
+ *       {@code referenceRegions}，正词里一律写“未指定”），并在 payload 写 {@code layoutNote} 供前端提示；</li>
  *   <li>**正词里只出现一处** {@code Picture N (imageN) = 主体名（方位/框）}（由 applyLayoutRegions 统一写）；
  *       {@code refAnchor} 只负责身份约束那一句 —— 两处都写会让模型更难分清谁对应哪张图；
  *       槽位名**同时写** {@code Picture N}（Qwen-Image-Edit 节点内部就是 `Picture {}`）与旧口径 `imageN`；</li>
@@ -173,16 +175,17 @@ class JobLayoutRegionsTest {
     }
 
     @Test
-    void facePickFallsBackToDefaultBoxCentredOnTheClick() {
+    void 对口型点选不再被当作构图位置() {
         ObjectNode p = payload("cinematic still of two figures");
         JsonNode shot = json("{\"lipsync_targets\":{\"宝玉\":{\"x\":0.30,\"y\":0.40}}}");
         JobService.applyLayoutRegions(p, json("{}"), shot, -1, refs("宝玉"));
-        // 点选只有坐标 → 以点为中心默认框 0.30×0.45 = x 0.15 / y 0.20（★ 2026-09-21：站位写横向区间，框值看 referenceRegions）
-        assertTrue(p.path("positive_prompt").asText()
-                .contains("Picture 1 (image1) = 宝玉 (position: x 0.15–0.45, left band, y 0.20–0.65)"),
-                p.path("positive_prompt").asText());
-        assertEquals(0.15, p.get("referenceRegions").get(0).path("x").asDouble(), 1e-6);
-        assertEquals(0.45, p.get("referenceRegions").get(0).path("h").asDouble(), 1e-6);
+        // ★ 2026-09-24 用户裁定：`shots[].lipsync_targets` 只管对口型，**不参与构图**。
+        //   历史行为（已删）：以点为中心造默认框 0.30×0.45 → x 0.15 / y 0.20；
+        //   后果 = 用户清了“位置总控”也清不掉它 ⇒ 同镜里部分人有框、部分没框 ⇒ 没框的搭进去。
+        assertNull(p.get("referenceRegions"), "不得再从对口型点选造位置框");
+        String pos = p.path("positive_prompt").asText();
+        assertFalse(pos.contains("x 0.15"), pos);
+        assertTrue(pos.contains("(position: unspecified"), pos);
     }
 
     // ---------- 语言一致性 ----------
@@ -461,10 +464,7 @@ class JobLayoutRegionsTest {
     void 缺位置的主体不得被从左到右清单剔除() {
         ObjectNode p = payload("电影感关键帧：三人同框而立，烛影摇红");   // 中文正词 → 走中文措辞分支
         JsonNode plan = json("{\"subjects\":[{\"name\":\"宝玉\"},{\"name\":\"可卿\"},{\"name\":\"警幻\"}]}");
-        JsonNode shot = json("""
-                {"layout":[{"subject":"宝玉","x":0.23,"y":0.18,"w":0.30,"h":0.45},
-                           {"subject":"警幻","x":0.51,"y":0.07,"w":0.30,"h":0.45}]}
-                """);
+        JsonNode shot = json("{}");          // 一个位置都没设（= 用户清空“位置总控”后的正常状态）
 
         JobService.applyLayoutRegions(p, plan, shot, -1, refs("宝玉", "可卿", "警幻"));
         String pos = p.path("positive_prompt").asText();
@@ -476,13 +476,42 @@ class JobLayoutRegionsTest {
         // 顺序句必须同时点名三个人
         String line = pos.substring(pos.indexOf("画面从左到右依次为"));
         line = line.substring(0, line.indexOf('；'));
-        assertTrue(line.contains("宝玉"), line);
-        assertTrue(line.contains("可卿"), line);
-        assertTrue(line.contains("警幻"), line);
+        assertTrue(line.contains("宝玉") && line.contains("可卿") && line.contains("警幻"), line);
         // 没位置的要显式说明，且仍然强调必须出现
         assertTrue(pos.contains("Picture 2 (image2) = 可卿（位置：未指定"), pos);
         assertTrue(pos.contains("必须出现在画面中"), pos);
-        // 有位置的仍然写区间（没被这次改动破坏）
-        assertTrue(pos.contains("Picture 1 (image1) = 宝玉（位置：x 0.23–0.53"), pos);
+        // 一个框都没设 ⇒ 不下发 referenceRegions、也不写任何区间、无告警
+        assertNull(p.get("referenceRegions"));
+        assertFalse(pos.contains("位置：x "), pos);
+        assertTrue(p.path("layoutNote").asText("").isEmpty(), p.path("layoutNote").asText(""));
+    }
+
+    @Test
+    void 位置不对称_整镜降级为纯文字() {
+        // ★ 2026-09-24 用户裁定（实测第 4 镜缺可卿）：只给部分主体设框比“完全不设”更伤多主体一致性 —— 
+        //   有框的两位被模型落实、没框的被牺牲（可卿 cos 0.125，同镜有框的宝玉 0.592）。
+        //   契约：一边硬一边软时**整镜降级为纯文字** + 写 layoutNote（前端可见）。
+        ObjectNode p = payload("电影感关键帧：三人并肩而立，烛影摇红");
+        JsonNode plan = json("{\"subjects\":[{\"name\":\"宝玉\"},{\"name\":\"可卿\"},{\"name\":\"警幻\"}]}");
+        JsonNode shot = json("""
+                {"layout":[{"subject":"宝玉","x":0.23,"y":0.18,"w":0.30,"h":0.45},
+                           {"subject":"警幻","x":0.51,"y":0.07,"w":0.30,"h":0.45}]}
+                """);
+
+        JobService.applyLayoutRegions(p, plan, shot, -1, refs("宝玉", "可卿", "警幻"));
+        String pos = p.path("positive_prompt").asText();
+
+        // 整镜降级：没有框、没有区间；三个人都按“未指定”写
+        assertNull(p.get("referenceRegions"));
+        assertFalse(pos.contains("位置：x "), pos);
+        assertTrue(pos.contains("Picture 1 (image1) = 宝玉（位置：未指定"), pos);
+        assertTrue(pos.contains("Picture 2 (image2) = 可卿（位置：未指定"), pos);
+        assertTrue(pos.contains("Picture 3 (image3) = 警幻（位置：未指定"), pos);
+        // 三个人仍必须在“从左到右”清单里
+        String line = pos.substring(pos.indexOf("画面从左到右依次为"));
+        line = line.substring(0, line.indexOf('；'));
+        assertTrue(line.contains("宝玉") && line.contains("可卿") && line.contains("警幻"), line);
+        // 前端可见的提示：点名缺位置的主体
+        assertTrue(p.path("layoutNote").asText().contains("可卿"), p.path("layoutNote").asText());
     }
 }

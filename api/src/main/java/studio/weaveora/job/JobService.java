@@ -2821,8 +2821,10 @@ public class JobService {
         //   供 worker 做**区域条件**（ConditioningSetAreaPercentage）。来源优先级：
         //     ⓪ shots[].keyframes[帧].layout = [{subject,x,y,w,h}]（帧级；运镜镜头的每一帧可各摆各的）
         //     ① shots[].layout = [{subject,x,y,w,h}]（镜级；该镜所有帧的默认，UI 位置总控）
-        //     ② 方案级 referenceAssets[].region / subjects[].refs[].region（「位置预览」卡的方案默认值）
-        //     ③ shots[].lipsync_targets = {subject:{x,y}}（预览图点选，只有点 → 给默认框）
+        //     ② 方案级 referenceAssets[].region / subjects[].region / subjects[].refs[].region（「位置预览」卡的方案默认值）
+        //   ★ 2026-09-24 用户裁定：**删掉原第③档 `shots[].lipsync_targets`**（对口型点选数据不当构图位置来源）。
+        //     用户早就清空了位置，却还被这份遗留数据“阴”：它只覆盖部分主体 ⇒ 正词里一半硬区间一半“未指定”
+        //     ⇒ 没框的那位被模型牺牲（2026-09-24 第 4 镜缺可卿）。原因/证据见 applyLayoutRegions 的注释。
         //   与参考图顺序（refs.subjects()）严格对齐，没位置的填 null。
         //   同时把「Picture N = 谁・属性・位置」写进正词（用户要求：positive_prompt 必须点名主体，且要带人物档案）。
         // ★ 2026-09-18 用户裁定：**motion(clip) 不推位置框**（关键帧已把构图定死；clip 需要的是动作/方向/镜头运动）。
@@ -2838,9 +2840,19 @@ public class JobService {
     /**
      * 位置 → referenceRegions（路线 B 备用）+ 正词里的「参考图→主体」映射（路线 A 生效中）。
      *
-     * <p>位置三档来源，优先级从高到低（见 videoShotPayload 调用处注释）：
-     * ① {@code shots[].layout} ②方案级 {@code referenceAssets[].region} / {@code subjects[].refs[].region}
-     * ③ {@code shots[].lipsync_targets}。
+     * <p>位置来源，优先级从高到低（见 videoShotPayload 调用处注释）：
+     * ⓪ {@code shots[].keyframes[帧].layout} ① {@code shots[].layout}
+     * ②方案级 {@code referenceAssets[].region} / {@code subjects[].region} / {@code subjects[].refs[].region}。
+     *
+     * <p>★ 2026-09-24 用户裁定：**{@code shots[].lipsync_targets} 不再作为构图位置来源**（它曾是第③档）。
+     * 它是「对口型『谁在哪张脸』点选」的数据（对口型通路自己直接读，与本方法无关），语义与构图位置不同，
+     * 且**时序倒挂**：口型/出片在关键帧之后，出关键帧时这份数据通常还不存在 ⇒ 拿它当位置来源等于
+     * “用后置阶段的数据回灌前置生成”，而且会“以点为中心凭空造一个 0.30×0.45 的框”。
+     * 实测后果（2026-09-24 第 4 镜）：用户早就清空了位置，却因这份遗留点选只覆盖宝玉/警幻 ⇒
+     * 正词里两人有硬区间、可卿写“未指定” ⇒ 可卿被模型牺牲（faceid cos 0.125，同镜有框的宝玉 0.592）。
+     * **别再加回来。**
+     *
+     * <p>另：若某镜只有部分主体有框，本方法会**整镜降级为纯文字**（一致性 > 局部约束，见对称性守卫）。
      *
      * <p><b>为什么②要直接读 plan 而不是 {@code refs.regions()}</b>：走「剧情主体」路径
      * （{@code bindFromSubjects}，P13 起是默认路径）时 refs.regions() 恒为 null —— 它在按定妆照
@@ -2921,24 +2933,13 @@ public class JobService {
                 src.put(s, "plan");
             }
         }
-        // ③ 预览图点选：只有坐标 → 以该点为中心给默认框（宽 0.30 / 高 0.45）
-        JsonNode targets = shot.path("lipsync_targets");
-        if (targets.isObject()) {
-            java.util.Iterator<String> names = targets.fieldNames();
-            while (names.hasNext()) {
-                String s = names.next();
-                if (pos.containsKey(s)) {
-                    continue;
-                }
-                JsonNode t = targets.path(s);
-                double x = t.path("x").asDouble(-1), y = t.path("y").asDouble(-1);
-                if (x < 0 || y < 0) {
-                    continue;
-                }
-                pos.put(s, new double[]{Math.max(0, x - 0.15), Math.max(0, y - 0.20), 0.30, 0.45});
-                src.put(s, "click");
-            }
-        }
+        // ⛔ ③ 已删除（2026-09-24 用户裁定）：**不再**把 `shots[].lipsync_targets`（对口型「谁在哪张脸」点选）
+        //   当构图位置来源。历史上这里是「预览图点选 → 以点为中心给默认框（0.30×0.45）」，出了两个问题：
+        //     ① 清不干净：那份数据是口型用的，用户清「位置总控」碰不到它 ⇒ “我早清了为什么还在用”；
+        //     ② 时序倒挂：出关键帧时口型数据通常还不存在 ⇒ 后置数据回灌前置生成，且凭空造框；
+        //   后果 = 同镜里“部分主体有框、部分没框” ⇒ 没框的那位被模型牺牲
+        //   （2026-09-24 第 4 镜：可卿 cos 0.125，同镜有框的宝玉 0.592）。
+        //   要固定站位请只用 ⓪/①/② 三档（都是显式构图数据）。**别再加回来。**
         // ① 逐镜位置编辑器（最高优先，覆盖上面两档）
         JsonNode layout = shot.path("layout");
         if (layout.isArray()) {
@@ -2968,6 +2969,29 @@ public class JobService {
                         }
                     }
                 }
+            }
+        }
+        // ★ 2026-09-24 对称性守卫（用户裁定「位置按剧情提示词安排」的落地）：
+        //   若参考图主体里“一部分有框、一部分没框”，**整镜降级为纯文字**（清掉已收集的框）。
+        //   为什么必须整镜降级（实测 2026-09-24 第 4 镜）：半边硬框 + 半边“未指定”时，FLUX.2 只落
+        //   有框的两位，没框的那位被牺牲（可卿 faceid cos 0.125/0.170，同镜有框的宝玉 0.592）——
+        //   位置信息**不对称**比“完全没框”更伤多主体一致性。降级后所有主体一律“位置以剧情句为准”。
+        java.util.List<String> missing = new java.util.ArrayList<>();
+        if (!motion && !pos.isEmpty()) {
+            for (String s : refs.subjects()) {
+                if (s != null && !s.isBlank() && !pos.containsKey(s)) {
+                    missing.add(s);
+                }
+            }
+            if (!missing.isEmpty()) {
+                log.warn("refs: 本镜位置**不对称**（有框 {} / 无框 {}）→ 已整镜降级为「按剧情句安排位置」，"
+                        + "不下发任何位置框；要给位置就把缺的这几位在「位置总控」里补上",
+                        pos.keySet(), missing);
+                payload.put("layoutNote", "本镜只有部分主体设了位置（缺：" + String.join("、", missing)
+                        + "）→ 已整镜改为「按剧情句安排位置」，未使用任何位置框。"
+                        + "若要固定站位，请在「位置总控」里把这几位也补上。");
+                pos.clear();
+                src.clear();
             }
         }
         if (!pos.isEmpty() && motion) {
@@ -3099,8 +3123,9 @@ public class JobService {
                     enL.add(orderItems.get(k) + " (image" + orderSlot.get(k) + ")");
                 }
                 if (!noPos.isEmpty()) {
-                    log.warn("refs: 以下主体**没有位置**（会用槽位均分兜底排序，并在正词里标注“未指定”）：{} —— "
-                            + "若不希望它们被模型随意摆放，请在「位置总控 / 预览点选」里补上", noPos);
+                    // ★ 2026-09-24 用户裁定「位置按剧情提示词安排」⇒ “没设位置”是**正常状态**，不再劝用户去补，
+                    //   只 INFO 记一笔；真正需要人介入的告警是上面那条「位置不对称 → 整镜降级」。
+                    log.info("refs: 本镜未设位置的主体（位置一律以剧情句为准，正词里标注“未指定”）：{}", noPos);
                 }
                 orderLineZh = "画面从左到右依次为：" + String.join(" → ", zhL) + "；";
                 orderLineEn = "Left to right: " + String.join(" -> ", enL) + "; ";
