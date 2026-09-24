@@ -171,11 +171,25 @@ async def reload_comfy(request):
     #      这里显式 export，不依赖调用方环境。
     #   ③ `services_up.sh` 还需要 `WEAVEORA_GATEWAY_PORT`（默认 8000！）—— 漏了会把网关起在**错的端口**
     #      （现象：ComfyUI 好了、但公网入口 57712 变成 502）。所以两个变量一起显式给。
+    # ★ 2026-09-24 修（实测事故：定妆照任务 502）：等待判据必须与 `services_up.sh` **同源** ——
+    #   它决定起不起用的是 `up()` = `ss -ltn | grep -q ":8001 "`（**端口**），而旧代码等的是
+    #   `pgrep -f '[C]omfyUI/main.py'`（读 /proc/PID/cmdline）。内核 `do_exit` 的顺序是
+    #   先 `exit_mm()`（cmdline 立刻清空 ⇒ pgrep 立刻报“进程没了”）→ 最后 `exit_files()`（才关监听 socket）；
+    #   ComfyUI 要拆 33 GB，这个窗口实测 ~2 秒 ⇒ services_up 看到 8001 仍 LISTEN 就**跳过启动**，
+    #   随后进程真正退出 ⇒ 盒子再没有 ComfyUI，之后每个任务都 `POST /prompt -> 502 Cannot connect to host 127.0.0.1:8001`。
+    #   实测时间线：09:05:35 请求 reload → 09:05:37 services_up「ComfyUI :8001 已在监听，跳过」
+    #   → 09:05:39 起 8001 不可达、180s 全 502，且 comfyui.log 无任何新行（= 根本没被拉起）。
+    #   触发频率高：worker 进程重启后**第一个任务必然走这条路**（“本进程首次提交，但盒上已驻留 X GB”）。
     cmd = ("export WEAVEORA_ROOT=/opt/weaveora WEAVEORA_GATEWAY_PORT=8800 ; "
-           "pkill -f '[C]omfyUI/main.py' ; "
-           "for i in $(seq 1 40); do pgrep -f '[C]omfyUI/main.py' >/dev/null || break; sleep 1; done ; "
-           "sleep 1 ; "
            "mkdir -p /opt/weaveora/logs ; "
+           "pkill -f '[C]omfyUI/main.py' ; "
+           # ① 等**端口**释放（与 services_up 同判据，最多 60s）
+           "for i in $(seq 1 60); do ss -ltn 2>/dev/null | grep -q ':8001 ' || break; sleep 1; done ; "
+           "sleep 2 ; "
+           "setsid bash /opt/weaveora/services_up.sh >> /opt/weaveora/logs/services_up.log 2>&1 ; "
+           # ② 回读 40s：还没起来就再拉一次（兜住任何尚未想到的竞态）
+           "for i in $(seq 1 20); do ss -ltn 2>/dev/null | grep -q ':8001 ' && break; sleep 2; done ; "
+           "ss -ltn 2>/dev/null | grep -q ':8001 ' || "
            "setsid bash /opt/weaveora/services_up.sh >> /opt/weaveora/logs/services_up.log 2>&1")
     try:
         subprocess.Popen(["/bin/bash", "-c", cmd], start_new_session=True)
