@@ -1706,6 +1706,27 @@ def _unload_before_model_switch(prompt):
     return True
 
 
+def _reload_before_familyless_task(reason):
+    """给**没有 UNETLoader/CLIPLoader 指纹**的通路（lipsync/talk 等自研节点）用的重启守卫。
+
+    为什么需要：`_unload_before_model_switch` 靠图里的加载器指纹判家族，而 lipsync/talk 的图里
+    只有自研节点 ⇒ `key` 为空 ⇒ 直接 return False（不做任何释放）。于是它只能靠 `/free`——
+    而 `/free` 恰恰是把上一套（FLUX.2 33 GB）**从显存搬进内存**、不是释放。
+    实测同一机制已造成一次真事故（2026-09-24 10:54 motion：/free 后 13 秒 OOM，anon-rss 47.8 GB，
+    整栈连网关一起死、worker 只看到 Connection refused）。
+
+    策略：只要上一套是“大模型家族”（`_MODEL_KEY_LAST` 非空，即刚跑过出图/出片），就先重启 ComfyUI
+    把这套卸干净；连续跑同类任务时 last 已置空 ⇒ 不会再重启。
+    """
+    if not _MODEL_KEY_LAST["v"]:
+        return False
+    print("[comfy] ⚠️ 需重启 ComfyUI 释放上一套：%s（上一套模型 = %s）"
+          % (reason, _MODEL_KEY_LAST["v"]), flush=True)
+    _edge_reload_comfy(reason)
+    _MODEL_KEY_LAST["v"] = ""
+    return True
+
+
 def _post_prompt(prompt, client_id):
     """POST /prompt；对偶发的 prompt 校验失败重试 1 次（同图重投，服务端状态问题）。"""
     _unload_before_model_switch(prompt)
@@ -2573,11 +2594,15 @@ def _motion_ltx25(client_id, payload, progress_fn=None):
           % (w, h, dur, LTX25_NATIVE_FPS, int(round(dur * LTX25_NATIVE_FPS)) + 1,
              _deliver_fps, "，时间轴 ×2" if _x2 else "", seed, wf),
           flush=True)
-    # ---- 跑前腾显存：LTX 峰值 44.7G/46.1G，必须先把 ComfyUI 常驻缓存卸掉（实测过）
-    try:
-        _free_comfy_models(wait_gb=LTX25_FREE_GB)
-    except Exception as e:
-        print("[comfy] ltx25 /free 告警（继续）：%s" % e, flush=True)
+    # ⛔ 2026-09-24 修（「motion 全失败」的真因）：这里原有一句 `_free_comfy_models(wait_gb=LTX25_FREE_GB)`，
+    #   已**删除**。实测链路（真事，非推测）：10:52:56 发 /free → 10:54:35 回「卸载完成：可用显存 44.3 GiB
+    #   （目标 44.0）」看上去很好，其实它是把上一套（FLUX.2 主模型 33 GB + 编码器）**从显存搬到内存**、
+    #   而不是释放（`free_memory()` 对还被引用着的模型只 offload）⇒ 13 秒后 OOM killer 杀 ComfyUI
+    #   （`anon-rss 47.8 GB`）⇒ 整个 stack cgroup 一起死（ComfyUI/TTS/face/talk/网关），worker 只看到
+    #   `Connection refused`；而 unit 当时没有 Restart 策略 ⇒ 盒子一直死着 = 「motion 全失败」。
+    #   真正能释放大模型的手段只有一个：**重启 ComfyUI** —— 它由 `_post_prompt → _unload_before_model_switch`
+    #   里的**跨家族守卫**在提交前完成（本任务的图含 UNETLoader/CLIPLoader ⇒ 指纹与出图家族不同 ⇒ 必重启）。
+    #   所以这里只需把工作流读进来，不再需要任何 /free 前置动作。**别再把 /free 加回来。**
     try:
         with open(wf, encoding="utf-8") as fh:
             g = json.load(fh)
@@ -2698,15 +2723,17 @@ def generate_motion(client_id, payload, progress_fn=None):
                 "  修法二：显式降级单专家（params.mode=single + params.model=本地 5B 权重名）"
                 % (_total, MOTION_MIN_TOTAL_GB))
         if _free is not None and _free < _need:
-            # 先请 ComfyUI 释放自己的缓存（双专家 26.6GiB 是可回收的），**并等卸载真的生效**（异步！）
+            # ★ 2026-09-24 修：这里原来是 `_free_comfy_models(wait_gb=_need)`，**已删除** ——
+            #   `/free` 会把上一套模型从显存搬进内存（不是释放）⇒ 往 OOM 枪口上撞
+            #   （实测：LTX 出片前 /free 把 FLUX.2 的 33 GB 搬到 RAM，13 秒后 OOM 杀掉整栈）。
+            #   跨家族释放由 `_post_prompt → _unload_before_model_switch` 的重启守卫负责；
+            #   这里只重读一次显存并如实告知（放不下就交给 ComfyUI 自己换入换出）。
             try:
-                _free = _free_comfy_models(wait_gb=_need, timeout=120)
-                if _free is None:
-                    _free, _total2 = vram_stats()
-                    _total = _total2 or _total
-                print("[comfy] 已请 ComfyUI 释放缓存，可用显存 → %.1f GiB" % _free, flush=True)
+                _free, _total2 = vram_stats()
+                _total = _total2 or _total
+                print("[comfy] 可用显存 %.1f GiB（未做 /free 卸载；跨家族释放交给重启守卫）" % _free, flush=True)
             except Exception as _e:
-                print("[comfy] 释放 ComfyUI 缓存失败（忽略）: %s" % _e, flush=True)
+                print("[comfy] 重读显存失败（忽略）: %s" % _e, flush=True)
         # 判据：**只在真放不下时才降帧**。
         #   free < need 但仍能放下 → 给 WARN 继续跑，交给 ComfyUI 自己换入换出
         #   （旧写法拿 free 硬拦，会把本来能跑的任务误杀 —— 实测 121 帧 47.3GiB 是能跑的）。
@@ -4317,7 +4344,12 @@ def generate_lipsync(client_id, payload, progress_fn=None):
         print("[comfy] 第%s镜标记为极端表情（张口/喊叫）→ lips_expression=%.2f"
               % (shot_no, _lips_expr), flush=True)
 
-    _free_comfy_models()
+    # ★ 2026-09-24：这里原是 `_free_comfy_models()`（POST /free 卸 ComfyUI 缓存）—— 已换掉，原因：
+    #   lipsync 的图里没有 UNETLoader/CLIPLoader ⇒ 跨家族守卫认不出它 ⇒ 以前只能靠 /free，
+    #   而 /free 是把上一套（刚出的图 = FLUX.2 33 GB）**从显存搬进内存**、不是释放；
+    #   实测同一机制在 motion 上 13 秒后就 OOM（anon-rss 47.8 GB）杀掉整栈。
+    #   现在改成：上一套若是大模型家族，就先重启 ComfyUI（真正释放），连续 lip 任务不重复重启。
+    _reload_before_familyless_task("lipsync 需要整套显存，且与上一套（出图/出片）家族不同")
     _last_min = [-1]
 
     def _tick(elapsed):
