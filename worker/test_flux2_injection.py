@@ -118,7 +118,15 @@ def main():
     check("Picture 1 (image1)" in qwen_pos, "Qwen 通路正词**不被**改写（口径不变）")
 
     zh_id = c._flux2_fold_negative("庭院里的女子", "模糊, 换脸, 身份混淆", True)
-    check("同一张脸不得在画面里重复出现" in zh_id, "负词里的身份组折成**正向**约束句")
+    check("同一张脸不得在画面里重复出现" in zh_id, "负词里的“互换类”折成**正向**约束句")
+    # ★ 2026-09-24（用户报「第 4 镜出现 2 个宝玉」）：重复类负词不能被“同一张脸”那句覆盖掉 ——
+    #   正词里已有「禁止互换面孔…同一张脸」时，`同一人出现两次/复制脸庞` 仍必须折进正词。
+    dup = c._flux2_fold_negative(
+        "禁止互换面孔、发型与服饰，禁止把两位画成同一张脸。", "同一张脸重复, 换脸, 同一人出现两次, 复制脸庞", True)
+    check("只出现一次" in dup and "不得重复画同一个人" in dup,
+          "★ 重复类负词仍折进正词（不再被“同一张脸”那句误判为已覆盖）")
+    dup_en = c._flux2_fold_negative("never swap faces", "duplicate face, appears twice", False)
+    check("exactly once" in dup_en, "英文：重复类同样折成正向句")
     zh_cov = c._flux2_fold_negative("禁止互换面孔、发型与服饰，禁止把两位画成同一张脸。",
                                     "换脸, 身份混淆", True)
     check("同一张脸不得在画面里重复出现" not in zh_cov,

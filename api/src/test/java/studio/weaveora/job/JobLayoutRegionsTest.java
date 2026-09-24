@@ -480,6 +480,9 @@ class JobLayoutRegionsTest {
         // 没位置的要显式说明，且仍然强调必须出现
         assertTrue(pos.contains("Picture 2 (image2) = 可卿（位置：未指定"), pos);
         assertTrue(pos.contains("必须出现在画面中"), pos);
+        // ★ 2026-09-24（用户报「第 4 镜出现 2 个宝玉」）：必须有“数量/唯一性”约束
+        assertTrue(pos.contains("本镜共 3 个角色"), pos);
+        assertTrue(pos.contains("只出现一次"), pos);
         // 一个框都没设 ⇒ 不下发 referenceRegions、也不写任何区间、无告警
         assertNull(p.get("referenceRegions"));
         assertFalse(pos.contains("位置：x "), pos);
