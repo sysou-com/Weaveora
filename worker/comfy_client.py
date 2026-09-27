@@ -843,7 +843,10 @@ def generate_via_workflow(client_id, payload, progress_fn=None, on_tick=None):
             data, ctype = fetch_reference_bytes(key)
             fname = (key.split("/")[-1] or ("ref_%d.png" % i))
             _sub = str(_subj_of[i]) if i < len(_subj_of) and _subj_of[i] else ""
-            if _vis and _sub and _sub not in _vis:
+            # ⚠️ 2026-09-28：本条**默认关闭** —— 实测（第4镜 00:13）它会让画面**多出 2 个人、主脸变小变糊**：
+            #   裁到下巴以下后图里没有头部信息，而正词仍要求「头型/发型/头饰与服装取自参考图」
+            #   ⇒ 模型无处可抄就自己编人。开关：WEAVEORA_COSTUME_CROP=1 才启用（保留备查/以后 A/B）。
+            if _COSTUME_CROP_ON and _vis and _sub and _sub not in _vis:
                 _crop = _costume_only_bytes(data)
                 if _crop is not data:
                     data, ctype = _crop, "image/png"
@@ -1550,6 +1553,7 @@ def _faceswap_outputs(payload, outs):
 #   侧脸的人（可卿）脸和衣服都不像。规则：visibleSubjects 非空时，不在其中的（但仍在参考图清单里）
 #   改为**只取服装**：先把定妆照裁到这条线以下（脸没了），再当参考图送进去。
 COSTUME_CROP_TOP = float(os.environ.get("WEAVEORA_COSTUME_CROP_TOP", "0.42") or 0.42)
+COSTUME_CROP_ON = (os.environ.get("WEAVEORA_COSTUME_CROP", "") or "").strip().lower() in ("1", "true", "yes", "on")
 
 
 def _costume_only_bytes(data):

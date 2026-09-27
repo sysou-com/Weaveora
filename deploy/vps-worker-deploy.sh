@@ -106,8 +106,10 @@ if [ -n "${COMFY_DIR:-}" ] && [ -d "$COMFY_DIR" ]; then
   for wf in "$COMFY_DIR"/*.json; do
     [ -f "$wf" ] || continue
     b="$(basename "$wf")"
-    LMD5="$(md5sum "$wf" | cut -d' ' -f1)"
-    RMD5="$("${SSH[@]}" "[ -f '$DIR/workflows/$b' ] && md5sum '$DIR/workflows/$b' | cut -d' ' -f1" || true)"
+    # ★ 2026-09-28：必须**忽略行尾**再比 —— 本机（Windows）工作区是 CRLF、VPS 上是 LF，
+    #   直接 md5 会把 5 个工作流全判成"不一致"（实测：内容其实逐字节相同，只是行尾）⇒ 空警报。
+    LMD5="$(tr -d '' < "$wf" | md5sum | cut -d' ' -f1)"
+    RMD5="$("${SSH[@]}" "[ -f '$DIR/workflows/$b' ] && tr -d '' < '$DIR/workflows/$b' | md5sum | cut -d' ' -f1" || true)"
     if [ -z "$RMD5" ]; then
       scp -i "$KEY" -q "$wf" "$HOST:$DIR/workflows/$b" && echo "     + 补齐缺失：$b（md5 $LMD5）"
     elif [ "$LMD5" != "$RMD5" ]; then
