@@ -846,7 +846,7 @@ def generate_via_workflow(client_id, payload, progress_fn=None, on_tick=None):
             # ⚠️ 2026-09-28：本条**默认关闭** —— 实测（第4镜 00:13）它会让画面**多出 2 个人、主脸变小变糊**：
             #   裁到下巴以下后图里没有头部信息，而正词仍要求「头型/发型/头饰与服装取自参考图」
             #   ⇒ 模型无处可抄就自己编人。开关：WEAVEORA_COSTUME_CROP=1 才启用（保留备查/以后 A/B）。
-            if _COSTUME_CROP_ON and _vis and _sub and _sub not in _vis:
+            if COSTUME_CROP_ON and _vis and _sub and _sub not in _vis:
                 _crop = _costume_only_bytes(data)
                 if _crop is not data:
                     data, ctype = _crop, "image/png"
@@ -4902,7 +4902,7 @@ def _best_frame_png(video_bytes, max_long=1280):
         if mo is None:
             continue
         # 打分：脸太小直接排除（优先）；其余取 mouth_open 最小
-        if px is not None and px < FACE_MIN_PX:
+        if px is not None and px < LIPSYNC_FACE_MIN_PX:
             continue
         score = mo
         if best is None or score < best[0]:
@@ -4917,7 +4917,7 @@ def _best_frame_png(video_bytes, max_long=1280):
         print("[comfy] 片段里量不到人脸/嘴型，回退首帧", flush=True)
         return None
     print("[comfy] 片段抽帧 %d 张，选中第 %d 帧当底片（mouth_open=%.3f，阈值 %.2f）"
-          % (len(frames), best[2], best[0], MOUTH_MAX), flush=True)
+          % (len(frames), best[2], best[0], LIPSYNC_MOUTH_MAX), flush=True)
     return best[1]
 
 

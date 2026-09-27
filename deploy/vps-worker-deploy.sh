@@ -37,6 +37,8 @@ fi
 DIR="${WEAVEORA_WORKER_DIR:-/opt/weaveora}"
 SVC="weaveora-cloud-worker"
 FILES=(stub_worker.py cloud_client.py cloud_image.py comfy_client.py audio_client.py)
+# ★ 静态自查脚本的**绝对路径**：脚本中途会 cd 到 worker/，这里必须在 cd 之前算好
+CHECKER="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/check_py_constants.py"
 # 对口型工作流 JSON：worker 在**本机**读它，再把图 POST 给远端 ComfyUI（GPU 服务器）。
 # 必须跟着代码一起发，否则 fps/节点接线不一致会出各种怪问题。
 WF_SRC="$(cd "$(dirname "$0")/windows" && pwd)/lipsync_workflow_api.json"
@@ -74,6 +76,24 @@ echo "== 2/5 目标机语法校验（用它自己的 python）=="
 if ! "${SSH[@]}" "set -e; cd '$DIR'; for f in ${FILES[*]}; do /usr/bin/python3 -m py_compile \$f.new && echo \"   OK \$f\" || { echo \"!! \$f 语法不通过\"; exit 1; }; done"; then
   echo "!! 有文件校验失败 —— 已保持线上原样（只留下 .new 供排查）"
   exit 1
+fi
+
+echo "== 2.5/5 静态自查：引用但未定义的模块级常量 =="
+# ★ 2026-09-28：`py_compile` 与 import 自检都**查不出**「常量写错名/忘了定义」——
+#   只有那条代码路径真跑到才 NameError ⇒ 表现是「部署显示 IMPORTS_OK、任务跑到一半失败」。
+#   已实测踩过三次：LIPSYNC_POST_UPSCALE（对口型最后一步）、_COSTUME_CROP_ON（第4镜关键帧）、
+#   FACE_MIN_PX / MOUTH_MAX（挑最干净一帧路径，潜伏未爆）。本步在**上传前**用 AST 比对，非空即中止。
+PYCHECK=""
+for cand in py python3 python; do
+  if command -v "$cand" >/dev/null 2>&1; then PYCHECK="$cand"; break; fi
+done
+if [ -n "$PYCHECK" ]; then
+  if ! "$PYCHECK" "$CHECKER" "${FILES[@]}"; then
+    echo "!! 有未定义常量 → 已中止部署（修完再发，别让线上跑到一半才 NameError）"
+    exit 1
+  fi
+else
+  echo "   （本机找不到 python，跳过静态自查 —— 注意：这一步本可以挡住上面那三次事故）"
 fi
 
 echo "== 3/5 备份 + 原子改名 =="
