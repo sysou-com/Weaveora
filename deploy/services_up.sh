@@ -43,13 +43,33 @@ if up 8001; then
   log "ComfyUI :8001 已在监听，跳过"
 else
   cd "$CX" || exit 1
-  # --disable-smart-memory：Wan2.2 I2V-A14B 是**双专家**（fp8 各 13.3GiB）。24G 卡上必须让
-  #   ComfyUI 在切换专家时主动释放上一个，否则两个专家同时驻留（26.6GiB）直接 OOM。
+  # 2026-09-19 调整（原配置来自 24G 卡时代）：
+  #   原 --disable-smart-memory --cache-ram 32 来由：Wan2.2 I2V 双专家 fp8 各 13.3GiB，
+  #   24G 卡不主动释放 → 两专家同驻 26.6GiB 直接 OOM。
+  #   现在：① 卡是 48G；② 任务按 kind 串行（claim 同 kind 优先）→ 一批内只有一套重资产；
+  #   ③ cache-ram 32 在 62GiB 机器上会让两套重资产同时进 RAM → 曾触发内核 OOM killer。
+  #   ⇒ smart memory 打开（去掉 --disable-smart-memory）+ cache-ram 8：
+  # ★ 2026-09-23 23:2x 再调整（cache-ram 8 → 16 16）：
+  #   事故：A/B 里 flux2(33GB) 已被 pin → 紧接着加载 qwen-edit(19GB + 8.7GB 文本编码器)
+  #        → anon-rss 45.3GiB → 内核 OOM killer 杀了 ComfyUI（weaveora-stack 变 failed，5 端口全 000）。
+  #   根因（盒上现网源码）：model_management.py:720 `ensure_pin_budget()` 的余量 = max(RAM_CACHE_HEADROOM/2, 2GB)，
+  #        而 RAM_CACHE_HEADROOM ← --cache-ram 的**第一个值**（8）⇒ 只有 4GB 余量时才去卸旧模型；
+  #        且 psutil.available 把可回收的 page cache 也算进去 ⇒ 它以为还有余量，匿名内存却已顶死。
+  #        第二个值（inactive/pin 阈值）默认 = min(128, 总内存) = 47GB（main.py:356），显式给 16 更可控。
+  #   ⇒ 16 16：pin 预算余量 4GB→8GB（换模型前更早卸旧的）；代价 = 缓存更早被清、重复出图略慢。
+  #   未改 --disable-smart-memory（它会让 VRAM 更激进地往 RAM 卸，方向相反）/ --cache-none（铁律③ 禁）。
+  #     批内模型常驻（省掉每张重搬 ~36GB），跨 kind 由 smart memory 自然淘汰一次。
+  # ★ 2026-09-28（用户裁定：查为什么出图变慢）第二个值 16 → 24：
+  #   实测每张图都要重新装载「17.18GB 文本编码器 + 33.81GB 主干」（日志每张图前都出现这两行）；
+  #   两件合计 51.1GB > 49.1GB 显存 ⇒ 必然互相挤出；而 17.18GB 的 TE > 16GB 的 inactive/pin 阈值
+  #   ⇒ 每张图都被丢出 RAM、下一张再从盘重读（这就是「刚部署时快、现在慢」的主因）。
+  #   抬到 24 后 TE 可常驻 RAM ⇒ 换装变成 RAM→VRAM 拷贝（秒级）。
+  #   RAM 账：总 47GB、进程+其它服务 ~15GB、TE 17.18GB ⇒ 24 仍留 ~10GB 余量（不回到 32，避免 09-23 那次内核 OOM）。
+  #   注意：主干 33.81GB 仍无法与 TE 同时常驻（51.1 > 47GB RAM）⇒ 它的重装省不掉；根治要换更小模型/TE。
   # --reserve-vram 0.5：给 CUDA 上下文 / VAE 解码留 0.5GiB 余量。
   start_bg "ComfyUI(:8001)" "$LOGD/comfyui.log" \
     "$VENV_PY" "$CX/main.py" --listen 0.0.0.0 --port 8001 \
-    --disable-smart-memory \
-    --cache-none \
+    --cache-ram 16 24 \
     --reserve-vram 0.5
 fi
 
@@ -89,7 +109,7 @@ fi
 
 # ---------- 整脸口型 talk :8094（EchoMimicV3 / jaw-lip）----------
 # 独立 venv（envs/talk）与 ComfyUI 隔离；喊叫/尖叫/吟唱这类「嘴大张」镜用它替代 LatentSync。
-# ⚠️ 踩过的坑（2026-09-15）：原来只有手工 start_talk.sh，机器一重启 8094 就没了（维护后实测未监听）。
+# ⚠️ 之前只有手工 start_talk.sh，机器一重启该服务就消失（2026-09-15 维护后实测 8094 未监听）。
 if up 8094; then
   log "talk :8094 已在监听，跳过"
 else
@@ -98,7 +118,7 @@ else
 fi
 
 # ---------- 边缘网关（端口可配：WEAVEORA_GATEWAY_PORT，缺省 8000）----------
-# GPU#2：平台给的公网映射是 <公网端口>→容器 8800，故那边要设 8800（具体公网地址/端口见「生成引擎配置 → GPU 服务器地址」）。
+# GPU#2（180.127.11.166）平台给的公网映射是 10588→容器 8800，故那边要设 8800。
 GWPORT=${WEAVEORA_GATEWAY_PORT:-8000}
 # 必须最后起（依赖上面各服务）
 if up "$GWPORT"; then

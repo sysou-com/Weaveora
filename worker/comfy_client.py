@@ -199,10 +199,30 @@ def _wf_upstream_text_node(graph, start_ref):
 #   不存在的 "Picture 2" ⇒ 参考图与角色的映射**可能整个丢掉**（且不会报错）。
 #   只改序号写法，不改任何剧情/身份描述；WEAVEORA_FLUX2_SLOT_REWRITE=0 可关。
 FLUX2_SLOT_REWRITE = (os.environ.get("WEAVEORA_FLUX2_SLOT_REWRITE", "1") or "1").strip() == "1"
-_FLUX2_SLOT_RE_PIC = re.compile(r"Picture\s*(\d+)\s*\(\s*image\s*\1\s*\)", re.IGNORECASE)
+# ★ 2026-09-25：参考槽**措辞口径**（只影响英文正词；默认 "reference" = 现网，不动生产）。
+#   "reference" = ComfyUI 官方模板示例句的 `Reference Image N`（现网口径）
+#   "image"     = BFL 官方多参考教程里**所有示例**用的 `image N`（模型厂商口径）
+#     源：docs.bfl.ml/guides/prompting_editing_multi_reference.md（2026-09-25 实读）
+#   A/B 用：判据是 faceid 的同批排名，不是“哪个看着更官方”——两边都是官方。
+FLUX2_SLOT_WORDING = (os.environ.get("WEAVEORA_FLUX2_SLOT_WORDING", "reference") or "reference").strip().lower()
+if FLUX2_SLOT_WORDING not in ("reference", "image"):
+    FLUX2_SLOT_WORDING = "reference"
 # 光杆的 "Picture N"（没带括号的那种）也要管 —— 英文正词里就出现过 "...are Picture 1 and Picture 2"
-_FLUX2_SLOT_RE_BARE = re.compile(r"Picture\s*(\d+)", re.IGNORECASE)
-_FLUX2_SLOT_RE_IMG = re.compile(r"(?<![A-Za-z])image\s*(\d+)(?![0-9])", re.IGNORECASE)
+# ★ 2026-09-25：原来这里是 `_FLUX2_SLOT_RE_PIC` / `_FLUX2_SLOT_RE_BARE` / `_FLUX2_SLOT_RE_IMG`
+#   三条正则分三次 `sub`，前两条已合并进下面的 `_FLUX2_SLOT_RE`（见“为什么必须”）。
+#   两段 `_FLUX2_SLOT_RE_TAIL` 仍单独跑（它清的是**字面 N** 的解释句，与数字槽号不搭界）。
+# ★ 2026-09-25：把「三条规则分三次 sub」合并成**单趟**替换。
+#   为什么必须：分次 sub 时，第三条 `image\s*(\d+)` 会把第一条刚写进去的 "Reference Image 1"
+#   再吃一遍（`Image` 前是空格，`(?<![A-Za-z])` 放行）⇒ 实际下发给模型的是
+#   「**Reference Reference Image 1**」。2026-09-24 只修了「前缀被二次改写」那一半，
+#   这半（**改写产物被自己二次改写**）漏了 —— 09-25 在第 4 镜 19:04 的 finalPrompt 里实测到 3 处。
+#   `re.sub` 不会回头扫自己刚写进的结果 ⇒ 单趟天然幂等。再加 `(?<!Reference\s)` 兜底：
+#   输入若已经是官方口径（或本函数跑第二遍），不再动它。
+_FLUX2_SLOT_RE = re.compile(
+    r"Picture\s*(\d+)\s*\(\s*image\s*\1\s*\)"                       # ① 「Picture 1 (image1)」
+    r"|Picture\s*(\d+)"                                                 # ② 光杆「Picture 2」
+    r"|(?<![A-Za-z])(?<!Reference\s)image\s*(\d+)(?![0-9])",            # ③ 「image3」
+    re.IGNORECASE)
 # 陈旧解释句：“参考图映射（按送入顺序；Picture N 与 imageN 指同一张图）：”
 #   —— 那里是**字面 N**（不是数字）⇒ 上面三条数字规则盖不到；
 #   槽号改完它还留着就变成自相矛盾的噪声（同句里既说“参考图 N” 又说“Picture N”）。一并清掉。
@@ -230,15 +250,21 @@ def _flux2_slot_rewrite(text):
     ⚠️ 本函数**只能作用在 Java 侧拼的那份正词上**，绝不能跑在 `_image_edit_prefix` 的产物上 ——
     前缀里的 "Reference Image N" 会被 `image\s*(\d+)` 再吃一遍（2026-09-24 的静默 bug）。
     组装顺序见 `_image_edit_prompt`。
+
+    ★ 2026-09-25：数字槽号走**单趟** `_FLUX2_SLOT_RE`（见上方的“为什么必须”），
+    并保证 **幂等**：`f(f(x)) == f(x)`（回归测试在 `worker/test_flux2_injection.py`）。
     """
     if not text:
         return text
     zh = _looks_zh(text)
-    slot = "参考图 %s" if zh else "Reference Image %s"
+    slot = "参考图 %s" if zh else ("image %s" if FLUX2_SLOT_WORDING == "image" else "Reference Image %s")
     out = _FLUX2_SLOT_RE_TAIL.sub("", text)
-    out = _FLUX2_SLOT_RE_PIC.sub(lambda m: slot % m.group(1), out)
-    out = _FLUX2_SLOT_RE_BARE.sub(lambda m: slot % m.group(1), out)
-    out = _FLUX2_SLOT_RE_IMG.sub(lambda m: slot % m.group(1), out)
+
+    def _one(m):
+        # ①②③ 三条分支只会命中一条；`\1` 已保证「Picture 1 (image1)」里的两个编号一致
+        return slot % (m.group(1) or m.group(2) or m.group(3))
+
+    out = _FLUX2_SLOT_RE.sub(_one, out)
     # 字面 N 放最后：上面三条只认数字，认不出它
     if zh:
         out = _FLUX2_SLOT_RE_LIT_ZH.sub("不同的参考图对应", out)
@@ -666,13 +692,23 @@ _FLUX2_POS_DUP_COVERED = ("只出现一次", "仅出现一次", "恰出现一次
                           "exactly once", "only appears once")
 
 
+# ★ 2026-09-27（用户裁定：「不要把提示词加到 worker 侧，删除 worker 侧拼装提示词」）：
+#   worker **不再往正词里加任何前缀句**（原先是 "The reference image(s) are image 1, image 2, …" +
+#   "放进剧情场景/别搬白底" 那一句）。正词现在完全由**用户自己的剧情句**（+ 年代一行）构成，
+#   谁是谁/谁站哪/几张图各是什么，都由用户在剧情里写。置 true 才能恢复旧行为（便于对照/回退）。
+EDIT_PROMPT_PREFIX = False
+
+
 def _image_edit_prefix(positive, negative, ref_names, is_flux2):
-    """Edit 档的"怎么用这些参考图"前缀 + 负词补充（**单一真源**，worker 与 diag 共用）。
+    """（2026-09-27 起为**空转**：直接原样返回）Edit 档的"怎么用这些参考图"前缀 + 负词补充。
 
     为什么抽成函数（2026-09-23）：出图 A/B 诊断脚本也必须用**生产同一套**提示词前缀，否则对照无效
     （Qwen 用 "Picture N" / FLUX.2 用 "Reference Image N"、Flux2 不注负词 —— 两处各写一遍必然漂移）。
     返回 (positive, negative)；不改入参。
     """
+    if not EDIT_PROMPT_PREFIX:
+        # 生产默认：worker 不拼装任何提示词（负词也不在这里补；FLUX.2 本来就没有负词通路）
+        return positive, negative
     if not ref_names:
         return positive, negative
     # 槽位措辞必须跟模型走：FLUX.2 的参考图机制是 ReferenceLatent（官方模板措辞 Reference Image 1/2/…），
@@ -681,21 +717,26 @@ def _image_edit_prefix(positive, negative, ref_names, is_flux2):
     # 分隔符跟着语言走（中文「、」/ 英文「, 」）：别让模型看到 "Reference Image 1 Reference Image 2"
     # 这种无分隔堆叠 —— 它得先自己切词才能对上「第几张」。
     _sep = "、" if _looks_zh(positive) else ", "
-    slot_hint = _sep.join(("Reference Image %d" if is_flux2 else "Picture %d") % (i + 1)
-                          for i in range(len(ref_names)))
+    if is_flux2 and not _looks_zh(positive) and FLUX2_SLOT_WORDING == "image":
+        _word = "image %d"          # BFL 官方多参考示例口径（见上方 FLUX2_SLOT_WORDING）
+    else:
+        _word = "Reference Image %d" if is_flux2 else "Picture %d"
+    slot_hint = _sep.join(_word % (i + 1) for i in range(len(ref_names)))
     if _looks_zh(positive):
-        positive = ("参考图按送入顺序对应片中角色（%s）。每个角色的面容、发型、年龄与服装必须严格跟随"
-                    "其自己的参考图；把角色放进下面描述的剧情场景里（背景/光线/机位/动作以文字描述为准，"
-                    "**不要**保留参考图的纯色/白底写真背景）。场景：" % slot_hint) + (positive or "")
+        # ★ 2026-09-27（用户裁定：正词重复太多、模型抓不住重点）：删掉重复的身份句
+        #   （“面容/发型/年龄/服装必须跟随各自参考图”已由 API 的「参考图映射…」段写一次，
+        #   而且不该再提“年龄”）。此处只留“槽位顺序 + 放进剧情场景 + 别搬白底”这三件不重复的事。
+        positive = ("参考图按送入顺序对应片中角色（%s）；把角色放进下面描述的剧情场景里"
+                    "（背景/光线/机位/动作以文字描述为准，**不要**保留参考图的纯色/白底写真背景）。场景："
+                    % slot_hint) + (positive or "")
         if not is_flux2:
             negative = ((negative + ", ") if negative else "") + \
                        "白色背景, 纯色背景, 影棚背景, 角色设定图, 证件照, 正面证件照, 3d渲染, cgi"
     else:
-        positive = ("The reference image(s) are %s and show this shot's character(s) in that order; keep each "
-                    "character's face, hairstyle, age and costume strictly consistent with their own reference, "
-                    "and place them into the scene described below (background / lighting / camera framing / "
-                    "action follow the description; do NOT keep the plain or white studio backdrop of the "
-                    "reference image(s)). Scene: " % slot_hint) + (positive or "")
+        positive = ("The reference image(s) are %s and show this shot's character(s) in that order; place them "
+                    "into the scene described below (background / lighting / camera framing / action follow the "
+                    "text; do NOT keep the plain or white studio backdrop of the reference image(s)). Scene: "
+                    % slot_hint) + (positive or "")
         if not is_flux2:
             negative = ((negative + ", ") if negative else "") + \
                        "white background, plain backdrop, solid color background, studio portrait, character sheet, " \
@@ -717,8 +758,12 @@ def _image_edit_prompt(positive, negative, ref_names, is_flux2):
     if is_flux2 and FLUX2_SLOT_REWRITE and positive:
         _rw = _flux2_slot_rewrite(positive)
         if _rw != positive:
+            # ★ 2026-09-25：这里以前把口径**写死**成 "Reference Image N"，
+            #   开了 WEAVEORA_FLUX2_SLOT_WORDING=image 后日志会骗人（实际发的是 image N）。
+            #   现在与 `_flux2_slot_rewrite` 同源取词。
             print("[comfy] FLUX.2：参考槽措辞已改写（Picture N (imageN) → %s）—— 否则映射会丢"
-                  % ("参考图 N" if _looks_zh(positive) else "Reference Image N"), flush=True)
+                  % ("参考图 N" if _looks_zh(positive)
+                     else ("image N" if FLUX2_SLOT_WORDING == "image" else "Reference Image N")), flush=True)
         positive = _rw
     if ref_names:
         positive, negative = _image_edit_prefix(positive, negative, ref_names, is_flux2)
@@ -766,15 +811,48 @@ def generate_via_workflow(client_id, payload, progress_fn=None, on_tick=None):
 
     ref_names = []
     ref_keys = payload.get("referenceKeys") or []
+    # ★ 2026-09-27 第三版（用户实测：「警幻与可卿**互换服饰**」）：
+    #   旧做法把“不露脸角色”的定妆照裁到下巴以下当“服装参考图”喂进去 —— 实测**不可用**：
+    #   无脸的图没有身份信号，模型无法把两块布料分配给两个不同角色 ⇒ 两个女角色服饰互换。
+    #   现在“不露脸角色”**不再喂图**（API 已把它们从 referenceKeys 里拿掉，并在正词里写明它们的服饰文字）——
+    #   这样槽位号与实际送入的图始终一一对应（不会重演 2026-09-16 “槽位前移 ⇒ 张冠李戴”）。
     # ★ 2026-09-16（用户实测第 4 镜“张冠李戴”的一个真因）：参考图**上传失败不能静默跳过**。
     #   旧写法失败就 continue → 后面的图**前移一格**，而提示词里的 `Picture 2 = 可卿` 不会变，
     #   于是 Picture 2 实际装的是第三个主体的脸 → 两个角色的脸被互换（张冠李戴）。
     #   现在：任一图拿不到就**直接报错**，宁可让任务失败并给出可行动的信息，也不输出一张错脸的图。
+    # ★ 2026-09-28（用户裁定「把死代码接上」，本机另一会话留下的 WIP 由我接手）：
+    #   把「不在 visibleSubjects 里」的槽位换成**只取服装**的裁切图（`_costume_only_bytes`）。
+    #   为什么必须做（第4镜实测）：payload.keyframeConfirm.visibleSubjects=[可卿,警幻]（宝玉=背影），
+    #   但 worker 从来没读这个字段 ⇒ 宝玉那张**带脸的整张定妆照**被喂进去 ⇒ 模型照图又画了一个他
+    #   （用户看到：背后多一个穿同款衣服的男脸）。
+    #   API 侧 narrowToVisible() 已停用，其注释明确把这件事交给 worker（见 JobService 的"现方案"）。
+    #   ★ 只**替换**、不删除槽位 —— 删了会让后面的图前移，与正词里 `Picture N = 谁` 错位（张冠李戴机制）。
+    _vis = []
+    try:
+        _kc = payload.get("keyframeConfirm") or {}
+        _vis = [str(x) for x in ((_kc.get("visibleSubjects") if isinstance(_kc, dict) else None)
+                                 or payload.get("visibleSubjects") or [])]
+    except Exception:
+        _vis = []
+    _subj_of = payload.get("referenceSubjects") or []
+    if _vis:
+        print("[comfy] 「只让这些主体露正脸」清单=%s（其余槽位将只给服装、不给脸）" % "、".join(_vis), flush=True)
     failed = []
     for i, key in enumerate(ref_keys[:3]):
         try:
             data, ctype = fetch_reference_bytes(key)
-            nm = _upload_image(data, (key.split("/")[-1] or ("ref_%d.png" % i)), ctype or "image/png")
+            fname = (key.split("/")[-1] or ("ref_%d.png" % i))
+            _sub = str(_subj_of[i]) if i < len(_subj_of) and _subj_of[i] else ""
+            if _vis and _sub and _sub not in _vis:
+                _crop = _costume_only_bytes(data)
+                if _crop is not data:
+                    data, ctype = _crop, "image/png"
+                    fname = "costume_" + os.path.splitext(fname)[0] + ".png"
+                    print("[comfy] 槽位 %d「%s」不在露脸清单 → 已换成只取服装的裁切图（图中无脸，防止模型照图把 TA 也画出来）"
+                          % (i + 1, _sub), flush=True)
+                else:
+                    print("[comfy] WARN 槽位 %d「%s」服装裁切未生效（仍用原图，可能多画一张脸）" % (i + 1, _sub), flush=True)
+            nm = _upload_image(data, fname, ctype or "image/png")
             if not nm:
                 failed.append("#%d(%s): 上传未返回文件名" % (i + 1, key.split("/")[-1][:12]))
             else:
@@ -824,6 +902,8 @@ def generate_via_workflow(client_id, payload, progress_fn=None, on_tick=None):
     # ★ 正词组装**只走这一个真源**（改写 → 前缀 → 折负词；顺序在 _image_edit_prompt 里锁死）。
     #   2026-09-24 修：旧代码把「加前缀」写在「改写」之前 ⇒ 前缀里刚写好的官方口径 "Reference Image N"
     #   被改写规则又吃了一遍，正词里只剩「Reference 参考图 1 …」残句（官方口径从未进过模型）。
+    # ★ 2026-09-27：旧的“只取服装”槽位说明已删除（那条路已停用：无脸图无法绑定到角色）。
+    #   “不露脸角色”的服饰改由 **API 侧的正词句**说明（backViewCostumeNote），且它们不再占参考图槽位。
     positive, negative = _image_edit_prompt(positive, negative,
                                             ref_names if mode == "edit" else [], _is_flux2)
     _wf_inject_text(graph, positive, negative)
@@ -950,6 +1030,9 @@ def generate_via_workflow(client_id, payload, progress_fn=None, on_tick=None):
             raise ComfyError("工作流出图无输出（%s）" % os.path.basename(path))
         # ★ 2026-09-21 出图后放大（默认关；WEAVEORA_IMAGE_UPSCALE=seedvr2 开启）：只作用于出图
         outs = _maybe_upscale_outputs(outs)
+        # ★ 2026-09-27：换脸（身份锚定）。失败不致命；notes 会进资产卡。
+        outs, _fs_notes = _faceswap_outputs(payload, outs)
+        _img_notes.extend(_fs_notes)
         # 降级提示随资产上报（前端资产卡 ⚠ 可见），不只藏在日志里
         if _img_notes:
             _note_txt = "；".join(_img_notes)
@@ -1385,6 +1468,113 @@ def _maybe_upscale_outputs(outs):
         except Exception as e:
             print("[comfy] WARN 出图放大失败（保留原图）：%s" % str(e)[:200], flush=True)
     return outs
+
+
+# ★ 2026-09-27：关键帧出图后**自动换脸**（身份锚定）——走盒上 `/face/swap`
+#   为什么：FLUX.2 的参考图通道没有「身份槽」——同一镜 8 发实测均值 宝玉 0.404 / 可卿 0.212 / 警幻 0.279，
+#   3 人同框时每张脸只占画面 7–13%（≈70px）⇒ 脸型错乱、张冠李戴（docs/第4镜-脸型错乱-排查-2026-09-25.md）。
+#   身份改由 inswapper_128 从**该角色自己的定妆照**注入，与底模无关；逐脸换脸 = 逐脸绑定（这才是「谁是谁」的解）。
+#   为什么不写在 worker 本机：worker 在 VPS（py3.6，装不了 onnxruntime、无外网装包），
+#   而盒上本来就有 onnxruntime(+CUDA)+cv2，且 edge_proxy 已把 `/face/*` 转到 face_server ⇒ 走 FACE_URL 即可。
+#   ⚠️ 已知局限：换脸只解决「脸是谁」，不解决服装/身体归属（那是参考图泄漏，属 API 侧问题）。
+# ★★ 2026-09-27 用户裁定：**默认关闭（opt-in）**。实测在 67–90px 的小脸上，inswapper_128 会把
+#   脸型/嘴型改得明显失真（用户：“把人物的脸型嘴型彻底搞坏了”）⇒ 权重与代码待清理，
+#   重新启用必须显式 WEAVEORA_FACESWAP=1，且必须先解决“脸要够大（≥200px）”的前提。
+FACESWAP_ON = (os.environ.get("WEAVEORA_FACESWAP", "0") or "0").strip() not in ("", "0", "off", "none", "false")
+FACESWAP_UP = float(os.environ.get("WEAVEORA_FACESWAP_UP", "1") or 1.0)
+FACESWAP_EXPR = (os.environ.get("WEAVEORA_FACESWAP_EXPR", "none") or "none").strip()
+FACESWAP_TIMEOUT = int(os.environ.get("WEAVEORA_FACESWAP_TIMEOUT", "900") or 900)
+
+
+def _faceswap_outputs(payload, outs):
+    """出图后逐脸换脸（身份锦定）。返回 (outs, notes[])。
+
+    映射：不传 order → 引擎做「一对一贪心配对」（cos 从大到小），并按检测分/尺寸/相似度门控
+    跳过假脸（实测：第4镜过肩帧里“后背被检出成脸”score 0.74/49px 会被跳过，而两张真脸
+    分别判成 可卿 0.861 / 警幻 0.620）。所有决定随 notes 上报到资产卡，用户看得见。
+    失败**一律不致命**：原图返回 + 一条 note（换脸是增强，不能把出图搞挂）。
+    """
+    if not FACESWAP_ON or not FACE_URL:
+        return outs, []
+    if (payload.get("kind") or "").lower() == "video":
+        return outs, []
+    ref_keys = payload.get("referenceKeys") or []
+    ref_subjs = payload.get("referenceSubjects") or []
+    if not ref_keys:
+        return outs, []
+    srcs = []
+    for i, key in enumerate(ref_keys[:4]):
+        name = ref_subjs[i] if i < len(ref_subjs) else ""
+        try:
+            data, _ct = fetch_reference_bytes(key)
+            srcs.append({"name": name or ("ref%d" % (i + 1)),
+                         "image_b64": base64.b64encode(data).decode("ascii")})
+        except Exception as e:
+            print("[faceswap] 参考图 #%d 取字节失败：%s" % (i, e), flush=True)
+    if not srcs:
+        return outs, []
+    notes = []
+    for o in outs:
+        if not isinstance(o, dict) or not o.get("bytes"):
+            continue
+        try:
+            body = {"image_b64": base64.b64encode(o["bytes"]).decode("ascii"),
+                    "sources": srcs, "up": FACESWAP_UP, "expr": FACESWAP_EXPR}
+            _st, resp = _post_json(FACE_URL + "/face/swap", body, timeout=FACESWAP_TIMEOUT)
+            if not (isinstance(resp, dict) and resp.get("image_b64")):
+                print("[faceswap] 换脸未出图：%s" % str(resp)[:200], flush=True)
+                notes.append("换脸服务未返回图像（%s）" % str(resp)[:80])
+                continue
+            o["bytes"] = base64.b64decode(resp["image_b64"])
+            rep = resp.get("report") or {}
+            o["faceswap"] = rep
+            parts = []
+            for f in (rep.get("faces") or []):
+                parts.append("脸%d→%s (换后 %.3f)" % (f.get("idx"), f.get("assigned"),
+                                                     (f.get("after") or {}).get(f.get("assigned"), 0.0)))
+            if rep.get("skipped"):
+                parts.append("跳过 %d 张（假脸/不像本镜人物）" % len(rep["skipped"]))
+            note = "换脸：" + ("、".join(parts) if parts else "未换到任何脸")
+            if rep.get("warn"):
+                note += "。" + str(rep["warn"])
+            notes.append(note)
+            print("[faceswap] %s" % note, flush=True)
+        except Exception as e:
+            print("[faceswap] 换脸异常（原图返回）：%s" % str(e)[:200], flush=True)
+            notes.append("换脸异常，已用原图：%s" % str(e)[:80])
+    return outs, notes
+
+
+# ★ 2026-09-27（用户第4镜实测）：背影/侧脸角色也需要**服装**参考。
+#   定妆照是「脸 + 服装」一整包；只给露正脸的人喂图 ⇒ 背影的人（宝玉）服装全靠文字瞎编、
+#   侧脸的人（可卿）脸和衣服都不像。规则：visibleSubjects 非空时，不在其中的（但仍在参考图清单里）
+#   改为**只取服装**：先把定妆照裁到这条线以下（脸没了），再当参考图送进去。
+COSTUME_CROP_TOP = float(os.environ.get("WEAVEORA_COSTUME_CROP_TOP", "0.42") or 0.42)
+
+
+def _costume_only_bytes(data):
+    """把定妆照裁成「只含服装」的参考图：切掉上部（脸/发髆），保留下部（领口/衣襟/肩胸）。
+
+    为什么：整张定妆照喂进去，模型会连那张脸一起安排到画面里（或把服装泄漏到别的角色身上）；
+    裁到下颚线以下就没有脸可选，只剩服装信息。
+    ⚠️ 定妆照口径是「正面半身（腰以上、头肩到胸口）、人物占满画面」⇒ 0.42 这条线落在下颚/颈下；
+       可用 WEAVEORA_COSTUME_CROP_TOP 覆盖。解码失败/太小则原样返回（不因裁切而丢图）。
+    """
+    try:
+        import cv2 as _cv2
+        import numpy as _np
+        img = _cv2.imdecode(_np.frombuffer(data, _np.uint8), _cv2.IMREAD_COLOR)
+        if img is None:
+            return data
+        h = img.shape[0]
+        y0 = int(h * COSTUME_CROP_TOP)
+        if y0 < 8 or (h - y0) < 32:
+            return data
+        ok, buf = _cv2.imencode(".png", img[y0:, :])
+        return buf.tobytes() if ok else data
+    except Exception as e:
+        print("[comfy] 服装参考裁切失败（用原图）：%s" % e, flush=True)
+        return data
 
 
 def _sampler_options(kind, fallback):
