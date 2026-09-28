@@ -117,6 +117,40 @@ def main():
     qwen_pos, _ = c._image_edit_prompt("Picture 1 (image1) = 宝玉", "neg", ["a.png"], False)
     check("Picture 1 (image1)" in qwen_pos, "Qwen 通路正词**不被**改写（口径不变）")
 
+    # ★ 2026-09-25 回归（关键）：**冪等**。分三次 sub 时，`image\s*(\d+)` 会把第一条刚写好的
+    #   "Reference Image 1" 再吃一遍 ⇒ 实际下发给模型的是「Reference Reference Image 1」
+    #   （09-25 在第 4 镜 19:04 的 finalPrompt 里实测到 3 处）。
+    en_prod = ("Reference mapping (input order; Picture N and imageN are the same image): "
+               "Picture 1 (image1) = Baoyu; Picture 2 (image2) = Keqing; "
+               "Picture 3 (image3) = Jinghuan")
+    en_rw = c._flux2_slot_rewrite(en_prod)
+    check("Reference Reference" not in en_rw,
+          "★ 英文：不得出现「Reference Reference Image N」（2026-09-25 静默缺陷）")
+    check(en_rw.count("Reference Image 1") == 1 and en_rw.count("Reference Image 2") == 1
+          and en_rw.count("Reference Image 3") == 1, "★ 英文：三个槽各恰好一次")
+    check(c._flux2_slot_rewrite(en_rw) == en_rw, "★ 英文：槽位改写冪等（第二遍一字不动）")
+    check(c._flux2_slot_rewrite(rw) == rw, "★ 中文：槽位改写冪等（第二遍一字不动）")
+    check("Reference Reference" not in final and "\u53c2\u8003\u56fe \u53c2\u8003\u56fe" not in final,
+          "★ 最终正词（含前缀）里不得出现重复的槽号措辞")
+
+    # ★ 2026-09-25：参考槽**措辞口径**开关（WEAVEORA_FLUX2_SLOT_WORDING）。
+    #   默认 "reference"（现网，ComfyUI 模板口径）；"image" = BFL 官方多参考教程口径（小写 image N）。
+    #   这里只断言开关**只动英文槽号措辞**，不动中文、不动别的内容。
+    _keep = c.FLUX2_SLOT_WORDING
+    try:
+        c.FLUX2_SLOT_WORDING = "image"
+        en_img = c._flux2_slot_rewrite(en_prod)
+        check("image 1" in en_img and "Reference Image" not in en_img and "Picture" not in en_img,
+              "★ 口径开关 image：英文槽号 → 小写「image N」（BFL 官方教程口径）")
+        fin_img, _ = c._image_edit_prompt(en_prod, "", ["a.png", "b.png", "c.png"], True)
+        check("are image 1, image 2, image 3" in fin_img and "Reference Image" not in fin_img,
+              "★ 口径开关 image：前缀里的槽号也一起改（不出现两套口径混用）")
+        check("参考图 1" in c._flux2_slot_rewrite(prod), "★ 口径开关不影响中文（永远是「参考图 N」）")
+    finally:
+        c.FLUX2_SLOT_WORDING = _keep
+    check("Reference Image 1" in c._flux2_slot_rewrite(en_prod),
+          "★ 开关恢复默认后仍是现网口径（不泄露到其它用例）")
+
     zh_id = c._flux2_fold_negative("庭院里的女子", "模糊, 换脸, 身份混淆", True)
     check("同一张脸不得在画面里重复出现" in zh_id, "负词里的“互换类”折成**正向**约束句")
     # ★ 2026-09-24（用户报「第 4 镜出现 2 个宝玉」）：重复类负词不能被“同一张脸”那句覆盖掉 ——

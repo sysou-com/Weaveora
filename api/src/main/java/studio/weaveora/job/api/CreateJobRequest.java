@@ -16,6 +16,9 @@ public record CreateJobRequest(
         String subject,                    // P13：kind=portrait 时指定剧情主体名
         java.util.List<String> refAssetIds, // P13：kind=portrait 时直接指定参考图资产（用界面上当前点选的图，无需先保存/确认）
         String positivePrompt,             // P13b：kind=portrait 时用户在弹框里确认过的正向提示词（空=用默认模板）
-        String negativePrompt              // P13b：kind=portrait 时的负向提示词（空=用默认负词）
+        String negativePrompt,             // P13b：kind=portrait 时的负向提示词（空=用默认负词）
+        java.util.List<studio.weaveora.job.api.KeyframeConfirm> keyframeConfirms
+        // P15（2026-09-25）：多主体关键帧的用户确认（景别 + 要显示脸的主体 + 场景补充）。
+        // 空/null = 未确认（走原行为）。预检见 POST /projects/{id}/keyframe-face-check。
 ) {
 }

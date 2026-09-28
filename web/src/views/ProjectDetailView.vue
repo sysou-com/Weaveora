@@ -24,7 +24,8 @@ import {
   type RewriteResult,
 } from '@/api/director'
 import { createBrief, listBriefs } from '@/api/briefs'
-import { createJobs, getEngineStatus, listJobs, cancelJob, rerunJob, retryJobs, deleteJobs, JOB_STATE_LABEL } from '@/api/jobs'
+import { createJobs, getEngineStatus, listJobs, cancelJob, rerunJob, retryJobs, deleteJobs, JOB_STATE_LABEL, keyframeFaceCheck } from '@/api/jobs'
+import type { KeyframeConfirmInput, KeyframeFaceCheckRow } from '@/api/jobs'
 import { shareProject } from '@/api/market'
 import { listAssets, uploadReference, fetchAssetBlob, fetchAssetThumb, deleteAssets, uploadVoiceLine, useSampleAsLineVoice, deleteVoicePreset, auditionVoicePreset, assetAsPortrait, assetAsReference } from '@/api/assets'
 import { createExport, fetchExportBlob, renderMaster, timecode } from '@/api/export'
@@ -2974,11 +2975,20 @@ async function startGeneration(shotNos?: number[] | null): Promise<void> {
   // ★ 2026-09-16 夜（用户要求“做 a”）：生成**前**拦“脸会过小”的组合。
   //   为什么必须在生成前：事后告警等于白烧 GPU（用户原话：生成后再告警没意义，浪费了生图资源/时间）。
   if (!preflightFaceSize(shotNos)) return
+  // ★ P15（2026-09-25 用户裁定）：出关键帧前检查「剧情主体数量 > 2」——
+  //   主体 > 2 时关键图会出现 > 2 张脸（实测这一档每张脸只占画面高 10–13%，身份必然绑不住）→
+  //   弹框让用户选景别（过肩/中近景/近景）+ 要显示脸的 ≤2 个主体（+ 场景补充），
+  //   确定后把选择随建任务一起传给后端（写进本次正词）并继续出关键帧。
+  if (!(await preflightKeyframeFaces(shotNos))) return
   await doStartGeneration(shotNos, revId)
 }
 
 /** 真正发起关键帧生成（闸门过了、或用户在“脸过小”弹框里选了“仍然生成”） */
-async function doStartGeneration(shotNos: number[] | null | undefined, revId: string): Promise<void> {
+async function doStartGeneration(
+  shotNos: number[] | null | undefined,
+  revId: string,
+  keyframeConfirms?: KeyframeConfirmInput[],
+): Promise<void> {
   // P12：生成后自动切到对应 Tab（顺手解锁），否则用户看不到刚发起任务的进度
   focusJobTab('still')
   // P4：先把当前草稿（含参考图/主体标注/提示词改动）落库，再发起生成
@@ -2991,6 +3001,7 @@ async function doStartGeneration(shotNos: number[] | null | undefined, revId: st
       kind: 'still',
       count: isVideo ? undefined : imgCount.value,
       ...(shotNos && shotNos.length ? { shotNos } : {}),
+      ...(keyframeConfirms && keyframeConfirms.length ? { keyframeConfirms } : {}),
     })
     await queryClient.invalidateQueries({ queryKey: ['jobs'] })
     message.success(`已创建 ${created.length} 个任务（关键帧 · 基于确认稿 v${approvedRev.value?.revisionNo ?? '?'}）`)
@@ -3952,6 +3963,95 @@ const planSubjectsNow = computed<string[]>(() => {
 const faceWarnOpen = ref(false)
 const faceWarnRows = ref<Array<{ shot: number; sub: string; px: number }>>([])
 const faceWarnShotNos = ref<number[] | null>(null)
+
+// ---------- P15（2026-09-25 用户裁定）：多主体关键帧确认 ----------
+/** 关键图里“能看清脸”的主体上限（与后端 JobService.KEYFRAME_MAX_FACES 一致） */
+const KF_MAX_FACES = 2
+/** 建议景别（词典值与中文显示名，与后端 shotSizePhrase 对应） */
+const KF_SHOT_SIZES = [
+  { value: 'over_the_shoulder', label: '过肩镜头' },
+  { value: 'medium_close', label: '中近景' },
+  { value: 'close_up', label: '近景' },
+]
+const kfFaceOpen = ref(false)
+const kfFaceRows = ref<KeyframeFaceCheckRow[]>([])
+const kfFaceShotNos = ref<number[] | null>(null)
+const kfFaceChoice = ref<Record<number, { shotSize: string; visibleSubjects: string[]; sceneNote: string }>>({})
+
+/**
+ * P15：关键帧「人脸数量 &gt; 2」预检。
+ *
+ * <p>用户口径：「在每一镜的关键帧的时候检查剧情主体数量大于 2 个则提示关键图中人脸数量大于 2，
+ * 建议使用补上 over_the_shoulder / medium_close / close_up…在弹框让用户选择场景和要显示人脸的主体，
+ * 确定以后更新提示词并继续进行关键帧出图」。
+ *
+ * <p>预检失败**不拦**出图（不为了弹提示把生成卡死）；只有真的需要确认时才拦。
+ */
+async function preflightKeyframeFaces(shotNos?: number[] | null): Promise<boolean> {
+  const revId = genRevisionId()
+  if (!revId || !isVideoPlan(draft.value)) return true
+  let rows: KeyframeFaceCheckRow[] = []
+  try {
+    rows = await keyframeFaceCheck(workspaceId.value, projectId.value, {
+      revisionId: revId,
+      kind: 'still',
+      ...(shotNos && shotNos.length ? { shotNos } : {}),
+    })
+  } catch (e) {
+    console.warn('[P15] keyframe-face-check 预检失败，跳过确认框（不拦出图）', e)
+    return true
+  }
+  if (!rows.length) return true
+  kfFaceRows.value = rows
+  kfFaceShotNos.value = shotNos && shotNos.length ? [...shotNos] : null
+  const init: Record<number, { shotSize: string; visibleSubjects: string[]; sceneNote: string }> = {}
+  for (const r of rows) {
+    init[r.shotNo] = {
+      shotSize: r.suggestedShotSizes?.[0] ?? 'over_the_shoulder',
+      // 默认只给前 N 个主体露脸（用户可改）
+      visibleSubjects: (r.subjects ?? []).slice(0, KF_MAX_FACES),
+      sceneNote: '',
+    }
+  }
+  kfFaceChoice.value = init
+  kfFaceOpen.value = true
+  return false
+}
+
+/** 勾选/取消「要显示脸的主体」——上限 KF_MAX_FACES 个（其余人物不入画或只作前景遮挡）。 */
+function toggleKfSubject(shotNo: number, sub: string, on: boolean): void {
+  const c = kfFaceChoice.value[shotNo]
+  if (!c) return
+  const set = new Set(c.visibleSubjects)
+  if (on) {
+    if (set.size >= KF_MAX_FACES && !set.has(sub)) {
+      message.info(`最多选 ${KF_MAX_FACES} 个要让观众看清脸的主体（其余人物会不入画，或只作前景遮挡/背影）`)
+      return
+    }
+    set.add(sub)
+  } else {
+    set.delete(sub)
+  }
+  c.visibleSubjects = [...set]
+}
+
+/** 弹框确定：把选择传给后端（后端写进本次正词）并继续出关键帧。 */
+async function confirmKeyframeFaces(): Promise<void> {
+  const revId = genRevisionId()
+  if (!revId) return
+  const confirms: KeyframeConfirmInput[] = kfFaceRows.value.map((r) => {
+    const c = kfFaceChoice.value[r.shotNo] ??
+      { shotSize: 'over_the_shoulder', visibleSubjects: [], sceneNote: '' }
+    return {
+      shotNo: r.shotNo,
+      shotSize: c.shotSize,
+      visibleSubjects: c.visibleSubjects.slice(0, KF_MAX_FACES),
+      ...(c.sceneNote && c.sceneNote.trim() ? { sceneNote: c.sceneNote.trim() } : {}),
+    }
+  })
+  kfFaceOpen.value = false
+  await doStartGeneration(kfFaceShotNos.value, revId, confirms)
+}
 
 function preflightCast(): boolean {
   const d = draft.value
@@ -5486,6 +5586,61 @@ const shotTotal = computed(() => {
         </div>
       </NModal>
 
+      <!--
+        P15（2026-09-25 用户裁定）：多主体关键帧确认
+          触发：本镜剧情主体 > 2（关键图会出现 > 2 张脸）
+          让用户选：景别（过肩/中近景/近景）+ 要显示脸的主体（≤2）+ 场景补充
+          确定后：选择随建任务传给后端 → 后端写进本次正词 → 继续出关键帧
+      -->
+      <NModal v-model:show="kfFaceOpen" preset="card"
+              title="⚠ 关键图里的人脸会超过 2 张（建议改景别 + 指定露脸主体）"
+              style="max-width: 660px" data-testid="kf-face-modal">
+        <p class="text-secondary" style="margin: 0 0 10px; font-size: 13px;">
+          下面这些镜的<b>剧情主体超过 {{ KF_MAX_FACES }} 个</b>，关键图会出现同样多的脸。
+          实测这一档每张脸只占画面高度的 10–13%，与定妆照的相似度只能到 0.19~0.30
+          （脸型错乱 / 认不出是谁）。下面按镜选景别，并只让不超过 {{ KF_MAX_FACES }} 个主体
+          露出清晰人脸 —— 确定后会**写进本次出图的正词**再继续生成。
+        </p>
+        <div v-for="r in kfFaceRows" :key="r.shotNo" class="kf-face-block">
+          <div class="kf-face-head">
+            第 {{ r.shotNo }} 镜 · 剧情主体 {{ r.subjectCount }} 个
+            <span v-if="r.shotSize" class="font-mono">（方案景别：{{ r.shotSize }}）</span>
+          </div>
+          <div class="kf-face-row">
+            <span class="kf-face-label">景别</span>
+            <NRadioGroup v-model:value="kfFaceChoice[r.shotNo].shotSize" size="small">
+              <NRadioButton v-for="s in KF_SHOT_SIZES" :key="s.value" :value="s.value">
+                {{ s.label }}
+              </NRadioButton>
+            </NRadioGroup>
+          </div>
+          <div class="kf-face-row">
+            <span class="kf-face-label">要显示脸</span>
+            <NCheckbox v-for="sub in r.subjects" :key="sub"
+                       :checked="kfFaceChoice[r.shotNo].visibleSubjects.includes(sub)"
+                       @update:checked="(v: boolean) => toggleKfSubject(r.shotNo, sub, v)">
+              {{ sub }}
+            </NCheckbox>
+          </div>
+          <div class="kf-face-row">
+            <span class="kf-face-label">场景补充</span>
+            <NInput v-model:value="kfFaceChoice[r.shotNo].sceneNote" size="small"
+                    placeholder="可选：这一帧要取的那块场景/环境" style="max-width: 400px" />
+          </div>
+        </div>
+        <p class="text-secondary" style="font-size: 12px; margin: 8px 0 0">
+          为什么这么拦：主脸占画面越大，身份越容易绑住（实测“脸宽 ↔ 身份相似度” r=0.72）；
+          而主脸放大与“一帧同框 3 人”在几何上是互斥的 —— 所以要么改景别、要么拆镜。
+        </p>
+        <div class="ai-actions">
+          <NButton size="small" @click="kfFaceOpen = false">取消</NButton>
+          <NButton size="small" type="primary" :loading="genBusy" data-testid="kf-face-confirm"
+                   @click="confirmKeyframeFaces">
+            确定并生成关键帧
+          </NButton>
+        </div>
+      </NModal>
+
       <!-- 沉浸式预览（大图/大视频） -->
       <NModal v-model:show="motionOpen" preset="card" :title="'生成运动(motion)'" style="max-width: 420px">
         <div class="motion-form">
@@ -6166,6 +6321,11 @@ const shotTotal = computed(() => {
 .portrait-ref-warn { color: var(--wv-danger, #c45c4a); }
 /* “脸过小”生成前闸门 + motion 帧数↔时长提示（2026-09-16 夜） */
 .face-warn-list { margin: 0; padding-left: 18px; font-size: 12.5px; line-height: 1.9; color: var(--wv-danger, #c45c4a); }
+/* P15：多主体关键帧确认框（景别 / 要显示脸的主体 / 场景补充） */
+.kf-face-block { border: 1px solid var(--wv-border, #2a2a2a); border-radius: 8px; padding: 10px 12px; margin: 0 0 10px; }
+.kf-face-head { font-size: 13px; font-weight: 600; margin-bottom: 8px; }
+.kf-face-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 6px; font-size: 12.5px; }
+.kf-face-label { width: 64px; flex: 0 0 64px; color: var(--wv-text-3, var(--wv-text-2)); }
 .motion-sec { font-size: 12px; margin: 8px 0 0; color: var(--wv-text-3, var(--wv-text-2)); }
 .motion-sec.warn { color: var(--wv-danger, #c45c4a); }
 /* 资产卡上的 ⚠（worker 因显存做的取舍说明，如自动降分辨率）：悬停看全文 */

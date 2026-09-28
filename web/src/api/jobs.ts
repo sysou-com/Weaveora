@@ -36,9 +36,60 @@ export async function getEngineStatus(): Promise<EngineStatus> {
     /** P13b：kind=portrait 时用户在弹框里确认过的正/负向提示词（不传=用后端默认模板） */
     positivePrompt?: string
     negativePrompt?: string
+    /**
+     * P15（2026-09-25 用户裁定）：多主体关键帧的用户确认。
+     *
+     * <p>由 {@link keyframeFaceCheck} 预检弹框产出 —— 镜内剧情主体 &gt; 2 时，
+     * 用户选「景别（过肩/中近景/近景）+ 要显示脸的 ≤2 个主体 + 场景补充」。
+     * 后端会把它们写进本次出图的正词（并替掉原正词里冲突的景别词）再建任务。
+     */
+    keyframeConfirms?: KeyframeConfirmInput[]
   },
 ): Promise<JobRecord[]> {
   return request<JobRecord[]>(`/api/v1/projects/${projectId}/jobs`, {
+    method: 'POST',
+    headers: { [WORKSPACE_HEADER]: workspaceId },
+    body: input,
+  })
+}
+
+/** P15：预检返回的一镜（**只含需要确认的镜**：剧情主体 &gt; 2） */
+export interface KeyframeFaceCheckRow {
+  shotNo: number
+  shotId: string
+  subjectCount: number
+  subjects: string[]
+  /** 方案里现有的景别字段值（可能为空） */
+  shotSize?: string | null
+  /** 建议景别词典值：over_the_shoulder / medium_close / close_up */
+  suggestedShotSizes: string[]
+  /** 后端给的一句人话（跟随该镜正词语言） */
+  message: string
+  constraintPreview?: string
+}
+
+/** P15：用户在弹框里确认的选择（与后端 KeyframeConfirm 一一对应） */
+export interface KeyframeConfirmInput {
+  shotNo: number
+  /** 运镜镜头第几帧（不传 = 该镜全部帧） */
+  keyframeIndex?: number | null
+  shotSize?: string
+  visibleSubjects?: string[]
+  sceneNote?: string
+}
+
+/**
+ * POST /api/v1/projects/{id}/keyframe-face-check —— 关键帧「人脸数量 &gt; 2」预检（**只读**，不建任务）。
+ *
+ * <p>用户口径：「在每一镜的关键帧的时候检查剧情主体数量大于 2 个则提示关键图中人脸数量大于 2」。
+ * 返回结果为空 = 不需要确认，可直接建任务。
+ */
+export async function keyframeFaceCheck(
+  workspaceId: string,
+  projectId: string,
+  input: { revisionId: string; shotId?: string | null; kind?: string; shotNos?: number[] | null },
+): Promise<KeyframeFaceCheckRow[]> {
+  return request<KeyframeFaceCheckRow[]>(`/api/v1/projects/${projectId}/keyframe-face-check`, {
     method: 'POST',
     headers: { [WORKSPACE_HEADER]: workspaceId },
     body: input,

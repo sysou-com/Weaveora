@@ -21,6 +21,9 @@ import studio.weaveora.infra.ws.JobWsHandler;
 import studio.weaveora.job.api.CreateJobRequest;
 import studio.weaveora.job.api.EngineStatusResponse;
 import studio.weaveora.job.api.JobView;
+import studio.weaveora.job.api.KeyframeConfirm;
+import studio.weaveora.job.api.KeyframeFaceCheckRequest;
+import studio.weaveora.job.api.KeyframeFaceCheckView;
 import studio.weaveora.job.domain.GenerationJob;
 import studio.weaveora.job.domain.GenerationJobRepository;
 import studio.weaveora.job.domain.WorkerNode;
@@ -119,6 +122,12 @@ public class JobService {
         payload.put("revision_no", revisionNo);
         payload.put("prompt_md5", md5Hex(finalPositive));
     }
+
+    // ★ 2026-09-27（用户裁定）：「参考图映射」整段拼接的开关。
+    //   false（**生产默认**）= 不拼接；正词里只有用户自己的剧情句 +（可选）年代一行。
+    //   true = 恢复 2026-09-27 之前的写法（映射 / 人数 / 禁止互换那一长段）。
+    //   非 final 是为了让单测能把旧行为的断言跑起来（生产代码不再改这个值）。
+    static boolean REF_MAPPING_TEXT = false;
 
     private StyleTemplate loadStyle(ProjectSnapshot project) {
         if (project.styleTemplateId() == null) return null;
@@ -360,11 +369,17 @@ public class JobService {
                     for (int fi = 0; fi < frames.size(); fi++) {
                         JsonNode kf = frames.get(fi);
                         // ★ 2026-09-16 夜：参考图/主体**逐帧**解析（帧级 cast > 镜级 cast > 帧文本自动）
-                        RefCtx refs = resolveRefs(plan, shot, userId, workspaceId, projectId, req.revisionId(), fi);
+                        // ★ 2026-09-27：确认要先取 —— 参考图要按「只让 X 露脸」收窄（见 narrowToVisible）
+                        KeyframeConfirm kfConfirm = confirmFor(req, shot.path("shot_no").asInt(), fi);
+                        RefCtx refs = resolveRefs(plan, shot, userId, workspaceId, projectId, req.revisionId(), fi,
+                                kfConfirm == null ? null : kfConfirm.visibleSubjects());
                         String raw = kf.path("positive_prompt").asText(shot.path("positive_prompt").asText(""));
+                        // P15：多主体关键帧的用户确认（景别 + 要显示脸的主体 + 场景补充）→ 落到正词
+                        raw = applyKeyframeConfirm(raw, kfConfirm);
                         // ★ 逐帧位置：把帧号传进去，applyLayoutRegions 才能取 keyframes[fi].layout
                         ObjectNode payload = videoShotPayload("still", plan, shot, req.revisionId(), shotId,
                                 revisionNo, raw, seed, project, style, refs, fi, imgMaxSide, userId);
+                        attachKeyframeConfirm(payload, kfConfirm);
                         payload.put("keyframe_index", fi);
                         payload.put("keyframe_count", frames.size());
                         payload.put("frame_label", frameLabel(kf, fi, frames.size()));
@@ -377,8 +392,12 @@ public class JobService {
                     continue;
                 }
                 // keyframes 存在（==1 帧）时按第 0 帧解析，让帧级 cast 同样生效
-                RefCtx refs = resolveRefs(plan, shot, userId, workspaceId, projectId, req.revisionId(),
+                // ★ 2026-09-27：确认要先取 —— 参考图要按「只让 X 露脸」收窄（见 narrowToVisible）
+                KeyframeConfirm rawConfirm = confirmFor(req, shot.path("shot_no").asInt(),
                         frames.isEmpty() ? -1 : 0);
+                RefCtx refs = resolveRefs(plan, shot, userId, workspaceId, projectId, req.revisionId(),
+                        frames.isEmpty() ? -1 : 0,
+                        rawConfirm == null ? null : rawConfirm.visibleSubjects());
                 // ★ 2026-09-22 根治：still 的**正词来源改为「帧正词优先」**。
                 //   旧写法：只要帧数 ≤1 就一律回退到 shot 级正词 ⇒ ① 只有 1 帧时该帧的出图正词被**静默忽略**；
                 //   ② 单帧镜的 shot 级正词同时当「图生视频正词」用，一旦它被按「运动+运镜」口径重写
@@ -387,9 +406,12 @@ public class JobService {
                 String rawPrompt = frames.isEmpty()
                         ? shot.path("positive_prompt").asText("")
                         : frames.get(0).path("positive_prompt").asText(shot.path("positive_prompt").asText(""));
+                // P15：多主体关键帧的用户确认（景别 + 要显示脸的主体 + 场景补充）→ 落到正词
+                rawPrompt = applyKeyframeConfirm(rawPrompt, rawConfirm);
                 ObjectNode payload = videoShotPayload(req.kind(), plan, shot, req.revisionId(), shotId,
                         revisionNo, rawPrompt, seed, project, style, refs, -1,
                         imgMaxSide, userId);
+                attachKeyframeConfirm(payload, rawConfirm);
                 if ("clip".equals(req.kind())) {
                     // motion 帧数：可显式指定（范围校验）
                     if (req.frames() != null) {
@@ -1235,6 +1257,30 @@ public class JobService {
      */
     private RefCtx resolveRefs(JsonNode plan, JsonNode shot, UUID userId, UUID workspaceId,
                                UUID projectId, UUID revisionId, int keyframeIndex) {
+        return resolveRefs(plan, shot, userId, workspaceId, projectId, revisionId, keyframeIndex, null);
+    }
+
+    /**
+     * ★ 2026-09-27（用户第4镜实测：「宝玉的红金镀穿到了一个女性身上」「露脸的人与定妆照全不对」）：
+     * 用户在关键帧确认里选定「**只让 X 露脸**」后，**参考图必须跟着收窄**。
+     *
+     * <p>为什么：定妆照是「脸 + 发型 + 服装」**一整包**。多喂一张、而画面里没有它的合法脸位时，
+     * 模型会把那张的服装/身份泄漏到别的角色身上（实测：3 张定妆照 + 约束“只让警幻露脸” ⇒
+     * 中间那张女性脸穿上了宝玉的红金袍，而两张脸谁的定妆照都对不上）。
+     *
+     * <p>收窄必须在 **anchor（正词里的「Picture N = 谁」映射）生成之前**做，
+     * 否则正词里的槽位映射会与实际送入的图错位 —— 那正是「张冠李戴」的机制。
+     *
+     * <p>★ 2026-09-27 第二版（用户第4镜 2560×1408 实测）：
+     * 参考图**不再因“只让 X 露脸”而被摸掉** —— 背影/侧脸的角色也在画面里，他们同样需要服装参考。
+     * 现在只把 `visible` 传给调用链（留着以后用），真正“他人不露脸”的处理交由 **worker**：
+     * 不在 visible 里的槽位换成「只取服装」的裁切图（裁到下巴以下）+ 正词声明。
+     *
+     * @param visible 用户确认“只让这几个主体露清晰正脸”；null/空 = 不限制
+     */
+    private RefCtx resolveRefs(JsonNode plan, JsonNode shot, UUID userId, UUID workspaceId,
+                               UUID projectId, UUID revisionId, int keyframeIndex,
+                               java.util.List<String> visible) {
         StringBuilder tb = new StringBuilder();
         if (shot == null) {
             tb.append(plan.path("positive_prompt").asText("")).append(' ')
@@ -1288,8 +1334,108 @@ public class JobService {
                 }
             }
         }
-        return enforcePortraits(picked, plan, projectId, workspaceId,
+        java.util.List<String> noFace = droppedByVisible(picked, visible);
+        RefCtx enforced = enforcePortraits(picked, plan, projectId, workspaceId,
                 shot == null ? 0 : shot.path("shot_no").asInt(), text);
+        if (noFace.isEmpty()) {
+            return enforced;
+        }
+        int shotNo = shot == null ? 0 : shot.path("shot_no").asInt();
+        log.info("refs: 第{}镜「不露脸」主体 {} → **仍喂其定妆照**（头型/发型/头饰/服装要绑），"
+                + "只在正词里声明不露脸", shotNo, noFace);
+        return new RefCtx(enforced.ids(), enforced.keys(), enforced.subjects(), enforced.regions(),
+                (enforced.anchor() == null ? "" : enforced.anchor()) + noFaceNote(noFace, isZhText(text)),
+                enforced.primarySubject());
+    }
+
+    /**
+     * ★ 2026-09-27 第四版（用户裁定：「背影和侧脸也是要绑定人的，不然侧脸/背影的头部没办法保持一致」）：
+     *
+     * <p>前三版的教训：
+     * <ol>
+     *   <li>“把不露脸角色的定妆照裁成无脸图当服装参考” → 无身份信号，两个角色**互换服饰**；</li>
+     *   <li>“不露脸角色干脆不喂图” → 背影/侧脸的**头型、发型、头饰全凭模型瞎编**（用户由此判定不可接受）。</li>
+     * </ol>
+     *
+     * <p>现在（官方口径核对后）：**三张定妆照全部照喂**（官方：FLUX.2 最多 10 张参考图，
+     * “describe the role of each image so the model knows what to pull from where”），
+     * 只在正词里补一句**正面表述**说明“谁本镜不露脸”，而不是把它的图拿走、
+     * 也不是自相矛盾地写“这张图只提供服装、但脸又必须来自这张图”。
+     */
+    private static String noFaceNote(List<String> names, boolean zh) {
+        if (names == null || names.isEmpty()) {
+            return "";
+        }
+        String joined = String.join(zh ? "、" : ", ", names);
+        return zh
+                ? " 【本镜不露脸的角色】" + joined + "：本镜看不到它们的正脸（背影/侧脸），"
+                  + "但它们各自的**头型、发型、头饰与服装仍然严格取自各自的参考图**，"
+                  + "不要凭空生成、不要与其他角色互换、也不要为它们新增或复制人物。"
+                : " [Characters whose face is not visible in this shot] " + joined
+                  + ": their facial front is not seen (from behind / in profile), but each one's head shape, "
+                  + "hairstyle, headwear and costume still come strictly from its own reference image - do not "
+                  + "invent them, do not swap them with another character, and do not add or duplicate anyone.";
+    }
+
+    /** 取“用户没让它露脸”的主体名（日志 + 服饰文字补充都要用）。 */
+    private static List<String> droppedByVisible(RefCtx refs, java.util.List<String> visible) {
+        List<String> out = new ArrayList<>();
+        if (refs == null || visible == null || visible.isEmpty() || refs.subjects() == null) {
+            return out;
+        }
+        for (String n : refs.subjects()) {
+            if (n != null && !n.isBlank() && !visible.contains(n) && !out.contains(n)) {
+                out.add(n);
+            }
+        }
+        return out;
+    }
+
+    /**
+     * （**已停用**：2026-09-27 当天上线后又按用户实测回退，保留备查）
+     *
+     * <p>原意：用户确认「只让 X 露脸」时把其他人的定妆照整张摸掉，防服装/身份泄漏。
+     * 实测副作用（第4镜 2560×1408）：被摸掉的人**还在画面里**（宝玉背影、可卿侧脸），
+     * 他们连服装参考也没了 ⇒ “宝玉背影的服饰没参考定妆照”“可卿脸型服饰都不像”。
+     *
+     * <p>现方案：参考图**都保留**，改由 **worker** 把“不在 visibleSubjects 里”的那些槽位
+     * 换成「只取服装」的裁切图（裁到下巴以下，图里没有脸）并在正词里声明；
+     * 见 {@code worker/comfy_client.py::_costume_only_bytes}。
+     *
+     * <p>如果将来要重新启用“直接摸掉”，注意：收窄必须在 anchor（正词槽位映射）生成**之前**，
+     * 否则正词里的 `Picture N = 谁` 会与实际送入的图错位（那正是“张冠李戴”的机制）。
+     */
+    @SuppressWarnings("unused")
+    private RefCtx narrowToVisible(RefCtx refs, java.util.List<String> visible, int shotNo) {
+        if (refs == null || visible == null || visible.isEmpty() || refs.subjects() == null) {
+            return refs;
+        }
+        List<String> ids = new ArrayList<>();
+        List<String> keys = new ArrayList<>();
+        List<String> subs = new ArrayList<>();
+        List<String> regs = new ArrayList<>();
+        List<String> dropped = new ArrayList<>();
+        for (int i = 0; i < refs.subjects().size(); i++) {
+            String name = refs.subjects().get(i);
+            if (name != null && !name.isBlank() && !visible.contains(name)) {
+                dropped.add(name);
+                continue;
+            }
+            ids.add(i < refs.ids().size() ? refs.ids().get(i) : null);
+            keys.add(i < refs.keys().size() ? refs.keys().get(i) : null);
+            subs.add(name == null ? "" : name);
+            regs.add(i < refs.regions().size() ? refs.regions().get(i) : null);
+        }
+        if (keys.isEmpty() || dropped.isEmpty()) {
+            return refs;
+        }
+        String primary = refs.primarySubject();
+        if (primary != null && dropped.contains(primary)) {
+            primary = subs.stream().filter(s -> s != null && !s.isBlank()).findFirst().orElse(null);
+        }
+        log.info("refs: 第{}镜 用户确认「只让 {} 露脸」→ 参考图收窄：摸掉 {}（防服装/身份泄漏到别的角色）",
+                shotNo, String.join("、", visible), String.join("、", dropped));
+        return new RefCtx(ids, keys, subs, regs, "", primary);
     }
 
     /**
@@ -1365,6 +1511,31 @@ public class JobService {
         }
         if (keys.isEmpty()) {
             return RefCtx.empty();   // 剔除后没有可用锚定
+        }
+        // ★ 2026-09-28（用户裁定，第1/2点建议）：把**参考图槽位顺序对齐「正词提及顺序」**。
+        //   动机（实测第4镜）：正词里第一个被提到、且被用户指定“只让它露清晰正脸”的是「警幻」，
+        //   而槽位顺序是 1=宝玉 2=可卿 3=警幻 ⇒ 模型拿到「先说警幻、首图却是宝玉」的错位对应，
+        //   表现为「警幻的脸长在可卿身上 / 出现两个宝玉」。模型判身份靠的就是这份对应关系。
+        //   这里按「主体名在本镜文本中首次出现的位置」重排四张并行列表（未提到的保持原相对顺序排后），
+        //   于是 imageN = 的清单与正词叙述顺序天然一致（清单本身由下方 mapping 追加，保持不变）。
+        //   ⚠️ 已知边界：另一个会话做过“手工槽位对调”的 A/B，单次无效（FLUX.2 多参考绑定强度 + seed
+        //   方差才是主因，见 docs/第4镜-脸型错乱-排查-2026-09-25.md）。本改动属“把该对齐的对齐”，
+        //   收益预期有限；真正抓手在脸占比 / 模型绑定强度。
+        int[] _ord = mentionOrder(subjects, shotText);
+        if (_ord != null) {
+            List<String> _i = new ArrayList<>(ids), _k = new ArrayList<>(keys),
+                    _s = new ArrayList<>(subjects), _r = new ArrayList<>(regions);
+            ids.clear();
+            keys.clear();
+            subjects.clear();
+            regions.clear();
+            for (int _n : _ord) {
+                ids.add(_i.get(_n));
+                keys.add(_k.get(_n));
+                subjects.add(_s.get(_n));
+                regions.add(_r.get(_n));
+            }
+            log.info("refs: 第{}镜 槽位已按正词提及顺序重排 -> {}", shotNo, subjects);
         }
         StringBuilder mapping = new StringBuilder();
         for (int i = 0; i < subjects.size(); i++) {
@@ -1716,22 +1887,18 @@ public class JobService {
             if (!era.isEmpty()) {
                 sb.append(era);
             }
-            if (!notes.isEmpty()) {
-                sb.append(era.isEmpty() ? "" : "；").append(notes);
-            }
-            sb.append("。全片所有镜头的服装、发式、道具、建筑与环境都必须符合该年代设定，")
-              .append("禁止出现该年代不存在的元素（现代服装、手机、电线、现代建筑与现代交通工具）。");
+            // ★ 2026-09-27（用户裁定）：年代段**只交代年代**。
+            //   原先还接 notes（《红楼梦》第五回段落定位 / 清代贵族服化道清单 / 仙界意象用雾霭黑水缥缈冷光）
+            //   + “全片所有镜头都必须符合该年代 + 禁止现代元素”两大句 —— 用户实测「可卿脸不像 +
+            //   多出一个宝玉服饰的人」，并要求「交代清楚年代就行，其余由模型判断」。
+            //   notes 仍保留在 scheme/payload 里（需要时可查），只是不再进正词。
+            sb.append("。");
         } else {
             sb.append("\n[Setting / era] ");
             if (!era.isEmpty()) {
                 sb.append(era).append(". ");
             }
-            if (!notes.isEmpty()) {
-                sb.append(notes).append(". ");
-            }
-            sb.append("All costumes, hairstyles, props, architecture and environment must strictly match this era; ")
-              .append("do not include anything that did not exist then (modern clothing, phones, power lines, ")
-              .append("modern buildings or vehicles).");
+            // ★ 2026-09-27：英文分支同样只留年代（去掉 notes 与“全片必须符合/禁止现代元素”两大句）
         }
         payload.put("positive_prompt", cur + sb);
         // 负词也补一份（Qwen-Image-Edit 对负词不敏感，但代价极低，且用户能在界面上看到）
@@ -1847,14 +2014,12 @@ public class JobService {
      * @param zh    是否用中文（跟随镜文本语言）
      */
     static String refAnchor(String slots, boolean zh) {
-        // ★ 2026-09-16：这里**不再**列 imageN = 主体名 —— 那个清单连同位置一起由
-        //   applyLayoutRegions 一次写清（用户反馈：同一件事在正词里出现两遍、排序写法不一致，
-        //   模型会更难分清谁对应哪张图）。本方法只负责「身份约束」这一件事。
+        // ★ 2026-09-16：这里**不再**列 imageN = 主体名 —— 那个清单由 applyLayoutRegions 一次写清。
+        // ★ 2026-09-27（用户裁定：正词重复太多）：本句也从“三句堆叠”缩成**一小句**——
+        //   身份/服装/禁止互换已由「参考图映射…」段完整写过（worker 前缀里那份重复也已经删了）。
         return zh
-                ? " 每个角色的身份、面容与服饰必须严格以其自己的参考图为依据；角色之间必须互相区分，"
-                  + "禁止共用、混合或互换面容。"
-                : " Each character's identity, face and costume must strictly follow its own reference image;"
-                  + " keep the characters distinct and do not share, blend or swap their faces.";
+                ? " 每个角色只用自己的参考图（禁止互换面容与服饰）。"
+                : " Each character uses only its own reference image (never swap faces or costumes).";
     }
 
     /** 多主体时追加“防串脸”负词（语言跟随负词本身）。 */
@@ -1866,6 +2031,310 @@ public class JobService {
                 ? "同一张脸重复, 换脸, 同一人出现两次, 身份混淆, 复制脸庞"
                 : "identical faces, face swap, same person repeated, mixed identities, cloned face";
         return (neg == null || neg.isBlank()) ? extra : neg + ", " + extra;
+    }
+
+    // ==========================================================================
+    // P15（2026-09-25 用户裁定）：关键帧「人脸数量 > 2」闸门
+    //   需求：每一镜出关键帧前，若剧情主体 > 2 个，就提示“关键图中人脸数量 > 2”，
+    //         建议景别用 over_the_shoulder / medium_close / close_up，弹框让用户选
+    //         「要显示脸的主体」，确定后**更新提示词**再继续出关键帧。
+    //   依据：docs/第4镜-脸型错乱-排查-2026-09-25.md —— 3 人同框时每张脸只占画面高度
+    //         10–13%，18 次出图“脸宽 ↔ 身份 cos” r=0.722；而主脸占到 20%+ 时才出现
+    //         0.5 以上的绑定；且“主脸放大 + 3 人同框”几何互斥（脸一大人就丢）。
+    // ==========================================================================
+
+    /** 关键图里“能看清脸”的主体个数上限。超过就要在弹框里让用户选景别与可见主体。 */
+    static final int KEYFRAME_MAX_FACES = 2;
+
+    /** 建议景别（词典值）；写法见 {@link #shotSizePhrase}。 */
+    static final List<String> SUGGESTED_SHOT_SIZES =
+            List.of("over_the_shoulder", "medium_close", "close_up");
+
+    /**
+     * 正词里已有的景别词 —— 用户确认后要**替换**掉，否则同一句里两个景别互相打架
+     * （实测：正词里留着 “medium shot” 时，即使追写“过肩”也仍被往宽景推）。
+     */
+    private static final java.util.regex.Pattern SHOT_SIZE_WORDS_EN = java.util.regex.Pattern.compile(
+            "\\b(?:extreme\\s+long\\s+shot|long\\s+shot|wide\\s+shot|full\\s+shot|establishing\\s+shot"
+            + "|medium\\s+long\\s+shot|medium\\s+shot|medium\\s+close[\\s-]?up"
+            + "|extreme\\s+close[\\s-]?up|close[\\s-]?up)\\b", java.util.regex.Pattern.CASE_INSENSITIVE);
+    private static final java.util.regex.Pattern SHOT_SIZE_WORDS_ZH = java.util.regex.Pattern.compile(
+            "大远景|远景|全景|中全景|中景|中近景|近景|特写");
+
+    /** 景别词典值 → 提示词写法（未识别返回 null = 不改写）。 */
+    static String shotSizePhrase(String size, boolean zh) {
+        String v = size == null ? "" : size.trim().toLowerCase().replace('-', '_');
+        if (v.equals("over_the_shoulder") || v.equals("ots")) {
+            return zh ? "过肩镜头" : "over-the-shoulder shot";
+        }
+        if (v.equals("medium_close")) {
+            return zh ? "中近景" : "medium close-up shot";
+        }
+        if (v.equals("close_up")) {
+            return zh ? "近景" : "close-up shot";
+        }
+        return null;
+    }
+
+    /** 把正词里已有的景别词换成确认后的景别。 */
+    static String replaceShotSizeWords(String text, String phrase) {
+        if (text == null || text.isEmpty() || phrase == null || phrase.isBlank()) {
+            return text;
+        }
+        String rep = java.util.regex.Matcher.quoteReplacement(phrase);
+        return SHOT_SIZE_WORDS_ZH.matcher(SHOT_SIZE_WORDS_EN.matcher(text).replaceAll(rep)).replaceAll(rep);
+    }
+
+    /**
+     * 「参考图槽位顺序对齐正词提及顺序」的置换表（2026-09-28 用户裁定）。
+     *
+     * <p>按主体名在 {@code text} 里**首次出现**的位置升序；没提到的排最后（保持原相对顺序）。
+     * 返回 {@code null} = 顺序本来就一致（调用方不重排、不打日志）。
+     */
+    static int[] mentionOrder(List<String> subjects, String text) {
+        if (subjects == null || subjects.size() < 2 || text == null || text.isBlank()) {
+            return null;
+        }
+        int n = subjects.size();
+        Integer[] idx = new Integer[n];
+        for (int i = 0; i < n; i++) {
+            idx[i] = i;
+        }
+        java.util.Arrays.sort(idx, (a, b) -> {
+            int pa = firstMention(text, subjects.get(a));
+            int pb = firstMention(text, subjects.get(b));
+            if (pa < 0 && pb < 0) {
+                return Integer.compare(a, b);
+            }
+            if (pa < 0) {
+                return 1;
+            }
+            if (pb < 0) {
+                return -1;
+            }
+            return pa == pb ? Integer.compare(a, b) : Integer.compare(pa, pb);
+        });
+        int[] out = new int[n];
+        boolean changed = false;
+        for (int i = 0; i < n; i++) {
+            out[i] = idx[i];
+            if (out[i] != i) {
+                changed = true;
+            }
+        }
+        return changed ? out : null;
+    }
+
+    private static int firstMention(String text, String name) {
+        if (name == null || name.isBlank()) {
+            return -1;
+        }
+        return text.indexOf(name);
+    }
+
+    /** 名字去重（保序、丢空）。 */
+    static List<String> distinctNames(List<String> names) {
+        List<String> out = new ArrayList<>();
+        if (names == null) {
+            return out;
+        }
+        for (String s : names) {
+            if (s != null && !s.isBlank() && !out.contains(s)) {
+                out.add(s);
+            }
+        }
+        return out;
+    }
+
+    /** 主体名去重（保序）。 */
+    static List<String> distinctSubjects(RefCtx refs) {
+        return distinctNames(refs == null ? null : refs.subjects());
+    }
+
+    /**
+     * 本镜的**剧情主体**（= 会出现在画面里的人）：帧级 cast &gt; 镜级 cast；
+     * 两者都没写则退回参考图绑定到的主体。
+     *
+     * <p>多帧时取**主体最多的那一帧**（运镜镜头逐帧可各写各的 cast）。
+     * 语义与 {@link #castOf} 一致：null = 未指定（退回参考图主体）；[] = 明确空镜（0 个）。
+     */
+    static List<String> keyframeSubjects(JsonNode shot, RefCtx refs) {
+        List<JsonNode> frames = keyframesOf(shot);
+        List<String> best = null;
+        if (frames.isEmpty()) {
+            best = storySubjectsOf(shot, -1, refs);
+        } else {
+            for (int i = 0; i < frames.size(); i++) {
+                List<String> cur = storySubjectsOf(shot, i, refs);
+                if (best == null || cur.size() > best.size()) {
+                    best = cur;
+                }
+            }
+        }
+        return best == null ? new ArrayList<>() : best;
+    }
+
+    private static List<String> storySubjectsOf(JsonNode shot, int keyframeIndex, RefCtx refs) {
+        List<String> cast = castOf(shot, keyframeIndex);
+        return cast != null ? distinctNames(cast) : distinctSubjects(refs);
+    }
+
+    /** 预检弹框里那句话（跟随正词语言）。 */
+    static String keyframeFaceMessage(boolean zh, int count, List<String> subjects) {
+        String names = subjects == null || subjects.isEmpty()
+                ? "" : String.join(zh ? "、" : ", ", subjects);
+        if (zh) {
+            return String.format("本镜剧情主体 %d 个，关键图会出现 %d 张脸（超过 %d 张时人脸容易互相串、"
+                            + "脸型错乱）。建议把景别改成过肩镜头 / 中近景 / 近景，并只让不超过 %d 个主体"
+                            + "露出清晰人脸。主体：%s",
+                    count, count, KEYFRAME_MAX_FACES, KEYFRAME_MAX_FACES, names);
+        }
+        return String.format("This shot has %d story subjects, so its keyframe would show %d faces "
+                        + "(above %d faces identity tends to blend). Switch the framing to an over-the-shoulder / "
+                        + "medium close-up / close-up shot and keep at most %d clear faces. Subjects: %s",
+                count, count, KEYFRAME_MAX_FACES, KEYFRAME_MAX_FACES, names);
+    }
+
+    /**
+     * 用户确认 → 追加到正词的那段构图约束。
+     *
+     * <p>⚠️ 这里的“主脸约占画面高度的五分之一”是**故意违反**
+     * {@code prompts/prompt_template_still.md} 规则 5（禁写坐标/百分比）的例外：
+     * 实测显示“脸占画面太小”是身份绑不住的直接原因（r=0.722），
+     * 而文字是唯一不引入新流程就能对构图施压的手段。若产品要收回这条，删掉该句即可。
+     */
+    static String keyframeConstraint(KeyframeConfirm c, boolean zh) {
+        if (c == null || c.isEmpty()) {
+            return "";
+        }
+        String phrase = shotSizePhrase(c.shotSize(), zh);
+        List<String> vis = c.visibleSubjects() == null ? List.of() : c.visibleSubjects();
+        StringBuilder sb = new StringBuilder();
+        if (zh) {
+            sb.append(" 【构图硬约束（本镜已由用户确认）】");
+            if (phrase != null) {
+                sb.append("本镜为").append(phrase).append('；');
+            }
+            if (!vis.isEmpty()) {
+                sb.append("画面里只让「").append(String.join("」「", vis)).append("」露出清晰人脸，")
+                  .append("其余人物不入画，或只作前景遮挡/背影；");
+            }
+            sb.append("主脸约占画面高度的五分之一。");
+            if (c.sceneNote() != null && !c.sceneNote().isBlank()) {
+                sb.append(" 场景补充：").append(c.sceneNote().trim());
+            }
+        } else {
+            sb.append(" [Framing constraint, confirmed by the user]");
+            if (phrase != null) {
+                sb.append(' ').append(Character.toUpperCase(phrase.charAt(0))).append(phrase.substring(1))
+                  .append(';');
+            }
+            if (!vis.isEmpty()) {
+                sb.append(" only ").append(String.join(" and ", vis)).append(" show a clear face;")
+                  .append(" every other character stays off-frame or appears only as foreground occlusion")
+                  .append(" or the back of a head;");
+            }
+            sb.append(" the main face occupies about one fifth of the frame height.");
+            if (c.sceneNote() != null && !c.sceneNote().isBlank()) {
+                sb.append(" Scene note: ").append(c.sceneNote().trim());
+            }
+        }
+        return sb.toString();
+    }
+
+    /** 把用户确认落到正词上：先替换已有景别词，再追加约束句。 */
+    static String applyKeyframeConfirm(String raw, KeyframeConfirm c) {
+        if (raw == null || c == null || c.isEmpty()) {
+            return raw;
+        }
+        boolean zh = isZhText(raw);
+        String out = replaceShotSizeWords(raw, shotSizePhrase(c.shotSize(), zh));
+        return out + keyframeConstraint(c, zh);
+    }
+
+    /** 找这一镜（可选某一帧）的用户确认。 */
+    private static KeyframeConfirm confirmFor(CreateJobRequest req, int shotNo, int keyframeIndex) {
+        if (req == null || req.keyframeConfirms() == null) {
+            return null;
+        }
+        for (KeyframeConfirm c : req.keyframeConfirms()) {
+            if (c == null || c.shotNo() == null || c.shotNo() != shotNo) {
+                continue;
+            }
+            if (c.coversKeyframe(keyframeIndex)) {
+                return c;
+            }
+        }
+        return null;
+    }
+
+    /** 把用户选定的确认写进 payload（存档用：双击任务时能看到用户当时选了什么）。 */
+    private static void attachKeyframeConfirm(ObjectNode payload, KeyframeConfirm c) {
+        if (c == null) {
+            return;
+        }
+        ObjectNode n = payload.putObject("keyframeConfirm");
+        n.put("shotSize", c.shotSize() == null ? "" : c.shotSize());
+        com.fasterxml.jackson.databind.node.ArrayNode vis = n.putArray("visibleSubjects");
+        if (c.visibleSubjects() != null) {
+            c.visibleSubjects().forEach(vis::add);
+        }
+        n.put("sceneNote", c.sceneNote() == null ? "" : c.sceneNote());
+    }
+
+    /**
+     * P15：关键帧「人脸数量 > 2」预检（只读）。
+     *
+     * <p>只返回**需要用户确认**的镜（剧情主体 &gt; {@link #KEYFRAME_MAX_FACES}）；
+     * 不需要确认的镜不在结果里。前端拿它在弹框里让用户选景别/可见主体，
+     * 然后把 {@link KeyframeConfirm} 随 POST /jobs 一起传回来。
+     */
+    @Transactional(readOnly = true)
+    public List<KeyframeFaceCheckView> keyframeFaceCheck(UUID userId, UUID workspaceId, UUID projectId,
+                                                         KeyframeFaceCheckRequest req) {
+        guard.requireMember(userId, workspaceId);
+        projects.require(userId, workspaceId, projectId);
+        if (req == null || req.revisionId() == null) {
+            throw new BizException(ErrorCode.VALIDATION, "revisionId 不能为空");
+        }
+        JsonNode plan = planReader.revisionPlan(req.revisionId());
+        if (!plan.has("shots") || !plan.get("shots").isArray()) {
+            return List.of();               // 图片方案没有镜头表 → 不适用
+        }
+        String kind = req.kind() == null || req.kind().isBlank() ? "still" : req.kind();
+        List<UUID> shotIds = resolveVideoShots(userId, workspaceId, projectId, req.revisionId(),
+                req.shotId(), kind, req.shotNos(), false);
+        List<KeyframeFaceCheckView> out = new ArrayList<>();
+        for (UUID sid : shotIds) {
+            JsonNode shot = shotOf(plan, sid);
+            if (shot == null) {
+                continue;
+            }
+            RefCtx refs = resolveRefs(plan, shot, userId, workspaceId, projectId, req.revisionId(), -1);
+            // 剧情主体 = 方案里 cast 写的人（帧级 > 镜级）；没写才退回参考图绑定的主体。
+            List<String> subjects = keyframeSubjects(shot, refs);
+            if (subjects.size() <= KEYFRAME_MAX_FACES) {
+                continue;                   // 不需要确认
+            }
+            List<JsonNode> frames = keyframesOf(shot);
+            String raw = frames.isEmpty()
+                    ? shot.path("positive_prompt").asText("")
+                    : frames.get(0).path("positive_prompt").asText(shot.path("positive_prompt").asText(""));
+            boolean zh = isZhText(raw);
+            // 弹框里默认选项的预览文本（景别 = 首推，主体 = 前 2 个）
+            KeyframeConfirm preview = new KeyframeConfirm(shot.path("shot_no").asInt(), null,
+                    SUGGESTED_SHOT_SIZES.get(0),
+                    subjects.subList(0, Math.min(KEYFRAME_MAX_FACES, subjects.size())), null);
+            out.add(new KeyframeFaceCheckView(
+                    shot.path("shot_no").asInt(), sid.toString(), subjects.size(), subjects,
+                    shot.path("shot_size").asText(""), SUGGESTED_SHOT_SIZES,
+                    keyframeFaceMessage(zh, subjects.size(), subjects), keyframeConstraint(preview, zh)));
+        }
+        if (!out.isEmpty()) {
+            log.info("keyframe face check: project={} shots={} 需确认（主体>{}）",
+                    projectId, out.size(), KEYFRAME_MAX_FACES);
+        }
+        return out;
     }
 
     private void attachRefs(ObjectNode payload, RefCtx refs) {
@@ -3074,9 +3543,12 @@ public class JobService {
             //   ★ 2026-09-21 简化：绑了定妆照时只写**性别/年龄**（describeRef）——
             //   身高/体态/性格/外貌·服饰是“文字版外观断言”，会与参考图抢话语权（用户实测“可卿变丰腴、
             //   衣服变粉红纱衣”就是它们被采纳），而外貌/服饰/体态本来就由定妆照决定。
+            // ★ 2026-09-27（用户裁定）：**不再写方括号里的性别/年龄** —— 「参考图那里也不需要年龄和性别，
+            //   参考定妆图就行」。定妆照本身就带性别/年龄信息，文字重申会与参考图抢话语权（P14 当年加它
+            //   是为防「宝玉被当女性」，现在按用户意见取消；若日后又出现性别错乱，恢复此处即可）。
             studio.weaveora.director.plan.PlanSubjects.Traits tr =
                     studio.weaveora.director.plan.PlanSubjects.traitsOf(plan, name);
-            if (tr != null && !tr.isEmpty()) {
+            if (false && tr != null && !tr.isEmpty()) {
                 sb.append('[').append(tr.describeRef(zh)).append(']');
             }
             // motion：不写方位/坐标/框 —— 位置以关键帧为准（见方法注释）。
@@ -3090,13 +3562,13 @@ public class JobService {
                 //        且把第三张参考图的服饰（警幻的佛禅）给了右侧那人 —— 完全对得上用户描述。
                 //   ⇒ 现在：**所有主体都进“从左到右”清单**；没位置的不再被隐式删掉，
                 //     而是显式写“位置未指定（按参考图与剧情自然安排）”，排序用槽位均分兜底。
+                // ★ 2026-09-27（用户裁定）：**方位不再写进正词**（「剧情提示已经有了方位描述」）——
+                //   括号里的横向区间/“未指定就自然安排”全部不写了。
+                //   但 orderX / noPos 的**记账必须保留**：下面的 orderLine 与“没位置的主体”日志要靠它，
+                //   而且 2026-09-23 的事故就是“没位置的主体被隐式移出名单” ⇒ 正词自述只有两个人。
                 if (p != null) {
-                    sb.append(zh ? bandHintZh(p[0], p[1], p[2], p[3]) : bandHint(p[0], p[1], p[2], p[3]));
                     orderX.add((p[0] + Math.min(1.0, p[0] + p[2])) / 2);
                 } else {
-                    sb.append(zh ? "（位置：未指定，按剧情与参考图自然安排，**但必须出现在画面中**）"
-                                 : " (position: unspecified - arrange naturally, but MUST appear in frame)");
-                    // 槽位均分作为排序兑底（只用于“从左到右”那行的顺序，不写进正词）
                     orderX.add((i + 0.5) / Math.max(1, refs.subjects().size()));
                     noPos.add(name);
                 }
@@ -3155,12 +3627,16 @@ public class JobService {
                           + " a character grow closer, larger or taller as the shot progresses; apparent size changes"
                           + " may come only from perspective and camera movement, and the characters' relative size and"
                           + " height ratio must stay fixed.";
+            } else if (!REF_MAPPING_TEXT) {
+                // ★ 2026-09-27（用户裁定：「这段拼接暂时不要，让我在剧情中去指定」）：
+                //   **「参考图映射（按送入顺序；Picture N ...）」整段不再拼接** ——
+                //   谁是谁、谁站哪、几人同框，全部由用户自己在剧情句里写；
+                //   旧文本仍保留在下面那个分支里（把 REF_MAPPING_TEXT 改回 true 即恢复）。
+                add = "";
             } else {
                 add = zh
                     ? "\n参考图映射（按送入顺序；Picture N 与 imageN 指同一张图）：" + sb
-                      + "。请严格按这个对应关系：**每个角色只用自己的参考图**（这是硬约束）；"
-                      + "而**画面方位（左右、前后、远近、遮挡、站位与相对大小）一律以剧情句为准**；"
-                      + "括号里的横向区间与下面这句顺序**仅仅兜底**（剧情句没写方位时才用）：" + orderLineZh
+                      + "。**每个角色只用自己的参考图**（硬约束）；画面方位一律以剧情句为准，本句不涉及方位；"
                       + "面容、发型、服饰、体态一律以各自参考图为准，不得按文字更改；"
                       + "不同 imageN 是**不同的人**：禁止互换面孔、发型与服饰，禁止把两位画成同一张脸、"
                       + "禁止合并或省掉任何一位；"
@@ -3171,12 +3647,9 @@ public class JobService {
                       + "本镜共 " + orderItems.size() + " 个角色，画面中每人**只出现一次**"
                       + "（不得重复、不得多画不在清单里的人）；"
                       + "角色之间必须互相区分。"
-                      + "方括号里的性别/年龄为硬约束（不得把男性画成女性或反之、不得改变年龄）。"
-                      + "剧情句与上面这串兜底区间/顺序不一致时，**以剧情句为准**（系统已把该矛盾记成提示）。"
+                      + "剧情句与本映射不一致时，**以剧情句为准**。"
                     : "\nReference mapping (input order; Picture N and imageN are the same image): " + sb
-                      + ". Follow this mapping strictly: each character uses only its own reference image, and its"
-                      + " placement is given in parentheses ONLY as a fallback (x runs 0→1 left to right;"
-                      + " full height = reaching the bottom edge); " + orderLineEn
+                      + ". Each character uses only its own reference image; placement follows the scene text; "
                       + "face/hair/costume/build always follow each subject's own reference image and must not be"
                       + " altered by the text; "
                       + "Different imageN are **different people**: never swap faces, hair or costume, never draw"
@@ -3186,10 +3659,9 @@ public class JobService {
                       + " there are exactly " + orderItems.size() + " characters in this shot and each appears"
                       + " **exactly once** (never repeat a character, never add anyone who is not in the list);"
                       + " keep them clearly apart."
-                      + " The bracketed gender/age are hard constraints (never render a male character as female or"
-                      + " vice versa, never change the age). **Composition (left/right, depth, occlusion, blocking and"
-                      + " relative size) follows the story text**; where the story text disagrees with the fallback"
-                      + " ranges above, **the story text wins** (the system has logged that conflict).";
+                      // ★ 2026-09-27（用户裁定）：删掉括号性别/年龄句 + 坐标/顺序兑底句（正词重复太多）。
+                      + " **Composition follows the story text**; where the scene text disagrees with this mapping,"
+                      + " **the story text wins**.";
             }
             payload.put("positive_prompt", cur + add);
             if (motion) {

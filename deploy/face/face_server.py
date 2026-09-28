@@ -17,6 +17,19 @@
   POST /face/embed                 → 取一张图里最大的人脸特征（给「锁人」做参考）
        body: {"image_b64": "<图片字节 base64>"}
        resp: {"embedding": [512 floats], "face_px": 321}
+  POST /face/swap  ★ 2026-09-27 新增 → **关键帧换脸后处理**（逐脸按显式映射换身份）
+       为什么在盒上：换脸模型（inswapper_128）要 onnxruntime，而 worker 所在 VPS 是 py3.6、
+       装不了 onnxruntime、且无外网装包；盒上本来就有 onnxruntime(+CUDA) 与 cv2，且 edge_proxy
+       已经把 /face/* 转到本服务 ⇒ worker 只需调它，不必新开端口、不必重启 ComfyUI。
+       引擎：同目录 faceswap_engine.py（inswapper_128 + ArcFace w600k + YuNet，逐行对照 insightface）。
+       body: {"image_b64": "<关键帧 png base64>",
+              "sources": [{"name": "宝玉", "image_b64": "<定妆照 png base64>"}, …],
+              "order": ["宝玉","可卿","警幻"]?   # 左→右要换的名字；不给则按 cos 最近自动认领
+              "up": 1.0, "expr": "none|restore|replace", "expr_freq": 3.0,
+              "blend": 1.0, "brightness": true}
+       resp: {"image_b64": "<换脸后 png base64>", "report": {"mapping": […], "faces": […], "warn": "…"}}
+            report.faces[i] = {idx, x, width_px, assigned, before{名:cos}, after{名:cos}, argmax_after, sec}
+            report.warn    = 脸太小时的告警（会随资产卡上报给用户：脸小就不该指望像定妆照）
 
 依赖：insightface + onnxruntime(+可选 GPU) + opencv + numpy（GPU 机器上装 ComfyUI 时已有）。
 启动：python3 face_server.py [--port 8093] [--device cpu|cuda] [--det-size 512]
@@ -203,6 +216,37 @@ def probe(media_b64: str, suffix: str, target=None):
     return hits, total, best, face_ratio, mouth_open, face_px
 
 
+def swap(payload: dict):
+    """关键帧换脸后处理（详见文件头 /face/swap 说明）。失败**不抛**，返回带 error 的 dict，
+    让 worker 能原图返回（换脸是增强，不是硬依赖）。
+
+    ★ 2026-09-27：权重已按用户裁定删除（inswapper 在小脸上会把脸型/嘴型搞坏）⇒
+      这里先查 available()，没权重就明确报下线，不抛异常、不让调用方误以为能用。"""
+    import faceswap_engine
+    if not faceswap_engine.available():
+        return {"error": "faceswap 权重已删除（2026-09-27 下线；需恢复权重并显式启用）"}
+    img_b64 = payload.get("image_b64") or ""
+    if not img_b64:
+        return {"error": "image_b64 required"}
+    srcs = []
+    for s in (payload.get("sources") or []):
+        b = s.get("image_b64") or ""
+        if b:
+            srcs.append((s.get("name") or "?", base64.b64decode(b)))
+    if not srcs:
+        return {"error": "sources required"}
+    order = payload.get("order") or None
+    png, rep = faceswap_engine.post_process_png(
+        base64.b64decode(img_b64), srcs, order=order,
+        up=float(payload.get("up") or 1.0),
+        expr=(payload.get("expr") or "none"),
+        expr_freq=float(payload.get("expr_freq") or 3.0),
+        blend=float(payload.get("blend") or 1.0),
+        brightness=bool(payload.get("brightness", True)),
+    )
+    return {"image_b64": base64.b64encode(png).decode("ascii"), "report": rep}
+
+
 def embed(image_b64: str, suffix: str):
     """取图里最大脸的特征（给「锁人」当参考）。"""
     app = _app(True)
@@ -255,6 +299,8 @@ class Handler(BaseHTTPRequestHandler):
             if self.path.startswith("/face/embed"):
                 emb, px = embed(body.get("image_b64") or "", body.get("suffix") or ".png")
                 return self._json(200, {"embedding": emb, "face_px": px})
+            if self.path.startswith("/face/swap"):
+                return self._json(200, swap(body))
         except Exception as e:
             return self._json(500, {"error": str(e)[:300]})
         return self._json(404, {"error": "not found"})

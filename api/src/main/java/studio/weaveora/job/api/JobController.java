@@ -43,6 +43,22 @@ public class JobController {
         return ResponseEntity.ok(jobService.engineStatus());
     }
 
+    /**
+     * P15（2026-09-25）：关键帧「人脸数量 &gt; 2」预检（只读，不建任务）。
+     *
+     * <p>返回**需要用户确认**的镜（剧情主体 &gt; 2）；前端拿它弹出「景别 + 要显示脸的主体 + 场景补充」
+     * 的确认框，用户确定后把 {@link studio.weaveora.job.api.KeyframeConfirm} 随 POST /jobs 传回来，
+     * 后端就把约束写进正词再建 still 任务。
+     */
+    @PostMapping("/projects/{projectId}/keyframe-face-check")
+    public ResponseEntity<List<KeyframeFaceCheckView>> keyframeFaceCheck(
+            HttpServletRequest request,
+            @RequestHeader(value = ProjectController.WORKSPACE_HEADER, required = false) String workspaceId,
+            @PathVariable UUID projectId,
+            @RequestBody KeyframeFaceCheckRequest req) {
+        return ResponseEntity.ok(jobService.keyframeFaceCheck(uid(request), ws(workspaceId), projectId, req));
+    }
+
     @PostMapping("/projects/{projectId}/jobs")
     public ResponseEntity<List<JobView>> create(
             HttpServletRequest request,
