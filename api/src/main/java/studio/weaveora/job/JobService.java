@@ -1512,30 +1512,18 @@ public class JobService {
         if (keys.isEmpty()) {
             return RefCtx.empty();   // 剔除后没有可用锚定
         }
-        // ★ 2026-09-28（用户裁定，第1/2点建议）：把**参考图槽位顺序对齐「正词提及顺序」**。
-        //   动机（实测第4镜）：正词里第一个被提到、且被用户指定“只让它露清晰正脸”的是「警幻」，
-        //   而槽位顺序是 1=宝玉 2=可卿 3=警幻 ⇒ 模型拿到「先说警幻、首图却是宝玉」的错位对应，
-        //   表现为「警幻的脸长在可卿身上 / 出现两个宝玉」。模型判身份靠的就是这份对应关系。
-        //   这里按「主体名在本镜文本中首次出现的位置」重排四张并行列表（未提到的保持原相对顺序排后），
-        //   于是 imageN = 的清单与正词叙述顺序天然一致（清单本身由下方 mapping 追加，保持不变）。
-        //   ⚠️ 已知边界：另一个会话做过“手工槽位对调”的 A/B，单次无效（FLUX.2 多参考绑定强度 + seed
-        //   方差才是主因，见 docs/第4镜-脸型错乱-排查-2026-09-25.md）。本改动属“把该对齐的对齐”，
-        //   收益预期有限；真正抓手在脸占比 / 模型绑定强度。
-        int[] _ord = mentionOrder(subjects, shotText);
-        if (_ord != null) {
-            List<String> _i = new ArrayList<>(ids), _k = new ArrayList<>(keys),
-                    _s = new ArrayList<>(subjects), _r = new ArrayList<>(regions);
-            ids.clear();
-            keys.clear();
-            subjects.clear();
-            regions.clear();
-            for (int _n : _ord) {
-                ids.add(_i.get(_n));
-                keys.add(_k.get(_n));
-                subjects.add(_s.get(_n));
-                regions.add(_r.get(_n));
-            }
-            log.info("refs: 第{}镜 槽位已按正词提及顺序重排 -> {}", shotNo, subjects);
+        // ★ 2026-09-29 回滚（用户裁定）：2026-09-28 上线的「按正词提及顺序重排参考图槽位」**已删除**。
+        //   为什么回滚（线上实测，见 docs/第4镜-正词槽号错位-2026-09-29.md）：
+        //   它只重排了 ids/keys/subjects/regions 四张并行列表，**没有重写正词里 LLM 写死的 `image N` 标注**
+        //   ⇒ 正词说「宝玉(image 1)」而 image1 实际装的是警幻（09-27 23:23 起线上全部第 4 镜任务均如此），
+        //   模型拿到的就是「文字 ↔ 图」错位对应，症状＝「出现两个宝玉 / 警幻消失」。
+        //   ⇒ 槽位顺序必须与正词里的编号一致。正词里的编号是导演生成阶段按**当时的**参考图顺序写的，
+        //     所以这里不能悄悄改顺序（真要改就得连正词一起改写 —— 那是产品级动作，见上面的备注）。
+        //   保留一条**防回归守卫**：谁再动槽位顺序，只要与正词里的 `image N` 冲突就告警（不拦出图）。
+        List<String> slotMismatch = slotNumberMismatches(subjects, shotText);
+        if (!slotMismatch.isEmpty()) {
+            log.warn("refs: 第{}镜 正词里的「第 N 张图 = 谁」与实际送入顺序**不一致**（模型会张冠李戴）：{}；"
+                    + "实际槽位顺序={}", shotNo, slotMismatch, subjects);
         }
         StringBuilder mapping = new StringBuilder();
         for (int i = 0; i < subjects.size(); i++) {
@@ -2091,45 +2079,54 @@ public class JobService {
      * <p>按主体名在 {@code text} 里**首次出现**的位置升序；没提到的排最后（保持原相对顺序）。
      * 返回 {@code null} = 顺序本来就一致（调用方不重排、不打日志）。
      */
-    static int[] mentionOrder(List<String> subjects, String text) {
-        if (subjects == null || subjects.size() < 2 || text == null || text.isBlank()) {
-            return null;
-        }
-        int n = subjects.size();
-        Integer[] idx = new Integer[n];
-        for (int i = 0; i < n; i++) {
-            idx[i] = i;
-        }
-        java.util.Arrays.sort(idx, (a, b) -> {
-            int pa = firstMention(text, subjects.get(a));
-            int pb = firstMention(text, subjects.get(b));
-            if (pa < 0 && pb < 0) {
-                return Integer.compare(a, b);
-            }
-            if (pa < 0) {
-                return 1;
-            }
-            if (pb < 0) {
-                return -1;
-            }
-            return pa == pb ? Integer.compare(a, b) : Integer.compare(pa, pb);
-        });
-        int[] out = new int[n];
-        boolean changed = false;
-        for (int i = 0; i < n; i++) {
-            out[i] = idx[i];
-            if (out[i] != i) {
-                changed = true;
-            }
-        }
-        return changed ? out : null;
-    }
+    // ==========================================================================
+    // 参考图「槽号 ↔ 图片」一致性（防回归守卫，2026-09-29 用户裁定回滚 mentionOrder 时新增）
+    //   正词里会显式写「谁 = 第几张参考图」（三种写法：宝玉(image 1) / 宝玉（参考图 1） /
+    //   Baoyu (Reference Image 1)）。这份对应关系是模型判身份的依据；一旦实际送入的图片顺序
+    //   与它不一致，就会出现「张冠李戴 / 多画一个人」。本函数把不一致挑出来（不修改顺序）。
+    // ==========================================================================
+    private static final java.util.regex.Pattern SLOT_ANNOT = java.util.regex.Pattern.compile(
+            "[（(]\\s*(?:image|Image|参考图|Reference\\s+Image|Picture)\\s*(\\d+)\\s*[)）]");
 
-    private static int firstMention(String text, String name) {
-        if (name == null || name.isBlank()) {
-            return -1;
+    /**
+     * 正词里的 `第 N 张图 = 谁` 与实际槽位顺序是否一致。
+     *
+     * <p>返回不一致项描述（空列表 = 一致，或正词里根本没写编号）。只读、不改顺序。
+     */
+    static List<String> slotNumberMismatches(List<String> subjects, String text) {
+        if (subjects == null || subjects.size() < 2 || text == null || text.isBlank()) {
+            return List.of();
         }
-        return text.indexOf(name);
+        List<String> bad = new ArrayList<>();
+        java.util.regex.Matcher m = SLOT_ANNOT.matcher(text);
+        while (m.find()) {
+            int n;
+            try {
+                n = Integer.parseInt(m.group(1));
+            } catch (NumberFormatException e) {
+                continue;
+            }
+            if (n < 1 || n > subjects.size()) {
+                bad.add("标注了 image" + n + "，但本镜只有 " + subjects.size() + " 张参考图");
+                continue;
+            }
+            // 标注左边最近的主体名 = 它自称是哪张图上的角色
+            String before = text.substring(Math.max(0, m.start() - 32), m.start());
+            String claimed = null;
+            for (String s : subjects) {
+                if (s == null || s.isBlank()) {
+                    continue;
+                }
+                int at = before.lastIndexOf(s);
+                if (at >= 0 && (claimed == null || at > before.lastIndexOf(claimed))) {
+                    claimed = s;
+                }
+            }
+            if (claimed != null && !claimed.equals(subjects.get(n - 1))) {
+                bad.add(claimed + " 被标成 image" + n + "，但实际 image" + n + " = " + subjects.get(n - 1));
+            }
+        }
+        return bad;
     }
 
     /** 名字去重（保序、丢空）。 */
