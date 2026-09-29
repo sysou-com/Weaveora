@@ -333,11 +333,16 @@ public class ScriptService {
         Set<UUID> projectIds = new HashSet<>(epToProject.values());
         Map<UUID, String> titles = new HashMap<>();
         for (UUID pid : projectIds) {
-            try {
-                titles.put(pid, projects.get(userId, workspaceId, pid).title());
-            } catch (RuntimeException ex) {
-                // 项目已被删/不可见 → 不展示链接（不是错误）
-                log.debug("剧本集的项目链接失效：project={} : {}", pid, ex.getMessage());
+            // ★ 必须用**不抛异常**的查询（ProjectService.titleIfVisible）。
+            //   旧写法 try { projects.get(...) } catch(RuntimeException) 看似无害，但在已开启的事务里：
+            //   内层 @Transactional 方法抛异常会把**外层事务**标记 rollback-only，catch 掉也没用 →
+            //   事务提交时抛 UnexpectedRollbackException → 整个列表接口 500（2026-09-29 实测事故：
+            //   删掉一个已转过项目的项目后，「我的剧本」分集列表直接挂，用户以为分集丢了）。
+            String t = projects.titleIfVisible(workspaceId, pid);
+            if (t != null) {
+                titles.put(pid, t);
+            } else {
+                log.debug("剧本集的项目链接失效（项目已删/不可见），不展示：project={}", pid);
             }
         }
         Map<UUID, Integer> revs = new HashMap<>();
@@ -716,6 +721,10 @@ public class ScriptService {
         EpisodeProjectLink link = linksOf(userId, workspaceId, List.of(e)).get(e.id());
         ProjectResponse existing = null;
         if (link != null && !req.newProjectOrFalse()) {
+            // ⚠️ 这个 catch 只在本方法**不在事务里**时才安全（toProject 故意不开事务）。
+            //   若哪天给 toProject 加上 @Transactional，内层 NOT_FOUND 会把事务标记 rollback-only，
+            //   catch 掉也无效 → 提交时报 UnexpectedRollbackException。届时要改用
+            //   ProjectService.titleIfVisible() 先判可见性（参见 linksOf 里的同型修复）。
             try {
                 existing = projects.get(userId, workspaceId, link.projectId());
             } catch (RuntimeException ex) {

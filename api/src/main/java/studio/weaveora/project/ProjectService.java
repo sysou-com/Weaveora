@@ -129,6 +129,27 @@ public class ProjectService implements ProjectContextPort {
         return ProjectMapper.toResponse(findInWorkspace(workspaceId, projectId));
     }
 
+    /**
+     * 项目的标题；**不存在 / 已删 / 越权一律返回 null，不抛异常**（P16，2026-09-29）。
+     *
+     * <p><b>为什么必须有个不抛的版本</b>：调用方（剧本模块的「集 → 项目」链接）是在一个**已开启的事务里**
+     * 做「有就显示链接、没有就算了」的查询。如果这里抛 {@code NOT_FOUND}，Spring 会把**外层事务**
+     * 标记为 rollback-only；调用方就算 catch 掉，外层提交时也会抛
+     * {@code UnexpectedRollbackException}（事务静默回滚）。
+     *
+     * <p>实测事故（2026-09-29）：用户删掉一个「已转过项目」的项目后，「我的剧本」的分集列表接口直接 500，
+     * 前端显示「还没有任何一集」——用户误以为分集内容被删了（其实一集都没丢）。
+     */
+    @Transactional(readOnly = true)
+    public String titleIfVisible(UUID workspaceId, UUID projectId) {
+        if (workspaceId == null || projectId == null) {
+            return null;
+        }
+        return projects.findByWorkspaceIdAndIdAndDeletedAtIsNull(workspaceId, projectId)
+                .map(Project::title)
+                .orElse(null);
+    }
+
     @Transactional
     public ProjectResponse rename(UUID userId, UUID workspaceId, UUID projectId, String title) {
         guard.requireMember(userId, workspaceId);

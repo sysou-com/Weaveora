@@ -79,7 +79,7 @@ const { data: script, isPending: scriptPending } = useQuery({
   queryFn: () => getScript(workspaceId.value, scriptId.value),
   enabled: computed(() => scriptId.value !== '' && workspaceId.value !== ''),
 })
-const { data: episodes, isPending: epsPending } = useQuery({
+const { data: episodes, isPending: epsPending, isError: epsFailed, error: epsErr } = useQuery({
   queryKey: computed(() => ['script-episodes', scriptId.value]),
   queryFn: () => listScriptEpisodes(workspaceId.value, scriptId.value),
   enabled: computed(() => scriptId.value !== '' && workspaceId.value !== ''),
@@ -602,6 +602,15 @@ function fieldValue(key: ScriptFieldKey): string {
             </div>
           </NCollapseItem>
         </NCollapse>
+        <!--
+          ⚠️ 接口失败≠没有分集（2026-09-29 实测：删掉一个已转过项目的项目后，服务端 500，
+          这里却显示「还没有任何一集」，用户以为分集被删了）。分开渲染，别把错误当空数据。
+        -->
+        <div v-else-if="epsFailed" class="empty-state">
+          <p class="load-error">分集列表加载失败（服务端出错）—— <b>不是你的分集没了</b>。</p>
+          <p class="text-secondary">{{ epsErr instanceof Error ? epsErr.message : '请重试' }}</p>
+          <NButton @click="refresh()">重新加载</NButton>
+        </div>
         <div v-else class="empty-state">
           <p class="text-secondary">还没有任何一集。点「开始下一集」，让 AI 读着「精简的故事」起个头，或自己写。</p>
           <NButton type="primary" @click="nextShow = true">
@@ -795,6 +804,8 @@ function fieldValue(key: ScriptFieldKey): string {
 
 <style scoped>
 .page { display: flex; flex-direction: column; gap: 20px; }
+/* 接口失败时的提示（不要把「加载失败」渲染成「没有数据」） */
+.load-error { color: var(--wv-danger, #C45C4A); font-size: 13.5px; margin: 0; }
 .back {
   display: inline-flex; align-items: center; gap: 6px; align-self: flex-start;
   padding: 6px 10px; margin-left: -10px; background: none; border: none;
