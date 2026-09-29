@@ -443,6 +443,15 @@ public class AiAudioService {
         return Math.max(MIN_LINE_SEC, chars(text) / charsPerSec(text));
     }
 
+    /**
+     * 公开的朗读时长估算（秒）——供 {@link studio.weaveora.director.plan.ShotTimingPlanner}
+     * 在「还没有真实配音产物」时先按文本估一个时长（音频先行的退化路径）。
+     * 口径与 {@link #estimate} 完全一致，避免两处速度常数漂移。
+     */
+    public static double speechSec(String text) {
+        return estimate(text);
+    }
+
     /** 该文本的朗读速度（字符/秒）。 */
     static double charsPerSec(String text) {
         return isLatinText(text) ? LATIN_CHARS_PER_SEC : CHARS_PER_SEC;

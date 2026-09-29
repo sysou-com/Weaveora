@@ -32,6 +32,14 @@ public class PlanReader {
                 .orElseThrow(() -> new BizException(ErrorCode.NOT_FOUND, "方案不存在"));
     }
 
+    /** 该 revision 是否属于该项目 / 工作区（制作流程端点用，防止跨项目/跨工作区读改）。 */
+    @Transactional(readOnly = true)
+    public boolean revisionInProject(UUID revisionId, UUID projectId, UUID workspaceId) {
+        return revisions.findById(revisionId)
+                .map(r -> projectId.equals(r.projectId()) && workspaceId.equals(r.workspaceId()))
+                .orElse(false);
+    }
+
     @Transactional(readOnly = true)
     public List<UUID> shotIds(UUID revisionId) {
         return shots.findByRevisionIdOrderByShotNo(revisionId).stream().map(ShotDraft::id).toList();

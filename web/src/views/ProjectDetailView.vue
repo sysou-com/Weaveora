@@ -43,6 +43,7 @@ import VoiceCloneDialog from '@/components/director/VoiceCloneDialog.vue'
 import VoiceBindingsTable from '@/components/director/VoiceBindingsTable.vue'
 import VoicePickerBar from '@/components/director/VoicePickerBar.vue'
 import VideoPlanEditor from '@/components/director/VideoPlanEditor.vue'
+import ProductionRunPanel from '@/components/director/ProductionRunPanel.vue'
 import { useAuthStore } from '@/stores/auth'
 import { aspectNote, modeLabel } from '@/utils/format'
 import { VOICE_PRESETS } from '@/utils/audio'
@@ -185,6 +186,18 @@ watch(draft, () => {
 }, { deep: true })
 
 const detApproved = computed(() => detail.data.value?.approved === true)
+/** 制作流程绑定的确认稿（未确认时空串 → 面板不渲染）。 */
+const runRevisionId = computed(() => (detApproved.value ? selectedRevId.value ?? '' : ''))
+
+/** 制作流程动作后刷新任务/资产/方案（否则产物要手动刷新才看得见）。 */
+async function onRunChanged(): Promise<void> {
+  await Promise.all([
+    queryClient.invalidateQueries({ queryKey: ['jobs'] }),
+    queryClient.invalidateQueries({ queryKey: ['assets'] }),
+    queryClient.invalidateQueries({ queryKey: ['revision'] }),
+    queryClient.invalidateQueries({ queryKey: ['project'] }),
+  ])
+}
 // 已确认版本也可编辑（保存时后端自动解除确认，改后可重新确认）
 const canEdit = computed(() => !!draft.value)
 const latestBrief = computed(() => briefs.data.value?.[0] ?? null)
@@ -5186,6 +5199,16 @@ const shotTotal = computed(() => {
       </div>
 
       <!-- P8：试听播放条已上提到方案编辑器里（紧跟试听配音/试听配乐按钮） -->
+
+      <!-- P0/P1 制作流程：一键成片（定妆照 → 关键帧 → 运动 → 配音配乐 → 成片），只需点「确定/下一步」 -->
+      <ProductionRunPanel
+        v-if="isVideoNow"
+        :workspace-id="workspaceId"
+        :project-id="projectId"
+        :revision-id="runRevisionId"
+        :disabled="!detApproved"
+        @changed="onRunChanged"
+      />
 
       <!-- 任务区（W3）：确认后发起生成，展示状态/进度 -->
       <div v-if="detApproved || (jobs.data.value ?? []).length" class="jobs-panel" data-testid="jobs-panel">

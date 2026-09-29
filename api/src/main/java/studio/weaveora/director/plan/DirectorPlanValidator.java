@@ -49,6 +49,9 @@ public final class DirectorPlanValidator {
         return validate(plan, mode, durationSec, true);
     }
 
+    /** 单镜时长的历史硬上限（§30 #25）；实际应用应传引擎能力版本的重载。 */
+    public static final double DEFAULT_MAX_SHOT_SEC = 10.0;
+
     /**
      * @param strictDuration 是否严格校验「时长一致性」（plan.duration_sec / 镜头总和 vs 项目目标 ±0.5s）。
      *       P13：「按配音校准时长」会按配音实际时长改写镜头时长 → 总和必然变化，
@@ -56,6 +59,19 @@ public final class DirectorPlanValidator {
      */
     public static List<String> validate(JsonNode plan, String mode, BigDecimal durationSec,
                                         boolean strictDuration) {
+        return validate(plan, mode, durationSec, strictDuration, DEFAULT_MAX_SHOT_SEC);
+    }
+
+    /**
+     * 按**引擎能力**校验单镜上限的版本（P0，2026-09-29）。
+     *
+     * <p>为什么必须传进来：现役 LTX-2.5 单次只有 5.04s（121 帧 ÷ 24fps）、Wan2.2 是 7.56s，
+     * 而旧实现写死 10s ⇒ LLM 出一个 8s 的镜会被放行、引擎静默截到 5.04s（成片节奏与台词全错）。
+     *
+     * @param maxShotSec &lt;=0 时退回 {@link #DEFAULT_MAX_SHOT_SEC}
+     */
+    public static List<String> validate(JsonNode plan, String mode, BigDecimal durationSec,
+                                        boolean strictDuration, double maxShotSec) {
         List<String> problems = new ArrayList<>();
         if (plan == null || !plan.isObject()) {
             problems.add("plan 必须是 JSON 对象");
@@ -73,7 +89,8 @@ public final class DirectorPlanValidator {
         }
 
         if ("video".equals(mode)) {
-            validateVideo(plan, durationSec, problems, strictDuration);
+            validateVideo(plan, durationSec, problems, strictDuration,
+                    maxShotSec > 0 ? maxShotSec : DEFAULT_MAX_SHOT_SEC);
         } else {
             if (isBlank(text(plan, "positive_prompt"))) {
                 problems.add("缺少 positive_prompt");
@@ -91,7 +108,7 @@ public final class DirectorPlanValidator {
     }
 
     private static void validateVideo(JsonNode plan, BigDecimal targetDuration, List<String> problems,
-                                      boolean strictDuration) {
+                                      boolean strictDuration, double maxShotSec) {
         if (targetDuration == null) {
             problems.add("视频项目缺少目标时长 durationSec");
         }
@@ -145,9 +162,7 @@ public final class DirectorPlanValidator {
                 problems.add("shots[" + i + "] 缺少 duration_sec");
             } else {
                 sum = sum.add(d);
-                if (d.compareTo(new BigDecimal("10")) > 0) {
-                    problems.add("shots[" + i + "] 单镜 " + d + "s 超过 10s（§30 #25 单镜上限）");
-                }
+                checkShotCap(shot, d, maxShotSec, problems, i);
             }
             String pos = text(shot, "positive_prompt");
             if (isBlank(pos)) {
@@ -190,6 +205,31 @@ public final class DirectorPlanValidator {
         if (targetDuration != null && diff(sum, targetDuration).compareTo(new BigDecimal("0.5")) > 0) {
         if (strictDuration)
             problems.add("镜头时长总和(" + sum + ")与项目目标(" + targetDuration + ")偏差 >0.5s");
+        }
+    }
+
+    /**
+     * 单镜时长 vs 引擎上限（P0）：**有 {@code segments[]} 时校验每一段**（stretch 策略下镜头总时长
+     * 可以超过上限 —— 生成时按上限出一段、成片阶段本地重定时拉伸；segment 策略下则是多段各 ≤ 上限）。
+     * 没有 segments 的旧方案仍直接看 {@code duration_sec}。
+     */
+    private static void checkShotCap(JsonNode shot, BigDecimal duration, double maxShotSec,
+                                     List<String> problems, int i) {
+        BigDecimal cap = new BigDecimal(Double.toString(maxShotSec));
+        JsonNode segs = shot.path("segments");
+        if (segs.isArray() && !segs.isEmpty()) {
+            for (JsonNode seg : segs) {
+                double sd = seg.path("duration_sec").asDouble(0);
+                if (sd > maxShotSec + 0.06) {
+                    problems.add("shots[" + i + "] 分段时长 " + sd + "s 超过当前引擎上限 " + maxShotSec
+                            + "s（§30 #25：上限从引擎能力读，不再写死 10s）");
+                }
+            }
+            return;
+        }
+        if (duration.compareTo(cap) > 0) {
+            problems.add("shots[" + i + "] 单镜 " + duration + "s 超过当前引擎上限 " + maxShotSec
+                    + "s（§30 #25：上限从引擎能力读，不再写死 10s）");
         }
     }
 

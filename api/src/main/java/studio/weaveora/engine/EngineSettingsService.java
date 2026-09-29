@@ -37,18 +37,69 @@ public class EngineSettingsService {
     private final String defaultTtsUrl;
     /** Wan2.2 I2V-A14B 的原生帧率（ComfyUI 官方模板节奏；env `weaveora.video.motion-native-fps`） */
     private final int wanNativeFps;
+    /** 本机 GPU 出片的帧数上限（env `weaveora.video.motion-frames-max`，与 JobService 同一口径）。 */
+    private final int motionFramesMax;
+    /** 云通道出片的帧数上限。 */
+    private final int motionFramesMaxCloud;
 
     public EngineSettingsService(UserEngineSettingsRepository repo, ModelSchemaService schemaService,
                                  WorkerEnvSyncService workerEnvSync,
                                  @Value("${weaveora.store-key:}") String storeKey,
                                  @Value("${weaveora.tts-url:http://127.0.0.1:18091}") String ttsUrl,
-                                 @Value("${weaveora.video.motion-native-fps:16}") int wanNativeFps) {
+                                 @Value("${weaveora.video.motion-native-fps:16}") int wanNativeFps,
+                                 @Value("${weaveora.video.motion-frames-max:96}") int motionFramesMax,
+                                 @Value("${weaveora.video.motion-frames-max-cloud:300}") int motionFramesMaxCloud) {
         this.repo = repo;
         this.schemaService = schemaService;
         this.workerEnvSync = workerEnvSync;
         this.storeKey = storeKey;
         this.defaultTtsUrl = (ttsUrl == null || ttsUrl.isBlank()) ? "http://127.0.0.1:18091" : ttsUrl;
         this.wanNativeFps = Math.max(1, wanNativeFps);
+        this.motionFramesMax = Math.max(1, motionFramesMax);
+        this.motionFramesMaxCloud = Math.max(1, motionFramesMaxCloud);
+    }
+
+    /**
+     * 出片引擎能力（P0，2026-09-29）：供「自动拆镜」按当前配置的 GPU / 云 API 能力决定单镜上限。
+     *
+     * @param maxShotSec  单次生成上限（秒）= 帧数上限 ÷ 原生帧率
+     * @param minShotSec  单镜最短（秒）
+     * @param nativeFps   引擎原生帧率
+     * @param deliverFps  成片交付帧率（按引擎归一）
+     * @param motionEngine wan22 | ltx25
+     * @param route       gpu | cloud
+     * @param maxFrames   帧数上限（原始值，便于排查）
+     */
+    public record VideoCaps(double maxShotSec, double minShotSec, int nativeFps, int deliverFps,
+                            String motionEngine, String route, int maxFrames) {
+    }
+
+    /**
+     * 当前用户 / 项目的出片能力。**GPU 或云 API 走同一契约** —— 二期云 API 接入时这里不用改调用方。
+     */
+    @Transactional(readOnly = true)
+    public VideoCaps videoCaps(UUID userId, JsonNode plan) {
+        String route;
+        try {
+            route = resolveEngine(userId, "clip");
+        } catch (RuntimeException e) {
+            route = "gpu";
+        }
+        int nativeFps = motionNativeFps(userId);
+        String eng = motionEngine(userId);
+        double minShot = 1.0;
+        if (!"gpu".equals(route)) {
+            double planMax = plan == null ? 0 : plan.path("edit_plan").path("video_model_max_sec").asDouble(0);
+            if (planMax > 0) {
+                return new VideoCaps(planMax, minShot, nativeFps, deliverFps(userId, plan), eng, route,
+                        motionFramesMaxCloud);
+            }
+            double cloudMax = Math.round(motionFramesMaxCloud * 100.0 / nativeFps) / 100.0;
+            return new VideoCaps(cloudMax, minShot, nativeFps, deliverFps(userId, plan), eng, route,
+                    motionFramesMaxCloud);
+        }
+        double maxShot = Math.round(motionFramesMax * 100.0 / nativeFps) / 100.0;
+        return new VideoCaps(maxShot, minShot, nativeFps, deliverFps(userId, plan), eng, route, motionFramesMax);
     }
 
     /**
