@@ -594,19 +594,56 @@ public class DirectorService {
 
     private JsonNode callAndParse(String system, String user, BriefSnapshot brief,
                                   ProjectSnapshot project, String mode) {
-        LlmRequest req = new LlmRequest(system, user,
-                "", brief.rawText(), mode, project.aspectRatio(), project.durationSec(), brief.constraints());
+        Exception last = null;
         for (int attempt = 1; attempt <= 2; attempt++) {
+            // 第 2 次带上「压缩重出」指令：首包过长（8 镜 × 长正词）会撞 max_tokens=8000 被截断，
+            // 原样重试必然同样失败（2026-09-29 实测：同一需求连续两次 finish_reason=length）。
+            String u = attempt == 1 ? user : user
+                    + "；上次输出无效（可能过长）。压缩重出：镜头数 ≤5，每镜 positive_prompt ≤40 个英文词，"
+                    + "字段齐全，只输出 JSON 对象";
+            LlmRequest req = new LlmRequest(system, u,
+                    "", brief.rawText(), mode, project.aspectRatio(), project.durationSec(), brief.constraints());
             try {
                 String raw = llm.generateJson(req);
                 return mapper.readTree(raw);
             } catch (JsonProcessingException e) {
+                last = e;
                 log.warn("director 输出非 JSON（第 {} 次），重试: {}", attempt, e.getMessage());
             } catch (Exception e) {
+                last = e;
                 log.warn("director 网关调用异常（第 {} 次）: {}", attempt, e.getMessage());
             }
         }
-        throw new BizException(ErrorCode.DIRECTOR_PARSE_FAILED, "导演服务暂时不可用或返回不可解析，请稍后重试或精简需求");
+        throw classifyLlmFailure(last);
+    }
+
+    /**
+     * 把 LLM 失败分类成**可操作**的错误（P16，2026-09-29 用户反馈）。
+     *
+     * <p>背景：以前不管什么原因都是「导演服务暂时不可用或返回不可解析，请稍后重试或精简需求」——
+     * 而实测那次是供应商 **402 余额不足**，用户按提示反复精简需求、重试十几次都无用。
+     * 现在按原因分档，让用户/管理员一眼看出该充钱、该等、还是该精简。
+     */
+    static BizException classifyLlmFailure(Exception last) {
+        String m = last == null || last.getMessage() == null ? "" : last.getMessage();
+        String low = m.toLowerCase();
+        if (low.contains("insufficient balance") || low.contains("402")
+                || low.contains("payment required") || low.contains("quota")) {
+            return new BizException(ErrorCode.DIRECTOR_LLM_BALANCE,
+                    "AI 导演服务不可用：模型账户余额不足（402）。请联系管理员充值后重试 —— 你的需求没有写错，不必精简。");
+        }
+        if (low.contains("max_tokens") || low.contains("finish_reason=length")) {
+            return new BizException(ErrorCode.DIRECTOR_UNAVAILABLE,
+                    "AI 输出被长度上限截断（自动压缩重试仍失败）。请把目标时长调短，或减少出场人物/镜头数后再试。");
+        }
+        if (low.contains("timeout") || low.contains("timed out") || low.contains("connect")
+                || low.contains("server error") || low.contains("503") || low.contains("502")
+                || low.contains("429")) {
+            return new BizException(ErrorCode.DIRECTOR_UNAVAILABLE,
+                    "AI 导演服务连接失败（网络或服务暂不可用），请稍后重试。");
+        }
+        return new BizException(ErrorCode.DIRECTOR_PARSE_FAILED,
+                "导演返回的内容无法解析为方案 JSON（非余额/网络问题），请稍后重试；若持续失败请精简需求。");
     }
 
     private void enrich(JsonNode plan, String mode, String aspect) {

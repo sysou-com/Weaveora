@@ -691,7 +691,27 @@ public class ScriptService {
             duration = null;
         }
 
-        String projectTitle = clip(s.title() + " · 第" + e.episodeNo() + "集 " + e.title(), 100);
+        String epTitle = e.title() == null ? "" : e.title().trim();
+        // P16（2026-09-29 用户要求）：标题还是默认的「第 N 集」时，自动起一个真标题。
+        //   为什么会出现默认标题：用「AI 更新/润色」写正文时按口径不改标题（只改文笔），
+        //   于是标题一直停在默认值，转项目就拼成「剧名 · 第3集 第 3 集」。
+        //   ⚠️ 非阻断：失败/模型余额不足/超时 → 退回「剧名 · 第N集」（绝不因此转不了项目）。
+        boolean defaultTitle = epTitle.isEmpty() || epTitle.matches("第\\s*\\d+\\s*集");
+        if (defaultTitle) {
+            try {
+                String t = ai.suggestEpisodeTitle(s, e);
+                if (t != null && !t.isBlank()) {
+                    e.patch(t, null, null, null);
+                    episodes.save(e);
+                    epTitle = t;
+                    log.info("剧本转项目：第{}集自动起标题「{}」", e.episodeNo(), t);
+                }
+            } catch (RuntimeException ex) {
+                log.warn("剧本转项目：自动起标题失败（忽略）: {}", ex.getMessage());
+            }
+        }
+        String projectTitle = clip(s.title() + " · 第" + e.episodeNo() + "集"
+                + (epTitle.isBlank() ? "" : " " + epTitle), 100);
         // 这一集已经转过项目？→ 默认在**同一个项目**里出新版本（V+1），不再新建项目（用户 2026-09-17）
         EpisodeProjectLink link = linksOf(userId, workspaceId, List.of(e)).get(e.id());
         ProjectResponse existing = null;

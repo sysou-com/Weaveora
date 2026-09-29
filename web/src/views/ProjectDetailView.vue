@@ -4481,7 +4481,15 @@ async function onCloneUsedForLine(): Promise<void> {
 const lastCloneAssetId = ref('')
 
 async function handleApprove(): Promise<void> {
-  if (!selectedRevId.value) return
+  // 以前这里直接 `return` → 按钮“点了没反应”（用户 2026-09-29 反馈）；现在给明确提示。
+  if (!selectedRevId.value) {
+    message.warning('还没有可确认的方案 —— 请先点「让导演层基于这段 Brief 出方案」')
+    return
+  }
+  if (problems.value.length) {
+    message.warning(`方案还有问题没修正：${problems.value.slice(0, 2).join('；')}`)
+    return
+  }
   // 有未保存改动：先保存草稿再确认（否则确认会用服务端旧方案，草稿丢失）
   if (dirty.value && draft.value) {
     const ok = await handleSave()
@@ -4489,10 +4497,10 @@ async function handleApprove(): Promise<void> {
   }
   approving.value = true
   try {
-    const res = await approveRevision(workspaceId.value, projectId.value, selectedRevId.value)
+    const revNo = activeRevision.value?.revisionNo
+    await approveRevision(workspaceId.value, projectId.value, selectedRevId.value)
     await invalidateAll()
-    message.success(`方案 v${activeRevision.value?.revisionNo ?? ''} 已确认 — W3 由此发起生成`)
-    void res
+    message.success(`方案 v${revNo ?? ''} 已确认 —— 现在可在下方「制作流程」逐步生成`)
   } catch (e) {
     message.error(e instanceof Error ? e.message : '确认失败')
   } finally {

@@ -22,6 +22,15 @@ public enum ErrorCode {
     BRIEF_TOO_SHORT(400),
     BRIEF_BLOCKED(422),
     DIRECTOR_PARSE_FAILED(422),
+    /**
+     * AI 导演服务不可用（网络/服务耄机/输出被截断）：与「返回不可解析」分开。
+     *
+     * <p>2026-09-29 用户实测：LLM 供应商返回 402 Insufficient Balance，但前端只看到
+     * 「导演服务暂时不可用或返回不可解析」→ 用户反复重试、以为是自己需求写坏了。
+     */
+    DIRECTOR_UNAVAILABLE(503),
+    /** LLM 供应商账户余额不足（402）——单独一档，便于告警/管理员察觉。 */
+    DIRECTOR_LLM_BALANCE(402),
     REVISION_NOT_APPROVED(409),
     SHOT_NOT_APPROVED(409),
     REVISION_LOCKED(409),

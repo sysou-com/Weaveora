@@ -163,10 +163,9 @@ function submit(): void {
 
       <NFormItem v-if="mode === 'video'" label="每镜时长">
         <NSelect v-model:value="shotDurationSec" :disabled="!!existing" :options="SHOT_DURATIONS" />
-        <em class="lang-hint text-secondary">
-          本机 GPU 单段上限 ≈ <b>{{ singleClipSec }}</b>s（{{ engineStatus.data.value?.gpuMaxFrames }} 帧 ÷ 原生
-          {{ engineStatus.data.value?.nativeFps }}fps，含插帧到 {{ 30 }}fps）；超过它的档位会**自动切段**（每段独立推理一次）。
-          选 4 秒最稳（余量充足、不切段、插帧伪影最少）。
+        <em class="lang-hint text-secondary shot-hint">
+          <span>本机 GPU 单段上限 ≈ <b>{{ singleClipSec }}</b>s（{{ engineStatus.data.value?.gpuMaxFrames }} 帧 ÷ 原生 {{ engineStatus.data.value?.nativeFps }}fps）。</span>
+          <span>超过它的档位会被<b>自动切段</b>（每段独立推理一次，更慢也更贵）；建议选 <b>4 秒</b>最稳（余量充足、不切段、插帧伪影最少）。</span>
         </em>
       </NFormItem>
 
@@ -228,6 +227,8 @@ function submit(): void {
 .warn { margin: 0 0 16px; font-size: 12.5px; line-height: 1.85; }
 .sw { display: flex; align-items: flex-start; gap: 10px; cursor: pointer; }
 .lang-hint { display: block; margin-top: 6px; font-style: normal; font-size: 11.5px; line-height: 1.7; }
+/* P16：单段上限提示分两行显示，避免一行过长把弹框布局撑开（用户 2026-09-29 反馈） */
+.shot-hint { display: flex; flex-direction: column; gap: 2px; }
 .sw span { display: flex; flex-direction: column; gap: 2px; }
 .sw b { font-size: 13.5px; font-weight: 600; }
 .sw em { font-style: normal; font-size: 12px; }

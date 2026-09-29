@@ -1500,6 +1500,8 @@ shared ← *
 | `BRIEF_TOO_SHORT` | 400 | Brief < 10 字 |
 | `BRIEF_BLOCKED` | 422 | 安全策略拦截 |
 | `DIRECTOR_PARSE_FAILED` | 422 | LLM JSON 不可用 |
+| `DIRECTOR_UNAVAILABLE` | 503 | AI 导演服务不可用（网络/服务耄机/输出被截断）—— **与“不可解析”分开**，P16 |
+| `DIRECTOR_LLM_BALANCE` | 402 | LLM 供应商**余额不足**（2026-09-29 实测 402 被误报为不可解析，故单独立档） |
 | `REVISION_NOT_APPROVED` | 409 | 未确认就生成 |
 | `SHOT_NOT_APPROVED` | 409 | 单镜未确认 |
 | `JOB_NOT_CANCELLABLE` | 409 | 已进入不可取消阶段 |

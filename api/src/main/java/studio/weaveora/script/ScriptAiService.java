@@ -471,6 +471,46 @@ public class ScriptAiService {
     // ------------------------------------------------------------ 内部
 
     /**
+     * P16（2026-09-29 用户要求）：为「还是默认标题」的一集自动起一个短标题。
+     *
+     * <p><b>为什么需要</b>：「AI 更新/润色」按口径**不改标题**（只改文笔、不重编剧情）—— 于是用润色写出来的集，
+     * 标题一直停在默认的「第 N 集」。转项目时就拼出「剧名 · 第3集 第 3 集」（用户实测）。
+     *
+     * <p><b>绝不阻断</b>：失败/余额不足/超时一律返回空串，调用方退化用「剧名 · 第N集」。
+     */
+    public String suggestEpisodeTitle(Script script, ScriptEpisode ep) {
+        if (stub()) {
+            return "";
+        }
+        String body = ep.content() == null ? "" : ep.content();
+        if (body.isBlank()) {
+            body = ep.summary() == null ? "" : ep.summary();
+        }
+        if (body.isBlank()) {
+            return "";
+        }
+        if (body.length() > 3000) {
+            body = body.substring(0, 3000);
+        }
+        String sys = "你是中文编剧。只输出 JSON：{\"title\":\"...\"}。title 是这一集的短标题："
+                + "4–12 个汉字，具体、有画面感，不要引号、不要标点、不要「第N集」这类编号、不要解释。";
+        String user = "剧本《" + script.title() + "》第 " + ep.episodeNo() + " 集正文：\n" + body;
+        try {
+            LlmJson res = callJson(sys, user, "第 " + ep.episodeNo() + " 集标题", "集标题");
+            String t = res.node().path("title").asText("").trim();
+            t = t.replaceAll("^[《\"'“”\\s]+", "").replaceAll("[》\"'“”\\s]+", "");
+            t = t.replaceAll("^第\\s*\\d+\\s*集[·:：\\s]*", "");
+            if (t.isBlank() || t.length() > 24) {
+                return "";
+            }
+            return t;
+        } catch (RuntimeException e) {
+            log.warn("剧本 AI（集标题）失败，忽略: {}", e.getMessage());
+            return "";
+        }
+    }
+
+    /**
      * 调 LLM 并解析 JSON。
      *
      * @param system null = 用 {@link ScriptPrompts#episodeSystem()} 之外的默认（这里传 null 时用通用收尾指令）
