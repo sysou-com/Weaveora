@@ -458,6 +458,22 @@ sequenceDiagram
 > **`subjects[]` 与 `setting` 都归用户所有**：导演新一版时由 `DirectorService.mergePrevSubjectsAndSetting()`
 > 强制继承上一版（丢弃 LLM 自己编的 `subjects`），否则一带而过就会把定妆照与档案洗掉（等价于“一致性突然全崩”）。
 
+### 7.5.3 制作流程（一键成片，P0/P1，2026-09-29）
+
+**定位**：把「用户只关注剧本」做成可执行链路。系统按**当前引擎能力（GPU / 云 API）+ 台词/旁白时长**
+确定性拆镜，用户依次点「确定/下一步」走完 `定妆照 → 关键帧 → 运动 → 配音配乐 → 成片`。
+
+1. **时长不交给 LLM**：`ShotTimingPlanner`（纯函数）按「有台词镜 = 台词时长 + 余量；无台词镜 = 导演目标时长」定长，
+   超引擎单次上限时按 `oversize_policy` 处理（**默认 `stretch`**：生成 1 次 + 成片本地重定时）；总长差额**只补给无台词镜**，不压台词。
+2. **引擎能力契约**：单镜上限 = 帧数上限 ÷ 原生帧率（`EngineSettingsService.videoCaps`），**GPU 与云 API 同一契约**；
+   校验器单镜上限改为按能力，且**按 `segments[]` 逐段校验**（stretch 下镜头总长可超上限）。详见 §30 #25（上限从配置读）。
+3. **阶段编排**：阶段完成度由已有 `generation_jobs` + `assets` 派生，只把用户的**确认动作**落库
+   （`production_stage_approvals`，满足 §0-3）；门禁写死（关键帧需定妆、运动需关键帧、成片需运动+配音）。
+4. **配乐按需**：逐镜 `music = none|bed|hit`；**`none` 镜不铺配乐**（不一定每镜都要配乐）。
+5. 端点：`GET /projects/{id}/runs/status`、`POST …/runs/replan`（自动、不跑 LLM）、`POST …/runs/prepare`、
+   `POST …/runs/stages/{stage}/confirm`、`POST …/runs/stages/{stage}/retry`。
+   完整设计见 `docs/方案-剧本驱动自动成片-P0P1-2026-09-29.md`。
+
 ### 7.6 资产
 
 - 原图、缩略图、视频 mp4、预览 webp、prompt 快照、seed、模型哈希一并保存。
@@ -1523,6 +1539,13 @@ POST   /api/v1/projects/{id}/shots/{shotId}/approve
 POST   /api/v1/projects/{id}/jobs
 GET    /api/v1/jobs/{jobId}
 POST   /api/v1/jobs/{jobId}/cancel
+
+# 制作流程（P0/P1，一键成片；见 §7.5.3）
+GET    /api/v1/projects/{id}/runs/status?revisionId=
+POST   /api/v1/projects/{id}/runs/replan
+POST   /api/v1/projects/{id}/runs/prepare
+POST   /api/v1/projects/{id}/runs/stages/{stage}/confirm
+POST   /api/v1/projects/{id}/runs/stages/{stage}/retry
 
 GET    /api/v1/projects/{id}/assets
 GET    /api/v1/assets/{id}/download
