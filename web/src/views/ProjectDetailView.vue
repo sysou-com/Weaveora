@@ -16,9 +16,11 @@ import { useRoute, useRouter } from 'vue-router'
 import {
   approveRevision,
   approveShot,
+  checkPromptLanguage,
   generateDirector,
   getRevision,
   listRevisions,
+  normalizePromptLanguage,
   patchRevision,
   rewritePromptFromZh,
   type RewriteResult,
@@ -2975,9 +2977,13 @@ async function createJobsLive(ws: string, pid: string, input: unknown) {
   return created
 }
 
-async function startGeneration(shotNos?: number[] | null): Promise<void> {
+async function startGeneration(shotNos?: number[] | null, opts?: { skipLang?: boolean }): Promise<void> {
   const revId = genRevisionId()
   if (!revId) return
+  // ★ 2026-09-29（用户裁定）：先拦「中英混排」正词 —— FLUX.2 编码器是英文向，
+  //   混排会让模型两头听（线上第 4 镜同 seed 下中文臂出「2 个宝玉」、纯英文臂出合格帧）。
+  //   放在最前面：优化完会改草稿正词，后续闸门（主体/脸大小/景别）都应基于改后的稿子判。
+  if (!opts?.skipLang && !(await preflightPromptLanguage(shotNos))) return
   // P5：先过主体闸门（镜文本没点名主体 → 弹框让用户勾选，避免“全部注入/没参考图”）
   if (!preflightCast()) return
   // ⑤ 2026-09-19（用户实测纠正）：有“生成了新版但没绑”的定妆照 → 先弹框，
@@ -4062,8 +4068,157 @@ async function confirmKeyframeFaces(): Promise<void> {
       ...(c.sceneNote && c.sceneNote.trim() ? { sceneNote: c.sceneNote.trim() } : {}),
     }
   })
+  // ★ 2026-09-29（用户裁定「自动拼装部分跟随提示词语言」）：场景补充是用户手输的，
+  //   若与本镜正词语言不一致（英文正词 + 中文场景补充），后端原样拼进去就又变成中英混排。
+  //   这里在拼之前先把场景补充规范化到正词语言（失败则不拦，由后端日志/界面可见）。
+  for (const c of confirms) {
+    if (!c.sceneNote) continue
+    const shot = ((draft.value?.shots ?? []) as Array<{ shot_no: number; positive_prompt?: string }>)
+      .find((s) => s.shot_no === c.shotNo)
+    const target: 'zh' | 'en' = looksZh(shot?.positive_prompt ?? '') ? 'zh' : 'en'
+    if (looksZh(c.sceneNote) === (target === 'zh')) continue
+    try {
+      const r = await normalizePromptLanguage(workspaceId.value, projectId.value, c.sceneNote, target)
+      if (r.positive_prompt) c.sceneNote = r.positive_prompt
+    } catch (e) {
+      console.warn('[lang] 场景补充语言规范化失败（保留原文）', e)
+    }
+  }
   kfFaceOpen.value = false
   await doStartGeneration(kfFaceShotNos.value, revId, confirms)
+}
+
+// ==========================================================================
+// 提示词语言一致性闸门（2026-09-29 用户裁定）
+//   最终提示词中英混排 → 弹框 + 一键 AI 优化 + 可保存回分镜正词。
+//   判据真源在后端（shared.PromptLang）；这里只负责拦、优化、写回草稿。
+// ==========================================================================
+interface LangRow {
+  shotIndex: number
+  shotNo: number
+  text: string
+  lang: 'zh' | 'en'
+  optimized: string
+  busy: boolean
+}
+
+const langOpen = ref(false)
+const langBusy = ref(false)
+const langRows = ref<LangRow[]>([])
+const langShotNos = ref<number[] | null>(null)
+
+/**
+ * 粗判是否中文（与后端 {@code shared.PromptLang} 同口径的简化版：汉字 ≥ 8 且汉字占「汉字+字母」≥ 20%）。
+ *
+ * <p>只用于「场景补充要不要跟随正词语言翻译」这一个判断，不作为混排判定真源。
+ */
+function looksZh(s: string): boolean {
+  const cjk = (s.match(/[\u4e00-\u9fff]/g) ?? []).length
+  const latin = (s.match(/[A-Za-z]/g) ?? []).length
+  return cjk >= 8 && cjk * 100 >= (cjk + latin) * 20
+}
+
+/** 出图前拦「中英混排」正词。返回 false = 已弹框拦住（用户可优化或跳过）。 */
+async function preflightPromptLanguage(shotNos?: number[] | null): Promise<boolean> {
+  const d = draft.value
+  if (!d || !isVideoPlan(d)) return true
+  const shots = d.shots ?? []
+  const picked = shots
+    .map((s, i) => ({ s, i }))
+    .filter(({ s }) => !shotNos || !shotNos.length || shotNos.includes(s.shot_no))
+    .filter(({ s }) => (s.positive_prompt ?? '').trim().length > 0)
+  if (!picked.length) return true
+  let res: Awaited<ReturnType<typeof checkPromptLanguage>>
+  try {
+    res = await checkPromptLanguage(workspaceId.value, projectId.value,
+      picked.map((p) => p.s.positive_prompt ?? ''))
+  } catch (e) {
+    console.warn('[lang] 混排检查失败，跳过弹框（不拦出图）', e)
+    return true
+  }
+  const rows: LangRow[] = []
+  for (const it of res.items ?? []) {
+    if (!it.mixed) continue
+    const p = picked[it.index]
+    if (!p) continue
+    rows.push({
+      shotIndex: p.i,
+      shotNo: p.s.shot_no,
+      text: (p.s.positive_prompt ?? '').trim(),
+      lang: it.lang === 'zh' ? 'zh' : 'en',
+      optimized: '',
+      busy: false,
+    })
+  }
+  if (!rows.length) return true
+  langRows.value = rows
+  langShotNos.value = shotNos && shotNos.length ? [...shotNos] : null
+  langOpen.value = true
+  return false
+}
+
+/** 单镜「一键 AI 优化」：把正词重写成单一语言（逐句等义，槽位 image N 原样保留）。 */
+async function optimizeLangRow(row: LangRow): Promise<void> {
+  row.busy = true
+  try {
+    const r = await normalizePromptLanguage(workspaceId.value, projectId.value, row.text, row.lang)
+    row.optimized = r.positive_prompt
+    if (!r.changed) message.info(`第 ${row.shotNo} 镜：模型认为无需改动`)
+  } catch (e) {
+    message.error(`第 ${row.shotNo} 镜优化失败：${e instanceof Error ? e.message : '未知错误'}`)
+  } finally {
+    row.busy = false
+  }
+}
+
+/** 全部优化（逐镜串行，避免并发打爆 LLM）。 */
+async function optimizeAllLang(): Promise<void> {
+  langBusy.value = true
+  try {
+    for (const r of langRows.value) {
+      if (!r.optimized) await optimizeLangRow(r)
+    }
+  } finally {
+    langBusy.value = false
+  }
+}
+
+/** 把优化结果写回方案草稿（真正的落库发生在 doStartGeneration 里的 savePlanInPlace）。 */
+function applyLangOptimized(): { applied: number; missing: number } {
+  const shots = (draft.value?.shots ?? []) as Array<{ shot_no: number; positive_prompt?: string }>
+  let applied = 0
+  let missing = 0
+  for (const r of langRows.value) {
+    if (!r.optimized.trim()) {
+      missing++
+      continue
+    }
+    const s = shots[r.shotIndex]
+    if (!s) {
+      missing++
+      continue
+    }
+    s.positive_prompt = r.optimized.trim()
+    applied++
+  }
+  if (applied) dirty.value = true
+  return { applied, missing }
+}
+
+/** 保存并继续：写回草稿 → 重走生成流程（跳过语言检查，避免死循环）。 */
+async function continueAfterLang(): Promise<void> {
+  const { applied, missing } = applyLangOptimized()
+  langOpen.value = false
+  if (applied) message.success(`已把 ${applied} 镜的正词改成单一语言（随本次出图保存到分镜）`)
+  if (missing) message.info(`还有 ${missing} 镜未优化，仍按原正词出图`)
+  await startGeneration(langShotNos.value, { skipLang: true })
+}
+
+/** 跳过多语言检查（仍按原正词出图）。 */
+async function skipLang(): Promise<void> {
+  langOpen.value = false
+  message.info('已跳过语言检查，按原正词出图')
+  await startGeneration(langShotNos.value, { skipLang: true })
 }
 
 function preflightCast(): boolean {
@@ -5668,6 +5823,49 @@ const shotTotal = computed(() => {
           <NButton size="small" type="primary" :loading="genBusy" data-testid="kf-face-confirm"
                    @click="confirmKeyframeFaces">
             确定并生成关键帧
+          </NButton>
+        </div>
+      </NModal>
+
+      <!--
+        2026-09-29（用户裁定）：提示词中英混排闸门
+          触发：本镜最终提示词同时含「一整段中文」与「一整段英文」（判据在后端 shared.PromptLang）
+          让用户选目标语言 → 一键 AI 优化（逐句等义，槽位 image N 原样保留）→ 保存到分镜正词后继续
+      -->
+      <NModal v-model:show="langOpen" preset="card"
+              title="⚠ 提示词中英混排（模型会两头听）"
+              style="max-width: 760px" data-testid="prompt-lang-modal">
+        <p class="text-secondary" style="margin: 0 0 10px; font-size: 13px;">
+          出图模型（FLUX.2）的文本编码器是<b>英文向</b>的，提示词<b>整条语言必须一致</b>：
+          同一条正词、同一个 seed，纯英文版出过合格的关键帧（身份 cos 0.566），
+          而「英文风格前缀 + 中文正文」那版出的是「2 个宝玉」。
+          下面是混排的镜：选目标语言 →「一键 AI 优化」→ 确认后覆盖该镜正词（随本次出图保存到分镜）。
+        </p>
+        <div v-for="r in langRows" :key="r.shotNo" class="kf-face-block">
+          <div class="kf-face-head">第 {{ r.shotNo }} 镜</div>
+          <div class="kf-face-row">
+            <span class="kf-face-label">目标语言</span>
+            <NRadioGroup v-model:value="r.lang" size="small">
+              <NRadioButton value="zh">中文</NRadioButton>
+              <NRadioButton value="en">English</NRadioButton>
+            </NRadioGroup>
+            <NButton size="tiny" :loading="r.busy" @click="optimizeLangRow(r)">一键 AI 优化</NButton>
+          </div>
+          <div class="kf-face-row">
+            <span class="kf-face-label">优化后</span>
+            <NInput v-model:value="r.optimized" type="textarea" :rows="3" size="small"
+                    placeholder="点「一键 AI 优化」后在这里预览（可再手改）" />
+          </div>
+        </div>
+        <p class="text-secondary" style="font-size: 12px; margin: 8px 0 0">
+          「仍然生成」不拦出图；但混排正词的身份绑定会更差（实测），建议先优化。
+        </p>
+        <div class="ai-actions">
+          <NButton size="small" @click="skipLang">仍然生成（不优化）</NButton>
+          <NButton size="small" :loading="langBusy" @click="optimizeAllLang">全部优化</NButton>
+          <NButton size="small" type="primary" :loading="genBusy" data-testid="prompt-lang-continue"
+                   @click="continueAfterLang">
+            保存并继续
           </NButton>
         </div>
       </NModal>

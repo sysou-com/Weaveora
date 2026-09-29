@@ -274,3 +274,56 @@ export async function patchPlanInPlace(
     body: { plan },
   })
 }
+
+// ==========================================================================
+// 提示词语言一致性（2026-09-29 用户裁定）
+//   ① 自动拼装部分跟随语言；② 最终提示词中英混排 → 弹框 + 一键 AI 优化 + 可存回分镜。
+//   判据真源在后端（shared.PromptLang），前端不重复实现，避免漂移。
+// ==========================================================================
+
+/** 单条提示词的语言诊断（index 与请求 texts 的下标对应）。 */
+export interface PromptLanguageItem {
+  index: number
+  mixed: boolean
+  lang: string
+  cjk: number
+  latin: number
+}
+
+export interface PromptLanguageCheck {
+  anyMixed: boolean
+  items: PromptLanguageItem[]
+}
+
+/** POST director/prompt-language-check —— 只读：哪些提示词是中英混排 */
+export async function checkPromptLanguage(
+  workspaceId: string,
+  projectId: string,
+  texts: string[],
+): Promise<PromptLanguageCheck> {
+  return request<PromptLanguageCheck>(`/api/v1/projects/${projectId}/director/prompt-language-check`, {
+    method: 'POST',
+    headers: { [WORKSPACE_HEADER]: workspaceId },
+    body: { texts },
+  })
+}
+
+/** POST director/normalize-prompt —— 一键 AI 优化：把提示词重写成单一语言（槽位 image N 原样保留） */
+export interface NormalizePromptResult {
+  positive_prompt: string
+  lang: string
+  changed: boolean
+}
+
+export async function normalizePromptLanguage(
+  workspaceId: string,
+  projectId: string,
+  text: string,
+  lang: 'zh' | 'en',
+): Promise<NormalizePromptResult> {
+  return request<NormalizePromptResult>(`/api/v1/projects/${projectId}/director/normalize-prompt`, {
+    method: 'POST',
+    headers: { [WORKSPACE_HEADER]: workspaceId },
+    body: { text, lang },
+  })
+}

@@ -1865,7 +1865,9 @@ public class JobService {
             return;
         }
         String cur = payload.path("positive_prompt").asText("");
-        if (cur.contains(SETTING_MARK)) {
+        // ★ 2026-09-29：幂等标记必须**中英都认** —— 旧代码只认中文标记，
+        //   英文正词（用户裁定「正词全英文」之后）会因判据不命中而**再追加一行中文年代** ⇒ 又变中英混排。
+        if (cur.contains(SETTING_MARK) || cur.contains(SETTING_MARK_EN)) {
             return;
         }
         boolean zh = isZhText(cur);
@@ -1891,7 +1893,7 @@ public class JobService {
         payload.put("positive_prompt", cur + sb);
         // 负词也补一份（Qwen-Image-Edit 对负词不敏感，但代价极低，且用户能在界面上看到）
         String neg = payload.path("negative_prompt").asText("");
-        if (!neg.contains(SETTING_NEG_MARK)) {
+        if (!neg.contains(SETTING_NEG_MARK) && !neg.contains(SETTING_NEG_MARK_EN)) {
             String add = zh
                     ? "现代服装, 现代建筑, 手机, 电线, 现代交通工具"
                     : "modern clothing, modern buildings, mobile phone, power lines, modern vehicles";
@@ -1902,7 +1904,10 @@ public class JobService {
 
     /** 幂等标记：正词里出现过就不再追加。 */
     private static final String SETTING_MARK = "【设定年代/世界观】";
+    /** 英文幂等标记（正词是全英文时，上面那个中文标记不会出现 —— 必须单独认）。 */
+    private static final String SETTING_MARK_EN = "[Setting / era]";
     private static final String SETTING_NEG_MARK = "现代交通工具";
+    private static final String SETTING_NEG_MARK_EN = "modern vehicles";
 
     /** 区域 → 方位描述（供云模型提示词）。 */
     private static String regionHint(String csv) {

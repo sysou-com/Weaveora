@@ -1064,6 +1064,87 @@ public class DirectorService {
         }
     }
 
+    // ==========================================================================
+    // 提示词语言一致性（2026-09-29 用户裁定）
+    //   背景：FLUX.2 的编码器是 Mistral-3（英文向），中英混排会让模型两头听；线上第 4 镜关键帧
+    //   就是「英文风格前缀 + 中文正文 + 中文自动拼装块」，同 seed 下中文臂出「2 个宝玉」。
+    //   用户要求：① 自动拼装部分跟随提示词语言；② 最终提示词混排→弹框 + 一键 AI 优化 + 可存回分镜。
+    // ==========================================================================
+
+    /** 语言规范化结果。 */
+    public record NormalizedPrompt(String positivePrompt, String lang, boolean changed) {
+    }
+
+    /**
+     * 混排检测（只读）：规则真源在 {@link studio.weaveora.shared.PromptLang}。
+     *
+     * <p>返回 {@code {anyMixed, items:[{index, mixed, lang, cjk, latin}]}}；前端拿它决定要不要弹框。
+     */
+    public java.util.Map<String, Object> checkPromptLanguage(java.util.List<String> texts) {
+        java.util.List<java.util.Map<String, Object>> items = new java.util.ArrayList<>();
+        boolean anyMixed = false;
+        for (int i = 0; i < (texts == null ? 0 : texts.size()); i++) {
+            String t = texts.get(i);
+            boolean mixed = studio.weaveora.shared.PromptLang.isMixed(t);
+            anyMixed |= mixed;
+            java.util.Map<String, Object> m = new java.util.LinkedHashMap<>();
+            m.put("index", i);
+            m.put("mixed", mixed);
+            m.put("lang", studio.weaveora.shared.PromptLang.dominant(t));
+            m.put("cjk", studio.weaveora.shared.PromptLang.cjkCount(t));
+            m.put("latin", studio.weaveora.shared.PromptLang.latinLetterCount(t));
+            items.add(m);
+        }
+        java.util.Map<String, Object> out = new java.util.LinkedHashMap<>();
+        out.put("anyMixed", anyMixed);
+        out.put("items", items);
+        return out;
+    }
+
+    /**
+     * 「一键 AI 优化」：把**已经拼装好的最终提示词**重写成单一语言（中文或英文）。
+     *
+     * <p>为什么不复用 {@link #rewritePrompt}：那条是「按动作描述重写」，amend 分支明确要求
+     * “不要整句直译”；而这里要的恰恰是**逐句等义改写**，把混排清干净。
+     * 槽位标记（{@code image 1/2/3}、{@code Reference Image N}）必须原样保留 —— 那是模型判身份的依据。
+     */
+    public NormalizedPrompt normalizePromptLanguage(UUID userId, UUID workspaceId, UUID projectId,
+                                                    String text, String lang) {
+        context.require(userId, workspaceId, projectId);
+        if (text == null || text.isBlank()) {
+            throw new BizException(ErrorCode.VALIDATION, "提示词为空，无法优化");
+        }
+        boolean zh = !(lang != null && "en".equalsIgnoreCase(lang.trim()));
+        String target = zh ? "中文" : "英文";
+        String system = "你是提示词语言规范化器。把用户给的提示词改写为**纯" + target + "**。硬规则："
+                + "① **逐句等义**：不新增、不删除、不改变任何约束、动作、构图、光线与氛围语义；"
+                + "② **槽位标记原样保留**：`image 1` / `image 2` / `image 3` / `Image N` / `Reference Image N` 里的"
+                + "编号与对应关系**一个都不能改**，也**不得**翻译成“第一张图/图一”这类说法（它是模型判身份的依据）；"
+                + "③ 角色专有名词保留（英文侧可用拼音，如 Baoyu / Keqing / Jinghuan；中文侧保留原名）；"
+                + "④ 保留原文里的方括号小标题（如 [Framing constraint…] / 【构图硬约束…】）的结构位置；"
+                + "⑤ 只输出 JSON，不要任何解释：{\"positive_prompt\":\"...\"}";
+        LlmRequest req = new LlmRequest(system, "待规范化提示词：\n" + text, "normalize", text,
+                "image", "16:9", null, null);
+        try {
+            String rawTxt = llm.generateJson(req);
+            JsonNode n = mapper.readTree(rawTxt);
+            String outTxt = n.path("positive_prompt").asText("");
+            if (outTxt.isBlank()) {
+                throw new IllegalStateException("模型返回空提示词");
+            }
+            outTxt = outTxt.trim();
+            boolean changed = !outTxt.equals(text.trim());
+            log.info("normalize-prompt：lang={} 输入({}) 输出({}) changed={}",
+                    zh ? "zh" : "en", studio.weaveora.shared.PromptLang.describe(text),
+                    studio.weaveora.shared.PromptLang.describe(outTxt), changed);
+            return new NormalizedPrompt(outTxt, zh ? "zh" : "en", changed);
+        } catch (BizException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new IllegalStateException("提示词语言优化失败: " + e.getMessage(), e);
+        }
+    }
+
     private String buildUserPrompt(BriefSnapshot brief, ProjectSnapshot project, String mode,
                                    JsonNode prevPlan) {
         StringBuilder sb = new StringBuilder();

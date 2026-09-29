@@ -174,6 +174,50 @@ public class DirectorController {
                                        String templateScope) {
     }
 
+    /** 混排检测请求体：texts = 待检查的最终提示词列表（顺序即回包 items.index）。 */
+    public record LanguageCheckRequest(java.util.List<String> texts) {
+    }
+
+    /**
+     * 提示词混排检测（只读，2026-09-29 用户裁定）。
+     *
+     * <p>前端在「出图 / 重写」前拿它决定要不要弹框；规则真源在后端（{@code shared.PromptLang}），
+     * 避免前后端各写一套判据而漂移。
+     */
+    @PostMapping("/director/prompt-language-check")
+    public ResponseEntity<java.util.Map<String, Object>> promptLanguageCheck(
+            HttpServletRequest request,
+            @RequestHeader(value = ProjectController.WORKSPACE_HEADER, required = false) String workspaceId,
+            @PathVariable UUID projectId,
+            @RequestBody LanguageCheckRequest body) {
+        return ResponseEntity.ok(directorService.checkPromptLanguage(body == null ? null : body.texts()));
+    }
+
+    /** 一键语言规范化请求体（lang：zh | en；空/未传按英文目标）。 */
+    public record NormalizePromptRequest(@NotBlank String text, String lang) {
+    }
+
+    /**
+     * 「一键 AI 优化」：把最终提示词重写成单一语言（逐句等义，槽位标记 image N 原样保留）。
+     *
+     * <p>只返回结果、**不落库** —— 落库由前端确认后走
+     * {@code PATCH /revisions/{id}/plan/inplace}（“支持优化后保存到分镜提示词”）。
+     */
+    @PostMapping("/director/normalize-prompt")
+    public ResponseEntity<java.util.Map<String, Object>> normalizePrompt(
+            HttpServletRequest request,
+            @RequestHeader(value = ProjectController.WORKSPACE_HEADER, required = false) String workspaceId,
+            @PathVariable UUID projectId,
+            @Valid @RequestBody NormalizePromptRequest body) {
+        DirectorService.NormalizedPrompt r = directorService.normalizePromptLanguage(
+                uid(request), ws(workspaceId), projectId, body.text(), body.lang());
+        java.util.Map<String, Object> out = new java.util.LinkedHashMap<>();
+        out.put("positive_prompt", r.positivePrompt());
+        out.put("lang", r.lang());
+        out.put("changed", r.changed());
+        return ResponseEntity.ok(out);
+    }
+
     @PostMapping("/director/generate")
     public ResponseEntity<GenerateResponse> generate(
             HttpServletRequest request,
