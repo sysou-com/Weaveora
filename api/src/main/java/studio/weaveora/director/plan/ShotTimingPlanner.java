@@ -197,39 +197,58 @@ public final class ShotTimingPlanner {
             return;
         }
         int n = shots.size();
-        // 候选顺序：无台词镜优先（呼吸余量），其次台词镜
-        List<Integer> silent = new ArrayList<>();
-        List<Integer> talking = new ArrayList<>();
-        for (int i = 0; i < n; i++) {
-            (shots.get(i).hasSpeech() ? talking : silent).add(i);
-        }
-        List<Integer> order = new ArrayList<>(silent);
-        order.addAll(talking);
         double sign = delta > 0 ? 1 : -1;
         int steps = (int) Math.round(Math.abs(delta) / STEP);
         int applied = 0;
         for (int step = 0; step < steps && step < MAX_STEPS; step++) {
-            boolean moved = false;
-            for (int idx : order) {
-                double lo = lowerBound(shots.get(idx), caps);
-                double hi = upperBound(shots.get(idx), dur[idx], caps);
-                double next = round1(dur[idx] + sign * STEP);
-                if (next >= lo - 1e-6 && next <= hi + 1e-6) {
-                    dur[idx] = next;
-                    moved = true;
-                    applied++;
-                    break;
-                }
+            // 选镜策略：**削最长的 / 补最短的**（等水位），而不是“从第一镜开始削”。
+            //   为什么：从第一镜削会把 3/6/9/12/15 削成 1/1/1/1/11（一镜独大、其余碎成 1s）。
+            //   选最长的做等水位，才是“保相对节奏”的合理行为。
+            //   优先无台词镜，其次台词镜。
+            int best = pickCandidate(shots, dur, caps, sign, true);
+            if (best < 0) {
+                best = pickCandidate(shots, dur, caps, sign, false);
             }
-            if (!moved) {
+            if (best < 0) {
                 break;
             }
+            dur[best] = round1(dur[best] + sign * STEP);
+            applied++;
         }
         int left = steps - applied;
         if (left > 0) {
             notes.add("目标时长差 " + fmt(Math.abs(delta)) + "s 无法全部归位（还有 " + fmt(left * STEP)
                     + "s）：台词总时长与目标严重不匹配，请调整目标时长或增删台词");
         }
+    }
+
+    /**
+     * 选一个可移动的镜：{@code silentOnly=true} 时只在无台词镜里选。
+     *
+     * <p>耗时：仅在**确实需要归一**时调用（每次 0.1s × 镜数），正常流程 delta≈0 直接 return。
+     */
+    private static int pickCandidate(List<ShotInput> shots, double[] dur, Caps caps,
+                                     double sign, boolean silentOnly) {
+        int best = -1;
+        double bestKey = 0;
+        for (int i = 0; i < shots.size(); i++) {
+            if (silentOnly && shots.get(i).hasSpeech()) {
+                continue;
+            }
+            double lo = lowerBound(shots.get(i), caps);
+            double hi = upperBound(shots.get(i), dur[i], caps);
+            double next = round1(dur[i] + sign * STEP);
+            if (next < lo - 1e-6 || next > hi + 1e-6) {
+                continue;
+            }
+            // 削：取当前最长；补：取当前最短
+            double key = sign < 0 ? dur[i] : -dur[i];
+            if (best < 0 || key > bestKey) {
+                best = i;
+                bestKey = key;
+            }
+        }
+        return best;
     }
 
     private static double lowerBound(ShotInput s, Caps caps) {
@@ -282,10 +301,12 @@ public final class ShotTimingPlanner {
                 continue;
             }
             ObjectNode s = (ObjectNode) shot;
+            double shotDur = round1(t.toSec() - t.fromSec());
             if (!s.hasNonNull("target_sec")) {
-                s.put("target_sec", round1(s.path("duration_sec").asDouble(t.toSec())));
+                s.put("target_sec", round1(s.path("duration_sec").asDouble(shotDur)));
             }
-            s.put("duration_sec", round1(t.toSec()));
+            // ★ 必须写**本镜时长**（toSec 是绝对时间轴的终点，不是时长！2026-09-29 线上验证抓到的 bug）
+            s.put("duration_sec", shotDur);
             ArrayNode segs = s.putArray("segments");
             for (Segment seg : t.segments()) {
                 ObjectNode o = segs.addObject();

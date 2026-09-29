@@ -87,6 +87,28 @@ class ShotTimingPlannerTest {
                 "应如实提示目标可达不到：" + r.notes());
     }
 
+    /**
+     * 回归守卫：归一化必须「削最长的」等水位，而不是“从第一镜开始削”。
+     *
+     * <p>2026-09-29 线上验证：若用“从第一镜削”，3/6/9/12/15（合计 45s，目标 15s）会被削成
+     * 1/1/1/1/11（一镜独大、其余碎成 1s）。
+     */
+    @Test
+    void normalizationLevelsLongestFirstInsteadOfStarvingFirstShots() {
+        var r = ShotTimingPlanner.plan(
+                List.of(new ShotTimingPlanner.ShotInput(1, 3, 0),
+                        new ShotTimingPlanner.ShotInput(2, 6, 0),
+                        new ShotTimingPlanner.ShotInput(3, 9, 0),
+                        new ShotTimingPlanner.ShotInput(4, 12, 0),
+                        new ShotTimingPlanner.ShotInput(5, 15, 0)),
+                15, ShotTimingPlanner.Caps.of(20, 24), ShotTimingPlanner.POLICY_STRETCH);
+        assertEquals(15.0, r.totalSec(), 0.2);
+        for (var t : r.timings()) {
+            double d = t.toSec() - t.fromSec();
+            assertTrue(d >= 1.0 - 1e-6 && d <= 8.0, "不应出现独大的长镜或碎成 1s 的短镜：" + d);
+        }
+    }
+
     @Test
     void applyToWritesDurationsSegmentsAndEditPlan() throws Exception {
         ObjectMapper m = new ObjectMapper();
@@ -106,5 +128,34 @@ class ShotTimingPlannerTest {
         assertTrue(plan.path("shots").get(0).path("stretch").asBoolean());
         assertEquals(1, plan.path("shots").get(0).path("segments").size());
         assertEquals(5.04, plan.path("shots").get(0).path("segments").get(0).path("duration_sec").asDouble(), 0.001);
+    }
+
+    /**
+     * 回归守卫（2026-09-29 线上验证抓到的 bug）：`applyTo` 必须写**本镜时长**，
+     * 不能写时间轴上的**绝对终点**（旧实现写成终点 → 各镜时长变累加值 3/6/9/12/15、总长 ×3）。
+     */
+    @Test
+    void applyToWritesPerShotDurationNotCumulativeEnd() throws Exception {
+        ObjectMapper m = new ObjectMapper();
+        ObjectNode plan = (ObjectNode) m.readTree("""
+                {"mode":"video","duration_sec":12,
+                 "shots":[{"shot_no":1,"duration_sec":4},{"shot_no":2,"duration_sec":4},
+                          {"shot_no":3,"duration_sec":4}]}
+                """);
+        var r = ShotTimingPlanner.plan(
+                List.of(new ShotTimingPlanner.ShotInput(1, 4, 0),
+                        new ShotTimingPlanner.ShotInput(2, 4, 0),
+                        new ShotTimingPlanner.ShotInput(3, 4, 0)),
+                12, ShotTimingPlanner.Caps.of(10, 24), ShotTimingPlanner.POLICY_STRETCH);
+        ShotTimingPlanner.applyTo(plan, r, ShotTimingPlanner.Caps.of(10, 24), ShotTimingPlanner.POLICY_STRETCH);
+        for (int i = 0; i < 3; i++) {
+            assertEquals(4.0, plan.path("shots").get(i).path("duration_sec").asDouble(), 0.001,
+                    "第 " + (i + 1) + " 镜时长必须是 4.0（不是累加的终值）");
+        }
+        double total = 0;
+        for (int i = 0; i < 3; i++) {
+            total += plan.path("shots").get(i).path("duration_sec").asDouble();
+        }
+        assertEquals(12.0, total, 0.001, "总长必须等于目标 12s");
     }
 }

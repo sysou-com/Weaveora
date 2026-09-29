@@ -156,15 +156,16 @@ public class ProductionRunService {
             plannedSec += s.path("duration_sec").asDouble(0);
         }
         JsonNode edit = plan.path("edit_plan");
-        String timingMode = edit.path("timing_mode").asText("");
+        String rawTiming = edit.path("timing_mode").asText("");
+        String mode = rawTiming.isEmpty() ? "shot_fixed" : rawTiming;
         return new RunStatus(projectId, revisionId, planReader.revisionNo(revisionId), project.status(),
                 revisionId.equals(project.approvedRevisionId()), project.durationSec() == null ? 0
                 : project.durationSec().doubleValue(),
                 Math.round(plannedSec * 10) / 10.0, planned,
                 caps.maxShotSec(), caps.nativeFps(), caps.motionEngine(), caps.route(),
-                timingMode.isEmpty() ? "shot_fixed" : timingMode,
+                mode,
                 edit.path("oversize_policy").asText("stretch"),
-                !"shot_fixed".equals(timingMode),
+                !"shot_fixed".equals(mode),
                 stages, next);
     }
 
@@ -545,6 +546,12 @@ public class ProductionRunService {
         }
         Stage normalized = Stage.of(stage);
         JsonNode plan = planReader.revisionPlan(revisionId);
+        // 门禁（写死在代码，不靠 UI）：上一步未完成 → 不允许确认本阶段（防绕过前端直调）
+        StageView target = status(userId, workspaceId, projectId, revisionId).stages().stream()
+                .filter(v -> v.stage().equals(normalized.key())).findFirst().orElse(null);
+        if (target != null && "blocked".equals(target.state())) {
+            throw new BizException(ErrorCode.VALIDATION, "上一步尚未完成：" + target.hint());
+        }
         List<Asset> assets = assetRepo.findByProjectIdAndWorkspaceIdOrderByCreatedAtDesc(projectId, workspaceId);
         List<JsonNode> shots = new ArrayList<>();
         plan.path("shots").forEach(shots::add);
